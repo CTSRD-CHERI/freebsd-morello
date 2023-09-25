@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2018-2020 Ruslan Bukin <br@bsdpad.com>
+ * Copyright (c) 2018-2023 Ruslan Bukin <br@bsdpad.com>
  * All rights reserved.
  *
  * This software was developed by BAE Systems, the University of Cambridge
@@ -69,22 +69,56 @@ static int
 tmc_fdt_attach(device_t dev)
 {
 	struct tmc_softc *sc;
+	phandle_t node;
+	ssize_t len;
 
 	sc = device_get_softc(dev);
 	sc->pdata = coresight_fdt_get_platform_data(dev);
 
+	node = ofw_bus_get_node(dev);
+
+	len = OF_getproplen(node, "arm,scatter-gather");
+	if (len >= 0)
+		sc->scatter_gather = true;
+	else
+		sc->scatter_gather = false;
+
 	return (tmc_attach(dev));
+}
+
+static int
+tmc_fdt_detach(device_t dev)
+{
+	struct tmc_softc *sc;
+	int error;
+
+	sc = device_get_softc(dev);
+ 
+	coresight_fdt_release_platform_data(sc->pdata);
+
+	sc->pdata = NULL;
+
+	error = tmc_detach(dev);
+
+	return (error);
 }
 
 static device_method_t tmc_fdt_methods[] = {
 	/* Device interface */
 	DEVMETHOD(device_probe,		tmc_fdt_probe),
 	DEVMETHOD(device_attach,	tmc_fdt_attach),
+	DEVMETHOD(device_detach,	tmc_fdt_detach),
 	DEVMETHOD_END
 };
 
-DEFINE_CLASS_1(tmc, tmc_fdt_driver, tmc_fdt_methods,
-    sizeof(struct tmc_softc), tmc_driver);
+DEFINE_CLASS_1(coresight_tmc, tmc_fdt_driver, tmc_fdt_methods,
+    sizeof(struct tmc_softc), coresight_tmc_driver);
 
-EARLY_DRIVER_MODULE(tmc, simplebus, tmc_fdt_driver, 0, 0,
+EARLY_DRIVER_MODULE(coresight_tmc, simplebus, tmc_fdt_driver, 0, 0,
     BUS_PASS_INTERRUPT + BUS_PASS_ORDER_MIDDLE);
+MODULE_DEPEND(coresight_tmc, coresight, 1, 1, 1);
+MODULE_DEPEND(coresight_tmc, coresight_cpu_debug, 1, 1, 1);
+MODULE_DEPEND(coresight_tmc, coresight_etm4x, 1, 1, 1);
+MODULE_DEPEND(coresight_tmc, coresight_funnel, 1, 1, 1);
+MODULE_DEPEND(coresight_tmc, coresight_replicator, 1, 1, 1);
+MODULE_VERSION(coresight_tmc, 1);

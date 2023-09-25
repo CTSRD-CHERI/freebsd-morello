@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2020 Ruslan Bukin <br@bsdpad.com>
+ * Copyright (c) 2023 Ruslan Bukin <br@bsdpad.com>
  * All rights reserved.
  *
  * This software was developed by SRI International and the University of
@@ -34,7 +34,7 @@
 #define	REPLICATOR_IDFILTER0	0x00
 #define	REPLICATOR_IDFILTER1	0x04
 
-DECLARE_CLASS(replicator_driver);
+DECLARE_CLASS(coresight_replicator_driver);
 
 struct replicator_softc {
 	struct resource			*res;
@@ -42,5 +42,6 @@ struct replicator_softc {
 };
 
 int replicator_attach(device_t dev);
+int replicator_detach(device_t dev);
 
 #endif /* !_ARM64_CORESIGHT_CORESIGHT_REPLICATOR_H_ */

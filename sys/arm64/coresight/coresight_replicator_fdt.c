@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2018-2020 Ruslan Bukin <br@bsdpad.com>
+ * Copyright (c) 2018-2023 Ruslan Bukin <br@bsdpad.com>
  * All rights reserved.
  *
  * This software was developed by BAE Systems, the University of Cambridge
@@ -76,15 +76,34 @@ replicator_fdt_attach(device_t dev)
 	return (replicator_attach(dev));
 }
 
+static int
+replicator_fdt_detach(device_t dev)
+{
+	struct replicator_softc *sc;
+
+	sc = device_get_softc(dev);
+
+	coresight_fdt_release_platform_data(sc->pdata);
+
+	sc->pdata = NULL;
+
+	return (replicator_detach(dev));
+}
+
 static device_method_t replicator_fdt_methods[] = {
 	/* Device interface */
 	DEVMETHOD(device_probe,		replicator_fdt_probe),
 	DEVMETHOD(device_attach,	replicator_fdt_attach),
+	DEVMETHOD(device_detach,	replicator_fdt_detach),
 	DEVMETHOD_END
 };
 
-DEFINE_CLASS_1(replicator, replicator_fdt_driver, replicator_fdt_methods,
-    sizeof(struct replicator_softc), replicator_driver);
+DEFINE_CLASS_1(coresight_replicator, coresight_replicator_fdt_driver,
+    replicator_fdt_methods, sizeof(struct replicator_softc),
+    coresight_replicator_driver);
 
-EARLY_DRIVER_MODULE(replicator, simplebus, replicator_fdt_driver, 0, 0,
+EARLY_DRIVER_MODULE(coresight_replicator, simplebus,
+    coresight_replicator_fdt_driver, 0, 0,
     BUS_PASS_INTERRUPT + BUS_PASS_ORDER_MIDDLE);
+MODULE_DEPEND(coresight_replicator, coresight, 1, 1, 1);
+MODULE_VERSION(coresight_replicator, 1);

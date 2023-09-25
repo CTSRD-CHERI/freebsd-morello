@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2018-2020 Ruslan Bukin <br@bsdpad.com>
+ * Copyright (c) 2018-2023 Ruslan Bukin <br@bsdpad.com>
  * All rights reserved.
  *
  * This software was developed by BAE Systems, the University of Cambridge
@@ -74,8 +74,8 @@ funnel_init(device_t dev)
 }
 
 static int
-funnel_enable(device_t dev, struct endpoint *endp,
-    struct coresight_event *event)
+funnel_configure(device_t dev, struct endpoint *endp,
+    struct coresight_pipeline *pipeline, struct hwt_context *ctx)
 {
 	struct funnel_softc *sc;
 	uint32_t reg;
@@ -94,8 +94,8 @@ funnel_enable(device_t dev, struct endpoint *endp,
 }
 
 static void
-funnel_disable(device_t dev, struct endpoint *endp,
-    struct coresight_event *event)
+funnel_deconfigure(device_t dev, struct endpoint *endp,
+    struct coresight_pipeline *pipeline)
 {
 	struct funnel_softc *sc;
 	uint32_t reg;
@@ -130,13 +130,30 @@ funnel_attach(device_t dev)
 	return (0);
 }
 
+int
+funnel_detach(device_t dev)
+{
+	struct funnel_softc *sc;
+	int error;
+
+	sc = device_get_softc(dev);
+ 
+	error = coresight_unregister(dev);
+	if (error)
+		return (error);
+
+	bus_release_resources(dev, funnel_spec, &sc->res);
+
+	return (0);
+}
+
 static device_method_t funnel_methods[] = {
 	/* Coresight interface */
 	DEVMETHOD(coresight_init,	funnel_init),
-	DEVMETHOD(coresight_enable,	funnel_enable),
-	DEVMETHOD(coresight_disable,	funnel_disable),
+	DEVMETHOD(coresight_configure,	funnel_configure),
+	DEVMETHOD(coresight_deconfigure,funnel_deconfigure),
 	DEVMETHOD_END
 };
 
-DEFINE_CLASS_0(funnel, funnel_driver, funnel_methods,
+DEFINE_CLASS_0(coresight_funnel, coresight_funnel_driver, funnel_methods,
     sizeof(struct funnel_softc));

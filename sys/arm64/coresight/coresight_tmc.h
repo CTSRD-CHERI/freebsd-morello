@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2018-2020 Ruslan Bukin <br@bsdpad.com>
+ * Copyright (c) 2018-2023 Ruslan Bukin <br@bsdpad.com>
  * All rights reserved.
  *
  * This software was developed by SRI International and the University of
@@ -77,6 +77,7 @@
 #define	 FFCR_FON_TRIG_EVT	(1 << 5)
 #define	 FFCR_FLUSH_MAN		(1 << 6)
 #define	 FFCR_TRIGON_TRIGIN	(1 << 8)
+#define	 FFCR_STOP_ON_FLUSH	(1 << 12)
 #define	TMC_PSCR	0x308 /* Periodic Synchronization Counter Register */
 #define	TMC_ITATBMDATA0	0xED0 /* Integration Test ATB Master Data Register 0 */
 #define	TMC_ITATBMCTR2	0xED4 /* Integration Test ATB Master Interface Control 2 Register */
@@ -114,22 +115,25 @@
 #define	TMC_COMPID2	0xFF8 /* Component ID2 Register */
 #define	TMC_COMPID3	0xFFC /* Component ID3 Register */
 
-DECLARE_CLASS(tmc_driver);
+DECLARE_CLASS(coresight_tmc_driver);
 
 struct tmc_softc {
-	struct resource			*res;
+	struct resource			*res[2];
 	device_t			dev;
-	uint64_t			cycle;
 	struct coresight_platform_data	*pdata;
 	uint32_t			dev_type;
 #define	CORESIGHT_UNKNOWN		0
 #define	CORESIGHT_ETR			1
 #define	CORESIGHT_ETF			2
 	uint32_t			nev;
-	struct coresight_event		*event;
 	boolean_t			etf_configured;
+	boolean_t			scatter_gather;
+	void				*intrhand;
 };
 
+typedef uint32_t sgte_t;
+
 int tmc_attach(device_t dev);
+int tmc_detach(device_t dev);
 
 #endif /* !_ARM64_CORESIGHT_CORESIGHT_TMC_H_ */

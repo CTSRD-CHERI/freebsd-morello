@@ -1,5 +1,5 @@
 #-
-# Copyright (c) 2018 Ruslan Bukin <br@bsdpad.com>
+# Copyright (c) 2018-2023 Ruslan Bukin <br@bsdpad.com>
 # All rights reserved.
 #
 # This software was developed by SRI International and the University of
@@ -38,20 +38,59 @@ METHOD int init {
 	device_t dev;
 };
 
+METHOD int deinit {
+	device_t dev;
+};
+
+METHOD int setup {
+	device_t dev;
+	struct endpoint *endp;
+	struct coresight_pipeline *pipeline;
+};
+
+METHOD int configure {
+	device_t dev;
+	struct endpoint *endp;
+	struct coresight_pipeline *pipeline;
+	struct hwt_context *ctx;
+};
+
+METHOD void deconfigure {
+	device_t dev;
+	struct endpoint *endp;
+	struct coresight_pipeline *pipeline;
+};
+
+METHOD int start {
+	device_t dev;
+	struct endpoint *endp;
+	struct coresight_pipeline *pipeline;
+};
+
+METHOD void stop {
+	device_t dev;
+	struct endpoint *endp;
+	struct coresight_pipeline *pipeline;
+}
+
 METHOD int enable {
 	device_t dev;
 	struct endpoint *endp;
-	struct coresight_event *event;
+	struct coresight_pipeline *pipeline;
 };
 
 METHOD void disable {
 	device_t dev;
 	struct endpoint *endp;
-	struct coresight_event *event;
+	struct coresight_pipeline *pipeline;
+};
+
+METHOD void dump {
+	device_t dev;
 };
 
 METHOD int read {
 	device_t dev;
 	struct endpoint *endp;
-	struct coresight_event *event;
+	struct coresight_pipeline *pipeline;
 };

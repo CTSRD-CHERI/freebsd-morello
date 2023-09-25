@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2018-2020 Ruslan Bukin <br@bsdpad.com>
+ * Copyright (c) 2018-2023 Ruslan Bukin <br@bsdpad.com>
  * All rights reserved.
  *
  * This software was developed by BAE Systems, the University of Cambridge
@@ -62,8 +62,8 @@ replicator_init(device_t dev)
 }
 
 static int
-replicator_enable(device_t dev, struct endpoint *endp,
-    struct coresight_event *event)
+replicator_configure(device_t dev, struct endpoint *endp,
+    struct coresight_pipeline *pipeline, struct hwt_context *ctx)
 {
 	struct replicator_softc *sc;
 
@@ -82,8 +82,8 @@ replicator_enable(device_t dev, struct endpoint *endp,
 }
 
 static void
-replicator_disable(device_t dev, struct endpoint *endp,
-    struct coresight_event *event)
+replicator_deconfigure(device_t dev, struct endpoint *endp,
+    struct coresight_pipeline *pipeline)
 {
 	struct replicator_softc *sc;
 
@@ -114,13 +114,30 @@ replicator_attach(device_t dev)
 	return (0);
 }
 
+int
+replicator_detach(device_t dev)
+{
+	struct replicator_softc *sc;
+	int error;
+
+	sc = device_get_softc(dev);
+
+	error = coresight_unregister(dev);
+	if (error)
+		return (error);
+
+	bus_release_resources(dev, replicator_spec, &sc->res);
+
+	return (0);
+}
+
 static device_method_t replicator_methods[] = {
 	/* Coresight interface */
 	DEVMETHOD(coresight_init,	replicator_init),
-	DEVMETHOD(coresight_enable,	replicator_enable),
-	DEVMETHOD(coresight_disable,	replicator_disable),
+	DEVMETHOD(coresight_configure,	replicator_configure),
+	DEVMETHOD(coresight_deconfigure,replicator_deconfigure),
 	DEVMETHOD_END
 };
 
-DEFINE_CLASS_0(replicator, replicator_driver, replicator_methods,
-    sizeof(struct replicator_softc));
+DEFINE_CLASS_0(coresight_replicator, coresight_replicator_driver,
+    replicator_methods, sizeof(struct replicator_softc));

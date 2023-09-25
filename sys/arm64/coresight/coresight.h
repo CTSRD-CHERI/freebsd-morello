@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2018-2020 Ruslan Bukin <br@bsdpad.com>
+ * Copyright (c) 2018-2023 Ruslan Bukin <br@bsdpad.com>
  * All rights reserved.
  *
  * This software was developed by SRI International and the University of
@@ -46,6 +46,8 @@
 #include <dev/acpica/acpivar.h>
 #endif
 
+#include <dev/hwt/hwt_thread.h>
+
 #define	CORESIGHT_ITCTRL	0xf00
 #define	CORESIGHT_CLAIMSET	0xfa0
 #define	CORESIGHT_CLAIMCLR	0xfa4
@@ -58,7 +60,8 @@
 
 enum cs_dev_type {
 	CORESIGHT_ETMV4,
-	CORESIGHT_TMC,
+	CORESIGHT_TMC_ETF,
+	CORESIGHT_TMC_ETR,
 	CORESIGHT_DYNAMIC_REPLICATOR,
 	CORESIGHT_FUNNEL,
 	CORESIGHT_CPU_DEBUG,
@@ -90,7 +93,7 @@ struct endpoint {
 	boolean_t input;
 	int reg;
 	struct coresight_device *cs_dev;
-	LIST_ENTRY(endpoint) endplink;
+	TAILQ_ENTRY(endpoint) endplink;
 };
 
 struct coresight_platform_data {
@@ -117,19 +120,20 @@ struct etm_state {
 };
 
 struct etr_state {
-	boolean_t started;
-	uint32_t cycle;
-	uint32_t offset;
 	uint32_t low;
 	uint32_t high;
 	uint32_t bufsize;
-	uint32_t flags;
-#define	ETR_FLAG_ALLOCATE	(1 << 0)
-#define	ETR_FLAG_RELEASE	(1 << 1)
+	vm_page_t *pages;
+	int npages;
+	int curpage;
+	vm_offset_t curpage_offset;
+
+	vm_page_t *pt_dir;
+	int npt;
 };
 
-struct coresight_event {
-	LIST_HEAD(, endpoint) endplist;
+struct coresight_pipeline {
+	TAILQ_HEAD(endplistname, endpoint) endplist;
 
 	uint64_t addr[ETM_N_COMPRATOR];
 	uint32_t naddr;
@@ -147,16 +151,36 @@ struct etm_config {
 	uint8_t excp_level;
 };
 
-static MALLOC_DEFINE(M_CORESIGHT, "coresight", "ARM Coresight");
+MALLOC_DECLARE(M_CORESIGHT);
 
 struct coresight_platform_data *coresight_fdt_get_platform_data(device_t dev);
+void coresight_fdt_release_platform_data(struct coresight_platform_data *pdata);
+
 struct coresight_platform_data *coresight_acpi_get_platform_data(device_t dev);
-struct endpoint * coresight_get_output_endpoint(struct coresight_platform_data *pdata);
-struct coresight_device * coresight_get_output_device(struct endpoint *endp, struct endpoint **);
+struct endpoint *
+    coresight_get_output_endpoint(struct coresight_platform_data *pdata);
+struct coresight_device *
+    coresight_get_output_device(struct coresight_device *cs_dev,
+    struct endpoint *endp, struct endpoint **);
 int coresight_register(struct coresight_desc *desc);
-int coresight_init_event(int cpu, struct coresight_event *event);
-void coresight_enable(int cpu, struct coresight_event *event);
-void coresight_disable(int cpu, struct coresight_event *event);
-void coresight_read(int cpu, struct coresight_event *event);
+
+int coresight_init_pipeline(struct coresight_pipeline *pipeline, int cpu);
+void coresight_deinit_pipeline(struct coresight_pipeline *pipeline);
+
+int coresight_setup(struct coresight_pipeline *pipeline);
+int coresight_configure(struct coresight_pipeline *pipeline,
+    struct hwt_context *ctx);
+void coresight_deconfigure(struct coresight_pipeline *pipeline);
+
+int coresight_start(struct coresight_pipeline *pipeline);
+void coresight_stop(struct coresight_pipeline *pipeline);
+
+void coresight_enable(struct coresight_pipeline *pipeline);
+void coresight_disable(struct coresight_pipeline *pipeline);
+
+int coresight_read(struct coresight_pipeline *pipeline);
+void coresight_dump(struct coresight_pipeline *pipeline);
+
+int coresight_unregister(device_t dev);
 
 #endif /* !_ARM64_CORESIGHT_CORESIGHT_H_ */

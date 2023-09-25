@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2018-2020 Ruslan Bukin <br@bsdpad.com>
+ * Copyright (c) 2018-2023 Ruslan Bukin <br@bsdpad.com>
  * All rights reserved.
  *
  * This software was developed by BAE Systems, the University of Cambridge
@@ -77,6 +77,7 @@ debug_init(device_t dev)
 {
 	struct debug_softc *sc;
 	uint32_t reg;
+	int timeout;
 
 	sc = device_get_softc(dev);
 
@@ -95,9 +96,14 @@ debug_init(device_t dev)
 	reg |= EDPRCR_COREPURQ;
 	bus_write_4(sc->res, EDPRCR, reg);
 
+	timeout = 10000;
+
 	do {
 		reg = bus_read_4(sc->res, EDPRSR);
-	} while ((reg & EDPRCR_CORENPDRQ) == 0);
+	} while ((reg & EDPRCR_CORENPDRQ) == 0 && timeout--);
+
+	if (timeout <= 0)
+		return (EINTEGRITY);
 
 	return (0);
 }
@@ -139,10 +145,32 @@ debug_attach(device_t dev)
 	return (0);
 }
 
+static int
+debug_detach(device_t dev)
+{
+	struct debug_softc *sc;
+	int error;
+
+	sc = device_get_softc(dev);
+
+	error = coresight_unregister(dev);
+	if (error)
+		return (error);
+
+	coresight_fdt_release_platform_data(sc->pdata);
+
+	sc->pdata = NULL;
+
+	bus_release_resources(dev, debug_spec, &sc->res);
+
+	return (0);
+}
+
 static device_method_t debug_methods[] = {
 	/* Device interface */
 	DEVMETHOD(device_probe,		debug_probe),
 	DEVMETHOD(device_attach,	debug_attach),
+	DEVMETHOD(device_detach,	debug_detach),
 
 	/* Coresight interface */
 	DEVMETHOD(coresight_init,	debug_init),
@@ -150,11 +178,12 @@ static device_method_t debug_methods[] = {
 };
 
 static driver_t debug_driver = {
-	"debug",
+	"coresight_cpu_debug",
 	debug_methods,
 	sizeof(struct debug_softc),
 };
 
-EARLY_DRIVER_MODULE(debug, simplebus, debug_driver, 0, 0,
+EARLY_DRIVER_MODULE(coresight_cpu_debug, simplebus, debug_driver, 0, 0,
     BUS_PASS_BUS + BUS_PASS_ORDER_LATE);
-MODULE_VERSION(debug, 1);
+MODULE_VERSION(coresight_cpu_debug, 1);
+MODULE_DEPEND(coresight_cpu_debug, coresight, 1, 1, 1);

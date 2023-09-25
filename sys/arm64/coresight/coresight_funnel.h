@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2018-2020 Ruslan Bukin <br@bsdpad.com>
+ * Copyright (c) 2018-2023 Ruslan Bukin <br@bsdpad.com>
  * All rights reserved.
  *
  * This software was developed by BAE Systems, the University of Cambridge
@@ -65,7 +65,7 @@
 #define	HWTYPE_FUNNEL		1
 #define	HWTYPE_STATIC_FUNNEL	2
 
-DECLARE_CLASS(funnel_driver);
+DECLARE_CLASS(coresight_funnel_driver);
 
 struct funnel_softc {
 	struct resource			*res;
@@ -74,5 +74,6 @@ struct funnel_softc {
 };
 
 int funnel_attach(device_t dev);
+int funnel_detach(device_t dev);
 
 #endif /* !_ARM64_CORESIGHT_CORESIGHT_FUNNEL_H_ */

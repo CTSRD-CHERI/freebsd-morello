@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2018-2020 Ruslan Bukin <br@bsdpad.com>
+ * Copyright (c) 2018-2023 Ruslan Bukin <br@bsdpad.com>
  * All rights reserved.
  *
  * This software was developed by BAE Systems, the University of Cambridge
@@ -47,7 +47,7 @@
 #include "coresight_if.h"
 
 static struct ofw_compat_data compat_data[] = {
-	{ "arm,coresight-funnel",		HWTYPE_FUNNEL },
+	{ "arm,coresight-dynamic-funnel",	HWTYPE_FUNNEL },
 	{ "arm,coresight-static-funnel",	HWTYPE_STATIC_FUNNEL },
 	{ NULL,					HWTYPE_NONE }
 };
@@ -88,15 +88,32 @@ funnel_fdt_attach(device_t dev)
 	return (funnel_attach(dev));
 }
 
+static int
+funnel_fdt_detach(device_t dev)
+{
+	struct funnel_softc *sc;
+
+	sc = device_get_softc(dev);
+	coresight_fdt_release_platform_data(sc->pdata);
+
+	sc->pdata = NULL;
+
+	return (funnel_detach(dev));
+}
+
 static device_method_t funnel_fdt_methods[] = {
 	/* Device interface */
 	DEVMETHOD(device_probe,		funnel_fdt_probe),
 	DEVMETHOD(device_attach,	funnel_fdt_attach),
+	DEVMETHOD(device_detach,	funnel_fdt_detach),
 	DEVMETHOD_END
 };
 
-DEFINE_CLASS_1(funnel, funnel_fdt_driver, funnel_fdt_methods,
-    sizeof(struct funnel_softc), funnel_driver);
+DEFINE_CLASS_1(coresight_funnel, coresight_funnel_fdt_driver,
+    funnel_fdt_methods, sizeof(struct funnel_softc),
+    coresight_funnel_driver);
 
-EARLY_DRIVER_MODULE(funnel, simplebus, funnel_fdt_driver, 0, 0,
-    BUS_PASS_INTERRUPT + BUS_PASS_ORDER_MIDDLE);
+EARLY_DRIVER_MODULE(coresight_funnel, simplebus, coresight_funnel_fdt_driver,
+    0, 0, BUS_PASS_INTERRUPT + BUS_PASS_ORDER_MIDDLE);
+MODULE_DEPEND(coresight_funnel, coresight, 1, 1, 1);
+MODULE_VERSION(coresight_funnel, 1);
