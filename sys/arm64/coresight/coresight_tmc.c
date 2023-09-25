@@ -110,7 +110,7 @@ tmc_alloc_pages(struct tmc_softc *sc, vm_page_t *pages, int npages)
 	vm_paddr_t low, high, boundary;
 	vm_memattr_t memattr;
 	int alignment;
-	vm_pointer_t va;
+	uintptr_t va;
 	int pflags;
 	vm_page_t m;
 	int tries;
@@ -301,7 +301,7 @@ tmc_allocate_pgdir(struct tmc_softc *sc, vm_page_t *pages, int nentries,
 		}
 
 		*ptr = ETR_SG_ENTRY(paddr, type);
-		cpu_dcache_wb_range((vm_pointer_t)ptr, sizeof(sgte_t));
+		cpu_dcache_wb_range((uintptr_t)ptr, sizeof(sgte_t));
 		ptr++;
 
 		/* Take next directory page. */
@@ -317,7 +317,7 @@ tmc_allocate_pgdir(struct tmc_softc *sc, vm_page_t *pages, int nentries,
 	/* Last entry. */
 	paddr = VM_PAGE_TO_PHYS(pages[curpg]);
 	*ptr = ETR_SG_ENTRY(paddr, ETR_SG_ET_LAST);
-	cpu_dcache_wb_range((vm_pointer_t)ptr, sizeof(sgte_t));
+	cpu_dcache_wb_range((uintptr_t)ptr, sizeof(sgte_t));
 
 	return (pt_dir);
 }

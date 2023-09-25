@@ -110,7 +110,7 @@ hwt_vm_alloc_pages(struct hwt_vm *vm)
 {
 	vm_paddr_t low, high, boundary;
 	vm_memattr_t memattr;
-	vm_pointer_t va;
+	uintptr_t va;
 	int alignment;
 	vm_page_t m;
 	int pflags;
