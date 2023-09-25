@@ -44,6 +44,7 @@
 
 #include <sys/cdefs.h>
 #include "opt_hwpmc_hooks.h"
+#include "opt_hwt_hooks.h"
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -93,6 +94,10 @@
 
 #ifdef HWPMC_HOOKS
 #include <sys/pmckern.h>
+#endif
+
+#ifdef HWT_HOOKS
+#include <dev/hwt/hwt_hook.h>
 #endif
 
 static fo_rdwr_t	vn_read;
@@ -2924,6 +2929,25 @@ vn_mmap(struct file *fp, vm_map_t map, vm_offset_t *addr, vm_size_t size,
 		}
 	}
 #endif
+
+#ifdef HWT_HOOKS
+	/* HWT: record dynamic libs. */
+	struct hwt_record_entry ent;
+	char *fullpath;
+	char *freepath;
+
+	if ((prot & VM_PROT_EXECUTE) != 0 && error == 0) {
+		if (vn_fullpath(vp, &fullpath, &freepath) == 0) {
+			ent.fullpath = fullpath;
+			ent.addr = (uintptr_t) *addr;
+			ent.record_type = HWT_RECORD_MMAP;
+			HWT_CALL_HOOK(td, HWT_MMAP, &ent);
+			if (freepath != NULL)
+				free(freepath, M_TEMP);
+		}
+	}
+#endif
+
 	return (error);
 }
 

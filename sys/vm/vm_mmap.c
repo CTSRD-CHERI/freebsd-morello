@@ -96,6 +96,10 @@
 #include <sys/pmckern.h>
 #endif
 
+#ifdef HWT_HOOKS
+#include <dev/hwt/hwt_hook.h>
+#endif
+
 int old_mlock = 0;
 SYSCTL_INT(_vm, OID_AUTO, old_mlock, CTLFLAG_RWTUN, &old_mlock, 0,
     "Do not apply RLIMIT_MEMLOCK on mlockall");
@@ -617,6 +621,16 @@ kern_munmap(struct thread *td, uintptr_t addr0, size_t size)
 	}
 #endif
 	rv = vm_map_delete(map, addr, end);
+
+#ifdef HWT_HOOKS
+	struct hwt_record_entry ent;
+	if (rv == KERN_SUCCESS) {
+		ent.addr = (uintptr_t) addr;
+		ent.size = (size_t) size;
+		ent.record_type = HWT_RECORD_MUNMAP;
+		HWT_CALL_HOOK(td, HWT_RECORD, &ent);
+	}
+#endif
 
 #ifdef HWPMC_HOOKS
 	if (rv == KERN_SUCCESS && __predict_false(pmc_handled)) {

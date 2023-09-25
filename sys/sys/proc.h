@@ -889,6 +889,7 @@ struct proc {
 						   sync core registered */
 #define	P2_MEMBAR_GLOBE		0x00400000	/* membar global expedited
 						   registered */
+#define	P2_HWT			0x00800000	/* Process is using HWT. */
 
 /* Flags protected by proctree_lock, kept in p_treeflags. */
 #define	P_TREE_ORPHANED		0x00000001	/* Reparented, on orphan list */
