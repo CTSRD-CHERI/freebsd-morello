@@ -85,6 +85,38 @@ struct cs_decoder {
 	xo_handle_t *xop;
 };
 
+static int
+hwt_coresight_mmap(struct trace_context *tc)
+{
+	char filename[32];
+	int tid;
+
+	/* Coresight maps memory only from the first CPU */
+	if (tc->mode == HWT_MODE_CPU)
+		tid = CPU_FFS(&tc->cpu_map) - 1;
+	else /* HWT_MODE_THREAD */
+		tid = 0;
+
+	sprintf(filename, "/dev/hwt_%d_%d", tc->ident, tid);
+
+	tc->thr_fd = open(filename, O_RDONLY);
+	if (tc->thr_fd < 0) {
+		printf("Can't open %s\n", filename);
+		return (-1);
+	}
+
+	tc->base = mmap(NULL, tc->bufsize, PROT_READ, MAP_SHARED, tc->thr_fd,
+	    0);
+	if (tc->base == MAP_FAILED) {
+		printf("mmap failed: err %d\n", errno);
+		return (-1);
+	}
+
+	printf("%s: tc->base %p\n", __func__, tc->base);
+
+	return (0);
+}
+
 static ocsd_err_t
 attach_raw_printers(dcd_tree_handle_t dcd_tree_h)
 {
@@ -562,7 +594,7 @@ hwt_coresight_init(struct trace_context *tc, struct cs_decoder *dec,
 
 	error = create_decoder_etmv4(tc, dec->dcdtree_handle, thread_id);
 	if (error != OCSD_OK) {
-		printf("can't create decoder: tc->base %#p\n", tc->base);
+		printf("can't create decoder: tc->base %p\n", tc->base);
 		return (-2);
 	}
 
@@ -802,6 +834,8 @@ hwt_coresight_process(struct trace_context *tc)
 }
 
 struct trace_dev_methods cs_methods = {
+	.init = NULL,
+	.mmap = hwt_coresight_mmap,
 	.process = hwt_coresight_process,
 	.set_config = hwt_coresight_set_config,
 };

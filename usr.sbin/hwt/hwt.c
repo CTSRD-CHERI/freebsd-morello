@@ -158,7 +158,12 @@ hwt_ctx_alloc(struct trace_context *tc)
 {
 	struct hwt_alloc al;
 	cpuset_t cpu_map;
-	int error;
+	int error = 0;
+	
+	if (tc->trace_dev->methods->init != NULL)
+		error = tc->trace_dev->methods->init(tc);
+	if (error)
+		return (error);
 
 	CPU_ZERO(&cpu_map);
 
@@ -167,8 +172,10 @@ hwt_ctx_alloc(struct trace_context *tc)
 	al.mode = tc->mode;
 	if (tc->mode == HWT_MODE_THREAD)
 		al.pid = tc->pid;
-	else
-		al.cpu_map = tc->cpu_map;
+	else {
+		al.cpu_map = &tc->cpu_map;
+		al.cpusetsize = sizeof(cpuset_t);
+	}
 
 	al.bufsize = tc->bufsize;
 	al.backend_name = tc->trace_dev->name;
@@ -177,31 +184,6 @@ hwt_ctx_alloc(struct trace_context *tc)
 	error = ioctl(tc->fd, HWT_IOC_ALLOC, &al);
 
 	return (error);
-}
-
-static int
-hwt_map_memory(struct trace_context *tc, int tid)
-{
-	char filename[32];
-
-	sprintf(filename, "/dev/hwt_%d_%d", tc->ident, tid);
-
-	tc->thr_fd = open(filename, O_RDONLY);
-	if (tc->thr_fd < 0) {
-		printf("Can't open %s\n", filename);
-		return (-1);
-	}
-
-	tc->base = mmap(NULL, tc->bufsize, PROT_READ, MAP_SHARED, tc->thr_fd,
-	    0);
-	if (tc->base == MAP_FAILED) {
-		printf("mmap failed: err %d\n", errno);
-		return (-1);
-	}
-
-	printf("%s: tc->base %#p\n", __func__, tc->base);
-
-	return (0);
 }
 
 int
@@ -327,12 +309,9 @@ hwt_mode_cpu(struct trace_context *tc)
 		return (error);
 	}
 
-	/*
-	 * TODO: It is Coresight-specific to map memory from the first CPU.
-	 */
-	error = hwt_map_memory(tc, CPU_FFS(&tc->cpu_map) - 1);
-	if (error != 0) {
-		printf("can't map memory");
+	error = tc->trace_dev->methods->mmap(tc);
+	if (error) {
+		printf("cant map memory, error %d\n", error);
 		return (error);
 	}
 
@@ -482,9 +461,9 @@ hwt_mode_thread(struct trace_context *tc, char **cmd, char **env)
 		return (error);
 	}
 
-	error = hwt_map_memory(tc, 0);
-	if (error != 0) {
-		printf("can't map memory");
+	error = tc->trace_dev->methods->mmap(tc);
+	if (error) {
+		printf("cant map memory, error %d\n", error);
 		return (error);
 	}
 

@@ -35,6 +35,7 @@ struct hwt_vm {
 	vm_page_t			*pages;
 	int				npages;
 	vm_object_t			obj;
+	vm_offset_t			kvaddr;
 	struct cdev			*cdev;
 
 	struct hwt_context		*ctx;
@@ -42,7 +43,7 @@ struct hwt_vm {
 	struct hwt_thread		*thr;	/* thr mode only. */
 };
 
-int hwt_vm_alloc(size_t bufsize, char *path, struct hwt_vm **vm0);
+int hwt_vm_alloc(size_t bufsize, int kva_req, char *path, struct hwt_vm **vm0);
 void hwt_vm_free(struct hwt_vm *vm);
 
 #endif /* !_DEV_HWT_HWT_VM_H_ */
