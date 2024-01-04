@@ -537,15 +537,16 @@ dwc_attach(device_t dev)
 	error = clk_set_assigned(dev, ofw_bus_get_node(dev));
 	if (error != 0) {
 		device_printf(dev, "clk_set_assigned failed\n");
-		return (error);
 	}
 
 	/* Enable main clock */
-	if ((error = dwc_clock_init(sc)) != 0)
-		return (error);
+	if ((error = dwc_clock_init(sc)) != 0) {
+		device_printf(dev, "dwc_clock_init failed\n");
+	}
+
 	/* De-assert main reset */
 	if ((error = dwc_reset_deassert(sc)) != 0)
-		return (error);
+		device_printf(dev, "reset deassert failed\n");
 
 	if (IF_DWC_INIT(dev) != 0)
 		return (ENXIO);
