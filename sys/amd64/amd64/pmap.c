@@ -43,8 +43,6 @@
  * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
- *
- *	from:	@(#)pmap.c	7.7 (Berkeley)	5/12/91
  */
 /*-
  * Copyright (c) 2003 Networks Associates Technology, Inc.
@@ -337,16 +335,6 @@ safe_to_clear_referenced(pmap_t pmap, pt_entry_t pte)
 	else
 		return (FALSE);
 }
-
-#if !defined(DIAGNOSTIC)
-#ifdef __GNUC_GNU_INLINE__
-#define PMAP_INLINE	__attribute__((__gnu_inline__)) inline
-#else
-#define PMAP_INLINE	extern inline
-#endif
-#else
-#define PMAP_INLINE
-#endif
 
 #ifdef PV_STATS
 #define PV_STAT(x)	do { x ; } while (0)
@@ -1560,7 +1548,7 @@ pt_entry_t vtoptem __read_mostly = ((1ul << (NPTEPGSHIFT + NPDEPGSHIFT +
     NPDPEPGSHIFT + NPML4EPGSHIFT)) - 1) << 3;
 vm_offset_t PTmap __read_mostly = (vm_offset_t)P4Tmap;
 
-PMAP_INLINE pt_entry_t *
+pt_entry_t *
 vtopte(vm_offset_t va)
 {
 	KASSERT(va >= VM_MAXUSER_ADDRESS, ("vtopte on a uva/gpa 0x%0lx", va));
@@ -2342,7 +2330,10 @@ pmap_allow_2m_x_ept_recalculate(void)
 	    CPUID_TO_MODEL(cpu_id) == 0x57 ||	/* Knights */
 	    CPUID_TO_MODEL(cpu_id) == 0x85))))
 		pmap_allow_2m_x_ept = 1;
+#ifndef BURN_BRIDGES
 	TUNABLE_INT_FETCH("hw.allow_2m_x_ept", &pmap_allow_2m_x_ept);
+#endif
+	TUNABLE_INT_FETCH("vm.pmap.allow_2m_x_ept", &pmap_allow_2m_x_ept);
 }
 
 static bool
@@ -3620,7 +3611,7 @@ pmap_invalidate_all(pmap_t pmap)
 	}
 }
 
-PMAP_INLINE void
+void
 pmap_invalidate_cache(void)
 {
 
@@ -3846,7 +3837,7 @@ pmap_flush_cache_phys_range(vm_paddr_t spa, vm_paddr_t epa, vm_memattr_t mattr)
  *		Extract the physical page address associated
  *		with the given map/virtual_address pair.
  */
-vm_paddr_t 
+vm_paddr_t
 pmap_extract(pmap_t pmap, vm_offset_t va)
 {
 	pdp_entry_t *pdpe;
@@ -3933,6 +3924,12 @@ out:
 	return (m);
 }
 
+/*
+ *	Routine:	pmap_kextract
+ *	Function:
+ *		Extract the physical page address associated with the given kernel
+ *		virtual address.
+ */
 vm_paddr_t
 pmap_kextract(vm_offset_t va)
 {
@@ -3971,7 +3968,7 @@ pmap_kextract(vm_offset_t va)
  * Add a wired page to the kva.
  * Note: not SMP coherent.
  */
-PMAP_INLINE void 
+void
 pmap_kenter(vm_offset_t va, vm_paddr_t pa)
 {
 	pt_entry_t *pte;
@@ -3997,7 +3994,7 @@ pmap_kenter_attr(vm_offset_t va, vm_paddr_t pa, int mode)
  * Remove a page from the kernel pagetables.
  * Note: not SMP coherent.
  */
-PMAP_INLINE void
+void
 pmap_kremove(vm_offset_t va)
 {
 	pt_entry_t *pte;

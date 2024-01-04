@@ -380,6 +380,11 @@ pfattach_vnet(void)
 	my_timeout[PFTM_TCP_CLOSING] = PFTM_TCP_CLOSING_VAL;
 	my_timeout[PFTM_TCP_FIN_WAIT] = PFTM_TCP_FIN_WAIT_VAL;
 	my_timeout[PFTM_TCP_CLOSED] = PFTM_TCP_CLOSED_VAL;
+	my_timeout[PFTM_SCTP_FIRST_PACKET] = PFTM_TCP_FIRST_PACKET_VAL;
+	my_timeout[PFTM_SCTP_OPENING] = PFTM_TCP_OPENING_VAL;
+	my_timeout[PFTM_SCTP_ESTABLISHED] = PFTM_TCP_ESTABLISHED_VAL;
+	my_timeout[PFTM_SCTP_CLOSING] = PFTM_TCP_CLOSING_VAL;
+	my_timeout[PFTM_SCTP_CLOSED] = PFTM_TCP_CLOSED_VAL;
 	my_timeout[PFTM_UDP_FIRST_PACKET] = PFTM_UDP_FIRST_PACKET_VAL;
 	my_timeout[PFTM_UDP_SINGLE] = PFTM_UDP_SINGLE_VAL;
 	my_timeout[PFTM_UDP_MULTIPLE] = PFTM_UDP_MULTIPLE_VAL;
@@ -2016,10 +2021,40 @@ pf_rule_to_krule(const struct pf_rule *rule, struct pf_krule *krule)
 	return (0);
 }
 
-static int
+int
+pf_ioctl_getrules(struct pfioc_rule *pr)
+{
+	struct pf_kruleset	*ruleset;
+	struct pf_krule		*tail;
+	int			 rs_num;
+
+	PF_RULES_WLOCK();
+	ruleset = pf_find_kruleset(pr->anchor);
+	if (ruleset == NULL) {
+		PF_RULES_WUNLOCK();
+		return (EINVAL);
+	}
+	rs_num = pf_get_ruleset_number(pr->rule.action);
+	if (rs_num >= PF_RULESET_MAX) {
+		PF_RULES_WUNLOCK();
+		return (EINVAL);
+	}
+	tail = TAILQ_LAST(ruleset->rules[rs_num].active.ptr,
+	    pf_krulequeue);
+	if (tail)
+		pr->nr = tail->nr + 1;
+	else
+		pr->nr = 0;
+	pr->ticket = ruleset->rules[rs_num].active.ticket;
+	PF_RULES_WUNLOCK();
+
+	return (0);
+}
+
+int
 pf_ioctl_addrule(struct pf_krule *rule, uint32_t ticket,
     uint32_t pool_ticket, const char *anchor, const char *anchor_call,
-    struct thread *td)
+    uid_t uid, pid_t pid)
 {
 	struct pf_kruleset	*ruleset;
 	struct pf_krule		*tail;
@@ -2045,8 +2080,8 @@ pf_ioctl_addrule(struct pf_krule *rule, uint32_t ticket,
 	rule->states_cur = counter_u64_alloc(M_WAITOK);
 	rule->states_tot = counter_u64_alloc(M_WAITOK);
 	rule->src_nodes = counter_u64_alloc(M_WAITOK);
-	rule->cuid = td->td_ucred->cr_ruid;
-	rule->cpid = td->td_proc ? td->td_proc->p_pid : 0;
+	rule->cuid = uid;
+	rule->cpid = pid;
 	TAILQ_INIT(&rule->rpool.list);
 
 	PF_CONFIG_LOCK();
@@ -2249,7 +2284,7 @@ relock_DIOCKILLSTATES:
 		/* For floating states look at the original kif. */
 		kif = s->kif == V_pfi_all ? s->orig_kif : s->kif;
 
-		sk = s->key[PF_SK_WIRE];
+		sk = s->key[psk->psk_nat ? PF_SK_STACK : PF_SK_WIRE];
 		if (s->direction == PF_OUT) {
 			srcaddr = &sk->addr[1];
 			dstaddr = &sk->addr[0];
@@ -2308,10 +2343,10 @@ relock_DIOCKILLSTATES:
 
 			if (s->direction == PF_OUT) {
 				dir = PF_IN;
-				idx = PF_SK_STACK;
+				idx = psk->psk_nat ? PF_SK_WIRE : PF_SK_STACK;
 			} else {
 				dir = PF_OUT;
-				idx = PF_SK_WIRE;
+				idx = psk->psk_nat ? PF_SK_STACK : PF_SK_WIRE;
 			}
 
 			match_key.af = s->key[idx]->af;
@@ -3076,7 +3111,8 @@ DIOCGETETHRULESET_error:
 
 		/* Frees rule on error */
 		error = pf_ioctl_addrule(rule, ticket, pool_ticket, anchor,
-		    anchor_call, td);
+		    anchor_call, td->td_ucred->cr_ruid,
+		    td->td_proc ? td->td_proc->p_pid : 0);
 
 		nvlist_destroy(nvl);
 		free(nvlpacked, M_NVLIST);
@@ -3104,39 +3140,18 @@ DIOCADDRULENV_error:
 
 		/* Frees rule on error */
 		error = pf_ioctl_addrule(rule, pr->ticket, pr->pool_ticket,
-		    pr->anchor, pr->anchor_call, td);
+		    pr->anchor, pr->anchor_call, td->td_ucred->cr_ruid,
+		    td->td_proc ? td->td_proc->p_pid : 0);
 		break;
 	}
 
 	case DIOCGETRULES: {
 		struct pfioc_rule	*pr = (struct pfioc_rule *)addr;
-		struct pf_kruleset	*ruleset;
-		struct pf_krule		*tail;
-		int			 rs_num;
 
 		pr->anchor[sizeof(pr->anchor) - 1] = 0;
 
-		PF_RULES_WLOCK();
-		ruleset = pf_find_kruleset(pr->anchor);
-		if (ruleset == NULL) {
-			PF_RULES_WUNLOCK();
-			error = EINVAL;
-			break;
-		}
-		rs_num = pf_get_ruleset_number(pr->rule.action);
-		if (rs_num >= PF_RULESET_MAX) {
-			PF_RULES_WUNLOCK();
-			error = EINVAL;
-			break;
-		}
-		tail = TAILQ_LAST(ruleset->rules[rs_num].active.ptr,
-		    pf_krulequeue);
-		if (tail)
-			pr->nr = tail->nr + 1;
-		else
-			pr->nr = 0;
-		pr->ticket = ruleset->rules[rs_num].active.ticket;
-		PF_RULES_WUNLOCK();
+		error = pf_ioctl_getrules(pr);
+
 		break;
 	}
 
@@ -5684,6 +5699,7 @@ pf_getstatus(struct pfioc_nv *nv)
 	nvlist_add_number(nvl, "reass", V_pf_status.reass);
 	nvlist_add_bool(nvl, "syncookies_active",
 	    V_pf_status.syncookies_active);
+	nvlist_add_number(nvl, "halfopen_states", V_pf_status.states_halfopen);
 
 	/* counters */
 	error = pf_add_status_counters(nvl, "counters", V_pf_status.counters,
@@ -5793,6 +5809,7 @@ pf_clear_tables(void)
 	int error;
 
 	bzero(&io, sizeof(io));
+	io.pfrio_flags |= PFR_FLAG_ALLRSETS;
 
 	error = pfr_clr_tables(&io.pfrio_table, &io.pfrio_ndel,
 	    io.pfrio_flags);
@@ -6203,8 +6220,54 @@ shutdown_pf(void)
 	int error = 0;
 	u_int32_t t[5];
 	char nn = '\0';
+	struct pf_kanchor *anchor;
+	struct pf_keth_anchor *eth_anchor;
+	int rs_num;
 
 	do {
+		/* Unlink rules of all user defined anchors */
+		RB_FOREACH(anchor, pf_kanchor_global, &V_pf_anchors) {
+			/* Wildcard based anchors may not have a respective
+			 * explicit anchor rule or they may be left empty
+			 * without rules. It leads to anchor.refcnt=0, and the
+			 * rest of the logic does not expect it. */
+			if (anchor->refcnt == 0)
+				anchor->refcnt = 1;
+			for (rs_num = 0; rs_num < PF_RULESET_MAX; ++rs_num) {
+				if ((error = pf_begin_rules(&t[rs_num], rs_num,
+				    anchor->path)) != 0) {
+					DPFPRINTF(PF_DEBUG_MISC, ("shutdown_pf: "
+					    "anchor.path=%s rs_num=%d\n",
+					    anchor->path, rs_num));
+					goto error;	/* XXX: rollback? */
+				}
+			}
+			for (rs_num = 0; rs_num < PF_RULESET_MAX; ++rs_num) {
+				error = pf_commit_rules(t[rs_num], rs_num,
+				    anchor->path);
+				MPASS(error == 0);
+			}
+		}
+
+		/* Unlink rules of all user defined ether anchors */
+		RB_FOREACH(eth_anchor, pf_keth_anchor_global,
+		    &V_pf_keth_anchors) {
+			/* Wildcard based anchors may not have a respective
+			 * explicit anchor rule or they may be left empty
+			 * without rules. It leads to anchor.refcnt=0, and the
+			 * rest of the logic does not expect it. */
+			if (eth_anchor->refcnt == 0)
+				eth_anchor->refcnt = 1;
+			if ((error = pf_begin_eth(&t[0], eth_anchor->path))
+			    != 0) {
+				DPFPRINTF(PF_DEBUG_MISC, ("shutdown_pf: eth "
+				    "anchor.path=%s\n", eth_anchor->path));
+				goto error;
+			}
+			error = pf_commit_eth(t[0], eth_anchor->path);
+			MPASS(error == 0);
+		}
+
 		if ((error = pf_begin_rules(&t[0], PF_RULESET_SCRUB, &nn))
 		    != 0) {
 			DPFPRINTF(PF_DEBUG_MISC, ("shutdown_pf: SCRUB\n"));
@@ -6231,12 +6294,16 @@ shutdown_pf(void)
 			break;		/* XXX: rollback? */
 		}
 
-		/* XXX: these should always succeed here */
-		pf_commit_rules(t[0], PF_RULESET_SCRUB, &nn);
-		pf_commit_rules(t[1], PF_RULESET_FILTER, &nn);
-		pf_commit_rules(t[2], PF_RULESET_NAT, &nn);
-		pf_commit_rules(t[3], PF_RULESET_BINAT, &nn);
-		pf_commit_rules(t[4], PF_RULESET_RDR, &nn);
+		error = pf_commit_rules(t[0], PF_RULESET_SCRUB, &nn);
+		MPASS(error == 0);
+		error = pf_commit_rules(t[1], PF_RULESET_FILTER, &nn);
+		MPASS(error == 0);
+		error = pf_commit_rules(t[2], PF_RULESET_NAT, &nn);
+		MPASS(error == 0);
+		error = pf_commit_rules(t[3], PF_RULESET_BINAT, &nn);
+		MPASS(error == 0);
+		error = pf_commit_rules(t[4], PF_RULESET_RDR, &nn);
+		MPASS(error == 0);
 
 		if ((error = pf_clear_tables()) != 0)
 			break;
@@ -6245,7 +6312,8 @@ shutdown_pf(void)
 			DPFPRINTF(PF_DEBUG_MISC, ("shutdown_pf: eth\n"));
 			break;
 		}
-		pf_commit_eth(t[0], &nn);
+		error = pf_commit_eth(t[0], &nn);
+		MPASS(error == 0);
 
 #ifdef ALTQ
 		if ((error = pf_begin_altq(&t[0])) != 0) {
@@ -6263,6 +6331,7 @@ shutdown_pf(void)
 		/* fingerprints and interfaces have their own cleanup code */
 	} while(0);
 
+error:
 	return (error);
 }
 

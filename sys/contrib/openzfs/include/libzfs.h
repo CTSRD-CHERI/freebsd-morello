@@ -157,6 +157,7 @@ typedef enum zfs_error {
 	EZFS_CKSUM,		/* insufficient replicas */
 	EZFS_RESUME_EXISTS,	/* Resume on existing dataset without force */
 	EZFS_SHAREFAILED,	/* filesystem share failed */
+	EZFS_RAIDZ_EXPAND_IN_PROGRESS,	/* a raidz is currently expanding */
 	EZFS_UNKNOWN
 } zfs_error_t;
 
@@ -318,6 +319,9 @@ _LIBZFS_H int zpool_vdev_remove_wanted(zpool_handle_t *, const char *);
 
 _LIBZFS_H int zpool_vdev_fault(zpool_handle_t *, uint64_t, vdev_aux_t);
 _LIBZFS_H int zpool_vdev_degrade(zpool_handle_t *, uint64_t, vdev_aux_t);
+_LIBZFS_H int zpool_vdev_set_removed_state(zpool_handle_t *, uint64_t,
+    vdev_aux_t);
+
 _LIBZFS_H int zpool_vdev_clear(zpool_handle_t *, uint64_t);
 
 _LIBZFS_H nvlist_t *zpool_find_vdev(zpool_handle_t *, const char *, boolean_t *,

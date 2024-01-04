@@ -30,8 +30,6 @@
  * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
- *
- *	@(#)vfs_cache.c	8.5 (Berkeley) 3/22/95
  */
 
 #include <sys/cdefs.h>
@@ -4511,7 +4509,7 @@ cache_fplookup_dirfd(struct cache_fpl *fpl, struct vnode **vpp)
 	ndp = fpl->ndp;
 	cnp = fpl->cnp;
 
-	error = fgetvp_lookup_smr(ndp->ni_dirfd, ndp, vpp, &fsearch);
+	error = fgetvp_lookup_smr(ndp, vpp, &fsearch);
 	if (__predict_false(error != 0)) {
 		return (cache_fpl_aborted(fpl));
 	}
@@ -5426,12 +5424,14 @@ cache_fplookup_symlink(struct cache_fpl *fpl)
 	struct nameidata *ndp;
 	struct componentname *cnp;
 	struct vnode *dvp, *tvp;
+	struct pwd *pwd;
 	int error;
 
 	ndp = fpl->ndp;
 	cnp = fpl->cnp;
 	dvp = fpl->dvp;
 	tvp = fpl->tvp;
+	pwd = *(fpl->pwd);
 
 	if (cache_fpl_islastcn(ndp)) {
 		if ((cnp->cn_flags & FOLLOW) == 0) {
@@ -5486,6 +5486,9 @@ cache_fplookup_symlink(struct cache_fpl *fpl)
 		if (!cache_fplookup_mp_supported(mp)) {
 			cache_fpl_checkpoint(fpl);
 			return (cache_fpl_partial(fpl));
+		}
+		if (__predict_false(pwd->pwd_adir != pwd->pwd_rdir)) {
+			return (cache_fpl_aborted(fpl));
 		}
 	}
 	return (0);

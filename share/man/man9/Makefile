@@ -268,6 +268,7 @@ MAN=	accept_filter.9 \
 	pmap_copy.9 \
 	pmap_enter.9 \
 	pmap_extract.9 \
+	pmap_kextract.9 \
 	pmap_growkernel.9 \
 	pmap_init.9 \
 	pmap_is_modified.9 \
@@ -1369,6 +1370,7 @@ MLINKS+=kmsan.9 KMSAN.9 \
 	kmsan.9 kmsan_check_bio.9 \
 	kmsan.9 kmsan_check_ccb.9 \
 	kmsan.9 kmsan_check_mbuf.9 \
+	kmsan.9 kmsan_check_uio.9 \
 	kmsan.9 kmsan_mark.9 \
 	kmsan.9 kmsan_oirg.9
 MLINKS+=kobj.9 DEFINE_CLASS.9 \
@@ -1514,6 +1516,7 @@ MLINKS+=\
 	mbuf.9 m_pullup.9 \
 	mbuf.9 m_split.9 \
 	mbuf.9 mtod.9 \
+	mbuf.9 mtodo.9 \
 	mbuf.9 M_TRAILINGSPACE.9 \
 	mbuf.9 m_unshare.9 \
 	mbuf.9 M_WRITABLE.9
@@ -1807,6 +1810,7 @@ MLINKS+=PHOLD.9 PRELE.9 \
 	PHOLD.9 PROC_ASSERT_NOT_HELD.9
 MLINKS+=pmap_copy.9 pmap_copy_page.9
 MLINKS+=pmap_extract.9 pmap_extract_and_hold.9
+MLINKS+=pmap_kextract.9 vtophys.9
 MLINKS+=pmap_init.9 pmap_init2.9
 MLINKS+=pmap_is_modified.9 pmap_ts_referenced.9
 MLINKS+=pmap_pinit.9 pmap_pinit0.9 \

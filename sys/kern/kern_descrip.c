@@ -32,8 +32,6 @@
  * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
- *
- *	@(#)kern_descrip.c	8.6 (Berkeley) 4/19/94
  */
 
 #include <sys/cdefs.h>
@@ -2238,7 +2236,7 @@ fdinit(void)
  * Build a pwddesc structure from another.
  * Copy the current, root, and jail root vnode references.
  *
- * If pdp is not NULL, return with it shared locked.
+ * If pdp is not NULL and keeplock is true, return with it (exclusively) locked.
  */
 struct pwddesc *
 pdinit(struct pwddesc *pdp, bool keeplock)
@@ -2964,7 +2962,7 @@ fget_cap(struct thread *td, int fd, cap_rights_t *needrightsp,
 
 #ifdef CAPABILITIES
 int
-fgetvp_lookup_smr(int fd, struct nameidata *ndp, struct vnode **vpp, bool *fsearch)
+fgetvp_lookup_smr(struct nameidata *ndp, struct vnode **vpp, bool *fsearch)
 {
 	const struct filedescent *fde;
 	const struct fdescenttbl *fdt;
@@ -2974,9 +2972,11 @@ fgetvp_lookup_smr(int fd, struct nameidata *ndp, struct vnode **vpp, bool *fsear
 	const cap_rights_t *haverights;
 	cap_rights_t rights;
 	seqc_t seq;
+	int fd;
 
 	VFS_SMR_ASSERT_ENTERED();
 
+	fd = ndp->ni_dirfd;
 	rights = *ndp->ni_rightsneeded;
 	cap_rights_set_one(&rights, CAP_LOOKUP);
 
@@ -3030,15 +3030,17 @@ fgetvp_lookup_smr(int fd, struct nameidata *ndp, struct vnode **vpp, bool *fsear
 }
 #else
 int
-fgetvp_lookup_smr(int fd, struct nameidata *ndp, struct vnode **vpp, bool *fsearch)
+fgetvp_lookup_smr(struct nameidata *ndp, struct vnode **vpp, bool *fsearch)
 {
 	const struct fdescenttbl *fdt;
 	struct filedesc *fdp;
 	struct file *fp;
 	struct vnode *vp;
+	int fd;
 
 	VFS_SMR_ASSERT_ENTERED();
 
+	fd = ndp->ni_dirfd;
 	fdp = curproc->p_fd;
 	fdt = fdp->fd_files;
 	if (__predict_false((u_int)fd >= fdt->fdt_nfiles))
@@ -3066,7 +3068,7 @@ fgetvp_lookup_smr(int fd, struct nameidata *ndp, struct vnode **vpp, bool *fsear
 #endif
 
 int
-fgetvp_lookup(int fd, struct nameidata *ndp, struct vnode **vpp)
+fgetvp_lookup(struct nameidata *ndp, struct vnode **vpp)
 {
 	struct thread *td;
 	struct file *fp;

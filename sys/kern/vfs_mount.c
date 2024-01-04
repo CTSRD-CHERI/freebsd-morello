@@ -36,7 +36,6 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/cdefs.h>
 #include <sys/param.h>
 #include <sys/conf.h>
 #include <sys/smp.h>
@@ -996,7 +995,7 @@ vfs_donmount(struct thread *td, uint64_t fsflags, struct uio *fsoptions)
 		jail_export = false;
 
 	error = vfs_domount(td, fstype, fspath, fsflags, jail_export, &optlist);
-	if (error == ENOENT) {
+	if (error == ENODEV) {
 		error = EINVAL;
 		if (errmsg != NULL)
 			strncpy(errmsg, "Invalid fstype", errmsg_len);
@@ -1025,7 +1024,7 @@ bail:
 			    fsoptions->uio_iov[2 * errmsg_pos + 1].iov_base,
 			    fsoptions->uio_iov[2 * errmsg_pos + 1].iov_len);
 		} else {
-			copyout(errmsg,
+			(void)copyout(errmsg,
 			    fsoptions->uio_iov[2 * errmsg_pos + 1].iov_base,
 			    fsoptions->uio_iov[2 * errmsg_pos + 1].iov_len);
 		}
@@ -1086,7 +1085,7 @@ sys_mount(struct thread *td, struct mount_args *uap)
 	vfsp = vfs_byname_kld(fstype, td, &error);
 	free(fstype, M_TEMP);
 	if (vfsp == NULL)
-		return (ENOENT);
+		return (EINVAL);
 	if (((vfsp->vfc_flags & VFCF_SBDRY) != 0 &&
 	    vfsp->vfc_vfsops_sd->vfs_cmount == NULL) ||
 	    ((vfsp->vfc_flags & VFCF_SBDRY) == 0 &&
@@ -1313,9 +1312,10 @@ vfs_domount_update(
 	struct vnode *rootvp;
 	void *bufp;
 	struct mount *mp;
-	int error, export_error, i, len;
+	int error, export_error, i, len, fsid_up_len;
 	uint64_t flag;
 	gid_t *grps;
+	fsid_t *fsid_up;
 	bool vfs_suser_failed;
 
 	ASSERT_VOP_ELOCKED(vp, __func__);
@@ -1378,10 +1378,23 @@ vfs_domount_update(
 	VI_UNLOCK(vp);
 	VOP_UNLOCK(vp);
 
+	rootvp = NULL;
 	vfs_op_enter(mp);
 	vn_seqc_write_begin(vp);
 
-	rootvp = NULL;
+	if (vfs_getopt(*optlist, "fsid", (void **)&fsid_up,
+	    &fsid_up_len) == 0) {
+		if (fsid_up_len != sizeof(*fsid_up)) {
+			error = EINVAL;
+			goto end;
+		}
+		if (fsidcmp(fsid_up, &mp->mnt_stat.f_fsid) != 0) {
+			error = ENOENT;
+			goto end;
+		}
+		vfs_deleteopt(*optlist, "fsid");
+	}
+
 	MNT_ILOCK(mp);
 	if ((mp->mnt_kern_flag & MNTK_UNMOUNT) != 0) {
 		MNT_IUNLOCK(mp);
@@ -3120,6 +3133,41 @@ suspend_all_fs(void)
 		}
 	}
 	mtx_unlock(&mountlist_mtx);
+}
+
+/*
+ * Clone the mnt_exjail field to a new mount point.
+ */
+void
+vfs_exjail_clone(struct mount *inmp, struct mount *outmp)
+{
+	struct ucred *cr;
+	struct prison *pr;
+
+	MNT_ILOCK(inmp);
+	cr = inmp->mnt_exjail;
+	if (cr != NULL) {
+		crhold(cr);
+		MNT_IUNLOCK(inmp);
+		pr = cr->cr_prison;
+		sx_slock(&allprison_lock);
+		if (!prison_isalive(pr)) {
+			sx_sunlock(&allprison_lock);
+			crfree(cr);
+			return;
+		}
+		MNT_ILOCK(outmp);
+		if (outmp->mnt_exjail == NULL) {
+			outmp->mnt_exjail = cr;
+			atomic_add_int(&pr->pr_exportcnt, 1);
+			cr = NULL;
+		}
+		MNT_IUNLOCK(outmp);
+		sx_sunlock(&allprison_lock);
+		if (cr != NULL)
+			crfree(cr);
+	} else
+		MNT_IUNLOCK(inmp);
 }
 
 void

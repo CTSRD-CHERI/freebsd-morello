@@ -1580,13 +1580,16 @@ struct pf_pdesc {
 #define PFDESC_SCTP_INIT	0x0001
 #define PFDESC_SCTP_INIT_ACK	0x0002
 #define PFDESC_SCTP_COOKIE	0x0004
-#define PFDESC_SCTP_ABORT	0x0008
-#define PFDESC_SCTP_SHUTDOWN	0x0010
-#define PFDESC_SCTP_SHUTDOWN_COMPLETE	0x0020
-#define PFDESC_SCTP_DATA	0x0040
-#define PFDESC_SCTP_ASCONF	0x0080
-#define PFDESC_SCTP_OTHER	0x0100
-#define PFDESC_SCTP_ADD_IP	0x0200
+#define PFDESC_SCTP_COOKIE_ACK	0x0008
+#define PFDESC_SCTP_ABORT	0x0010
+#define PFDESC_SCTP_SHUTDOWN	0x0020
+#define PFDESC_SCTP_SHUTDOWN_COMPLETE	0x0040
+#define PFDESC_SCTP_DATA	0x0080
+#define PFDESC_SCTP_ASCONF	0x0100
+#define PFDESC_SCTP_HEARTBEAT	0x0200
+#define PFDESC_SCTP_HEARTBEAT_ACK	0x0400
+#define PFDESC_SCTP_OTHER	0x0800
+#define PFDESC_SCTP_ADD_IP	0x1000
 	u_int16_t	 sctp_flags;
 	u_int32_t	 sctp_initiate_tag;
 
@@ -1770,6 +1773,7 @@ struct pf_kstate_kill {
 	char			psk_label[PF_RULE_LABEL_SIZE];
 	u_int			psk_killed;
 	bool			psk_kill_match;
+	bool			psk_nat;
 };
 #endif
 
@@ -2468,6 +2472,11 @@ int			 pf_keth_anchor_nvcopyout(
 			    const struct pf_keth_rule *, nvlist_t *);
 struct pf_keth_ruleset	*pf_find_or_create_keth_ruleset(const char *);
 void			 pf_keth_anchor_remove(struct pf_keth_rule *);
+
+int			 pf_ioctl_getrules(struct pfioc_rule *);
+int			 pf_ioctl_addrule(struct pf_krule *, uint32_t,
+			    uint32_t, const char *, const char *, uid_t uid,
+			    pid_t);
 
 void			 pf_krule_free(struct pf_krule *);
 #endif

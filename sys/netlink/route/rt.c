@@ -556,9 +556,8 @@ dump_rtentry(struct rtentry *rt, void *_arg)
 	IF_DEBUG_LEVEL(LOG_DEBUG3) {
 		char rtbuf[INET6_ADDRSTRLEN + 5];
 		FIB_LOG(LOG_DEBUG3, wa->fibnum, wa->family,
-		    "Dump %s, offset %u, error %d",
-		    rt_print_buf(rt, rtbuf, sizeof(rtbuf)),
-		    wa->nw->offset, error);
+		    "Dump %s, error %d",
+		    rt_print_buf(rt, rtbuf, sizeof(rtbuf)), error);
 	}
 	wa->error = error;
 
@@ -578,7 +577,6 @@ dump_rtable_one(struct netlink_walkargs *wa, uint32_t fibnum, int family)
 
 	FIB_LOG(LOG_DEBUG2, fibnum, family, "End dump, iterated %d dumped %d",
 	    wa->count, wa->dumped);
-	NL_LOG(LOG_DEBUG2, "Current offset: %d", wa->nw->offset);
 }
 
 static int
@@ -750,9 +748,14 @@ finalize_nhop(struct nhop_object *nh, const struct sockaddr *dst, int *perror)
 
 		struct ifaddr *ifa = ifaof_ifpforaddr(gw_sa, nh->nh_ifp);
 		if (ifa == NULL) {
-			NL_LOG(LOG_DEBUG, "Unable to determine ifa, skipping");
-			*perror = EINVAL;
-			return (NULL);
+			/* Try link-level ifa. */
+			gw_sa = &nh->gw_sa;
+			ifa = ifaof_ifpforaddr(gw_sa, nh->nh_ifp);
+			if (ifa == NULL) {
+				NL_LOG(LOG_DEBUG, "Unable to determine ifa, skipping");
+				*perror = EINVAL;
+				return (NULL);
+			}
 		}
 		nhop_set_src(nh, ifa);
 	}

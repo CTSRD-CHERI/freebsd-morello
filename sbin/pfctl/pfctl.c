@@ -725,6 +725,12 @@ pfctl_net_kill_states(int dev, const char *iface, int opts)
 	    sizeof(kill.ifname)) >= sizeof(kill.ifname))
 		errx(1, "invalid interface: %s", iface);
 
+	if (state_killers == 2 && (strcmp(state_kill[0], "nat") == 0)) {
+		kill.nat = true;
+		state_kill[0] = state_kill[1];
+		state_killers = 1;
+	}
+
 	pfctl_addrprefix(state_kill[0], &kill.src.addr.v.a.mask);
 
 	if (opts & PF_OPT_KILLMATCH)
@@ -1361,6 +1367,14 @@ pfctl_show_rules(int dev, char *path, int opts, enum pfctl_show format,
 				    (unsigned long long)rule.bytes[1],
 				    (uintmax_t)rule.states_tot);
 			}
+
+			if (anchor_call[0] &&
+			    (((p = strrchr(anchor_call, '/')) ?
+			      p[1] == '_' : anchor_call[0] == '_') ||
+			     opts & PF_OPT_RECURSE)) {
+				pfctl_show_rules(dev, npath, opts, format,
+				    anchor_call, depth, rule.anchor_wildcard);
+			}
 			break;
 		}
 		case PFCTL_SHOW_RULES:
@@ -1529,9 +1543,6 @@ pfctl_show_state(struct pfctl_state *s, void *arg)
 {
 	struct pfctl_show_state_arg *a = (struct pfctl_show_state_arg *)arg;
 
-	if (a->iface != NULL && strcmp(s->ifname, a->iface))
-		return (0);
-
 	if (a->dotitle) {
 		pfctl_print_title("STATES:");
 		a->dotitle = 0;
@@ -1545,12 +1556,16 @@ int
 pfctl_show_states(int dev, const char *iface, int opts)
 {
 	struct pfctl_show_state_arg arg;
+	struct pfctl_state_filter filter = {};
+
+	if (iface != NULL)
+		strncpy(filter.ifname, iface, IFNAMSIZ);
 
 	arg.opts = opts;
 	arg.dotitle = opts & PF_OPT_SHOWALL;
 	arg.iface = iface;
 
-	if (pfctl_get_states_iter(pfctl_show_state, &arg))
+	if (pfctl_get_filtered_states_iter(&filter, pfctl_show_state, &arg))
 		return (-1);
 
 	return (0);
@@ -2265,6 +2280,11 @@ pfctl_init_options(struct pfctl *pf)
 	pf->timeout[PFTM_TCP_CLOSING] = PFTM_TCP_CLOSING_VAL;
 	pf->timeout[PFTM_TCP_FIN_WAIT] = PFTM_TCP_FIN_WAIT_VAL;
 	pf->timeout[PFTM_TCP_CLOSED] = PFTM_TCP_CLOSED_VAL;
+	pf->timeout[PFTM_SCTP_FIRST_PACKET] = PFTM_TCP_FIRST_PACKET_VAL;
+	pf->timeout[PFTM_SCTP_OPENING] = PFTM_TCP_OPENING_VAL;
+	pf->timeout[PFTM_SCTP_ESTABLISHED] = PFTM_TCP_ESTABLISHED_VAL;
+	pf->timeout[PFTM_SCTP_CLOSING] = PFTM_TCP_CLOSING_VAL;
+	pf->timeout[PFTM_SCTP_CLOSED] = PFTM_TCP_CLOSED_VAL;
 	pf->timeout[PFTM_UDP_FIRST_PACKET] = PFTM_UDP_FIRST_PACKET_VAL;
 	pf->timeout[PFTM_UDP_SINGLE] = PFTM_UDP_SINGLE_VAL;
 	pf->timeout[PFTM_UDP_MULTIPLE] = PFTM_UDP_MULTIPLE_VAL;

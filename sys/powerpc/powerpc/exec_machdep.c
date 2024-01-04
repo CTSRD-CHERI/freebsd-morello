@@ -528,8 +528,8 @@ set_mcontext(struct thread *td, mcontext_t *mcp)
 	 * Additionally, ensure VSX is disabled as well, as it is illegal
 	 * to leave it turned on when FP or VEC are off.
 	 */
-	tf->srr1 &= ~(PSL_FP | PSL_VSX);
-	pcb->pcb_flags &= ~(PCB_FPU | PCB_VSX);
+	tf->srr1 &= ~(PSL_FP | PSL_VSX | PSL_VEC);
+	pcb->pcb_flags &= ~(PCB_FPU | PCB_VSX | PCB_VEC);
 
 	if (mcp->mc_flags & _MC_FP_VALID) {
 		/* enable_fpu() will happen lazily on a fault */
@@ -550,9 +550,6 @@ set_mcontext(struct thread *td, mcontext_t *mcp)
 		pcb->pcb_vec.vscr = mcp->mc_vscr;
 		pcb->pcb_vec.vrsave = mcp->mc_vrsave;
 		memcpy(pcb->pcb_vec.vr, mcp->mc_avec, sizeof(mcp->mc_avec));
-	} else {
-		tf->srr1 &= ~PSL_VEC;
-		pcb->pcb_flags &= ~PCB_VEC;
 	}
 
 	return (0);
@@ -1152,12 +1149,15 @@ cpu_copy_thread(struct thread *td, struct thread *td0)
 	td->td_md.md_saved_msr = psl_kernset;
 }
 
-void
+int
 cpu_set_upcall(struct thread *td, void (*entry)(void *), void *arg,
     stack_t *stack)
 {
 	struct trapframe *tf;
 	uintptr_t sp;
+	#ifdef __powerpc64__
+	int error;
+	#endif
 
 	tf = td->td_frame;
 	/* align stack and alloc space for frame ptr and saved LR */
@@ -1185,10 +1185,12 @@ cpu_set_upcall(struct thread *td, void (*entry)(void *), void *arg,
 			tf->srr0 = (register_t)entry;
 			/* ELFv2 ABI requires that the global entry point be in r12. */
 			tf->fixreg[12] = (register_t)entry;
-		}
-		else {
+		} else {
 			register_t entry_desc[3];
-			(void)copyin((void *)entry, entry_desc, sizeof(entry_desc));
+			error = copyin((void *)entry, entry_desc,
+			    sizeof(entry_desc));
+			if (error != 0)
+				return (error);
 			tf->srr0 = entry_desc[0];
 			tf->fixreg[2] = entry_desc[1];
 			tf->fixreg[11] = entry_desc[2];
@@ -1204,6 +1206,7 @@ cpu_set_upcall(struct thread *td, void (*entry)(void *), void *arg,
 
 	td->td_retval[0] = (register_t)entry;
 	td->td_retval[1] = 0;
+	return (0);
 }
 
 static int

@@ -26,7 +26,6 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/cdefs.h>
 #include <sys/param.h>
 #include <sys/kernel.h>
 #include <sys/systm.h>
@@ -665,7 +664,7 @@ prep_cdevsw(struct cdevsw *devsw, int flags)
 		if ((devsw->d_flags & D_GIANTOK) == 0) {
 			printf(
 			    "WARNING: Device \"%s\" is Giant locked and may be "
-			    "deleted before FreeBSD 14.0.\n",
+			    "deleted before FreeBSD 15.0.\n",
 			    devsw->d_name == NULL ? "???" : devsw->d_name);
 		}
 		if (devsw->d_gianttrick == NULL) {
