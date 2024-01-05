@@ -540,9 +540,8 @@ dwc_attach(device_t dev)
 	}
 
 	/* Enable main clock */
-	if ((error = dwc_clock_init(sc)) != 0) {
+	if ((error = dwc_clock_init(sc)) != 0)
 		device_printf(dev, "dwc_clock_init failed\n");
-	}
 
 	/* De-assert main reset */
 	if ((error = dwc_reset_deassert(sc)) != 0)
