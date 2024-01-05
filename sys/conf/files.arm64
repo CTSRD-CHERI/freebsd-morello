@@ -480,6 +480,7 @@ arm64/intel/fmem.c				standard
 arm64/intel/stratix10-soc-fpga-mgr.c		optional soc_intel_stratix10 fdt
 arm64/intel/stratix10-svc.c			optional soc_intel_stratix10 fdt
 arm64/intel/stratix10-clkmgr.c			optional soc_intel_stratix10
+arm64/intel/stratix10-rstmgr.c			optional soc_intel_stratix10
 
 # Annapurna
 arm/annapurna/alpine/alpine_ccu.c		optional al_ccu fdt
