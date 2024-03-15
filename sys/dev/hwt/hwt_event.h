@@ -31,12 +31,13 @@
 #define HWT_KQ_BUFRDY_EV 138
 #define HWT_KQ_NEW_RECORD_EV 139
 
-#define HWT_KQ_BUFRDY_ID_MASK		0xFFFF
+#define HWT_KQ_BUFRDY_ID_MASK 0xFFFF
 
 #ifdef _KERNEL
 struct task;
 
-int hwt_event_send(int ev_type, struct task *task, task_fn_t *handler, void *ctx);
+int hwt_event_send(int ev_type, struct task *task, task_fn_t *handler,
+    void *ctx);
 void hwt_event_drain_all(void);
 
 #endif

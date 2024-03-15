@@ -48,7 +48,7 @@
 #define	HWT_MAXCONFIGSIZE	PAGE_SIZE
 
 #define	HWT_CONFIG_DEBUG
-//#undef	HWT_CONFIG_DEBUG
+#undef	HWT_CONFIG_DEBUG
 
 #ifdef	HWT_CONFIG_DEBUG
 #define	dprintf(fmt, ...)	printf(fmt, ##__VA_ARGS__)

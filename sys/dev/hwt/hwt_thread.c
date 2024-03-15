@@ -129,7 +129,7 @@ hwt_thread_alloc(struct hwt_context *ctx, struct hwt_thread **thr0, char *path, 
 	thr = malloc(sizeof(struct hwt_thread), M_HWT_THREAD,
 	    M_WAITOK | M_ZERO);
 	thr->vm = vm;
-  	/* Check if we need to store backend-specific data. */
+	/* Check if we need to store backend-specific data. */
   	if(ctx->hwt_backend->ops->hwt_backend_alloc_thread_priv != NULL) {
 		ctx->hwt_backend->ops->hwt_backend_alloc_thread_priv(thr);
 		if (thr->cookie == NULL){

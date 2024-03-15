@@ -456,7 +456,7 @@ pt_get_decoder_ctx(struct trace_context *tc, int ctxid)
 	switch (tc->mode) {
 	case HWT_MODE_CPU:
 		assert(ctxid < hwt_ncpu());
-		return &cpus[ctxid];
+		return (&cpus[ctxid]);
 	case HWT_MODE_THREAD: {
 		struct pt_dec_ctx srch;
 		srch.id = ctxid;
@@ -498,7 +498,7 @@ pt_process_data(struct trace_context *tc, struct kevent *tevent)
 		len = newoff - curoff;
 		error = pt_process_chunk(tc, dctx, curoff, len, &processed);
 		if (error != 0) {
-			return error;
+			return (error);
 		}
 		dctx->total += processed;
 		dctx->curoff += processed;
@@ -508,7 +508,7 @@ pt_process_data(struct trace_context *tc, struct kevent *tevent)
 		len = tc->bufsize - curoff;
 		error = pt_process_chunk(tc, dctx, curoff, len, &processed);
 		if (error != 0) {
-			return error;
+			return (error);
 		}
 
 		dctx->curoff += processed;
@@ -518,7 +518,7 @@ pt_process_data(struct trace_context *tc, struct kevent *tevent)
 		len = newoff;
 		error = pt_process_chunk(tc, dctx, curoff, len, &processed);
 		if (error != 0) {
-			return error;
+			return (error);
 		}
 
 		dctx->curoff += processed;
