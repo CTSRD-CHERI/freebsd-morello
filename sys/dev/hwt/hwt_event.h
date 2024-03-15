@@ -37,7 +37,7 @@
 struct task;
 
 int hwt_event_send(int ev_type, struct task *task, task_fn_t *handler,
-    void *ctx);
+    void *arg);
 void hwt_event_drain_all(void);
 
 #endif
