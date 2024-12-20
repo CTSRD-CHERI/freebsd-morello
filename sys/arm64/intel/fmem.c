@@ -113,6 +113,8 @@ fmemioctl(struct cdev *dev, u_long cmd, caddr_t data, int flags,
 		return (ERANGE);
 
 	addr = sc->fmem[unit].offset + req->offset;
+	if (addr & (req->access_width - 1))
+		return (ENXIO);
 
 	switch (cmd) {
 	case FMEM_READ:
