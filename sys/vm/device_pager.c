@@ -97,11 +97,13 @@ static int old_dev_pager_ctor(void *handle, vm_ooffset_t size, vm_prot_t prot,
 static void old_dev_pager_dtor(void *handle);
 static int old_dev_pager_fault(vm_object_t object, vm_ooffset_t offset,
     int prot, vm_page_t *mres);
+static void old_dev_pager_path(void *handle, char *path, size_t len);
 
 static const struct cdev_pager_ops old_dev_pager_ops = {
 	.cdev_pg_ctor =	old_dev_pager_ctor,
 	.cdev_pg_dtor =	old_dev_pager_dtor,
-	.cdev_pg_fault = old_dev_pager_fault
+	.cdev_pg_fault = old_dev_pager_fault,
+	.cdev_pg_path = old_dev_pager_path
 };
 
 static void
@@ -263,6 +265,14 @@ dev_pager_alloc(void *handle, vm_ooffset_t size, vm_prot_t prot,
 }
 
 void
+cdev_pager_get_path(vm_object_t object, char *path, size_t sz)
+{
+	if (object->un_pager.devp.ops->cdev_pg_path != NULL)
+		object->un_pager.devp.ops->cdev_pg_path(
+		    object->un_pager.devp.handle, path, sz);
+}
+
+void
 cdev_pager_free_page(vm_object_t object, vm_page_t m)
 {
 
@@ -297,8 +307,7 @@ cdev_mgtdev_pager_free_pages(vm_object_t object)
 retry:
 	KASSERT(pctrie_iter_is_reset(&pages),
 	    ("%s: pctrie_iter not reset for retry", __func__));
-	for (m = vm_radix_iter_lookup_ge(&pages, 0); m != NULL;
-	    m = vm_radix_iter_step(&pages)) {
+	VM_RADIX_FOREACH(m, &pages) {
 		if (!vm_page_busy_acquire(m, VM_ALLOC_WAITFAIL)) {
 			pctrie_iter_reset(&pages);
 			goto retry;
@@ -536,4 +545,13 @@ old_dev_pager_dtor(void *handle)
 {
 
 	dev_rel(handle);
+}
+
+static void
+old_dev_pager_path(void *handle, char *path, size_t len)
+{
+	struct cdev *cdev = handle;
+
+	if (cdev != NULL)
+		dev_copyname(cdev, path, len);
 }

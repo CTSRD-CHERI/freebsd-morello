@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -1338,6 +1339,8 @@ abd_bio_map_off(struct bio *bio, abd_t *abd,
 
 	return (io_size);
 }
+
+EXPORT_SYMBOL(abd_alloc_from_pages);
 
 /* Tunable Parameters */
 module_param(zfs_abd_scatter_enabled, int, 0644);

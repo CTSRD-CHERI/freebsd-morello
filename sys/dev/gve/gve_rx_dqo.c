@@ -58,6 +58,7 @@ void
 gve_rx_free_ring_dqo(struct gve_priv *priv, int i)
 {
 	struct gve_rx_ring *rx = &priv->rx[i];
+	struct gve_ring_com *com = &rx->com;
 	int j;
 
 	if (rx->dqo.compl_ring != NULL) {
@@ -86,6 +87,11 @@ gve_rx_free_ring_dqo(struct gve_priv *priv, int i)
 
 	if (!gve_is_qpl(priv) && rx->dqo.buf_dmatag)
 		bus_dma_tag_destroy(rx->dqo.buf_dmatag);
+
+	if (com->qpl != NULL) {
+		gve_free_qpl(priv, com->qpl);
+		com->qpl = NULL;
+	}
 }
 
 int
@@ -123,10 +129,13 @@ gve_rx_alloc_ring_dqo(struct gve_priv *priv, int i)
 	    M_GVE, M_WAITOK | M_ZERO);
 
 	if (gve_is_qpl(priv)) {
-		rx->com.qpl = &priv->qpls[priv->tx_cfg.max_queues + i];
+		rx->com.qpl = gve_alloc_qpl(priv, i + priv->tx_cfg.max_queues,
+		    GVE_RX_NUM_QPL_PAGES_DQO, /*single_kva=*/false);
 		if (rx->com.qpl == NULL) {
-			device_printf(priv->dev, "No QPL left for rx ring %d", i);
-			return (ENOMEM);
+			device_printf(priv->dev,
+			    "Failed to alloc QPL for rx ring %d", i);
+			err = ENOMEM;
+			goto abort;
 		}
 		return (0);
 	}
@@ -953,6 +962,19 @@ drop_frag_clear_ctx:
 	rx->ctx = (struct gve_rx_ctx){};
 }
 
+static uint8_t
+gve_rx_get_gen_bit(uint8_t *desc)
+{
+	uint8_t byte;
+
+	/*
+	 * Prevent generation bit from being read after the rest of the
+	 * descriptor.
+	 */
+	byte = atomic_load_acq_8(desc + GVE_RX_DESC_DQO_GEN_BYTE_OFFSET);
+	return ((byte & GVE_RX_DESC_DQO_GEN_BIT_MASK) != 0);
+}
+
 static bool
 gve_rx_cleanup_dqo(struct gve_priv *priv, struct gve_rx_ring *rx, int budget)
 {
@@ -962,17 +984,14 @@ gve_rx_cleanup_dqo(struct gve_priv *priv, struct gve_rx_ring *rx, int budget)
 	NET_EPOCH_ASSERT();
 
 	while (work_done < budget) {
-		bus_dmamap_sync(rx->dqo.compl_ring_mem.tag, rx->dqo.compl_ring_mem.map,
+		bus_dmamap_sync(rx->dqo.compl_ring_mem.tag,
+		    rx->dqo.compl_ring_mem.map,
 		    BUS_DMASYNC_POSTREAD);
 
 		compl_desc = &rx->dqo.compl_ring[rx->dqo.tail];
-		if (compl_desc->generation == rx->dqo.cur_gen_bit)
+		if (gve_rx_get_gen_bit((uint8_t *)compl_desc) ==
+		    rx->dqo.cur_gen_bit)
 			break;
-		/*
-		 * Prevent generation bit from being read after the rest of the
-		 * descriptor.
-		 */
-		atomic_thread_fence_acq();
 
 		rx->cnt++;
 		rx->dqo.tail = (rx->dqo.tail + 1) & rx->dqo.mask;

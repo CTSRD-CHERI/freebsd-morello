@@ -98,7 +98,6 @@ struct vm_object {
 	TAILQ_ENTRY(vm_object) object_list; /* list of all objects */
 	LIST_HEAD(, vm_object) shadow_head; /* objects that this is a shadow for */
 	LIST_ENTRY(vm_object) shadow_list; /* chain of shadow objects */
-	struct pglist memq;		/* list of resident pages */
 	struct vm_radix rtree;		/* root of the resident page radix trie*/
 	vm_pindex_t size;		/* Object size */
 	struct domainset_ref domain;	/* NUMA policy. */
@@ -204,7 +203,6 @@ struct vm_object {
 #define	OBJ_PAGERPRIV2	0x00008000	/* Pager private */
 #define	OBJ_SYSVSHM	0x00010000	/* SysV SHM */
 #define	OBJ_POSIXSHM	0x00020000	/* Posix SHM */
-#define	OBJ_CDEVH	0x00040000	/* OBJT_DEVICE handle is cdev */
 
 /*
  * Helpers to perform conversion between vm_object page indexes and offsets.

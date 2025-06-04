@@ -36,6 +36,7 @@
 #include <sys/caprights.h>
 #include <sys/signal.h>
 #include <sys/socket.h>
+#include <sys/_uexterror.h>
 #include <sys/_uio.h>
 
 /*
@@ -87,10 +88,9 @@ struct ktr_header {
  * is the public interface.
  */
 #define	KTRCHECK(td, type)	((td)->td_proc->p_traceflag & (1 << type))
-#define KTRPOINT(td, type)  (__predict_false(KTRCHECK((td), (type))))
-#define	KTRCHECKDRAIN(td)	(!(STAILQ_EMPTY(&(td)->td_proc->p_ktr)))
+#define	KTRPOINT(td, type)	(__predict_false(KTRCHECK((td), (type))))
 #define	KTRUSERRET(td) do {						\
-	if (__predict_false(KTRCHECKDRAIN(td)))				\
+	if (__predict_false(!STAILQ_EMPTY_ATOMIC(&(td)->td_proc->p_ktr))) \
 		ktruserret(td);						\
 } while (0)
 
@@ -274,6 +274,14 @@ struct ktr_struct_array {
 #define KTR_ENVS 17
 
 /*
+ * KTR_EXTERR - extended error reported
+ */
+#define	KTR_EXTERR 18
+struct ktr_exterr {
+	struct uexterror ue;
+};
+
+/*
  * KTR_DROP - If this bit is set in ktr_type, then at least one event
  * between the previous record and this record was dropped.
  */
@@ -307,6 +315,7 @@ struct ktr_struct_array {
 #define	KTRFAC_STRUCT_ARRAY (1<<KTR_STRUCT_ARRAY)
 #define KTRFAC_ARGS     (1<<KTR_ARGS)
 #define KTRFAC_ENVS     (1<<KTR_ENVS)
+#define	KTRFAC_EXTERR	(1<<KTR_EXTERR)
 
 /*
  * trace flags (also in p_traceflags)

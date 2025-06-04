@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -971,7 +972,8 @@ vdev_ops_t vdev_mirror_ops = {
 	.vdev_op_fini = NULL,
 	.vdev_op_open = vdev_mirror_open,
 	.vdev_op_close = vdev_mirror_close,
-	.vdev_op_asize = vdev_default_asize,
+	.vdev_op_psize_to_asize = vdev_default_asize,
+	.vdev_op_asize_to_psize = vdev_default_psize,
 	.vdev_op_min_asize = vdev_default_min_asize,
 	.vdev_op_min_alloc = NULL,
 	.vdev_op_io_start = vdev_mirror_io_start,
@@ -996,7 +998,8 @@ vdev_ops_t vdev_replacing_ops = {
 	.vdev_op_fini = NULL,
 	.vdev_op_open = vdev_mirror_open,
 	.vdev_op_close = vdev_mirror_close,
-	.vdev_op_asize = vdev_default_asize,
+	.vdev_op_psize_to_asize = vdev_default_asize,
+	.vdev_op_asize_to_psize = vdev_default_psize,
 	.vdev_op_min_asize = vdev_default_min_asize,
 	.vdev_op_min_alloc = NULL,
 	.vdev_op_io_start = vdev_mirror_io_start,
@@ -1021,7 +1024,8 @@ vdev_ops_t vdev_spare_ops = {
 	.vdev_op_fini = NULL,
 	.vdev_op_open = vdev_mirror_open,
 	.vdev_op_close = vdev_mirror_close,
-	.vdev_op_asize = vdev_default_asize,
+	.vdev_op_psize_to_asize = vdev_default_asize,
+	.vdev_op_asize_to_psize = vdev_default_psize,
 	.vdev_op_min_asize = vdev_default_min_asize,
 	.vdev_op_min_alloc = NULL,
 	.vdev_op_io_start = vdev_mirror_io_start,

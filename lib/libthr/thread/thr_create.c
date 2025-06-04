@@ -31,6 +31,7 @@
 #include <sys/types.h>
 #include <sys/rtprio.h>
 #include <sys/signalvar.h>
+#include <sys/exterrvar.h>
 #include <errno.h>
 #include <link.h>
 #include <stdlib.h>
@@ -160,7 +161,7 @@ _pthread_create(pthread_t * __restrict thread,
 	param.tls_size = sizeof(struct tcb);
 	param.child_tid = &new_thread->tid;
 	param.parent_tid = &new_thread->tid;
-	param.flags = 0;
+	param.flags = THR_C_RUNTIME;
 	if (new_thread->attr.flags & PTHREAD_SCOPE_SYSTEM)
 		param.flags |= THR_SYSTEM_SCOPE;
 	if (new_thread->attr.sched_inherit == PTHREAD_INHERIT_SCHED)
@@ -284,6 +285,9 @@ thread_start(struct pthread *curthread)
 	curthread->unwind_stackend = (char *)curthread->attr.stackaddr_attr +
 		curthread->attr.stacksize_attr;
 #endif
+
+	curthread->uexterr.ver = UEXTERROR_VER;
+	exterrctl(EXTERRCTL_ENABLE, 0, &curthread->uexterr);
 
 	/* Run the current thread's start routine with argument: */
 	_pthread_exit(curthread->start_routine(curthread->arg));

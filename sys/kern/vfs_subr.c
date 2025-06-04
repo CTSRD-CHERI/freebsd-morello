@@ -757,18 +757,17 @@ vntblinit(void *dummy __unused)
 	int cpu, physvnodes, virtvnodes;
 
 	/*
-	 * Desiredvnodes is a function of the physical memory size and the
-	 * kernel's heap size.  Generally speaking, it scales with the
-	 * physical memory size.  The ratio of desiredvnodes to the physical
-	 * memory size is 1:16 until desiredvnodes exceeds 98,304.
-	 * Thereafter, the
-	 * marginal ratio of desiredvnodes to the physical memory size is
-	 * 1:64.  However, desiredvnodes is limited by the kernel's heap
-	 * size.  The memory required by desiredvnodes vnodes and vm objects
-	 * must not exceed 1/10th of the kernel's heap size.
+	 * 'desiredvnodes' is the minimum of a function of the physical memory
+	 * size and another of the kernel heap size (UMA limit, a portion of the
+	 * KVA).
+	 *
+	 * Currently, on 64-bit platforms, 'desiredvnodes' is set to
+	 * 'virtvnodes' up to a physical memory cutoff of ~1722MB, after which
+	 * 'physvnodes' applies instead.  With the current automatic tuning for
+	 * 'maxfiles' (32 files/MB), 'desiredvnodes' is always greater than it.
 	 */
-	physvnodes = maxproc + pgtok(vm_cnt.v_page_count) / 64 +
-	    3 * min(98304 * 16, pgtok(vm_cnt.v_page_count)) / 64;
+	physvnodes = maxproc + pgtok(vm_cnt.v_page_count) / 32 +
+	    min(98304 * 16, pgtok(vm_cnt.v_page_count)) / 32;
 	virtvnodes = vm_kmem_size / (10 * (sizeof(struct vm_object) +
 	    sizeof(struct vnode) + NC_SZ * ncsizefactor + NFS_NCLNODE_SZ));
 	desiredvnodes = min(physvnodes, virtvnodes);
@@ -1202,6 +1201,7 @@ vattr_null(struct vattr *vap)
 	vap->va_gen = VNOVAL;
 	vap->va_vaflags = 0;
 	vap->va_filerev = VNOVAL;
+	vap->va_bsdflags = 0;
 }
 
 /*
@@ -1995,11 +1995,24 @@ vn_alloc_hard(struct mount *mp, u_long rnumvnodes, bool bumped)
 
 	mtx_lock(&vnode_list_mtx);
 
+	/*
+	 * Reload 'numvnodes', as since we acquired the lock, it may have
+	 * changed significantly if we waited, and 'rnumvnodes' above was only
+	 * actually passed if 'bumped' is true (else it is 0).
+	 */
+	rnumvnodes = atomic_load_long(&numvnodes);
+	if (rnumvnodes + !bumped < desiredvnodes) {
+		vn_alloc_cyclecount = 0;
+		mtx_unlock(&vnode_list_mtx);
+		goto alloc;
+	}
+
 	rfreevnodes = vnlru_read_freevnodes();
 	if (vn_alloc_cyclecount++ >= rfreevnodes) {
 		vn_alloc_cyclecount = 0;
 		vstir = true;
 	}
+
 	/*
 	 * Grow the vnode cache if it will not be above its target max after
 	 * growing.  Otherwise, if there is at least one free vnode, try to
@@ -4774,6 +4787,7 @@ DB_SHOW_COMMAND(mount, db_show_mount)
 	MNT_FLAG(MNT_FORCE);
 	MNT_FLAG(MNT_SNAPSHOT);
 	MNT_FLAG(MNT_BYFSID);
+	MNT_FLAG(MNT_NAMEDATTR);
 #undef MNT_FLAG
 	if (mflags != 0) {
 		if (buf[0] != '\0')
@@ -6519,6 +6533,8 @@ sysctl_vfs_ctl(SYSCTL_HANDLER_ARGS)
 	int error;
 	struct mount *mp;
 
+	if (req->newptr == NULL)
+		return (EINVAL);
 	error = SYSCTL_IN(req, &vc, sizeof(vc));
 	if (error)
 		return (error);

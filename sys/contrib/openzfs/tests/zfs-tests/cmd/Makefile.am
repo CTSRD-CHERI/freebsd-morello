@@ -126,6 +126,7 @@ if BUILD_LINUX
 scripts_zfs_tests_bin_PROGRAMS += %D%/getversion
 scripts_zfs_tests_bin_PROGRAMS += %D%/user_ns_exec
 scripts_zfs_tests_bin_PROGRAMS += %D%/renameat2
+scripts_zfs_tests_bin_PROGRAMS += %D%/statx
 scripts_zfs_tests_bin_PROGRAMS += %D%/xattrtest
 scripts_zfs_tests_bin_PROGRAMS += %D%/zed_fd_spill-zedlet
 scripts_zfs_tests_bin_PROGRAMS += %D%/idmap_util
@@ -139,7 +140,7 @@ scripts_zfs_tests_bin_PROGRAMS  += %D%/read_dos_attributes %D%/write_dos_attribu
 
 scripts_zfs_tests_bin_PROGRAMS += %D%/randfree_file
 %C%_randfree_file_SOURCES       = %D%/file/randfree_file.c
+endif
 
 scripts_zfs_tests_bin_PROGRAMS += %D%/file_fadvise
 %C%_file_fadvise_SOURCES  = %D%/file/file_fadvise.c
-endif

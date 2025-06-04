@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -21,6 +22,7 @@
 /*
  * Copyright (c) 2011, Lawrence Livermore National Security, LLC.
  * Copyright (c) 2015 by Chunwei Chen. All rights reserved.
+ * Copyright (c) 2025, Rob Norris <robn@despairlabs.com>
  */
 
 
@@ -30,6 +32,7 @@
 #include <sys/zfs_vnops.h>
 #include <sys/zfs_znode.h>
 #include <sys/dmu_objset.h>
+#include <sys/spa_impl.h>
 #include <sys/vfs.h>
 #include <sys/zpl.h>
 #include <sys/file.h>
@@ -371,14 +374,20 @@ zpl_unlink(struct inode *dir, struct dentry *dentry)
 	return (error);
 }
 
+#if defined(HAVE_IOPS_MKDIR_USERNS)
 static int
-#ifdef HAVE_IOPS_MKDIR_USERNS
 zpl_mkdir(struct user_namespace *user_ns, struct inode *dir,
     struct dentry *dentry, umode_t mode)
 #elif defined(HAVE_IOPS_MKDIR_IDMAP)
+static int
+zpl_mkdir(struct mnt_idmap *user_ns, struct inode *dir,
+    struct dentry *dentry, umode_t mode)
+#elif defined(HAVE_IOPS_MKDIR_DENTRY)
+static struct dentry *
 zpl_mkdir(struct mnt_idmap *user_ns, struct inode *dir,
     struct dentry *dentry, umode_t mode)
 #else
+static int
 zpl_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 #endif
 {
@@ -387,12 +396,14 @@ zpl_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 	znode_t *zp;
 	int error;
 	fstrans_cookie_t cookie;
-#if !(defined(HAVE_IOPS_MKDIR_USERNS) || defined(HAVE_IOPS_MKDIR_IDMAP))
+#if !(defined(HAVE_IOPS_MKDIR_USERNS) || \
+	defined(HAVE_IOPS_MKDIR_IDMAP) || defined(HAVE_IOPS_MKDIR_DENTRY))
 	zidmap_t *user_ns = kcred->user_ns;
 #endif
 
 	if (is_nametoolong(dentry)) {
-		return (-ENAMETOOLONG);
+		error = -ENAMETOOLONG;
+		goto err;
 	}
 
 	crhold(cr);
@@ -419,9 +430,14 @@ zpl_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 	spl_fstrans_unmark(cookie);
 	kmem_free(vap, sizeof (vattr_t));
 	crfree(cr);
-	ASSERT3S(error, <=, 0);
 
+err:
+	ASSERT3S(error, <=, 0);
+#if defined(HAVE_IOPS_MKDIR_DENTRY)
+	return (error != 0 ? ERR_PTR(error) : NULL);
+#else
 	return (error);
+#endif
 }
 
 static int
@@ -487,6 +503,17 @@ zpl_getattr_impl(const struct path *path, struct kstat *stat, u32 request_mask,
 	if (request_mask & STATX_BTIME) {
 		stat->btime = zp->z_btime;
 		stat->result_mask |= STATX_BTIME;
+	}
+#endif
+
+#ifdef STATX_DIOALIGN
+	if (request_mask & STATX_DIOALIGN) {
+		uint64_t align;
+		if (zfs_get_direct_alignment(zp, &align) == 0) {
+			stat->dio_mem_align = PAGE_SIZE;
+			stat->dio_offset_align = align;
+			stat->result_mask |= STATX_DIOALIGN;
+		}
 	}
 #endif
 

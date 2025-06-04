@@ -43,6 +43,7 @@
 
 #include <net/if.h>
 #include <net/if_var.h>
+#include <net/if_private.h>
 #include <net/vnet.h>
 #include <net/pfvar.h>
 #include <net/if_pflog.h>
@@ -146,7 +147,7 @@ static struct pf_fragment *pf_fillup_fragment(struct pf_fragment_cmp *,
 		    struct pf_frent *, u_short *);
 static struct mbuf *pf_join_fragment(struct pf_fragment *);
 #ifdef INET
-static int	pf_reassemble(struct mbuf **, int, u_short *);
+static int	pf_reassemble(struct mbuf **, u_short *);
 #endif	/* INET */
 #ifdef INET6
 static int	pf_reassemble6(struct mbuf **,
@@ -162,7 +163,7 @@ static int	pf_reassemble6(struct mbuf **,
 
 #ifdef INET
 static void
-pf_ip2key(struct ip *ip, int dir, struct pf_fragment_cmp *key)
+pf_ip2key(struct ip *ip, struct pf_fragment_cmp *key)
 {
 
 	key->frc_src.v4 = ip->ip_src;
@@ -434,7 +435,7 @@ pf_frent_remove(struct pf_fragment *frag, struct pf_frent *frent)
 {
 #ifdef INVARIANTS
 	struct pf_frent *prev = TAILQ_PREV(frent, pf_fragq, fr_next);
-#endif
+#endif /* INVARIANTS */
 	struct pf_frent *next = TAILQ_NEXT(frent, fr_next);
 	int index;
 
@@ -602,16 +603,16 @@ pf_fillup_fragment(struct pf_fragment_cmp *key, struct pf_frent *frent,
 
 	/* Non terminal fragments must have more fragments flag. */
 	if (frent->fe_off + frent->fe_len < total && !frent->fe_mff)
-		goto bad_fragment;
+		goto free_ipv6_fragment;
 
 	/* Check if we saw the last fragment already. */
 	if (!TAILQ_LAST(&frag->fr_queue, pf_fragq)->fe_mff) {
 		if (frent->fe_off + frent->fe_len > total ||
 		    (frent->fe_off + frent->fe_len == total && frent->fe_mff))
-			goto bad_fragment;
+			goto free_ipv6_fragment;
 	} else {
 		if (frent->fe_off + frent->fe_len == total && !frent->fe_mff)
-			goto bad_fragment;
+			goto free_ipv6_fragment;
 	}
 
 	/* Find neighbors for newly inserted fragment */
@@ -679,6 +680,9 @@ pf_fillup_fragment(struct pf_fragment_cmp *key, struct pf_frent *frent,
 
 	return (frag);
 
+free_ipv6_fragment:
+	if (frag->fr_af == AF_INET)
+		goto bad_fragment;
 free_fragment:
 	/*
 	 * RFC 5722, Errata 3089:  When reassembling an IPv6 datagram, if one
@@ -731,7 +735,7 @@ pf_join_fragment(struct pf_fragment *frag)
 
 #ifdef INET
 static int
-pf_reassemble(struct mbuf **m0, int dir, u_short *reason)
+pf_reassemble(struct mbuf **m0, u_short *reason)
 {
 	struct mbuf		*m = *m0;
 	struct ip		*ip = mtod(m, struct ip *);
@@ -755,7 +759,7 @@ pf_reassemble(struct mbuf **m0, int dir, u_short *reason)
 	frent->fe_off = (ntohs(ip->ip_off) & IP_OFFMASK) << 3;
 	frent->fe_mff = ntohs(ip->ip_off) & IP_MF;
 
-	pf_ip2key(ip, dir, &key);
+	pf_ip2key(ip, &key);
 
 	if ((frag = pf_fillup_fragment(&key, frent, reason)) == NULL)
 		return (PF_DROP);
@@ -1051,7 +1055,13 @@ pf_refragment6(struct ifnet *ifp, struct mbuf **m0, struct m_tag *mtag,
 			dst.sin6_len = sizeof(dst);
 			dst.sin6_addr = hdr->ip6_dst;
 
-			nd6_output_ifp(rt, rt, m, &dst, NULL);
+			if (m->m_pkthdr.len <= if_getmtu(ifp)) {
+				nd6_output_ifp(rt, rt, m, &dst, NULL);
+			} else {
+				in6_ifstat_inc(ifp, ifs6_in_toobig);
+				icmp6_error(m, ICMP6_PACKET_TOO_BIG, 0,
+				    if_getmtu(ifp));
+			}
 		} else if (forward) {
 			MPASS(m->m_pkthdr.rcvif != NULL);
 			ip6_forward(m, 0);
@@ -1190,7 +1200,7 @@ pf_normalize_ip(u_short *reason, struct pf_pdesc *pd)
 		 * Might return a completely reassembled mbuf, or NULL */
 		PF_FRAG_LOCK();
 		DPFPRINTF(("reass frag %d @ %d-%d\n", h->ip_id, fragoff, max));
-		verdict = pf_reassemble(&pd->m, pd->dir, reason);
+		verdict = pf_reassemble(&pd->m, reason);
 		PF_FRAG_UNLOCK();
 
 		if (verdict != PF_PASS)
@@ -1429,7 +1439,7 @@ pf_normalize_tcp(struct pf_pdesc *pd)
 
 int
 pf_normalize_tcp_init(struct pf_pdesc *pd, struct tcphdr *th,
-    struct pf_state_peer *src, struct pf_state_peer *dst)
+    struct pf_state_peer *src)
 {
 	u_int32_t tsval, tsecr;
 	u_int8_t hdr[60];
@@ -1457,6 +1467,8 @@ pf_normalize_tcp_init(struct pf_pdesc *pd, struct tcphdr *th,
 		break;
 	}
 #endif /* INET6 */
+	default:
+		unhandled_af(pd->af);
 	}
 
 	/*
@@ -1484,7 +1496,7 @@ pf_normalize_tcp_init(struct pf_pdesc *pd, struct tcphdr *th,
 					src->scrub->pfss_flags |=
 					    PFSS_TIMESTAMP;
 					src->scrub->pfss_ts_mod =
-					    htonl(arc4random());
+					    arc4random();
 
 					/* note PFSS_PAWS not set yet */
 					memcpy(&tsval, &opt[2],
@@ -1581,6 +1593,8 @@ pf_normalize_tcp_stateful(struct pf_pdesc *pd,
 		break;
 	}
 #endif /* INET6 */
+	default:
+		unhandled_af(pd->af);
 	}
 
 	if (th->th_off > (sizeof(struct tcphdr) >> 2) &&
@@ -1622,14 +1636,11 @@ pf_normalize_tcp_stateful(struct pf_pdesc *pd,
 					    (src->scrub->pfss_flags &
 					    PFSS_TIMESTAMP)) {
 						tsval = ntohl(tsval);
-						pf_patch_32_unaligned(pd->m,
-						    &th->th_sum,
+						copyback += pf_patch_32(pd,
 						    &opt[2],
 						    htonl(tsval +
 						    src->scrub->pfss_ts_mod),
-						    PF_ALGNMNT(startoff),
-						    0);
-						copyback = 1;
+						    PF_ALGNMNT(startoff));
 					}
 
 					/* Modulate TS reply iff valid (!0) */
@@ -1640,13 +1651,10 @@ pf_normalize_tcp_stateful(struct pf_pdesc *pd,
 					    PFSS_TIMESTAMP)) {
 						tsecr = ntohl(tsecr)
 						    - dst->scrub->pfss_ts_mod;
-						pf_patch_32_unaligned(pd->m,
-						    &th->th_sum,
+						copyback += pf_patch_32(pd,
 						    &opt[6],
 						    htonl(tsecr),
-						    PF_ALGNMNT(startoff),
-						    0);
-						copyback = 1;
+						    PF_ALGNMNT(startoff));
 					}
 					got_ts = 1;
 				}
@@ -1967,11 +1975,9 @@ pf_normalize_mss(struct pf_pdesc *pd)
 		case TCPOPT_MAXSEG:
 			mss = (u_int16_t *)(optp + 2);
 			if ((ntohs(*mss)) > pd->act.max_mss) {
-				pf_patch_16_unaligned(pd->m,
-				    &th->th_sum,
+				pf_patch_16(pd,
 				    mss, htons(pd->act.max_mss),
-				    PF_ALGNMNT(startoff),
-				    0);
+				    PF_ALGNMNT(startoff));
 				m_copyback(pd->m, pd->off + sizeof(*th),
 				    thoff - sizeof(*th), opts);
 				m_copyback(pd->m, pd->off, sizeof(*th), (caddr_t)th);
@@ -2200,7 +2206,7 @@ pf_scrub(struct pf_pdesc *pd)
 	struct ip		*h = mtod(pd->m, struct ip *);
 #ifdef INET6
 	struct ip6_hdr		*h6 = mtod(pd->m, struct ip6_hdr *);
-#endif
+#endif /* INET6 */
 
 	/* Clear IP_DF if no-df was requested */
 	if (pd->af == AF_INET && pd->act.flags & PFSTATE_NODF &&
@@ -2225,7 +2231,7 @@ pf_scrub(struct pf_pdesc *pd)
 	if (pd->af == AF_INET6 && pd->act.min_ttl &&
 	    h6->ip6_hlim < pd->act.min_ttl)
 		h6->ip6_hlim = pd->act.min_ttl;
-#endif
+#endif /* INET6 */
 	/* Enforce tos */
 	if (pd->act.flags & PFSTATE_SETTOS) {
 		switch (pd->af) {
@@ -2244,7 +2250,7 @@ pf_scrub(struct pf_pdesc *pd)
 			h6->ip6_flow &= IPV6_FLOWLABEL_MASK | IPV6_VERSION_MASK;
 			h6->ip6_flow |= htonl((pd->act.set_tos | IPV6_ECN(h6)) << 20);
 			break;
-#endif
+#endif /* INET6 */
 		}
 	}
 
@@ -2257,6 +2263,6 @@ pf_scrub(struct pf_pdesc *pd)
 		ip_fillid(h, V_ip_random_id);
 		h->ip_sum = pf_cksum_fixup(h->ip_sum, ip_id, h->ip_id, 0);
 	}
-#endif
+#endif /* INET */
 }
-#endif
+#endif /* INET || INET6 */

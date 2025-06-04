@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -914,13 +915,6 @@ int
 secpolicy_zfs(const cred_t *cr)
 {
 	(void) cr;
-	return (0);
-}
-
-int
-secpolicy_zfs_proc(const cred_t *cr, proc_t *proc)
-{
-	(void) cr, (void) proc;
 	return (0);
 }
 

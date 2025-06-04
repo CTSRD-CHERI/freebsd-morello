@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -2686,8 +2687,8 @@ dmu_send_obj(const char *pool, uint64_t tosnap, uint64_t fromsnap,
 	}
 
 	if (fromsnap != 0) {
-		err = dsl_dataset_hold_obj_flags(dspp.dp, fromsnap, dsflags,
-		    FTAG, &fromds);
+		err = dsl_dataset_hold_obj(dspp.dp, fromsnap, FTAG, &fromds);
+
 		if (err != 0) {
 			dsl_dataset_rele_flags(dspp.to_ds, dsflags, FTAG);
 			dsl_pool_rele(dspp.dp, FTAG);
@@ -2739,7 +2740,7 @@ dmu_send_obj(const char *pool, uint64_t tosnap, uint64_t fromsnap,
 		kmem_free(dspp.fromredactsnaps,
 		    dspp.numfromredactsnaps * sizeof (uint64_t));
 
-	dsl_dataset_rele(dspp.to_ds, FTAG);
+	dsl_dataset_rele_flags(dspp.to_ds, dsflags, FTAG);
 	return (err);
 }
 
