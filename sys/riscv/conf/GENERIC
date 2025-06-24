@@ -214,5 +214,5 @@ options 	FDT
 # Uncomment for memory disk
 # options 	MD_ROOT
 # options 	MD_ROOT_SIZE=8192
-# makeoptions	MFS_IMAGE=/home/br/dev/freebsd/mdroot-small.img
+# makeoptions	MFS_IMAGE=/home/br/dev/freebsd/mdroot.img
 # options 	ROOTDEVNAME=\"ufs:/dev/md0\"
