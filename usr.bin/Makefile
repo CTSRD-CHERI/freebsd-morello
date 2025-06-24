@@ -87,6 +87,7 @@ SUBDIR=	alias \
 	mdo \
 	mesg \
 	mididump \
+	minimal_count_stats \
 	ministat \
 	mkdep \
 	mkfifo \

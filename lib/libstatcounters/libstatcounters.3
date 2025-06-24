@@ -1,0 +1,228 @@
+.\" Copyright (c) 2016-2017 Alexandre Joannou
+.\" All rights reserved.
+.\"
+.\" Redistribution and use in source and binary forms, with or without
+.\" modification, are permitted provided that the following conditions
+.\" are met:
+.\" 1. Redistributions of source code must retain the above copyright
+.\"    notice, this list of conditions and the following disclaimer.
+.\" 2. Redistributions in binary form must reproduce the above copyright
+.\"    notice, this list of conditions and the following disclaimer in the
+.\"    documentation and/or other materials provided with the distribution.
+.\"
+.\" THIS SOFTWARE IS PROVIDED BY THE AUTHORS AND CONTRIBUTORS ``AS IS'' AND
+.\" ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+.\" IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+.\" ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHORS OR CONTRIBUTORS BE LIABLE
+.\" FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+.\" DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+.\" OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+.\" HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+.\" LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+.\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+.\" SUCH DAMAGE.
+.\"
+.\" $FreeBSD$
+.\"
+.Dd November 27, 2020
+.Dt LIBSTATCOUNTERS 3
+.Os
+.Sh NAME
+.Nm libstatcounters
+.Nd A library to gather basic performance counter numbers
+.Sh LIBRARY
+.Lb libstatcounters
+.Sh SYNOPSIS
+.In statcounters.h
+.Sh DESCRIPTION
+The
+.Nm
+library provides an API to access BERI/CHERI statcounters and RISC-V HPM CSRs.
+To link with
+.Nm
+, use "-lstatcounters" when compiling.
+When linking statically, add
+.Pp
+"-Wl,--whole-archive -lstatcounters -Wl,--no-whole-archive"
+.Pp
+to the linking flags to still enable the automatic sampling of statcounters before and after
+.Fn main
+, and output of the difference (this feature is directly available when linking non static).
+The behaviour of the automatic sampling is controlled by the
+.Nm STATCOUNTERS_PROGNAME
+,
+.Nm STATCOUNTERS_ARCHNAME
+,
+.Nm STATCOUNTERS_OUTPUT
+and
+.Nm STATCOUNTERS_FORMAT
+environment variables.
+.Sh ENVIRONMENT
+.Bl -tag -width size -offset 0
+.It Ev STATCOUNTERS_PROGNAME
+Environment variable specifying the program name to output (useful when appending entries to a csv output file)
+.It Ev STATCOUNTERS_ARCHNAME
+Environment variable specifying the architecture name to output (useful when appending entries to a csv output file)
+.It Ev STATCOUNTERS_OUTPUT
+Environment variable specifying the file in which to output the statcounters' values
+.It Ev  STATCOUNTERS_FORMAT
+Environment variable specifying the desired output format. "csv" is supported, any other value will output in a human readable format
+.El
+.Sh API
+.Ft int
+.Fn statcounters_zero "statcounters_bank_t * const b"
+.sp
+.Fn statcounters_zero
+zeroes the statcounters_bank_t
+.Fa b .
+Returns
+.Nm 0
+on success or
+.Nm -1
+if
+.Fa b
+is
+.Nm NULL .
+.Pp
+.Ft int
+.Fn statcounters_sample "statcounters_bank_t * const b"
+.sp
+.Fn statcounters_sample
+samples the hardware statcounters into statcounters_bank_t
+.Fa b .
+Returns
+.Nm 0
+on success or
+.Nm -1
+if
+.Fa b
+is
+.Nm NULL .
+.Pp
+.Ft int
+.Fn statcounters_diff "statcounters_bank_t * const bd" "const statcounters_bank_t * const be" "const statcounters_bank_t * const bs"
+.sp
+.Fn statcounters_diff
+subtracts statcounters_bank_t
+.Fa bs
+from
+.Fa be
+and stores the result in statcounters_bank_t
+.Fa bd .
+Returns
+.Nm 0
+on success or
+.Nm -1 if either of
+.Fa bd ,
+.Fa be ,
+or
+.Fa bs
+is
+.Nm NULL .
+.Pp
+.Ft int
+.Fn statcounters_dump "const statcounters_bank_t * const b"
+.sp
+.Fn statcounters_dump
+is a wrapper around
+.Fn statcounters_dump_with_args .
+The
+.Fa b
+argument is passed unchanged, the
+.Fa fmt_flg
+argument is set to
+.Nm HUMAN_READABLE
+and all other arguments are set to
+.Nm NULL .
+.Pp
+.Ft int
+.Fn statcounters_dump_with_phase "const statcounters_bank_t * const b" "const char * phase"
+.sp
+.Fn statcounters_dump_with_phase
+is a wrapper around
+.Fn statcounters_dump_with_args .
+The
+.Fa b
+and
+.Fa phase
+arguments are passed unchanged, the
+.Fa fmt_flg
+argument is set to
+.Nm HUMAN_READABLE
+and all other arguments are set to
+.Nm NULL .
+.Pp
+.Ft int
+.Fn statcounters_dump_with_args "const statcounters_bank_t * const b" "const char * progname" "const char * phase" "const char * archname" "const FILE * const fp" "const statcounters_fmt_flag_t fmt_flg"
+.sp
+.Fn statcounters_dump_with_args
+dumps the statcounters_bank_t
+.Fa b
+content in file described by the file descriptor
+.Fa fp
+according to the format flag
+.Fa fmt_flg along with
+.Fa progname
+(and
+.Fa phase
+as a suffix if it is not
+.Nm NULL
+) and
+.Fa archname
+(useful for csv output).
+The currently supported value for the
+.Fa fmt_flg
+argument are
+.Nm CSV_NOHEADER
+for csv output,
+.Nm CSV_HEADER
+for csv output with a header row, and
+.Nm HUMAN_READABLE
+for human readable output.
+If
+.Fa progname
+is
+.Nm NULL
+, the value in environment variable
+.Nm STATCOUNTERS_PROGNAME
+is used if it exists, otherwise,
+.Fn getprogname
+is used.
+If
+.Fa archname
+is
+.Nm NULL
+, the value in environment variable
+.Nm STATCOUNTERS_ARCHNAME
+is used if it exists, otherwise, "mips" or "cheri" is used.
+If
+.Fa fp
+is
+.Nm NULL
+, the value in environment variable
+.Nm STATCOUNTERS_OUTPUT
+is used as an argument to
+.Fn fopen
+if it exists, otherwise,
+.Nm stdout
+is used.
+If the
+.Nm STATCOUNTERS_FORMAT
+environment variable exists, it overwrites the
+.Fa fmt_flg
+argument.
+The function returns
+.Nm 0
+on success or
+.Nm -1
+if either of
+.Fa b
+or
+.Fa fp
+are
+.Nm NULL .
+.Sh AUTHORS
+.An Alexandre Joannou
+.Aq aj443@cl.cam.ac.uk
+.An Alex Richardson
+.Aq arichardson@FreeBSD.org

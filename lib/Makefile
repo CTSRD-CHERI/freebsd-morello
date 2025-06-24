@@ -94,6 +94,7 @@ SUBDIR=	${SUBDIR_BOOTSTRAP} \
 	librtld_db \
 	libsbuf \
 	libsmb \
+	libstatcounters \
 	libstdbuf \
 	libstdthreads \
 	libsysdecode \
