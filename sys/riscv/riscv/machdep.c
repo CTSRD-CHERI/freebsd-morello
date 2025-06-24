@@ -666,6 +666,30 @@ initriscv(struct riscv_bootparams *rvbp)
 
 	early_boot = 0;
 
+#if 1
+#define	SBI_PMU_START_FLAG_SET_INIT_VALUE	(1 << 0)
+#define	SBI_PMU_CFG_FLAG_AUTO_START		(1 << 2)
+	struct sbi_ret ret;
+	int i;
+
+	/* Get number of counters. */
+	ret = SBI_CALL0(SBI_EXT_ID_PMU, SBI_PMU_NUM_COUNTERS);
+	printf("num counters err %ld num %ld\n", ret.error, ret.value);
+
+	/* Configure counters. */
+	for (i = 0; i < 22; i++) {
+		ret = SBI_CALL5(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_CONFIG_MATCHING,
+		    0, 0xffff, SBI_PMU_CFG_FLAG_AUTO_START, i, 0);
+		printf("match err %ld num %ld\n", ret.error, ret.value);
+	}
+#endif
+
+#if 0
+	/* Enable counters. */
+	ret = SBI_CALL2(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_START, 0, 0xfffff);
+	printf("start all err %ld num %ld\n", ret.error, ret.value);
+#endif
+
 	if (bootverbose && kstack_pages != KSTACK_PAGES)
 		printf("kern.kstack_pages = %d ignored for thread0\n",
 		    kstack_pages);
