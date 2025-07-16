@@ -676,17 +676,25 @@ initriscv(struct riscv_bootparams *rvbp)
 	ret = SBI_CALL0(SBI_EXT_ID_PMU, SBI_PMU_NUM_COUNTERS);
 	printf("num counters err %ld num %ld\n", ret.error, ret.value);
 
-	/* Configure counters. */
-	for (i = 0; i < 22; i++) {
+	/*
+	 * Configure RAW counters.
+	 * Event 1 -> Counter 3
+	 * Event 2 -> Counter 4
+	 * ...
+	 */
+	for (i = 1; i <= 22; i++) {
 		ret = SBI_CALL5(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_CONFIG_MATCHING,
-		    0, 0xffff, SBI_PMU_CFG_FLAG_AUTO_START, i, 0);
+		    0, (1 << (i + 2)), 0 /* flags */, 0x20000, i);
 		printf("match err %ld num %ld\n", ret.error, ret.value);
 	}
 #endif
 
-#if 0
-	/* Enable counters. */
-	ret = SBI_CALL2(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_START, 0, 0xfffff);
+#if 1
+	/*
+	 * Enable all configured counters:
+	 *  IDs 3 to 24 (total 22).
+	 */
+	ret = SBI_CALL2(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_START, 0, 0x1fffff8);
 	printf("start all err %ld num %ld\n", ret.error, ret.value);
 #endif
 
