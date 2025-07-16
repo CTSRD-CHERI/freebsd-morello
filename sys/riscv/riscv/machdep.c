@@ -666,6 +666,31 @@ initriscv(struct riscv_bootparams *rvbp)
 
 	early_boot = 0;
 
+#if 0
+		/* L1 I-Cache misses */
+		/* L1 D-Cache misses */
+		/* ITLB misses */
+		/* DTLB misses */
+		/* Load accesses */
+		/* Store accesses */
+		/* Exceptions */
+		/* Exception handler returns */
+		/* Branch instructions */
+		/* Branch mispredicts */
+		/* Branch exceptions */
+		/* Call */
+		/* Return */
+		/* MSB Full */
+		/* Instruction fetch Empty */
+		/* L1 I-Cache accesses */
+		/* L1 D-Cache accesses */
+		/* Eviction */
+		/* I-TLB flush */
+		/* Integer instructions */
+		/* Floating Point Instruction*/
+		/* Pipeline bubbles */
+#endif
+
 #if 1
 #define	SBI_PMU_START_FLAG_SET_INIT_VALUE	(1 << 0)
 #define	SBI_PMU_CFG_FLAG_AUTO_START		(1 << 2)
