@@ -2,3 +2,4 @@
 SUBDIR+=	bhyve
 SUBDIR+=	bhyvectl
 .endif
+SUBDIR+=	hwc
