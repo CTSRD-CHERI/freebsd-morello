@@ -214,5 +214,6 @@ include		"std.eswin"
 include		"std.sifive"
 include		"std.starfive"
 
-device	em
-device	iflib
+device		em
+device		iflib
+options		ROOTDEVNAME=\"ufs:/dev/da0p2\"
