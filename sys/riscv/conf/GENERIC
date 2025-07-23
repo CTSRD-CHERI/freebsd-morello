@@ -213,3 +213,6 @@ include		"std.allwinner"
 include		"std.eswin"
 include		"std.sifive"
 include		"std.starfive"
+
+device	em
+device	iflib
