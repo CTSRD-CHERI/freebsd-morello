@@ -77,6 +77,9 @@ options 	RACCT_DEFAULT_TO_DISABLED # Set kern.racct.enable=0 by default
 options 	RCTL			# Resource limits
 options 	SMP
 
+options		HWC_HOOKS
+device		hwc
+
 # RISC-V SBI console
 device		rcons
 

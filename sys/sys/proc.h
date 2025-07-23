@@ -894,6 +894,7 @@ struct proc {
 #define	P2_LOGSIGEXIT_CTL	0x01000000	/* Override kern.logsigexit */
 
 #define	P2_HWT			0x02000000	/* Process is using HWT. */
+#define	P2_HWC			0x04000000	/* Process is using HWC. */
 
 /* Flags protected by proctree_lock, kept in p_treeflags. */
 #define	P_TREE_ORPHANED		0x00000001	/* Reparented, on orphan list */

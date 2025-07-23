@@ -885,6 +885,8 @@ DCONS_FORCE_GDB		opt_dcons.h
 HWPMC_DEBUG		opt_global.h
 HWPMC_HOOKS
 
+# Hardware Counting (HWC) framework options
+HWC_HOOKS
 # Hardware Trace (HWT) framework options
 HWT_HOOKS
 
