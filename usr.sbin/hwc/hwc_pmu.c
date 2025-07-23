@@ -36,7 +36,7 @@
 #include <sys/mman.h>
 #include <sys/errno.h>
 #include <sys/cpuset.h>
-#include <sys/hwt.h>
+#include <sys/hwc.h>
 #include <sys/wait.h>
 #include <sys/sysctl.h>
 
@@ -47,8 +47,8 @@
 #include <signal.h>
 #include <string.h>
 
-#include "hwt.h"
-#include "hwt_pmu.h"
+#include "hwc.h"
+#include "hwc_pmu.h"
 
 #include <libxo/xo.h>
 
@@ -62,7 +62,7 @@
 #endif
 
 static int
-pmu_init(struct hwc_context *tc)
+pmu_init(struct hwc_context *tc __unused)
 {
 
 	printf("%s\n", __func__);

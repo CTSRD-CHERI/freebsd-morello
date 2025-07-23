@@ -57,6 +57,10 @@
 #include "hwc.h"
 #include "hwc_process.h"
 
+#if defined(__riscv)
+#include "hwc_pmu.h"
+#endif
+
 #define	HWC_DEBUG
 #undef	HWC_DEBUG
 
@@ -69,8 +73,8 @@
 static struct hwc_context tcs;
 
 static struct hwc_backend backends[] = {
-#if defined(__riscv64__)
-	{ "pmu", "RISC-V Performace Monitoring Unit", &riscv_pmu_methods },
+#if defined(__riscv)
+	{ "pmu", "RISC-V Performace Monitoring Unit", &pmu_methods },
 #endif
 	{ NULL, NULL, NULL }
 };
@@ -139,7 +143,7 @@ usage(void)
 		"hwc [-c devname] [path to executable]\n"
 		"\t -c\tname\t\tName of tracing device, e.g. 'coresight'.\n"
 		"\t -o\tkeywords\t\tList of decoder output keywords.\n"
-		"\t -h\tkeywords\t\tHelp.\n"
+		"\t -h\tHelp."
         );
 }
 

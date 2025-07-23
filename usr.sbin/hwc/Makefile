@@ -6,6 +6,7 @@ CFLAGS+= -I${SRCTOP}/sys
 LIBADD=	xo
 
 SRCS=	hwc.c			\
+	hwc_pmu.c		\
 	hwc_process.c
 
 .if ${MACHINE_CPUARCH} == "riscv"
