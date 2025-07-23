@@ -64,7 +64,6 @@ struct hwc_alloc {
 	int		kqueue_fd;
 } __aligned(16);
 
-#if 0
 struct hwc_start {
 	int		reserved;
 } __aligned(16);
@@ -77,6 +76,7 @@ struct hwc_wakeup {
 	int		reserved;
 } __aligned(16);
 
+#if 0
 struct hwc_record_user_entry {
 	enum hwc_record_type	record_type;
 	union {
