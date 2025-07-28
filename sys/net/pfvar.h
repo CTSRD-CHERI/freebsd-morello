@@ -331,6 +331,14 @@ MALLOC_DECLARE(M_PF_RULE_ITEM);
 
 SDT_PROVIDER_DECLARE(pf);
 SDT_PROBE_DECLARE(pf, , test, reason_set);
+SDT_PROBE_DECLARE(pf, , log, log);
+
+#define DPFPRINTF(n, fmt, x...)				\
+	do {						\
+		SDT_PROBE2(pf, , log, log, (n), fmt);	\
+		if (V_pf_status.debug >= (n))	 	\
+			printf(fmt "\n", ##x); 		\
+	} while (0)
 
 struct pfi_dynaddr {
 	TAILQ_ENTRY(pfi_dynaddr)	 entry;
@@ -1676,6 +1684,9 @@ struct pf_pdesc {
 	u_int32_t	 fragoff;	/* fragment header offset */
 	u_int32_t	 jumbolen;	/* length from v6 jumbo header */
 	u_int32_t	 badopts;	/* v4 options or v6 routing headers */
+#define	PF_OPT_OTHER		0x0001
+#define	PF_OPT_JUMBO		0x0002
+#define	PF_OPT_ROUTER_ALERT	0x0004
 
 	u_int16_t	*ip_sum;
 	u_int16_t	 flags;		/* Let SCRUB trigger behavior in

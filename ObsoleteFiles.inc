@@ -51,6 +51,73 @@
 #   xargs -n1 | sort | uniq -d;
 # done
 
+# 20250728: zfsboot (MBR) removed
+OLD_FILES+=boot/zfsboot
+OLD_FILES+=usr/share/man/man8/zfsboot.8.gz
+
+# 20250728: Machine versions of 'runq.h' do not exist anymore
+OLD_FILES+=usr/include/machine/runq.h
+
+# 20250726: MIT KRB5 DSO bump
+OLD_LIBS+=usr/lib/libcom_err.so.121
+OLD_LIBS+=usr/lib/libgssapi_krb5.so.121
+OLD_LIBS+=usr/lib/libgssrpc.so.121
+OLD_LIBS+=usr/lib/libk5crypto.so.121
+OLD_LIBS+=usr/lib/libkadm5clnt_mit.so.121
+OLD_LIBS+=usr/lib/libkadm5srv_mit.so.121
+OLD_LIBS+=usr/lib/libkdb5.so.121
+OLD_LIBS+=usr/lib/libkrad.so.121
+OLD_LIBS+=usr/lib/libkrb5.so.121
+OLD_LIBS+=usr/lib/libkrb5profile.so.121
+OLD_LIBS+=usr/lib/libkrb5support.so.121
+OLD_LIBS+=usr/lib/libverto.so.121
+OLD_LIBS+=usr/lib/libcom_err.so.121
+OLD_LIBS+=usr/lib/libgssapi_krb5.so.121
+OLD_LIBS+=usr/lib/libgssrpc.so.121
+OLD_LIBS+=usr/lib/libk5crypto.so.121
+OLD_LIBS+=usr/lib/libkadm5clnt_mit.so.121
+OLD_LIBS+=usr/lib/libkadm5srv_mit.so.121
+OLD_LIBS+=usr/lib/libkdb5.so.121
+OLD_LIBS+=usr/lib/libkrad.so.121
+OLD_LIBS+=usr/lib/libkrb5.so.121
+OLD_LIBS+=usr/lib/libkrb5profile.so.121
+OLD_LIBS+=usr/lib/libkrb5support.so.121
+OLD_LIBS+=usr/lib/libverto.so.121
+
+# 20250726: xargs tests rewritten
+OLD_FILES+=usr/tests/usr.bin/xargs/legacy_test
+OLD_FILES+=usr/tests/usr.bin/xargs/regress.n2147483647.out
+OLD_FILES+=usr/tests/usr.bin/xargs/regress.sh
+
+# 20250726: This file is now installed in /etc/dma
+OLD_FILES+=usr/share/examples/dma/auth.conf
+
+# 20250725: libbsnmp bumped to version 7
+OLD_LIBS+=usr/lib/libbsnmp.so.6
+
+# 20250725: Files which were briefly installed by WITH_MITKRB5 in 15.0.
+OLD_FILES+=usr/include/kadm5/admin_internal.h
+OLD_FILES+=usr/include/kadm5/admin_xdr.h
+OLD_FILES+=usr/include/kadm5/kadm_rpc.h
+OLD_FILES+=usr/include/kadm5/server_internal.h
+OLD_FILES+=usr/include/internal.h
+OLD_FILES+=usr/include/t_daemon.h
+OLD_FILES+=usr/include/t_test.h
+OLD_FILES+=usr/include/dyn.h
+OLD_FILES+=usr/include/dynP.h
+OLD_FILES+=usr/include/gssrpcint.h
+OLD_FILES+=usr/include/import_err.h
+OLD_FILES+=usr/share/man/man3/db_btree.3.gz
+OLD_FILES+=usr/share/man/man3/db_hash.3.gz
+OLD_FILES+=usr/share/man/man3/db_lock.3.gz
+OLD_FILES+=usr/share/man/man3/db_log.3.gz
+OLD_FILES+=usr/share/man/man3/db_mpool.3.gz
+OLD_FILES+=usr/share/man/man3/db_open.3.gz
+OLD_FILES+=usr/share/man/man3/db_recno.3.gz
+OLD_FILES+=usr/share/man/man3/db_txn.3.gz
+OLD_FILES+=usr/share/man/man5/profile.5.gz
+OLD_FILES+=usr/share/man/man8/kamdin.local.8.gz
+
 # 20250716: Remove an old manual page, vn(4) was removed in FreeBSD 5.0
 OLD_FILES+=usr/share/man/man4/vn.4.gz
 

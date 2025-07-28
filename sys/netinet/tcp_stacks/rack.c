@@ -7888,8 +7888,8 @@ drop_it:
 				tp->t_maxseg = tp->t_pmtud_saved_maxseg;
 				if (tp->t_maxseg < V_tcp_mssdflt) {
 					/*
-					 * The MSS is so small we should not 
-					 * process incoming SACK's since we are 
+					 * The MSS is so small we should not
+					 * process incoming SACK's since we are
 					 * subject to attack in such a case.
 					 */
 					tp->t_flags2 |= TF2_PROC_SACK_PROHIBIT;
@@ -14638,9 +14638,6 @@ rack_init(struct tcpcb *tp, void **ptr)
 	if (rack->r_ctl.pcm_s == NULL) {
 		rack->r_ctl.pcm_i.cnt_alloc = 0;
 	}
-#ifdef NETFLIX_STATS
-	rack->r_ctl.side_chan_dis_mask = tcp_sidechannel_disable_mask;
-#endif
 	rack->r_ctl.rack_per_upper_bound_ss = (uint8_t)rack_per_upper_bound_ss;
 	rack->r_ctl.rack_per_upper_bound_ca = (uint8_t)rack_per_upper_bound_ca;
 	if (rack_enable_shared_cwnd)
@@ -15564,7 +15561,7 @@ rack_log_pcm(struct tcp_rack *rack, uint8_t mod, uint32_t flex1, uint32_t flex2,
 	if (tcp_bblogging_on(rack->rc_tp)) {
 		union tcp_log_stackspecific log;
 		struct timeval tv;
-		
+
 		(void)tcp_get_usecs(&tv);
 		memset(&log, 0, sizeof(log));
 		log.u_bbr.timeStamp = tcp_tv_to_usectick(&tv);
@@ -19915,7 +19912,7 @@ rack_output(struct tcpcb *tp)
 			goto nomore;
 		} else {
 			/* Return == 0, if there is more we can send tot_len wise fall through and send */
-			if (tot_len_this_send >= pace_max_seg) 
+			if (tot_len_this_send >= pace_max_seg)
 				return (ret);
 #ifdef TCP_ACCOUNTING
 			/* We need to re-pin since fast_output un-pined */
@@ -21556,11 +21553,7 @@ send:
 			m->m_next = tcp_m_copym(
 				mb, moff, &len,
 				if_hw_tsomaxsegcount, if_hw_tsomaxsegsize, msb,
-				((rsm == NULL) ? hw_tls : 0)
-#ifdef NETFLIX_COPY_ARGS
-				, &s_mb, &s_moff
-#endif
-				);
+				((rsm == NULL) ? hw_tls : 0));
 			if (len <= (tp->t_maxseg - optlen)) {
 				/*
 				 * Must have ran out of mbufs for the copy

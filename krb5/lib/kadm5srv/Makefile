@@ -7,8 +7,6 @@
 # under sponsorship from the FreeBSD Foundation.
 #
 
-PACKAGE=	krb5
-
 .include <src.opts.mk>
 
 .include "../Makefile.inc"
@@ -39,7 +37,8 @@ INCS=	admin.h \
 GEN=	kadm_err.c kadm_err.h chpass_util_strings.c chpass_util_strings.h
 CLEANFILES=	${GEN} ${GENI}
 
-CFLAGS+=-I${KRB5_DIR}/lib/kadm5 \
+CFLAGS+=-I${KRB5_DIR}/lib \
+	-I${KRB5_DIR}/lib/kadm5 \
 	-I${KRB5_DIR}/include \
 	-I${KRB5_OBJTOP}/include/krb5_private \
 	-I${KRB5_SRCTOP}/include \
@@ -50,10 +49,6 @@ CFLAGS+=-I${KRB5_DIR}/lib/kadm5 \
 
 HDRDIR=	${KRB5_OBJHDR}/kadm5
 HDRS=	${HDRDIR}/admin.h \
-	${HDRDIR}/admin_internal.h \
-	${HDRDIR}/admin_xdr.h \
-	${HDRDIR}/kadm_rpc.h \
-	${HDRDIR}/server_internal.h \
 	${HDRDIR}/chpass_util_strings.h \
 	${HDRDIR}/kadm_err.h
 
