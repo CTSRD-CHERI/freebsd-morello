@@ -63,14 +63,76 @@
 #define	dprintf(fmt, ...)
 #endif
 
+static void __unused
+pmu_configure_counter(const ucl_object_t *top)
+{
+	const ucl_object_t *obj;
+	ucl_object_iter_t it = NULL;
+	const char *k;
+	int event_id;
+	int mhpm_id;
+	const char *name;
+	bool enabled;
+
+	while ((obj = ucl_iterate_object (top, &it, true))) {
+		k = ucl_object_key(obj);
+		if (strcmp(k, "id") == 0)
+			mhpm_id = ucl_object_toint(obj);
+		if (strcmp(k, "event_id") == 0)
+			event_id = ucl_object_toint(obj);
+		if (strcmp(k, "name") == 0)
+			name = ucl_object_tostring(obj);
+		if (strcmp(k, "enabled") == 0)
+			enabled = ucl_object_toboolean(obj);
+	}
+
+	printf("id %d name %s event_id %d enabled %d\n", mhpm_id, name,
+	    event_id, enabled);
+}
+
+static void
+pmu_configure_counters(const ucl_object_t *top)
+{
+	ucl_object_iter_t it_obj = NULL;
+	ucl_object_iter_t it = NULL;
+	const ucl_object_t *obj;
+	const ucl_object_t *cur;
+	const char *k;
+
+	while ((obj = ucl_iterate_object (top, &it, true))) {
+		k = ucl_object_key(obj);
+		if (strcmp(k, "mhpmcounter") != 0)
+			continue;
+		while ((cur = ucl_iterate_object (obj, &it_obj, false)))
+			pmu_configure_counter(cur);
+	}
+}
+
 static int
 pmu_configure(struct hwc_context *tc)
 {
 	struct ucl_parser *parser;
+	const ucl_object_t *obj;
+	ucl_object_t *top;
+	ucl_object_iter_t it = NULL;
+	const char *k;
 
 	parser = ucl_parser_new(0);
 
-	ucl_parser_add_file(parser, tc->config_file);
+	bool ret;
+	ret = ucl_parser_add_file(parser, tc->config_file);
+	if (ret == false) {
+		printf("can't read file\n");
+		return (-1);
+	}
+
+	top = ucl_parser_get_object(parser);
+
+	while ((obj = ucl_iterate_object(top, &it, true))) {
+		k = ucl_object_key(obj);
+		if (strcmp(k, "mhpmcounters") == 0)
+			pmu_configure_counters(obj);
+	}
 
 	return (0);
 }

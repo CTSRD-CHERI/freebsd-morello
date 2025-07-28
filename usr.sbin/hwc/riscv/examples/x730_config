@@ -1,10 +1,12 @@
 mhpmcounters {
-	mhpmcounter3 = {
+	mhpmcounter = {
+		id = 3;
 		name = 'eee';
 		event_id = 33;
 		enabled = true;
 	}
-	mhpmcounter4 = {
+	mhpmcounter = {
+		id = 4;
 		name = 'vvv';
 		event_id = 22;
 		enabled = true;
