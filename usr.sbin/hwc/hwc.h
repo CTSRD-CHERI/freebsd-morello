@@ -35,6 +35,7 @@ struct hwc_methods {
 	int (*init)(struct hwc_context *tc);
 	int (*configure)(struct hwc_context *tc);
 	int (*shutdown)(struct hwc_context *tc);
+	void (*run_once)(struct hwc_context *tc);
 };
 
 struct hwc_backend {

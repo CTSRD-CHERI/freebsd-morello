@@ -146,7 +146,15 @@ pmu_init(struct hwc_context *tc __unused)
 	return (0);
 }
 
+static void
+pmu_run_once(struct hwc_context *tc __unused)
+{
+
+	printf("%s\n", __func__);
+}
+
 struct hwc_methods pmu_methods = {
 	.init = pmu_init,
 	.configure = pmu_configure,
+	.run_once = pmu_run_once,
 };

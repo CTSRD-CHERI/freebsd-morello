@@ -162,12 +162,9 @@ hwc_process_loop(struct hwc_context *tc)
 		if (error != 0 && WIFEXITED(status))
 			tc->terminate = 1;
 
-		if (!tc->terminate) {
-			//printf("%s: waiting for new records\n", __func__);
-			error = 0;
-			if (error != 0)
-				break;
-		}
+		if (!tc->terminate)
+			tc->backend->methods->run_once(tc);
+
 		if (errno == EINTR || tc->terminate) {
 			printf("%s: tracing terminated - exiting\n", __func__);
 			/* Fetch any remaining records */
