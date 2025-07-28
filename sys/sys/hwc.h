@@ -112,6 +112,12 @@ struct hwc_bufptr_get {
 	uint64_t	*data;
 } __aligned(16);
 
+struct hwc_configure {
+	int		event_id;
+	int		counter_id;
+	int		*ident;
+} __aligned(16);
+
 struct hwc_set_config {
 	/* Configuration of ctx. */
 	int			pause_on_mmap;

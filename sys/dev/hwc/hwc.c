@@ -36,13 +36,15 @@
 #include <sys/kernel.h>
 #include <sys/module.h>
 
-#if 0
 #include <dev/hwc/hwc_context.h>
 #include <dev/hwc/hwc_contexthash.h>
+#if 0
 #include <dev/hwc/hwc_thread.h>
+#endif
 #include <dev/hwc/hwc_owner.h>
 #include <dev/hwc/hwc_ownerhash.h>
 #include <dev/hwc/hwc_backend.h>
+#if 0
 #include <dev/hwc/hwc_record.h>
 #endif
 #include <dev/hwc/hwc_ioctl.h>

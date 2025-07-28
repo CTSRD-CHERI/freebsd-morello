@@ -43,21 +43,21 @@
 #include <sys/hwc.h>
 
 #include <dev/hwc/hwc_hook.h>
-#if 0
 #include <dev/hwc/hwc_context.h>
 #include <dev/hwc/hwc_contexthash.h>
+#if 0
 #include <dev/hwc/hwc_config.h>
 #include <dev/hwc/hwc_cpu.h>
 #include <dev/hwc/hwc_thread.h>
+#endif
 #include <dev/hwc/hwc_owner.h>
 #include <dev/hwc/hwc_ownerhash.h>
 #include <dev/hwc/hwc_backend.h>
+#if 0
 #include <dev/hwc/hwc_record.h>
 #endif
 #include <dev/hwc/hwc_ioctl.h>
-#if 0
 #include <dev/hwc/hwc_vm.h>
-#endif
 
 #define	HWC_IOCTL_DEBUG
 #undef	HWC_IOCTL_DEBUG
@@ -156,7 +156,6 @@ hwc_ioctl_alloc_mode_thread(struct thread *td, struct hwc_owner *ho,
 	error = hwc_ctx_alloc(&ctx);
 	if (error)
 		return (error);
-	ctx->bufsize = halloc->bufsize;
 	ctx->pid = halloc->pid;
 	ctx->hwc_backend = backend;
 	ctx->hwc_owner = ho;
@@ -389,18 +388,13 @@ hwc_ioctl_alloc_mode_cpu(struct thread *td, struct hwc_owner *ho,
 static int
 hwc_ioctl_alloc(struct thread *td, struct hwc_alloc *halloc)
 {
-
-	printf("%s\n", __func__);
-#if 0
 	char backend_name[HWC_BACKEND_MAXNAMELEN];
 	struct hwc_backend *backend;
 	struct hwc_owner *ho;
 	int error;
 
-	if (halloc->bufsize > HWC_MAXBUFSIZE)
-		return (EINVAL);
-	if (halloc->bufsize % PAGE_SIZE)
-		return (EINVAL);
+	printf("%s\n", __func__);
+
 	if (halloc->backend_name == NULL)
 		return (EINVAL);
 
@@ -425,18 +419,20 @@ hwc_ioctl_alloc(struct thread *td, struct hwc_alloc *halloc)
 
 	switch (halloc->mode) {
 	case HWC_MODE_THREAD:
-		error = hwc_ioctl_alloc_mode_thread(td, ho, backend, halloc);
+		error = 0;//hwc_ioctl_alloc_mode_thread(td, ho, backend, halloc);
 		break;
 	case HWC_MODE_CPU:
+#if 0
 		error = hwc_ioctl_alloc_mode_cpu(td, ho, backend, halloc);
+#else
+		error = -1;
+#endif
 		break;
 	default:
 		error = ENXIO;
 	};
 
 	return (error);
-#endif
-	return (0);
 }
 
 int
@@ -445,9 +441,10 @@ hwc_ioctl(struct cdev *dev, u_long cmd, caddr_t addr, int flags,
 {
 	int error;
 
+	/* Allocate HWC context. */
+
 	switch (cmd) {
 	case HWC_IOC_ALLOC:
-		/* Allocate HWC context. */
 		error = hwc_ioctl_alloc(td, (struct hwc_alloc *)addr);
 		return (error);
 	default:
