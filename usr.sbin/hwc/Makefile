@@ -1,9 +1,10 @@
 PROG_CXX=	hwc
 MAN=
 
+CFLAGS+= -I${SRCTOP}/contrib/libucl/include
 CFLAGS+= -I${SRCTOP}/sys
 
-LIBADD=	xo
+LIBADD=	xo ucl
 
 SRCS=	hwc.c			\
 	hwc_pmu.c		\

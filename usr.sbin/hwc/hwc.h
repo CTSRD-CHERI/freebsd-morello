@@ -33,6 +33,7 @@ struct hwc_context;
 
 struct hwc_methods {
 	int (*init)(struct hwc_context *tc);
+	int (*configure)(struct hwc_context *tc);
 	int (*shutdown)(struct hwc_context *tc);
 };
 
@@ -50,6 +51,7 @@ struct hwc_context {
 	int fd;
 	int attach;
 	int ident;
+	char *config_file;
 };
 
 void hwc_procexit(pid_t pid, int status);

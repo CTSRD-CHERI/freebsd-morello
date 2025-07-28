@@ -47,6 +47,8 @@
 #include <signal.h>
 #include <string.h>
 
+#include <ucl.h>
+
 #include "hwc.h"
 #include "hwc_pmu.h"
 
@@ -62,6 +64,18 @@
 #endif
 
 static int
+pmu_configure(struct hwc_context *tc)
+{
+	struct ucl_parser *parser;
+
+	parser = ucl_parser_new(0);
+
+	ucl_parser_add_file(parser, tc->config_file);
+
+	return (0);
+}
+
+static int
 pmu_init(struct hwc_context *tc __unused)
 {
 
@@ -72,4 +86,5 @@ pmu_init(struct hwc_context *tc __unused)
 
 struct hwc_methods pmu_methods = {
 	.init = pmu_init,
+	.configure = pmu_configure,
 };

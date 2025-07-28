@@ -237,6 +237,16 @@ hwc_mode_thread(struct hwc_context *tc, char **cmd, char **env)
 	}
 
 	/* Configure counter here. */
+	if (tc->backend->methods->configure == NULL) {
+		printf("configure method is missing\n");
+		return (ENXIO);
+	}
+
+	error = tc->backend->methods->configure(tc);
+	if (error) {
+		printf("could not configure counters, error %d\n", error);
+		return (error);
+	}
 
 	if (tc->attach == 0) {
 		error = hwc_process_start(sockpair);
@@ -277,6 +287,9 @@ main(int argc, char **argv, char **env)
 		case 'P':
 			tc->attach = 1;
 			tc->pid = atol(optarg);
+			break;
+		case 'f':
+			tc->config_file = strdup(optarg);
 			break;
 		case 'c':
 			backend_name = strdup(optarg);
