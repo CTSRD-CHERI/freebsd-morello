@@ -38,7 +38,6 @@
 #include <sys/cpuset.h>
 #include <sys/hwc.h>
 #include <sys/stat.h>
-#include <sys/user.h>
 
 #include <assert.h>
 #include <err.h>
@@ -159,12 +158,12 @@ hwc_process_loop(struct hwc_context *tc)
 	printf("Decoder started. Press ctrl+c to stop.\n");
 
 	while (1) {
-		waitpid(tc->pid, &status, WNOHANG);
-		if (WIFEXITED(status))
+		error = waitpid(tc->pid, &status, WNOHANG);
+		if (error != 0 && WIFEXITED(status))
 			tc->terminate = 1;
 
 		if (!tc->terminate) {
-			printf("%s: waiting for new records\n", __func__);
+			//printf("%s: waiting for new records\n", __func__);
 			error = 0;
 			if (error != 0)
 				break;
@@ -236,7 +235,6 @@ hwc_mode_thread(struct hwc_context *tc, char **cmd, char **env)
 		return (error);
 	}
 
-	/* Configure counter here. */
 	if (tc->backend->methods->configure == NULL) {
 		printf("configure method is missing\n");
 		return (ENXIO);
