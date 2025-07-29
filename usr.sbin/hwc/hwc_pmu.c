@@ -96,9 +96,10 @@ pmu_configure_counter(struct hwc_context *tc, const ucl_object_t *top)
 	hc.counter_id = mhpm_id;
 	hc.flags = 0;
 
-	error = ioctl(tc->fd, HWC_IOC_CONFIGURE, &hc);
+	error = ioctl(tc->ctx_fd, HWC_IOC_CONFIGURE, &hc);
 	if (error) {
-		printf("could not configure event_id %d\n", hc.event_id);
+		printf("%s: could not configure event_id %d, error %d\n",
+		    __func__, hc.event_id, error);
 		return (error);
 	}
 

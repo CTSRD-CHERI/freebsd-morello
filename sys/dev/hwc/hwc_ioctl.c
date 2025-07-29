@@ -239,6 +239,7 @@ hwc_ioctl_alloc_mode_thread(struct thread *td, struct hwc_owner *ho,
 	}
 
 	ctx->vm = vm;
+	vm->ctx = ctx;
 
 #if 0
 	for (i = 0; i < cnt; i++) {

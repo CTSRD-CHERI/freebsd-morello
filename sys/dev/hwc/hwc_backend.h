@@ -30,12 +30,13 @@
 #define _DEV_HWT_HWT_BACKEND_H_
 
 struct hwc_vm;
+struct hwc_configure;
 
 struct hwc_backend_ops {
 	int (*hwc_backend_init)(struct hwc_context *);
 	int (*hwc_backend_deinit)(struct hwc_context *);
-	int (*hwc_backend_configure)(struct hwc_context *, int cpu_id,
-	    int thread_id);
+	int (*hwc_backend_configure)(struct hwc_context *,
+	    struct hwc_configure *hc);
 	int (*hwc_backend_svc_buf)(struct hwc_context *, void *data,
 	    size_t data_size, int data_version);
 	void (*hwc_backend_enable)(struct hwc_context *, int cpu_id);
@@ -62,7 +63,7 @@ struct hwc_backend {
 
 int hwc_backend_init(struct hwc_context *ctx);
 void hwc_backend_deinit(struct hwc_context *ctx);
-int hwc_backend_configure(struct hwc_context *ctx, int cpu_id, int thread_id);
+int hwc_backend_configure(struct hwc_context *ctx, struct hwc_configure *hc);
 void hwc_backend_enable(struct hwc_context *ctx, int cpu_id);
 void hwc_backend_disable(struct hwc_context *ctx, int cpu_id);
 void hwc_backend_enable_smp(struct hwc_context *ctx);

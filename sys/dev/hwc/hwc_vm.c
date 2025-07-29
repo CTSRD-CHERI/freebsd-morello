@@ -210,6 +210,7 @@ hwc_vm_mmap_single(struct cdev *cdev, vm_ooffset_t *offset,
 	return (0);
 }
 
+#if 0
 static void
 hwc_vm_start_cpu_mode(struct hwc_context *ctx)
 {
@@ -238,6 +239,7 @@ hwc_vm_start_cpu_mode(struct hwc_context *ctx)
 		hwc_backend_enable_smp(ctx);
 	}
 }
+#endif
 
 static int
 hwc_vm_ioctl(struct cdev *dev, u_long cmd, caddr_t addr, int flags,
@@ -249,6 +251,7 @@ hwc_vm_ioctl(struct cdev *dev, u_long cmd, caddr_t addr, int flags,
 	struct hwc_bufptr_get *ptr_get;
 	struct hwc_svc_buf *sbuf;
 #endif
+	struct hwc_configure *hc;
 
 	struct hwc_context *ctx;
 	struct hwc_vm *vm;
@@ -290,6 +293,7 @@ hwc_vm_ioctl(struct cdev *dev, u_long cmd, caddr_t addr, int flags,
 		ctx->state = CTX_STATE_RUNNING;
 		HWT_CTX_UNLOCK(ctx);
 
+#if 0
 		if (ctx->mode == HWC_MODE_CPU)
 			hwc_vm_start_cpu_mode(ctx);
 		else {
@@ -298,6 +302,8 @@ hwc_vm_ioctl(struct cdev *dev, u_long cmd, caddr_t addr, int flags,
 			 * during hook invocation. See hwc_hook.c.
 			 */
 		}
+#else
+#endif
 
 		break;
 
@@ -307,7 +313,10 @@ hwc_vm_ioctl(struct cdev *dev, u_long cmd, caddr_t addr, int flags,
 		hwc_backend_stop(ctx);
 		ctx->state = CTX_STATE_STOPPED;
 		break;
-
+	case HWC_IOC_CONFIGURE:
+		hc = (struct hwc_configure *)addr;
+		hwc_backend_configure(ctx, hc);
+		break;
 #if 0
 	case HWT_IOC_RECORD_GET:
 		rget = (struct hwc_record_get *)addr;

@@ -40,7 +40,7 @@
 
 #define	HWC_MAGIC		0x42
 #define	HWC_IOC_ALLOC		_IOW(HWC_MAGIC, 0x00, struct hwc_alloc)
-#define	HWC_IOC_CONFIGURE	_IOW(HWC_MAGIC, 0x01, struct hwc_alloc)
+#define	HWC_IOC_CONFIGURE	_IOW(HWC_MAGIC, 0x01, struct hwc_configure)
 #define	HWC_IOC_START		_IOW(HWC_MAGIC, 0x02, struct hwc_start)
 #define	HWC_IOC_STOP		_IOW(HWC_MAGIC, 0x03, struct hwc_stop)
 #if 0

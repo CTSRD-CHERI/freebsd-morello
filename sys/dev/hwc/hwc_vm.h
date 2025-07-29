@@ -37,8 +37,10 @@ struct hwc_vm {
 	struct cdev			*cdev;
 
 	struct hwc_context		*ctx;
+#if 0
 	struct hwc_cpu			*cpu;	/* cpu mode only. */
 	struct hwc_thread		*thr;	/* thr mode only. */
+#endif
 };
 
 int hwc_vm_alloc(size_t bufsize, int kva_req, char *path, struct hwc_vm **vm0);

@@ -86,14 +86,13 @@ hwc_backend_deinit(struct hwc_context *ctx)
 }
 
 int
-hwc_backend_configure(struct hwc_context *ctx, int cpu_id, int thread_id)
+hwc_backend_configure(struct hwc_context *ctx, struct hwc_configure *hc)
 {
 	int error;
 
 	dprintf("%s\n", __func__);
 
-	error = ctx->hwc_backend->ops->hwc_backend_configure(ctx, cpu_id,
-	    thread_id);
+	error = ctx->hwc_backend->ops->hwc_backend_configure(ctx, hc);
 
 	return (error);
 }

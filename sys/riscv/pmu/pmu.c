@@ -80,11 +80,20 @@ pmu_backend_deinit(struct hwc_context *ctx)
 	return (0);
 }
 
+static int
+pmu_backend_configure(struct hwc_context *ctx, struct hwc_configure *hc)
+{
+
+	printf("%s: event_id %d\n", __func__, hc->event_id);
+
+	return (0);
+}
+
 static struct hwc_backend_ops pmu_ops = {
 	.hwc_backend_init = pmu_backend_init,
 	.hwc_backend_deinit = pmu_backend_deinit,
-#if 0
 	.hwc_backend_configure = pmu_backend_configure,
+#if 0
 	.hwc_backend_enable = pmu_backend_enable,
 	.hwc_backend_disable = pmu_backend_disable,
 	.hwc_backend_read = pmu_backend_read,
