@@ -80,6 +80,20 @@ get_val(const char *cp, u_long *valp)
 }
 
 static int
+get_vlan_id(const char *cp, ether_vlanid_t *valp)
+{
+	u_long val;
+
+	if (get_val(cp, &val) == -1)
+		return (-1);
+	if (val < DOT1Q_VID_MIN || val > DOT1Q_VID_MAX)
+		return (-1);
+
+	*valp = (ether_vlanid_t)val;
+	return (0);
+}
+
+static int
 do_cmd(if_ctx *ctx, u_long op, void *arg, size_t argsize, int set)
 {
 	struct ifdrv ifd = {};
@@ -147,6 +161,36 @@ bridge_addresses(if_ctx *ctx, const char *prefix)
 }
 
 static void
+print_vlans(ifbvlan_set_t *vlans)
+{
+	unsigned printed = 0;
+
+	for (unsigned vlan = DOT1Q_VID_MIN; vlan <= DOT1Q_VID_MAX;) {
+		unsigned last;
+
+		if (!BRVLAN_TEST(vlans, vlan)) {
+			++vlan;
+			continue;
+		}
+
+		last = vlan;
+		while (last < DOT1Q_VID_MAX && BRVLAN_TEST(vlans, last + 1))
+			++last;
+
+		if (printed == 0)
+			printf(" tagged ");
+		else
+			printf(",");
+
+		printf("%u", vlan);
+		if (last != vlan)
+			printf("-%u", last);
+		++printed;
+		vlan = last + 1;
+	}
+}
+
+static void
 bridge_status(if_ctx *ctx)
 {
 	struct ifconfig_bridge_status *bridge;
@@ -187,8 +231,9 @@ bridge_status(if_ctx *ctx)
 		printf("%s%s ", prefix, member->ifbr_ifsname);
 		printb("flags", member->ifbr_ifsflags, IFBIFBITS);
 		printf("\n%s", pad);
-		printf("ifmaxaddr %u port %u priority %u path cost %u",
-		    member->ifbr_addrmax,
+		if (member->ifbr_addrmax != 0)
+			printf("ifmaxaddr %u ", member->ifbr_addrmax);
+		printf("port %u priority %u path cost %u",
 		    member->ifbr_portno,
 		    member->ifbr_priority,
 		    member->ifbr_path_cost);
@@ -211,6 +256,9 @@ bridge_status(if_ctx *ctx)
 			else
 				printf(" <unknown state %d>", state);
 		}
+		if (member->ifbr_pvid != 0)
+			printf(" untagged %u", (unsigned)member->ifbr_pvid);
+		print_vlans(&bridge->member_vlans[i]);
 		printf("\n");
 	}
 
@@ -577,6 +625,35 @@ setbridge_ifpathcost(if_ctx *ctx, const char *ifn, const char *cost)
 }
 
 static void
+setbridge_untagged(if_ctx *ctx, const char *ifn, const char *vlanid)
+{
+	struct ifbreq req;
+
+	memset(&req, 0, sizeof(req));
+	strlcpy(req.ifbr_ifsname, ifn, sizeof(req.ifbr_ifsname));
+
+	if (get_vlan_id(vlanid, &req.ifbr_pvid) < 0)
+		errx(1, "invalid VLAN identifier: %s", vlanid);
+
+	if (do_cmd(ctx, BRDGSIFPVID, &req, sizeof(req), 1) < 0)
+		err(1, "BRDGSIFPVID %s", vlanid);
+}
+
+static void
+unsetbridge_untagged(if_ctx *ctx, const char *ifn, int dummy __unused)
+{
+	struct ifbreq req;
+
+	memset(&req, 0, sizeof(req));
+
+	strlcpy(req.ifbr_ifsname, ifn, sizeof(req.ifbr_ifsname));
+	req.ifbr_pvid = 0;
+
+	if (do_cmd(ctx, BRDGSIFPVID, &req, sizeof(req), 1) < 0)
+		err(1, "BRDGSIFPVID");
+}
+
+static void
 setbridge_ifmaxaddr(if_ctx *ctx, const char *ifn, const char *arg)
 {
 	struct ifbreq req;
@@ -612,15 +689,116 @@ setbridge_timeout(if_ctx *ctx, const char *arg, int dummy __unused)
 static void
 setbridge_private(if_ctx *ctx, const char *val, int dummy __unused)
 {
-
 	do_bridgeflag(ctx, val, IFBIF_PRIVATE, 1);
 }
 
 static void
 unsetbridge_private(if_ctx *ctx, const char *val, int dummy __unused)
 {
-
 	do_bridgeflag(ctx, val, IFBIF_PRIVATE, 0);
+}
+
+static void
+setbridge_vlanfilter(if_ctx *ctx, const char *val, int dummy __unused)
+{
+	do_bridgeflag(ctx, val, IFBIF_VLANFILTER, 1);
+}
+
+static void
+unsetbridge_vlanfilter(if_ctx *ctx, const char *val, int dummy __unused)
+{
+	do_bridgeflag(ctx, val, IFBIF_VLANFILTER, 0);
+}
+
+static int
+parse_vlans(ifbvlan_set_t *set, const char *str)
+{
+	char *s, *token;
+
+	/* "none" means the empty vlan set */
+	if (strcmp(str, "none") == 0) {
+		__BIT_ZERO(BRVLAN_SETSIZE, set);
+		return (0);
+	}
+
+	/* "all" means all vlans, except for 0 and 4095 which are reserved */
+	if (strcmp(str, "all") == 0) {
+		__BIT_FILL(BRVLAN_SETSIZE, set);
+		BRVLAN_CLR(set, DOT1Q_VID_NULL);
+		BRVLAN_CLR(set, DOT1Q_VID_RSVD_IMPL);
+		return (0);
+	}
+
+	if ((s = strdup(str)) == NULL)
+		return (-1);
+
+	while ((token = strsep(&s, ",")) != NULL) {
+		unsigned long first, last;
+		char *p, *lastp;
+
+		if ((lastp = strchr(token, '-')) != NULL)
+			*lastp++ = '\0';
+
+		first = last = strtoul(token, &p, 10);
+		if (*p != '\0')
+			goto err;
+		if (first < DOT1Q_VID_MIN || first > DOT1Q_VID_MAX)
+			goto err;
+
+		if (lastp) {
+			last = strtoul(lastp, &p, 10);
+			if (*p != '\0')
+				goto err;
+			if (last < DOT1Q_VID_MIN || last > DOT1Q_VID_MAX ||
+			    last < first)
+				goto err;
+		}
+
+		for (unsigned vlan = first; vlan <= last; ++vlan)
+			BRVLAN_SET(set, vlan);
+	}
+
+	free(s);
+	return (0);
+
+err:
+	free(s);
+	return (-1);
+}
+
+static void
+set_bridge_vlanset(if_ctx *ctx, const char *ifn, const char *vlans, int op)
+{
+	struct ifbif_vlan_req req;
+
+	memset(&req, 0, sizeof(req));
+
+	if (parse_vlans(&req.bv_set, vlans) != 0)
+		errx(1, "invalid vlan set: %s", vlans);
+
+	strlcpy(req.bv_ifname, ifn, sizeof(req.bv_ifname));
+	req.bv_op = op;
+
+	if (do_cmd(ctx, BRDGSIFVLANSET, &req, sizeof(req), 1) < 0)
+		err(1, "BRDGSIFVLANSET %s", vlans);
+}
+
+static void
+setbridge_tagged(if_ctx *ctx, const char *ifn, const char *vlans)
+{
+	set_bridge_vlanset(ctx, ifn, vlans, BRDG_VLAN_OP_SET);
+}
+
+static void
+addbridge_tagged(if_ctx *ctx, const char *ifn, const char *vlans)
+{
+	set_bridge_vlanset(ctx, ifn, vlans, BRDG_VLAN_OP_ADD);
+}
+
+static void
+delbridge_tagged(if_ctx *ctx, const char *ifn, const char *vlans)
+{
+	set_bridge_vlanset(ctx, ifn, vlans, BRDG_VLAN_OP_DEL);
 }
 
 static struct cmd bridge_cmds[] = {
@@ -659,6 +837,13 @@ static struct cmd bridge_cmds[] = {
 	DEF_CMD_ARG2("ifpriority",	setbridge_ifpriority),
 	DEF_CMD_ARG2("ifpathcost",	setbridge_ifpathcost),
 	DEF_CMD_ARG2("ifmaxaddr",	setbridge_ifmaxaddr),
+	DEF_CMD_ARG("vlanfilter",	setbridge_vlanfilter),
+	DEF_CMD_ARG("-vlanfilter",	unsetbridge_vlanfilter),
+	DEF_CMD_ARG2("untagged",	setbridge_untagged),
+	DEF_CMD_ARG("-untagged",	unsetbridge_untagged),
+	DEF_CMD_ARG2("tagged",		setbridge_tagged),
+	DEF_CMD_ARG2("+tagged",		addbridge_tagged),
+	DEF_CMD_ARG2("-tagged",		delbridge_tagged),
 	DEF_CMD_ARG("timeout",		setbridge_timeout),
 	DEF_CMD_ARG("private",		setbridge_private),
 	DEF_CMD_ARG("-private",		unsetbridge_private),

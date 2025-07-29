@@ -56,7 +56,6 @@
  *	need a proper out-of-band
  */
 
-#include <sys/cdefs.h>
 #include "opt_ddb.h"
 
 #include <sys/param.h>
@@ -66,6 +65,7 @@
 #include <sys/fcntl.h>
 #include <sys/file.h>
 #include <sys/filedesc.h>
+#include <sys/jail.h>
 #include <sys/kernel.h>
 #include <sys/lock.h>
 #include <sys/malloc.h>
@@ -1304,7 +1304,7 @@ out:
 }
 
 /*
- * Our version of sowakeup(), used by recv(2) and shutdown(2).
+ * Wakeup a writer, used by recv(2) and shutdown(2).
  *
  * @param so	Points to a connected stream socket with receive buffer locked
  *
@@ -1314,7 +1314,7 @@ out:
  * receive lock is protecting us from the peer going away.
  */
 static void
-uipc_wakeup(struct socket *so)
+uipc_wakeup_writer(struct socket *so)
 {
 	struct sockbuf *sb = &so->so_rcv;
 	struct selinfo *sel;
@@ -1346,8 +1346,10 @@ uipc_cantrcvmore(struct socket *so)
 
 	SOCK_RECVBUF_LOCK(so);
 	so->so_rcv.sb_state |= SBS_CANTRCVMORE;
+	selwakeuppri(&so->so_rdsel, PSOCK);
+	KNOTE_LOCKED(&so->so_rdsel.si_note, 0);
 	if (so->so_rcv.uxst_peer != NULL)
-		uipc_wakeup(so);
+		uipc_wakeup_writer(so);
 	else
 		SOCK_RECVBUF_UNLOCK(so);
 }
@@ -1503,7 +1505,7 @@ restart:
 			if ((aio = sb->uxst_flags & UXST_PEER_AIO))
 				sb->uxst_flags &= ~UXST_PEER_AIO;
 
-			uipc_wakeup(so);
+			uipc_wakeup_writer(so);
 			/*
 			 * XXXGL: need to go through uipc_lock_peer() after
 			 * the receive buffer lock dropped, it was protecting
@@ -3435,21 +3437,34 @@ unp_freerights(struct filedescent **fdep, int fdcount)
 	free(fdep[0], M_FILECAPS);
 }
 
+static bool
+restrict_rights(struct file *fp, struct thread *td)
+{
+	struct prison *prison1, *prison2;
+
+	prison1 = fp->f_cred->cr_prison;
+	prison2 = td->td_ucred->cr_prison;
+	return (prison1 != prison2 && prison1->pr_root != prison2->pr_root &&
+	    prison2 != &prison0);
+}
+
 static int
 unp_externalize(struct mbuf *control, struct mbuf **controlp, int flags)
 {
 	struct thread *td = curthread;		/* XXX */
 	struct cmsghdr *cm = mtod(control, struct cmsghdr *);
-	int i;
 	int *fdp;
 	struct filedesc *fdesc = td->td_proc->p_fd;
 	struct filedescent **fdep;
 	void *data;
 	socklen_t clen = control->m_len, datalen;
-	int error, newfds;
+	int error, fdflags, newfds;
 	u_int newlen;
 
 	UNP_LINK_UNLOCK_ASSERT();
+
+	fdflags = ((flags & MSG_CMSG_CLOEXEC) ? O_CLOEXEC : 0) |
+	    ((flags & MSG_CMSG_CLOFORK) ? O_CLOFORK : 0);
 
 	error = 0;
 	if (controlp != NULL) /* controlp == NULL => free control messages */
@@ -3492,11 +3507,14 @@ unp_externalize(struct mbuf *control, struct mbuf **controlp, int flags)
 				*controlp = NULL;
 				goto next;
 			}
-			for (i = 0; i < newfds; i++, fdp++) {
-				_finstall(fdesc, fdep[i]->fde_file, *fdp,
-				    (flags & MSG_CMSG_CLOEXEC) != 0 ? O_CLOEXEC : 0,
-				    &fdep[i]->fde_caps);
-				unp_externalize_fp(fdep[i]->fde_file);
+			for (int i = 0; i < newfds; i++, fdp++) {
+				struct file *fp;
+
+				fp = fdep[i]->fde_file;
+				_finstall(fdesc, fp, *fdp, fdflags |
+				    (restrict_rights(fp, td) ?
+				    O_RESOLVE_BENEATH : 0), &fdep[i]->fde_caps);
+				unp_externalize_fp(fp);
 			}
 
 			/*

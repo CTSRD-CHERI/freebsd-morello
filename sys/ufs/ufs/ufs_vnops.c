@@ -1268,14 +1268,15 @@ ufs_rename(
 	struct inode *fip, *tip, *tdp, *fdp;
 	struct direct newdir;
 	off_t endoff;
-	int doingdirectory, newparent;
+	int doingdirectory;
+	u_int newparent;
 	int error = 0;
 	struct mount *mp;
 	ino_t ino;
 	seqc_t fdvp_s, fvp_s, tdvp_s, tvp_s;
-	bool checkpath_locked, want_seqc_end;
+	bool want_seqc_end;
 
-	checkpath_locked = want_seqc_end = false;
+	want_seqc_end = false;
 
 	endoff = 0;
 	mp = tdvp->v_mount;
@@ -1427,10 +1428,6 @@ relock:
 		}
 		vfs_ref(mp);
 		MPASS(!want_seqc_end);
-		if (checkpath_locked) {
-			sx_xunlock(&VFSTOUFS(mp)->um_checkpath_lock);
-			checkpath_locked = false;
-		}
 		VOP_UNLOCK(fdvp);
 		VOP_UNLOCK(fvp);
 		vref(tdvp);
@@ -1479,13 +1476,11 @@ relock:
 	 * the user must have write permission in the source so
 	 * as to be able to change "..".
 	 */
-	if (doingdirectory && newparent) {
+	if (doingdirectory && newparent != 0) {
 		error = VOP_ACCESS(fvp, VWRITE, tcnp->cn_cred, curthread);
 		if (error)
 			goto unlockout;
 
-		sx_xlock(&VFSTOUFS(mp)->um_checkpath_lock);
-		checkpath_locked = true;
 		error = ufs_checkpath(ino, fdp->i_number, tdp, tcnp->cn_cred,
 		    &ino);
 		/*
@@ -1493,8 +1488,6 @@ relock:
 		 * everything else and VGET before restarting.
 		 */
 		if (ino) {
-			sx_xunlock(&VFSTOUFS(mp)->um_checkpath_lock);
-			checkpath_locked = false;
 			VOP_UNLOCK(fdvp);
 			VOP_UNLOCK(fvp);
 			VOP_UNLOCK(tdvp);
@@ -1546,7 +1539,7 @@ relock:
 	if (tip == NULL) {
 		if (ITODEV(tdp) != ITODEV(fip))
 			panic("ufs_rename: EXDEV");
-		if (doingdirectory && newparent) {
+		if (doingdirectory && newparent != 0) {
 			/*
 			 * Account for ".." in new directory.
 			 * When source and destination have the same
@@ -1574,9 +1567,6 @@ relock:
 				vn_seqc_write_end(fdvp);
 				want_seqc_end = false;
 				vfs_ref(mp);
-				MPASS(checkpath_locked);
-				sx_xunlock(&VFSTOUFS(mp)->um_checkpath_lock);
-				checkpath_locked = false;
 				VOP_UNLOCK(fdvp);
 				VOP_UNLOCK(fvp);
 				vref(tdvp);
@@ -1642,7 +1632,7 @@ relock:
 			goto bad;
 		}
 		if (doingdirectory) {
-			if (!newparent) {
+			if (newparent == 0) {
 				tdp->i_effnlink--;
 				if (DOINGSOFTDEP(tdvp))
 					softdep_change_linkcnt(tdp);
@@ -1652,11 +1642,11 @@ relock:
 				softdep_change_linkcnt(tip);
 		}
 		error = ufs_dirrewrite(tdp, tip, fip->i_number,
-		    IFTODT(fip->i_mode),
-		    (doingdirectory && newparent) ? newparent : doingdirectory);
+		    IFTODT(fip->i_mode), (doingdirectory && newparent != 0) ?
+		    newparent : doingdirectory);
 		if (error) {
 			if (doingdirectory) {
-				if (!newparent) {
+				if (newparent == 0) {
 					tdp->i_effnlink++;
 					if (DOINGSOFTDEP(tdvp))
 						softdep_change_linkcnt(tdp);
@@ -1679,7 +1669,7 @@ relock:
 			 * disk, so when running with that code we avoid doing
 			 * them now.
 			 */
-			if (!newparent) {
+			if (newparent == 0) {
 				tdp->i_nlink--;
 				DIP_SET_NLINK(tdp, tdp->i_nlink);
 				UFS_INODE_SET_FLAG(tdp, IN_CHANGE);
@@ -1708,7 +1698,7 @@ relock:
 	 * parent directory must be decremented
 	 * and ".." set to point to the new parent.
 	 */
-	if (doingdirectory && newparent) {
+	if (doingdirectory && newparent != 0) {
 		/*
 		 * Set the directory depth based on its new parent.
 		 */
@@ -1762,9 +1752,6 @@ unlockout:
 		vn_seqc_write_end(fvp);
 		vn_seqc_write_end(fdvp);
 	}
-
-	if (checkpath_locked)
-		sx_xunlock(&VFSTOUFS(mp)->um_checkpath_lock);
 
 	vput(fdvp);
 	vput(fvp);
@@ -2078,9 +2065,13 @@ ufs_mkdir(
 				 */
 				ucred.cr_ref = 1;
 				ucred.cr_uid = ip->i_uid;
+
+				/*
+				 * XXXKE Fix this is cr_gid gets separated out
+				 */
 				ucred.cr_ngroups = 1;
 				ucred.cr_groups = &ucred_group;
-				ucred.cr_groups[0] = dp->i_gid;
+				ucred.cr_gid = ucred_group = dp->i_gid;
 				ucp = &ucred;
 			}
 #endif
@@ -2734,6 +2725,9 @@ ufs_pathconf(
 	case _PC_SYMLINK_MAX:
 		*ap->a_retval = MAXPATHLEN;
 		break;
+	case _PC_HAS_HIDDENSYSTEM:
+		*ap->a_retval = 1;
+		break;
 
 	default:
 		error = vop_stdpathconf(ap);
@@ -2834,9 +2828,13 @@ ufs_makeinode(int mode, struct vnode *dvp, struct vnode **vpp,
 			 */
 			ucred.cr_ref = 1;
 			ucred.cr_uid = ip->i_uid;
+
+			/*
+			 * XXXKE Fix this is cr_gid gets separated out
+			 */
 			ucred.cr_ngroups = 1;
 			ucred.cr_groups = &ucred_group;
-			ucred.cr_groups[0] = pdir->i_gid;
+			ucred.cr_gid = ucred_group = pdir->i_gid;
 			ucp = &ucred;
 #endif
 		} else {

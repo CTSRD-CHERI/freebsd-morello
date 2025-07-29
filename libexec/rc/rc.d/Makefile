@@ -223,7 +223,7 @@ FTPDPACKAGE=	ftpd
 .if ${MK_GSSAPI} != "no"
 CONFGROUPS+=	GSSD
 GSSD=		gssd
-GSSDPACKAGE=	kerberos
+GSSDPACKAGE=	gssd
 .endif
 
 .if ${MK_HAST} != "no"
@@ -367,7 +367,9 @@ SMRCDPACKAGE=	sendmail
 
 .if ${MK_NUAGEINIT} != "no"
 CONFGROUPS+=	NIUAGEINIT
-NIUAGEINIT=		nuageinit
+NIUAGEINIT=		nuageinit \
+			nuageinit_post_net \
+			nuageinit_user_data_script
 NIUAGEINITPACKAGE=	nuageinit
 .endif
 

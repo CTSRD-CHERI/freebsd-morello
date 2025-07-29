@@ -117,10 +117,6 @@ v6_body()
 {
 	pft_init
 
-	if [ "$(atf_config_get ci false)" = "true" ]; then
-		atf_skip "https://bugs.freebsd.org/260458"
-	fi
-
 	epair=$(vnet_mkepair)
 	ifconfig ${epair}a inet6 2001:db8::1/64 up no_dad
 
@@ -579,6 +575,7 @@ key_head()
 {
 	atf_set descr 'Test killing states by their key'
 	atf_set require.user root
+	atf_set require.progs python3 scapy
 }
 
 key_body()

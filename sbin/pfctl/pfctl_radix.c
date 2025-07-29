@@ -400,7 +400,7 @@ pfr_buf_clear(struct pfr_buffer *b)
 
 int
 pfr_buf_load(struct pfr_buffer *b, char *file, int nonetwork,
-    int (*append_addr)(struct pfr_buffer *, char *, int))
+    int (*append_addr)(struct pfr_buffer *, char *, int, int), int opts)
 {
 	FILE	*fp;
 	char	 buf[BUF_SIZE];
@@ -416,7 +416,7 @@ pfr_buf_load(struct pfr_buffer *b, char *file, int nonetwork,
 			return (-1);
 	}
 	while ((rv = pfr_next_token(buf, fp)) == 1)
-		if (append_addr(b, buf, nonetwork)) {
+		if (append_addr(b, buf, nonetwork, opts)) {
 			rv = -1;
 			break;
 		}
@@ -460,17 +460,4 @@ pfr_next_token(char buf[BUF_SIZE], FILE *fp)
 	}
 	buf[i] = '\0';
 	return (1);
-}
-
-char *
-pfr_strerror(int errnum)
-{
-	switch (errnum) {
-	case ESRCH:
-		return "Table does not exist";
-	case ENOENT:
-		return "Anchor or Ruleset does not exist";
-	default:
-		return strerror(errnum);
-	}
 }

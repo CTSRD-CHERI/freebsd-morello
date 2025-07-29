@@ -22,6 +22,8 @@ ATF_TESTS_SH+=	altq \
 		killstate \
 		macro \
 		match \
+		max_pkt_rate \
+		max_pkt_size \
 		max_states \
 		mbuf \
 		modulate \
@@ -56,6 +58,8 @@ ATF_TESTS_SH+=	altq \
 ATF_TESTS_PYTEST+=	frag6.py
 ATF_TESTS_PYTEST+=	header.py
 ATF_TESTS_PYTEST+=	icmp.py
+ATF_TESTS_PYTEST+=	igmp.py
+ATF_TESTS_PYTEST+=	mld.py
 ATF_TESTS_PYTEST+=	nat64.py
 ATF_TESTS_PYTEST+=	nat66.py
 ATF_TESTS_PYTEST+=	return.py
