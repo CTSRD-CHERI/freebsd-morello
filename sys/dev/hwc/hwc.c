@@ -71,14 +71,12 @@ static struct cdevsw hwc_cdevsw = {
 static void
 hwc_process_exit(void *arg __unused, struct proc *p)
 {
-#if 0
 	struct hwc_owner *ho;
 
 	/* Stop HWCs associated with exiting owner, if any. */
 	ho = hwc_ownerhash_lookup(p);
 	if (ho)
 		hwc_owner_shutdown(ho);
-#endif
 }
 
 static int

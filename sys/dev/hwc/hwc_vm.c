@@ -480,11 +480,13 @@ void
 hwc_vm_free(struct hwc_vm *vm)
 {
 
-	dprintf("%s\n", __func__);
+	printf("%s\n", __func__);
 
 	if (vm->cdev)
 		destroy_dev_sched(vm->cdev);
+#if 0
 	hwc_vm_destroy_buffers(vm);
+#endif
 	free(vm, M_HWT_VM);
 }
 
@@ -497,11 +499,13 @@ hwc_vm_alloc(size_t bufsize, int kva_req, char *path, struct hwc_vm **vm0)
 	vm = malloc(sizeof(struct hwc_vm), M_HWT_VM, M_WAITOK | M_ZERO);
 	vm->npages = bufsize / PAGE_SIZE;
 
+#if 0
 	error = hwc_vm_alloc_buffers(vm, kva_req);
 	if (error) {
 		free(vm, M_HWT_VM);
 		return (error);
 	}
+#endif
 
 	error = hwc_vm_create_cdev(vm, path);
 	if (error) {

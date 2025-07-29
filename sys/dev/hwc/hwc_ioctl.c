@@ -142,8 +142,8 @@ hwc_ioctl_alloc_mode_thread(struct thread *td, struct hwc_owner *ho,
 	struct hwc_context *ctx, *ctx1;
 #if 0
 	struct hwc_thread *thr;
-	char path[MAXPATHLEN];
 #endif
+	char path[MAXPATHLEN];
 	struct proc *p;
 #if 0
 	int thread_id;
@@ -153,6 +153,7 @@ hwc_ioctl_alloc_mode_thread(struct thread *td, struct hwc_owner *ho,
 	int cnt;
 	int i;
 #endif
+	struct hwc_vm *vm;
 
 	/* Check if the owner have this pid configured already. */
 	ctx = hwc_owner_lookup_ctx(ho, halloc->pid);
@@ -228,6 +229,16 @@ hwc_ioctl_alloc_mode_thread(struct thread *td, struct hwc_owner *ho,
 
 	ctx->proc = p;
 	PROC_UNLOCK(p);
+
+	sprintf(path, "hwc_%d", ctx->ident);
+
+	error = hwc_vm_alloc(0, 0, path, &vm);
+	if (error) {
+		hwc_ctx_free(ctx);
+		return (error);
+	}
+
+	ctx->vm = vm;
 
 #if 0
 	for (i = 0; i < cnt; i++) {

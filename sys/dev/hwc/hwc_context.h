@@ -70,6 +70,8 @@ struct hwc_context {
 	struct mtx			rec_mtx;
 	enum hwc_ctx_state		state;
 	int				refcnt;
+
+	struct hwc_vm			*vm;
 };
 
 #define	HWT_CTX_LOCK(ctx)		mtx_lock_spin(&(ctx)->mtx)

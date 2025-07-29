@@ -177,7 +177,10 @@ hwc_ctx_free(struct hwc_context *ctx)
 		hwc_ctx_free_threads(ctx);
 
 	hwc_config_free(ctx);
+#else
+	hwc_vm_free(ctx->vm);
 #endif
+
 	hwc_ctx_ident_free(ctx->ident);
 	free(ctx, M_HWT_CTX);
 }

@@ -118,6 +118,8 @@ hwc_ctx_alloc(struct hwc_context *tc)
 
 	error = ioctl(tc->fd, HWC_IOC_ALLOC, &al);
 
+	printf("%s: err %d new ident %d\n", __func__, error, tc->ident);
+
 	return (error);
 }
 
