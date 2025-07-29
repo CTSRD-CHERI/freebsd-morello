@@ -93,6 +93,7 @@ static int
 hwc_ctx_alloc(struct hwc_context *tc)
 {
 	struct hwc_alloc al;
+	char filename[32];
 	int error = 0;
 
 	if (tc->backend->methods->init != NULL){
@@ -117,10 +118,21 @@ hwc_ctx_alloc(struct hwc_context *tc)
 	al.ident = &tc->ident;
 
 	error = ioctl(tc->fd, HWC_IOC_ALLOC, &al);
+	if (error) {
+		printf("%s: could not allocate ctx, error %d\n", __func__,
+		    error);
+		return (error);
+	}
 
-	printf("%s: err %d new ident %d\n", __func__, error, tc->ident);
+	sprintf(filename, "/dev/hwc_%d", tc->ident);
 
-	return (error);
+	tc->ctx_fd = open(filename, O_RDWR);
+	if (tc->ctx_fd < 0) {
+		printf("Can't open %s\n", filename);
+		return (-1);
+	}
+
+	return (0);
 }
 
 int
