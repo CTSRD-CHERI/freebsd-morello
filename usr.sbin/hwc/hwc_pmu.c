@@ -64,9 +64,28 @@
 #endif
 
 static int
-pmu_configure_counter(struct hwc_context *tc, const ucl_object_t *top)
+pmu_request(struct hwc_context *tc, int mhpm_id, int event_id)
 {
 	struct hwc_configure hc;
+	int error;
+
+	hc.event_id = event_id;
+	hc.counter_id = mhpm_id;
+	hc.flags = 0;
+
+	error = ioctl(tc->ctx_fd, HWC_IOC_CONFIGURE, &hc);
+	if (error) {
+		printf("%s: could not configure event_id %d, error %d\n",
+		    __func__, hc.event_id, error);
+		return (error);
+	}
+
+	return (0);
+}
+
+static int
+pmu_configure_counter(struct hwc_context *tc, const ucl_object_t *top)
+{
 	const ucl_object_t *obj;
 	ucl_object_iter_t it = NULL;
 	const char *k;
@@ -91,18 +110,9 @@ pmu_configure_counter(struct hwc_context *tc, const ucl_object_t *top)
 	printf("%s: Configuring id %d name %s event_id %d enabled %d\n",
 	    __func__, mhpm_id, name, event_id, enabled);
 
-	hc.event_id = event_id;
-	hc.counter_id = mhpm_id;
-	hc.flags = 0;
+	error = pmu_request(tc, mhpm_id, event_id);
 
-	error = ioctl(tc->ctx_fd, HWC_IOC_CONFIGURE, &hc);
-	if (error) {
-		printf("%s: could not configure event_id %d, error %d\n",
-		    __func__, hc.event_id, error);
-		return (error);
-	}
-
-	return (0);
+	return (error);
 }
 
 static int
