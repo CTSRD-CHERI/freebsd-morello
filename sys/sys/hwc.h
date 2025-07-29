@@ -40,13 +40,16 @@
 
 #define	HWC_MAGIC		0x42
 #define	HWC_IOC_ALLOC		_IOW(HWC_MAGIC, 0x00, struct hwc_alloc)
-#define	HWC_IOC_START		_IOW(HWC_MAGIC, 0x01, struct hwc_start)
-#define	HWC_IOC_STOP		_IOW(HWC_MAGIC, 0x02, struct hwc_stop)
-#define	HWC_IOC_RECORD_GET	_IOW(HWC_MAGIC, 0x03, struct hwc_record_get)
-#define	HWC_IOC_BUFPTR_GET	_IOW(HWC_MAGIC, 0x04, struct hwc_bufptr_get)
-#define	HWC_IOC_SET_CONFIG	_IOW(HWC_MAGIC, 0x05, struct hwc_set_config)
-#define	HWC_IOC_WAKEUP		_IOW(HWC_MAGIC, 0x06, struct hwc_wakeup)
-#define	HWC_IOC_SVC_BUF		_IOW(HWC_MAGIC, 0x07, struct hwc_svc_buf)
+#define	HWC_IOC_CONFIGURE	_IOW(HWC_MAGIC, 0x01, struct hwc_alloc)
+#define	HWC_IOC_START		_IOW(HWC_MAGIC, 0x02, struct hwc_start)
+#define	HWC_IOC_STOP		_IOW(HWC_MAGIC, 0x03, struct hwc_stop)
+#if 0
+#define	HWC_IOC_RECORD_GET	_IOW(HWC_MAGIC, 0x04, struct hwc_record_get)
+#define	HWC_IOC_BUFPTR_GET	_IOW(HWC_MAGIC, 0x05, struct hwc_bufptr_get)
+#define	HWC_IOC_SET_CONFIG	_IOW(HWC_MAGIC, 0x06, struct hwc_set_config)
+#define	HWC_IOC_WAKEUP		_IOW(HWC_MAGIC, 0x07, struct hwc_wakeup)
+#define	HWC_IOC_SVC_BUF		_IOW(HWC_MAGIC, 0x08, struct hwc_svc_buf)
+#endif
 
 #define	HWC_BACKEND_MAXNAMELEN	256
 
@@ -62,6 +65,12 @@ struct hwc_alloc {
 	const char	*backend_name;
 	int		*ident;
 	int		kqueue_fd;
+} __aligned(16);
+
+struct hwc_configure {
+	int		event_id;
+	int		counter_id;
+	int		flags;
 } __aligned(16);
 
 struct hwc_start {

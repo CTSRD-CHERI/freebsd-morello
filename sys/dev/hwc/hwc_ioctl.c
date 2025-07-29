@@ -77,7 +77,6 @@ static MALLOC_DEFINE(M_HWC_IOCTL, "hwc_ioctl", "Hardware Counting");
  * Check if owner process *o can trace target process *t.
  */
 
-#if 0
 static int
 hwc_priv_check(struct proc *o, struct proc *t)
 {
@@ -136,16 +135,24 @@ static int
 hwc_ioctl_alloc_mode_thread(struct thread *td, struct hwc_owner *ho,
     struct hwc_backend *backend, struct hwc_alloc *halloc)
 {
+#if 0
 	struct thread **threads, *td1;
 	struct hwc_record_entry *entry;
+#endif
 	struct hwc_context *ctx, *ctx1;
+#if 0
 	struct hwc_thread *thr;
 	char path[MAXPATHLEN];
+#endif
 	struct proc *p;
+#if 0
 	int thread_id;
+#endif
 	int error;
+#if 0
 	int cnt;
 	int i;
+#endif
 
 	/* Check if the owner have this pid configured already. */
 	ctx = hwc_owner_lookup_ctx(ho, halloc->pid);
@@ -193,6 +200,7 @@ hwc_ioctl_alloc_mode_thread(struct thread *td, struct hwc_owner *ho,
 		return (EEXIST);
 	}
 
+#if 0
 	/* Allocate hwc threads and buffers. */
 
 	cnt = 0;
@@ -216,10 +224,12 @@ hwc_ioctl_alloc_mode_thread(struct thread *td, struct hwc_owner *ho,
 	FOREACH_THREAD_IN_PROC(p, td1) {
 		threads[i++] = td1;
 	}
+#endif
 
 	ctx->proc = p;
 	PROC_UNLOCK(p);
 
+#if 0
 	for (i = 0; i < cnt; i++) {
 		thread_id = atomic_fetchadd_int(&ctx->thread_counter, 1);
 		sprintf(path, "hwc_%d_%d", ctx->ident, thread_id);
@@ -261,6 +271,7 @@ hwc_ioctl_alloc_mode_thread(struct thread *td, struct hwc_owner *ho,
 	}
 
 	free(threads, M_HWC_IOCTL);
+#endif
 
 	error = hwc_backend_init(ctx);
 	if (error) {
@@ -288,6 +299,7 @@ hwc_ioctl_alloc_mode_thread(struct thread *td, struct hwc_owner *ho,
 	return (0);
 }
 
+#if 0
 static int
 hwc_ioctl_alloc_mode_cpu(struct thread *td, struct hwc_owner *ho,
     struct hwc_backend *backend, struct hwc_alloc *halloc)
@@ -419,7 +431,7 @@ hwc_ioctl_alloc(struct thread *td, struct hwc_alloc *halloc)
 
 	switch (halloc->mode) {
 	case HWC_MODE_THREAD:
-		error = 0;//hwc_ioctl_alloc_mode_thread(td, ho, backend, halloc);
+		error = hwc_ioctl_alloc_mode_thread(td, ho, backend, halloc);
 		break;
 	case HWC_MODE_CPU:
 #if 0
