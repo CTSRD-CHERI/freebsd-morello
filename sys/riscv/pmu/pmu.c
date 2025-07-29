@@ -119,5 +119,6 @@ static driver_t pmu_driver = {
 	sizeof(struct pmu_softc)
 };
 
-EARLY_DRIVER_MODULE(pmu, simplebus, pmu_driver, 0, 0,
-    BUS_PASS_INTERRUPT + BUS_PASS_ORDER_MIDDLE);
+DRIVER_MODULE(pmu, simplebus, pmu_driver, 0, 0);
+MODULE_DEPEND(pmu, hwc, 1, 1, 1);
+MODULE_VERSION(pmu, 1);

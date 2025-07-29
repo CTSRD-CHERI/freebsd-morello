@@ -95,11 +95,11 @@ hwc_load(void)
 	args.mda_mode = 0660;
 	args.mda_si_drv1 = NULL;
 
-#if 0
 	hwc_backend_load();
 	hwc_ctx_load();
 	hwc_contexthash_load();
 	hwc_ownerhash_load();
+#if 0
 	hwc_record_load();
 #endif
 
