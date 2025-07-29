@@ -102,6 +102,15 @@ hwc_ctx_alloc(struct hwc_context *tc)
 	}
 
 	memset(&al, 0, sizeof(struct hwc_alloc));
+	al.mode = tc->mode;
+	if (tc->mode == HWC_MODE_THREAD)
+		al.pid = tc->pid;
+	else {
+#if 0
+		al.cpu_map = &tc->cpu_map;
+		al.cpusetsize = sizeof(cpuset_t);
+#endif
+	}
 
 	al.pid = tc->pid;
 	al.backend_name = tc->backend->name;
@@ -321,6 +330,8 @@ main(int argc, char **argv, char **env)
 
 	if (*argv == NULL && tc->attach == 0)
 		usage();
+
+	tc->mode = HWC_MODE_THREAD;
 
 	error = hwc_mode_thread(tc, argv, env);
 

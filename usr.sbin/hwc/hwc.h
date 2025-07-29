@@ -53,6 +53,7 @@ struct hwc_context {
 	int attach;
 	int ident;
 	char *config_file;
+	int mode;
 };
 
 void hwc_procexit(pid_t pid, int status);
