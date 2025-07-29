@@ -30,6 +30,7 @@
 #include <sys/kernel.h>
 #include <sys/module.h>
 #include <machine/bus.h>
+#include <machine/sbi.h>
 
 #include <dev/ofw/ofw_bus.h>
 #include <dev/ofw/ofw_bus_subr.h>
@@ -83,8 +84,24 @@ pmu_backend_deinit(struct hwc_context *ctx)
 static int
 pmu_backend_configure(struct hwc_context *ctx, struct hwc_configure *hc)
 {
+	struct sbi_ret ret;
+	uint32_t reg;
 
 	printf("%s: event_id %d\n", __func__, hc->event_id);
+
+	ret = SBI_CALL5(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_CONFIG_MATCHING, 0,
+	   (1 << (hc->counter_id + 2)), 0 /* flags */, 0x20000, hc->event_id);
+
+	/* Enable user access. */
+	reg = csr_read(scounteren);
+	reg |= (1 << hc->counter_id);
+	csr_write(scounteren, reg);
+
+	/* Enable counter */
+	ret = SBI_CALL2(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_START, 0,
+	    (1 << hc->counter_id));
+
+	printf("start counter err %ld num %ld\n", ret.error, ret.value);
 
 	return (0);
 }
