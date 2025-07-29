@@ -66,6 +66,7 @@
 static int
 pmu_configure_counter(struct hwc_context *tc, const ucl_object_t *top)
 {
+	struct hwc_configure hc;
 	const ucl_object_t *obj;
 	ucl_object_iter_t it = NULL;
 	const char *k;
@@ -73,6 +74,7 @@ pmu_configure_counter(struct hwc_context *tc, const ucl_object_t *top)
 	int mhpm_id;
 	const char *name;
 	bool enabled;
+	int error;
 
 	while ((obj = ucl_iterate_object (top, &it, true))) {
 		k = ucl_object_key(obj);
@@ -88,9 +90,6 @@ pmu_configure_counter(struct hwc_context *tc, const ucl_object_t *top)
 
 	printf("%s: Configuring id %d name %s event_id %d enabled %d\n",
 	    __func__, mhpm_id, name, event_id, enabled);
-
-	struct hwc_configure hc;
-	int error;
 
 	hc.event_id = event_id;
 	hc.counter_id = mhpm_id;
@@ -139,10 +138,10 @@ pmu_configure(struct hwc_context *tc)
 	ucl_object_iter_t it = NULL;
 	const char *k;
 	int error;
+	bool ret;
 
 	parser = ucl_parser_new(0);
 
-	bool ret;
 	ret = ucl_parser_add_file(parser, tc->config_file);
 	if (ret == false) {
 		printf("can't read file\n");
