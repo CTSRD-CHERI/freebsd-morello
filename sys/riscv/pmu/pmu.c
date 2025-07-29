@@ -34,6 +34,10 @@
 #include <dev/ofw/ofw_bus.h>
 #include <dev/ofw/ofw_bus_subr.h>
 
+#include <sys/hwc.h>
+#include <dev/hwc/hwc_context.h>
+#include <dev/hwc/hwc_backend.h>
+
 static struct ofw_compat_data compat_data[] = {
 	{ "riscv,pmu",			1 },
 	{ NULL,				0 }
@@ -59,12 +63,45 @@ pmu_probe(device_t dev)
 }
 
 static int
+pmu_backend_init(struct hwc_context *ctx)
+{
+
+	printf("%s\n", __func__);
+
+	return (0);
+}
+
+static struct hwc_backend_ops pmu_ops = {
+	.hwc_backend_init = pmu_backend_init,
+#if 0
+	.hwc_backend_deinit = pmu_backend_deinit,
+	.hwc_backend_configure = pmu_backend_configure,
+	.hwc_backend_enable = pmu_backend_enable,
+	.hwc_backend_disable = pmu_backend_disable,
+	.hwc_backend_read = pmu_backend_read,
+	.hwc_backend_dump = pmu_backend_dump,
+#endif
+};
+
+static struct hwc_backend pmu_backend = {
+	.ops = &pmu_ops,
+	.name = "pmu",
+};
+
+static int
 pmu_attach(device_t dev)
 {
 	struct pmu_softc *sc;
+	int error;
 
 	sc = device_get_softc(dev);
 	sc->dev = dev;
+
+	error = hwc_backend_register(&pmu_backend);
+	if (error) {
+		device_printf(dev, "Could not register in HWC\n");
+		return (error);
+	}
 
 	return (0);
 }
