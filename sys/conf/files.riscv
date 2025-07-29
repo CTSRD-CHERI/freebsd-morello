@@ -39,6 +39,7 @@ libkern/memset.c		standard
 libkern/strcmp.c		standard
 libkern/strlen.c		standard
 libkern/strncmp.c		standard
+riscv/pmu/pmu.c			standard
 riscv/riscv/aplic.c		standard
 riscv/riscv/autoconf.c		standard
 riscv/riscv/bus_machdep.c	standard
