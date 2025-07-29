@@ -63,8 +63,8 @@
 #define	dprintf(fmt, ...)
 #endif
 
-static void __unused
-pmu_configure_counter(const ucl_object_t *top)
+static int
+pmu_configure_counter(struct hwc_context *tc, const ucl_object_t *top)
 {
 	const ucl_object_t *obj;
 	ucl_object_iter_t it = NULL;
@@ -86,26 +86,47 @@ pmu_configure_counter(const ucl_object_t *top)
 			enabled = ucl_object_toboolean(obj);
 	}
 
-	printf("id %d name %s event_id %d enabled %d\n", mhpm_id, name,
-	    event_id, enabled);
+	printf("%s: Configuring id %d name %s event_id %d enabled %d\n",
+	    __func__, mhpm_id, name, event_id, enabled);
+
+	struct hwc_configure hc;
+	int error;
+
+	hc.event_id = event_id;
+	hc.counter_id = mhpm_id;
+	hc.flags = 0;
+
+	error = ioctl(tc->fd, HWC_IOC_CONFIGURE, &hc);
+	if (error) {
+		printf("could not configure event_id %d\n", hc.event_id);
+		return (error);
+	}
+
+	return (0);
 }
 
-static void
-pmu_configure_counters(const ucl_object_t *top)
+static int
+pmu_configure_counters(struct hwc_context *tc, const ucl_object_t *top)
 {
 	ucl_object_iter_t it_obj = NULL;
 	ucl_object_iter_t it = NULL;
 	const ucl_object_t *obj;
 	const ucl_object_t *cur;
 	const char *k;
+	int error;
 
 	while ((obj = ucl_iterate_object (top, &it, true))) {
 		k = ucl_object_key(obj);
 		if (strcmp(k, "mhpmcounter") != 0)
 			continue;
-		while ((cur = ucl_iterate_object (obj, &it_obj, false)))
-			pmu_configure_counter(cur);
+		while ((cur = ucl_iterate_object (obj, &it_obj, false))) {
+			error = pmu_configure_counter(tc, cur);
+			if (error)
+				return (error);
+		}
 	}
+
+	return (0);
 }
 
 static int
@@ -116,6 +137,7 @@ pmu_configure(struct hwc_context *tc)
 	ucl_object_t *top;
 	ucl_object_iter_t it = NULL;
 	const char *k;
+	int error;
 
 	parser = ucl_parser_new(0);
 
@@ -130,8 +152,11 @@ pmu_configure(struct hwc_context *tc)
 
 	while ((obj = ucl_iterate_object(top, &it, true))) {
 		k = ucl_object_key(obj);
-		if (strcmp(k, "mhpmcounters") == 0)
-			pmu_configure_counters(obj);
+		if (strcmp(k, "mhpmcounters") == 0) {
+			error = pmu_configure_counters(tc, obj);
+			if (error)
+				return (error);
+		}
 	}
 
 	return (0);
