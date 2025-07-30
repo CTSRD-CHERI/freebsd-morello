@@ -49,6 +49,8 @@
 
 #include <ucl.h>
 
+#include <machine/riscvreg.h>
+
 #include "hwc.h"
 #include "hwc_pmu.h"
 
@@ -186,6 +188,8 @@ pmu_run_once(struct hwc_context *tc __unused)
 {
 
 	printf("%s\n", __func__);
+	printf("%s: hpmcounter3 %lx\n", __func__, csr_read(hpmcounter3));
+	printf("%s: hpmcounter4 %lx\n", __func__, csr_read(hpmcounter4));
 }
 
 struct hwc_methods pmu_methods = {
