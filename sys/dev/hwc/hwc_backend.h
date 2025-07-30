@@ -31,6 +31,8 @@
 
 struct hwc_vm;
 struct hwc_configure;
+struct hwc_start;
+struct hwc_stop;
 
 struct hwc_backend_ops {
 	int (*hwc_backend_init)(struct hwc_context *);
@@ -43,7 +45,8 @@ struct hwc_backend_ops {
 	void (*hwc_backend_disable)(struct hwc_context *, int cpu_id);
 	int (*hwc_backend_read)(struct hwc_vm *, int *ident,
 	    vm_offset_t *offset, uint64_t *data);
-	void (*hwc_backend_stop)(struct hwc_context *);
+	int (*hwc_backend_stop)(struct hwc_context *, struct hwc_stop *);
+	int (*hwc_backend_start)(struct hwc_context *, struct hwc_start *);
 	/* For backends that are tied to local CPU registers */
 	int (*hwc_backend_enable_smp)(struct hwc_context *);
 	int (*hwc_backend_disable_smp)(struct hwc_context *);
@@ -73,7 +76,8 @@ int hwc_backend_read(struct hwc_context *ctx, struct hwc_vm *vm, int *ident,
     vm_offset_t *offset, uint64_t *data);
 int hwc_backend_register(struct hwc_backend *);
 int hwc_backend_unregister(struct hwc_backend *);
-void hwc_backend_stop(struct hwc_context *);
+int hwc_backend_stop(struct hwc_context *, struct hwc_stop *);
+int hwc_backend_start(struct hwc_context *, struct hwc_start *);
 int hwc_backend_svc_buf(struct hwc_context *ctx, void *data, size_t data_size,
     int data_version);
 struct hwc_backend * hwc_backend_lookup(const char *name);

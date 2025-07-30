@@ -171,6 +171,17 @@ pmu_configure(struct hwc_context *tc)
 		}
 	}
 
+	struct hwc_start hs;
+
+	hs.counter_mask = (1 << 3) | (1 << 4);
+
+	error = ioctl(tc->ctx_fd, HWC_IOC_START, &hs);
+	if (error) {
+		printf("%s: could not start counters %x, error %d\n",
+		    __func__, hs.counter_mask, error);
+		return (error);
+	}
+
 	return (0);
 }
 
@@ -187,13 +198,29 @@ static void
 pmu_run_once(struct hwc_context *tc __unused)
 {
 
-	printf("%s\n", __func__);
-	printf("%s: hpmcounter3 %lx\n", __func__, csr_read(hpmcounter3));
-	printf("%s: hpmcounter4 %lx\n", __func__, csr_read(hpmcounter4));
+}
+
+static int
+pmu_shutdown(struct hwc_context *tc __unused)
+{
+	struct hwc_stop hs;
+	int error;
+
+	hs.counter_mask = (1 << 3) | (1 << 4);
+	error = ioctl(tc->ctx_fd, HWC_IOC_STOP, &hs);
+	if (error) {
+		printf("%s: could not stop counters %x, error %d\n",
+		    __func__, hs.counter_mask, error);
+	}
+
+	printf("%s: hpmcounter3,4 %ld %ld\n", __func__, csr_read(hpmcounter3), csr_read(hpmcounter4));
+
+	return (error);
 }
 
 struct hwc_methods pmu_methods = {
 	.init = pmu_init,
+	.shutdown = pmu_shutdown,
 	.configure = pmu_configure,
 	.run_once = pmu_run_once,
 };

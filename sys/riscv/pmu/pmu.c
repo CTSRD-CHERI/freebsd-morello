@@ -81,35 +81,79 @@ pmu_backend_deinit(struct hwc_context *ctx)
 	return (0);
 }
 
+#define	SBI_PMU_CFG_FLAG_SKIP_MATCH	(1 << 0)
+#define	SBI_PMU_CFG_FLAG_CLEAR_VALUE	(1 << 1)
+#define	SBI_PMU_CFG_FLAG_AUTO_START	(1 << 2)
+#define	SBI_PMU_CFG_FLAG_SET_VUINH	(1 << 3)
+#define	SBI_PMU_CFG_FLAG_SET_VSINH	(1 << 4)
+#define	SBI_PMU_CFG_FLAG_SET_UINH	(1 << 5)
+#define	SBI_PMU_CFG_FLAG_SET_SINH	(1 << 6)
+#define	SBI_PMU_CFG_FLAG_SET_MINH	(1 << 7)
+
+#define	SBI_PMU_START_FLAG_SET_INIT_VALUE	(1 << 0)
+#define	SBI_PMU_START_FLAG_INIT_SNAPSHOT	(1 << 1)
+
 static int
 pmu_backend_configure(struct hwc_context *ctx, struct hwc_configure *hc)
 {
 	struct sbi_ret ret;
+	int flags;
 	uint32_t reg;
 
-	printf("%s: event_id %d\n", __func__, hc->event_id);
+	printf("%s: event_id %d counter_id %d\n", __func__, hc->event_id,
+	    hc->counter_id);
 
+	flags = SBI_PMU_CFG_FLAG_CLEAR_VALUE;
+#if 0
 	ret = SBI_CALL5(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_CONFIG_MATCHING, 0,
-	   (1 << (hc->counter_id + 2)), 0 /* flags */, 0x20000, hc->event_id);
+	    (1 << hc->counter_id), flags, 0x20000, hc->event_id);
+#else
+	ret = SBI_CALL5(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_CONFIG_MATCHING, 0,
+	    (1 << hc->counter_id), flags, hc->event_id, 0);
+#endif
+
+	printf("config match err %ld num %ld\n", ret.error, ret.value);
 
 	/* Enable user access. */
 	reg = csr_read(scounteren);
 	reg |= (1 << hc->counter_id);
 	csr_write(scounteren, reg);
 
-	/* Enable counter */
-	ret = SBI_CALL2(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_START, 0,
-	    (1 << hc->counter_id));
-
-	printf("start counter err %ld num %ld\n", ret.error, ret.value);
-
 	return (0);
+}
+
+static int
+pmu_backend_start(struct hwc_context *ctx, struct hwc_start *hs)
+{
+	struct sbi_ret ret;
+
+	ret = SBI_CALL2(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_START, 0,
+	    hs->counter_mask);
+
+	printf("start counters err %ld num %ld\n", ret.error, ret.value);
+
+	return (ret.error);
+}
+
+static int
+pmu_backend_stop(struct hwc_context *ctx, struct hwc_stop *hs)
+{
+	struct sbi_ret ret;
+
+	ret = SBI_CALL2(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_STOP, 0,
+	    hs->counter_mask);
+
+	printf("stop counters err %ld num %ld\n", ret.error, ret.value);
+
+	return (ret.error);
 }
 
 static struct hwc_backend_ops pmu_ops = {
 	.hwc_backend_init = pmu_backend_init,
 	.hwc_backend_deinit = pmu_backend_deinit,
 	.hwc_backend_configure = pmu_backend_configure,
+	.hwc_backend_start = pmu_backend_start,
+	.hwc_backend_stop = pmu_backend_stop,
 #if 0
 	.hwc_backend_enable = pmu_backend_enable,
 	.hwc_backend_disable = pmu_backend_disable,

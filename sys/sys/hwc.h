@@ -74,11 +74,11 @@ struct hwc_configure {
 } __aligned(16);
 
 struct hwc_start {
-	int		reserved;
+	int		counter_mask;
 } __aligned(16);
 
 struct hwc_stop {
-	int		reserved;
+	int		counter_mask;
 } __aligned(16);
 
 struct hwc_wakeup {

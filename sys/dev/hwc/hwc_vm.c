@@ -252,6 +252,8 @@ hwc_vm_ioctl(struct cdev *dev, u_long cmd, caddr_t addr, int flags,
 	struct hwc_svc_buf *sbuf;
 #endif
 	struct hwc_configure *hc;
+	struct hwc_start *hstart;
+	struct hwc_stop *hstop;
 
 	struct hwc_context *ctx;
 	struct hwc_vm *vm;
@@ -266,6 +268,7 @@ hwc_vm_ioctl(struct cdev *dev, u_long cmd, caddr_t addr, int flags,
 	size_t data_size;
 	int data_version;
 #endif
+	int error;
 
 	vm = dev->si_drv1;
 	KASSERT(vm != NULL, ("si_drv1 is NULL"));
@@ -282,7 +285,7 @@ hwc_vm_ioctl(struct cdev *dev, u_long cmd, caddr_t addr, int flags,
 
 	switch (cmd) {
 	case HWC_IOC_START:
-		dprintf("%s: start tracing\n", __func__);
+		printf("%s: start tracing\n", __func__);
 
 		HWT_CTX_LOCK(ctx);
 		if (ctx->state == CTX_STATE_RUNNING) {
@@ -293,6 +296,10 @@ hwc_vm_ioctl(struct cdev *dev, u_long cmd, caddr_t addr, int flags,
 		ctx->state = CTX_STATE_RUNNING;
 		HWT_CTX_UNLOCK(ctx);
 
+		hstart = (struct hwc_start *)addr;
+		error = hwc_backend_start(ctx, hstart);
+		if (error)
+			return (error);
 #if 0
 		if (ctx->mode == HWC_MODE_CPU)
 			hwc_vm_start_cpu_mode(ctx);
@@ -310,7 +317,10 @@ hwc_vm_ioctl(struct cdev *dev, u_long cmd, caddr_t addr, int flags,
 	case HWC_IOC_STOP:
 		if (ctx->state == CTX_STATE_STOPPED)
 			return (ENXIO);
-		hwc_backend_stop(ctx);
+		hstop = (struct hwc_stop *)addr;
+		error = hwc_backend_stop(ctx, hstop);
+		if (error)
+			return (error);
 		ctx->state = CTX_STATE_STOPPED;
 		break;
 	case HWC_IOC_CONFIGURE:

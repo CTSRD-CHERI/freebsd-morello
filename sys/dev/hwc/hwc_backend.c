@@ -237,12 +237,28 @@ hwc_backend_unload(void)
 	mtx_destroy(&hwc_backend_mtx);
 }
 
-void
-hwc_backend_stop(struct hwc_context *ctx)
+int
+hwc_backend_stop(struct hwc_context *ctx, struct hwc_stop *hs)
 {
+	int error;
+
 	dprintf("%s\n", __func__);
 
-	ctx->hwc_backend->ops->hwc_backend_stop(ctx);
+	error = ctx->hwc_backend->ops->hwc_backend_stop(ctx, hs);
+
+	return (error);
+}
+
+int
+hwc_backend_start(struct hwc_context *ctx, struct hwc_start *hs)
+{
+	int error;
+
+	printf("%s\n", __func__);
+
+	error = ctx->hwc_backend->ops->hwc_backend_start(ctx, hs);
+
+	return (error);
 }
 
 int
