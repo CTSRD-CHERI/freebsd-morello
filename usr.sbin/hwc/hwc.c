@@ -178,7 +178,7 @@ hwc_process_loop(struct hwc_context *tc)
 	xo_open_container("trace");
 	xo_open_list("entries");
 
-	printf("Decoder started. Press ctrl+c to stop.\n");
+	dprintf("Decoder started. Press ctrl+c to stop.\n");
 
 	while (1) {
 		error = waitpid(tc->pid, &status, WNOHANG);
@@ -189,7 +189,7 @@ hwc_process_loop(struct hwc_context *tc)
 			tc->backend->methods->run_once(tc);
 
 		if (errno == EINTR || tc->terminate) {
-			printf("%s: tracing terminated - exiting\n", __func__);
+			dprintf("%s: tracing terminated - exiting\n", __func__);
 			/* Fetch any remaining records */
 			if (tc->backend->methods->shutdown != NULL)
 				tc->backend->methods->shutdown(tc);
@@ -224,7 +224,7 @@ hwc_new_proc(struct hwc_context *tc, int *sockpair, char **cmd, char **env)
 	if (error != 0)
 		return (error);
 
-	printf("%s: process pid %d created\n", __func__, tc->pid);
+	dprintf("%s: process pid %d created\n", __func__, tc->pid);
 
 	return (0);
 }

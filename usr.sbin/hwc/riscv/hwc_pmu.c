@@ -104,7 +104,7 @@ pmu_configure_counter(struct hwc_context *tc, const ucl_object_t *top)
 	int event_id;
 	int mhpm_id;
 	const char *name;
-	bool enabled;
+	bool enabled __unused;
 	int error;
 
 	while ((obj = ucl_iterate_object (top, &it, true))) {
@@ -119,7 +119,7 @@ pmu_configure_counter(struct hwc_context *tc, const ucl_object_t *top)
 			enabled = ucl_object_toboolean(obj);
 	}
 
-	printf("%s: Configuring id %d name %s event_id %d enabled %d\n",
+	dprintf("%s: Configuring id %d name %s event_id %d enabled %d\n",
 	    __func__, mhpm_id, name, event_id, enabled);
 
 	/* Filter out reserved counters. */
@@ -222,7 +222,7 @@ static int
 pmu_init(struct hwc_context *tc __unused)
 {
 
-	printf("%s\n", __func__);
+	dprintf("%s\n", __func__);
 
 	bzero(counters, sizeof(struct counter) * RISCV_NCOUNTERS);
 
@@ -296,10 +296,15 @@ pmu_shutdown(struct hwc_context *tc __unused)
 		    __func__, hs.counter_mask, error);
 	}
 
+	/* Print out standard counters. */
+	printf(" time == %ld\n", csr_read(time));
+	printf(" cycle == %ld\n", csr_read(cycle));
+	printf(" instructions == %ld\n", csr_read(instret));
+
 	for (i = 0; i < RISCV_NCOUNTERS; i++) {
 		c = &counters[i];
 		if (c->valid == true)
-			printf("%s: %s == %ld\n", __func__, c->name,
+			printf(" %s == %ld\n", c->name,
 			    csr_read_num(CSR_HPMCOUNTER3 - 3 + i));
 	}
 
