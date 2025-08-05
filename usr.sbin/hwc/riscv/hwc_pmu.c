@@ -122,10 +122,6 @@ pmu_configure_counter(struct hwc_context *tc, const ucl_object_t *top)
 	dprintf("%s: Configuring id %d name %s event_id %d enabled %d\n",
 	    __func__, mhpm_id, name, event_id, enabled);
 
-	/* Filter out reserved counters. */
-	if (mhpm_id < 3)
-		return (-1);
-
 	error = pmu_request(tc, mhpm_id, event_id);
 	if (error)
 		return (error);

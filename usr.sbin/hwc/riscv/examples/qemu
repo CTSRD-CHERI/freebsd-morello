@@ -1,23 +1,5 @@
 mhpmcounters {
 	mhpmcounter = {
-		id = 0;
-		name = 'time';
-		event_id = 0;
-		enabled = true;
-	}
-	mhpmcounter = {
-		id = 1;
-		name = 'cycles';
-		event_id = 1;
-		enabled = true;
-	}
-	mhpmcounter = {
-		id = 2;
-		name = 'instructions';
-		event_id = 2;
-		enabled = true;
-	}
-	mhpmcounter = {
 		id = 3;
 		name = 'dtlb read miss';
 		event_id = 0x10019;
