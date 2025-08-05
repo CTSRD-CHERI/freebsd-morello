@@ -254,7 +254,7 @@ hwc_backend_start(struct hwc_context *ctx, struct hwc_start *hs)
 {
 	int error;
 
-	printf("%s\n", __func__);
+	dprintf("%s\n", __func__);
 
 	error = ctx->hwc_backend->ops->hwc_backend_start(ctx, hs);
 
