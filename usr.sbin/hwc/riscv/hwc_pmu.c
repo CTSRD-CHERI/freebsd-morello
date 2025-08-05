@@ -161,6 +161,29 @@ pmu_configure_counters(struct hwc_context *tc, const ucl_object_t *top)
 }
 
 static int
+pmu_start(struct hwc_context *tc)
+{
+	struct hwc_start hs;
+	int error;
+	int i;
+
+	hs.counter_mask = 0;
+
+	for (i = 0; i < RISCV_NCOUNTERS; i++)
+		if (counters[i].valid == true)
+			hs.counter_mask = (1 << i);
+
+	error = ioctl(tc->ctx_fd, HWC_IOC_START, &hs);
+	if (error) {
+		printf("%s: could not start counters %x, error %d\n",
+		    __func__, hs.counter_mask, error);
+		return (error);
+	}
+
+	return (0);
+}
+
+static int
 pmu_configure(struct hwc_context *tc)
 {
 	struct ucl_parser *parser;
@@ -190,16 +213,7 @@ pmu_configure(struct hwc_context *tc)
 		}
 	}
 
-	struct hwc_start hs;
-
-	hs.counter_mask = (1 << 3) | (1 << 4);
-
-	error = ioctl(tc->ctx_fd, HWC_IOC_START, &hs);
-	if (error) {
-		printf("%s: could not start counters %x, error %d\n",
-		    __func__, hs.counter_mask, error);
-		return (error);
-	}
+	pmu_start(tc);
 
 	return (0);
 }
