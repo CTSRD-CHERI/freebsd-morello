@@ -122,7 +122,7 @@ hwc_owner_shutdown(struct hwc_owner *ho)
 {
 	struct hwc_context *ctx;
 
-	printf("%s: stopping hwc owner\n", __func__);
+	dprintf("%s: stopping hwc owner\n", __func__);
 
 	while (1) {
 		mtx_lock(&ho->mtx);

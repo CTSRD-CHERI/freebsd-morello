@@ -285,7 +285,7 @@ hwc_vm_ioctl(struct cdev *dev, u_long cmd, caddr_t addr, int flags,
 
 	switch (cmd) {
 	case HWC_IOC_START:
-		printf("%s: start tracing\n", __func__);
+		dprintf("%s: start tracing\n", __func__);
 
 		HWT_CTX_LOCK(ctx);
 		if (ctx->state == CTX_STATE_RUNNING) {
@@ -499,7 +499,7 @@ void
 hwc_vm_free(struct hwc_vm *vm)
 {
 
-	printf("%s\n", __func__);
+	dprintf("%s\n", __func__);
 
 	if (vm->cdev)
 		destroy_dev_sched(vm->cdev);

@@ -39,6 +39,8 @@
 #include <dev/hwc/hwc_context.h>
 #include <dev/hwc/hwc_backend.h>
 
+#define	dprintf(...)
+
 static struct ofw_compat_data compat_data[] = {
 	{ "riscv,pmu",			1 },
 	{ NULL,				0 }
@@ -67,7 +69,7 @@ static int
 pmu_backend_init(struct hwc_context *ctx)
 {
 
-	printf("%s\n", __func__);
+	dprintf("%s\n", __func__);
 
 	return (0);
 }
@@ -76,7 +78,7 @@ static int
 pmu_backend_deinit(struct hwc_context *ctx)
 {
 
-	printf("%s\n", __func__);
+	dprintf("%s\n", __func__);
 
 	return (0);
 }
@@ -96,11 +98,11 @@ pmu_backend_deinit(struct hwc_context *ctx)
 static int
 pmu_backend_configure(struct hwc_context *ctx, struct hwc_configure *hc)
 {
-	struct sbi_ret ret;
+	struct sbi_ret ret __unused;
 	int flags;
 	uint32_t reg;
 
-	printf("%s: event_id %d counter_id %d\n", __func__, hc->event_id,
+	dprintf("%s: event_id %d counter_id %d\n", __func__, hc->event_id,
 	    hc->counter_id);
 
 	flags = SBI_PMU_CFG_FLAG_CLEAR_VALUE;
@@ -112,7 +114,7 @@ pmu_backend_configure(struct hwc_context *ctx, struct hwc_configure *hc)
 	    (1 << hc->counter_id), flags, hc->event_id, 0);
 #endif
 
-	printf("config match err %ld num %ld\n", ret.error, ret.value);
+	dprintf("config match err %ld num %ld\n", ret.error, ret.value);
 
 	/* Enable user access. */
 	reg = csr_read(scounteren);
@@ -130,7 +132,7 @@ pmu_backend_start(struct hwc_context *ctx, struct hwc_start *hs)
 	ret = SBI_CALL2(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_START, 0,
 	    hs->counter_mask);
 
-	printf("start counters err %ld num %ld\n", ret.error, ret.value);
+	dprintf("start counters err %ld num %ld\n", ret.error, ret.value);
 
 	return (ret.error);
 }
@@ -143,7 +145,7 @@ pmu_backend_stop(struct hwc_context *ctx, struct hwc_stop *hs)
 	ret = SBI_CALL2(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_STOP, 0,
 	    hs->counter_mask);
 
-	printf("stop counters err %ld num %ld\n", ret.error, ret.value);
+	dprintf("stop counters err %ld num %ld\n", ret.error, ret.value);
 
 	return (ret.error);
 }

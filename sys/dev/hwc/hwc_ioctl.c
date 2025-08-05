@@ -417,7 +417,7 @@ hwc_ioctl_alloc(struct thread *td, struct hwc_alloc *halloc)
 	struct hwc_owner *ho;
 	int error;
 
-	printf("%s\n", __func__);
+	dprintf("%s\n", __func__);
 
 	if (halloc->backend_name == NULL)
 		return (EINVAL);
