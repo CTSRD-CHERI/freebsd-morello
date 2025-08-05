@@ -245,7 +245,8 @@ static_body()
 	    jexec one ifconfig ${bridge} static ${epair}a 00:01:02:03:04:05
 
 	# List addresses
-	atf_check -s exit:0 -o ignore \
+	atf_check -s exit:0 \
+	    -o match:"00:01:02:03:04:05 Vlan0 ${epair}a 0 flags=1<STATIC>" \
 	    jexec one ifconfig ${bridge} addr
 
 	# Delete with bad address format
@@ -262,6 +263,72 @@ static_body()
 }
 
 static_cleanup()
+{
+	vnet_cleanup
+}
+
+atf_test_case "vstatic" "cleanup"
+vstatic_head()
+{
+	atf_set descr 'Bridge VLAN static address test'
+	atf_set require.user root
+}
+
+vstatic_body()
+{
+	vnet_init
+	vnet_init_bridge
+
+	epair=$(vnet_mkepair)
+	bridge=$(vnet_mkbridge)
+
+	vnet_mkjail one ${bridge} ${epair}a
+
+	ifconfig ${epair}b up
+
+	jexec one ifconfig ${bridge} up
+	jexec one ifconfig ${epair}a up
+	jexec one ifconfig ${bridge} addm ${epair}a
+
+	# Wrong interface
+	atf_check -s exit:1 -o ignore -e ignore jexec one \
+	    ifconfig ${bridge} static ${epair}b 00:01:02:03:04:05 vlan 10
+
+	# Bad address format
+	atf_check -s exit:1 -o ignore -e ignore jexec one \
+	    ifconfig ${bridge} static ${epair}a 00:01:02:03:04 vlan 10
+
+	# Invalid VLAN ID
+	atf_check -s exit:1 -o ignore -e ignore jexec one \
+	    ifconfig ${bridge} static ${epair}a 00:01:02:03:04:05 vlan 5000
+
+	# Correct add
+	atf_check -s exit:0 -o ignore jexec one \
+	    ifconfig ${bridge} static ${epair}a 00:01:02:03:04:05 vlan 10
+
+	# List addresses
+	atf_check -s exit:0 \
+	    -o match:"00:01:02:03:04:05 Vlan10 ${epair}a 0 flags=1<STATIC>" \
+	    jexec one ifconfig ${bridge} addr
+
+	# Delete with bad address format
+	atf_check -s exit:1 -o ignore -e ignore jexec one \
+	    ifconfig ${bridge} deladdr 00:01:02:03:04 vlan 10
+
+	# Delete with unlisted address
+	atf_check -s exit:1 -o ignore -e ignore jexec one \
+	    ifconfig ${bridge} deladdr 00:01:02:03:04:06 vlan 10
+
+	# Delete with wrong vlan id
+	atf_check -s exit:1 -o ignore -e ignore jexec one \
+	    ifconfig ${bridge} deladdr 00:01:02:03:04:05 vlan 20
+
+	# Correct delete
+	atf_check -s exit:0 -o ignore jexec one \
+	    ifconfig ${bridge} deladdr 00:01:02:03:04:05 vlan 10
+}
+
+vstatic_cleanup()
 {
 	vnet_cleanup
 }
@@ -852,7 +919,7 @@ vlan_pvid_body()
 
 	bridge=$(vnet_mkbridge)
 
-	ifconfig ${bridge} up
+	ifconfig ${bridge} vlanfilter up
 	ifconfig ${epone}a up
 	ifconfig ${eptwo}a up
 	ifconfig ${bridge} addm ${epone}a untagged ${epone}a 20
@@ -891,16 +958,18 @@ vlan_pvid_filtered_body()
 	vnet_mkjail one ${epone}b
 	vnet_mkjail two ${eptwo}b
 
-	jexec one ifconfig ${epone}b 192.0.2.1/24 up
-	jexec two ifconfig ${eptwo}b 192.0.2.2/24 up
+	atf_check -s exit:0 jexec one ifconfig ${epone}b 192.0.2.1/24 up
+	atf_check -s exit:0 jexec two ifconfig ${eptwo}b 192.0.2.2/24 up
 
 	bridge=$(vnet_mkbridge)
 
-	ifconfig ${bridge} up
-	ifconfig ${epone}a up
-	ifconfig ${eptwo}a up
-	ifconfig ${bridge} addm ${epone}a untagged ${epone}a 20
-	ifconfig ${bridge} addm ${eptwo}a untagged ${eptwo}a 30
+	atf_check -s exit:0 ifconfig ${bridge} vlanfilter up
+	atf_check -s exit:0 ifconfig ${epone}a up
+	atf_check -s exit:0 ifconfig ${eptwo}a up
+	atf_check -s exit:0 ifconfig ${bridge} \
+	    addm ${epone}a untagged ${epone}a 20
+	atf_check -s exit:0 ifconfig ${bridge} \
+	    addm ${eptwo}a untagged ${eptwo}a 30
 
 	atf_check -s exit:2 -o ignore jexec one ping -c 3 -t 1 192.0.2.2
 	atf_check -s exit:2 -o ignore jexec two ping -c 3 -t 1 192.0.2.1
@@ -930,18 +999,22 @@ vlan_pvid_tagged_body()
 	vnet_mkjail two ${eptwo}b
 
 	# Create two tagged interfaces on the appropriate VLANs
-	jexec one ifconfig ${epone}b up
-	jexec one ifconfig ${epone}b.20 create 192.0.2.1/24 up
-	jexec two ifconfig ${eptwo}b up
-	jexec two ifconfig ${eptwo}b.20 create 192.0.2.2/24 up
+	atf_check -s exit:0 jexec one ifconfig ${epone}b up
+	atf_check -s exit:0 jexec one ifconfig ${epone}b.20 \
+	    create 192.0.2.1/24 up
+	atf_check -s exit:0 jexec two ifconfig ${eptwo}b up
+	atf_check -s exit:0 jexec two ifconfig ${eptwo}b.20 \
+	    create 192.0.2.2/24 up
 
 	bridge=$(vnet_mkbridge)
 
-	ifconfig ${bridge} up
-	ifconfig ${epone}a up
-	ifconfig ${eptwo}a up
-	ifconfig ${bridge} addm ${epone}a untagged ${epone}a 20
-	ifconfig ${bridge} addm ${eptwo}a untagged ${eptwo}a 20
+	atf_check -s exit:0 ifconfig ${bridge} vlanfilter up
+	atf_check -s exit:0 ifconfig ${epone}a up
+	atf_check -s exit:0 ifconfig ${eptwo}a up
+	atf_check -s exit:0 ifconfig ${bridge} \
+	    addm ${epone}a untagged ${epone}a 20
+	atf_check -s exit:0 ifconfig ${bridge} \
+	    addm ${eptwo}a untagged ${eptwo}a 20
 
 	# Tagged frames should not be passed.
 	atf_check -s exit:2 -o ignore jexec one ping -c 3 -t 1 192.0.2.2
@@ -975,18 +1048,20 @@ vlan_pvid_1q_body()
 	# This forces the bridge to add and remove .1q tags to bridge the
 	# traffic.
 
-	jexec one ifconfig ${epone}b 192.0.2.1/24 up
-	jexec two ifconfig ${eptwo}b up
-	jexec two ifconfig ${eptwo}b.20 create 192.0.2.2/24 up
+	atf_check -s exit:0 jexec one ifconfig ${epone}b 192.0.2.1/24 up
+	atf_check -s exit:0 jexec two ifconfig ${eptwo}b up
+	atf_check -s exit:0 jexec two ifconfig ${eptwo}b.20 create 192.0.2.2/24 up
 
 	bridge=$(vnet_mkbridge)
 
-	ifconfig ${bridge} addm ${epone}a untagged ${epone}a 20
-	ifconfig ${bridge} addm ${eptwo}a
+	atf_check -s exit:0 ifconfig ${bridge} vlanfilter up
+	atf_check -s exit:0 ifconfig ${bridge} \
+	    addm ${epone}a untagged ${epone}a 20
+	atf_check -s exit:0 ifconfig ${bridge} addm ${eptwo}a \
+	    tagged ${eptwo}a 20
 
-	ifconfig ${bridge} up
-	ifconfig ${epone}a up
-	ifconfig ${eptwo}a up
+	atf_check -s exit:0 ifconfig ${epone}a up
+	atf_check -s exit:0 ifconfig ${eptwo}a up
 
 	atf_check -s exit:0 -o ignore jexec one ping -c 3 -t 1 192.0.2.2
 	atf_check -s exit:0 -o ignore jexec two ping -c 3 -t 1 192.0.2.1
@@ -1018,18 +1093,20 @@ vlan_filtering_body()
 	vnet_mkjail one ${epone}b
 	vnet_mkjail two ${eptwo}b
 
-	jexec one ifconfig ${epone}b up
-	jexec one ifconfig ${epone}b.20 create 192.0.2.1/24 up
-	jexec two ifconfig ${eptwo}b up
-	jexec two ifconfig ${eptwo}b.20 create 192.0.2.2/24 up
+	atf_check -s exit:0 jexec one ifconfig ${epone}b up
+	atf_check -s exit:0 jexec one ifconfig ${epone}b.20 \
+	    create 192.0.2.1/24 up
+	atf_check -s exit:0 jexec two ifconfig ${eptwo}b up
+	atf_check -s exit:0 jexec two ifconfig ${eptwo}b.20 \
+	    create 192.0.2.2/24 up
 
 	bridge=$(vnet_mkbridge)
 
-	ifconfig ${bridge} up
-	ifconfig ${epone}a up
-	ifconfig ${eptwo}a up
-	ifconfig ${bridge} addm ${epone}a vlanfilter ${epone}a
-	ifconfig ${bridge} addm ${eptwo}a vlanfilter ${eptwo}a
+	atf_check -s exit:0 ifconfig ${bridge} vlanfilter up
+	atf_check -s exit:0 ifconfig ${epone}a up
+	atf_check -s exit:0 ifconfig ${eptwo}a up
+	atf_check -s exit:0 ifconfig ${bridge} addm ${epone}a
+	atf_check -s exit:0 ifconfig ${bridge} addm ${eptwo}a
 
 	# Right now there are no VLANs on the access list, so everything
 	# should be blocked.
@@ -1049,15 +1126,15 @@ vlan_filtering_body()
 	atf_check -s exit:0 ifconfig ${bridge} -untagged ${eptwo}a
 
 	# Add VLANs 10-30 to the access list; now access should be allowed.
-	ifconfig ${bridge} +tagged ${epone}a 10-30
-	ifconfig ${bridge} +tagged ${eptwo}a 10-30
+	atf_check -s exit:0 ifconfig ${bridge} +tagged ${epone}a 10-30
+	atf_check -s exit:0 ifconfig ${bridge} +tagged ${eptwo}a 10-30
 	atf_check -s exit:0 -o ignore jexec one ping -c 3 -t 1 192.0.2.2
 	atf_check -s exit:0 -o ignore jexec two ping -c 3 -t 1 192.0.2.1
 
 	# Remove vlan 20 from the access list, now access should be blocked
 	# again.
-	ifconfig ${bridge} -tagged ${epone}a 20
-	ifconfig ${bridge} -tagged ${eptwo}a 20
+	atf_check -s exit:0 ifconfig ${bridge} -tagged ${epone}a 20
+	atf_check -s exit:0 ifconfig ${bridge} -tagged ${eptwo}a 20
 	atf_check -s exit:2 -o ignore jexec one ping -c 3 -t 1 192.0.2.2
 	atf_check -s exit:2 -o ignore jexec two ping -c 3 -t 1 192.0.2.1
 }
@@ -1084,9 +1161,10 @@ vlan_ifconfig_tagged_body()
 
 	ep=$(vnet_mkepair)
 	bridge=$(vnet_mkbridge)
+	atf_check -s exit:0 ifconfig ${bridge} vlanfilter up
 
-	ifconfig ${bridge} addm ${ep}a vlanfilter ${ep}a up
-	ifconfig ${ep}a up
+	atf_check -s exit:0 ifconfig ${bridge} addm ${ep}a
+	atf_check -s exit:0 ifconfig ${ep}a up
 
 	# To start with, no vlans should be configured.
 	atf_check -s exit:0 -o not-match:"tagged" ifconfig ${bridge}
@@ -1143,18 +1221,20 @@ vlan_svi_body()
 
 	vnet_mkjail one ${epone}b
 
-	jexec one ifconfig ${epone}b up
-	jexec one ifconfig ${epone}b.20 create 192.0.2.1/24 up
+	atf_check -s exit:0 jexec one ifconfig ${epone}b up
+	atf_check -s exit:0 jexec one ifconfig ${epone}b.20 \
+	    create 192.0.2.1/24 up
 
 	bridge=$(vnet_mkbridge)
 
-	ifconfig ${bridge} up
-	ifconfig ${epone}a up
-	ifconfig ${bridge} addm ${epone}a tagged ${epone}a 20
+	atf_check -s exit:0 ifconfig ${bridge} vlanfilter up
+	atf_check -s exit:0 ifconfig ${epone}a up
+	atf_check -s exit:0 ifconfig ${bridge} addm ${epone}a \
+	    tagged ${epone}a 20
 
 	svi=$(vnet_mkvlan)
-	ifconfig ${svi} vlan 20 vlandev ${bridge}
-	ifconfig ${svi} inet 192.0.2.2/24 up
+	atf_check -s exit:0 ifconfig ${svi} vlan 20 vlandev ${bridge}
+	atf_check -s exit:0 ifconfig ${svi} inet 192.0.2.2/24 up
 
 	atf_check -s exit:0 -o ignore ping -c 3 -t 1 192.0.2.1
 }
@@ -1244,12 +1324,66 @@ bridge_svi_in_bridge_cleanup()
 	vnet_cleanup
 }
 
+atf_test_case "vlan_defuntagged" "cleanup"
+vlan_defuntagged_head()
+{
+	atf_set descr 'defuntagged (defpvid) bridge option'
+	atf_set require.user root
+}
+
+vlan_defuntagged_body()
+{
+	vnet_init
+	vnet_init_bridge
+
+	bridge=$(vnet_mkbridge)
+	atf_check -s exit:0 ifconfig ${bridge} vlanfilter
+
+	# Invalid VLAN IDs
+	atf_check -s exit:1 -ematch:"invalid vlan id: 0" \
+		ifconfig ${bridge} defuntagged 0
+	atf_check -s exit:1 -ematch:"invalid vlan id: 4095" \
+		ifconfig ${bridge} defuntagged 4095
+	atf_check -s exit:1 -ematch:"invalid vlan id: 5000" \
+		ifconfig ${bridge} defuntagged 5000
+
+	# Check the bridge option is set and cleared correctly
+	atf_check -s exit:0 -onot-match:"defuntagged=" \
+		ifconfig ${bridge}
+
+	atf_check -s exit:0 ifconfig ${bridge} defuntagged 10
+	atf_check -s exit:0 -omatch:"defuntagged=10$" \
+		ifconfig ${bridge}
+
+	atf_check -s exit:0 ifconfig ${bridge} -defuntagged
+	atf_check -s exit:0 -onot-match:"defuntagged=" \
+		ifconfig ${bridge}
+
+	# Check the untagged option is correctly set on a member
+	atf_check -s exit:0 ifconfig ${bridge} defuntagged 10
+
+	epair=$(vnet_mkepair)
+	atf_check -s exit:0 ifconfig ${bridge} addm ${epair}a
+
+	tag=$(ifconfig ${bridge} | sed -Ene \
+		"/member: ${epair}a/ { N;s/.*untagged ([0-9]+).*/\\1/p;q; }")
+	if [ "$tag" != "10" ]; then
+		atf_fail "wrong untagged vlan: ${tag}"
+	fi
+}
+
+vlan_defuntagged_cleanup()
+{
+	vnet_cleanup
+}
+
 atf_init_test_cases()
 {
 	atf_add_test_case "bridge_transmit_ipv4_unicast"
 	atf_add_test_case "stp"
 	atf_add_test_case "stp_vlan"
 	atf_add_test_case "static"
+	atf_add_test_case "vstatic"
 	atf_add_test_case "span"
 	atf_add_test_case "inherit_mac"
 	atf_add_test_case "delete_with_members"
@@ -1270,5 +1404,6 @@ atf_init_test_cases()
 	atf_add_test_case "vlan_ifconfig_tagged"
 	atf_add_test_case "vlan_svi"
 	atf_add_test_case "vlan_qinq"
+	atf_add_test_case "vlan_defuntagged"
 	atf_add_test_case "bridge_svi_in_bridge"
 }

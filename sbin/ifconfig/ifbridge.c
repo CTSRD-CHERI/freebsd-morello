@@ -223,6 +223,11 @@ bridge_status(if_ctx *ctx)
 	    params->ifbop_root_path_cost,
 	    params->ifbop_root_port & 0xfff);
 
+	printb("\tbridge flags", bridge->flags, IFBRFBITS);
+	if (bridge->defpvid)
+		printf(" defuntagged=%u", (unsigned) bridge->defpvid);
+	printf("\n");
+
 	prefix = "\tmember: ";
 	pad    = "\t        ";
 	for (size_t i = 0; i < bridge->members_count; ++i) {
@@ -435,49 +440,85 @@ setbridge_flushall(if_ctx *ctx, const char *val __unused, int dummy __unused)
 		err(1, "BRDGFLUSH");
 }
 
-static void
-setbridge_static(if_ctx *ctx, const char *val, const char *mac)
+static int
+setbridge_static(if_ctx *ctx, int argc, const char *const *argv)
 {
 	struct ifbareq req;
 	struct ether_addr *ea;
+	int arg;
+
+	if (argc < 2)
+		errx(1, "usage: static <interface> <address> [vlan <id>]");
+	arg = 0;
 
 	memset(&req, 0, sizeof(req));
-	strlcpy(req.ifba_ifsname, val, sizeof(req.ifba_ifsname));
-
-	ea = ether_aton(mac);
-	if (ea == NULL)
-		errx(1, "%s: invalid address: %s", val, mac);
-
-	memcpy(req.ifba_dst, ea->octet, sizeof(req.ifba_dst));
 	req.ifba_flags = IFBAF_STATIC;
-	req.ifba_vlan = 0; /* XXX allow user to specify */
+
+	strlcpy(req.ifba_ifsname, argv[arg], sizeof(req.ifba_ifsname));
+	++arg;
+
+	ea = ether_aton(argv[arg]);
+	if (ea == NULL)
+		errx(1, "invalid address: %s", argv[arg]);
+	memcpy(req.ifba_dst, ea->octet, sizeof(req.ifba_dst));
+	++arg;
+
+	req.ifba_vlan = 0;
+	if (argc > 2 && strcmp(argv[arg], "vlan") == 0) {
+		if (argc < 3)
+			errx(1, "usage: static <interface> <address> "
+			    "[vlan <id>]");
+		++arg;
+
+		if (get_vlan_id(argv[arg], &req.ifba_vlan) < 0)
+			errx(1, "invalid vlan id: %s", argv[arg]);
+		++arg;
+	}
 
 	if (do_cmd(ctx, BRDGSADDR, &req, sizeof(req), 1) < 0)
-		err(1, "BRDGSADDR %s",  val);
+		err(1, "BRDGSADDR");
+	return arg;
 }
 
-static void
-setbridge_deladdr(if_ctx *ctx, const char *val, int dummy __unused)
+static int
+setbridge_deladdr(if_ctx *ctx, int argc, const char *const *argv)
 {
 	struct ifbareq req;
 	struct ether_addr *ea;
+	int arg;
+
+	if (argc < 1)
+		errx(1, "usage: deladdr <address> [vlan <id>]");
+	arg = 0;
 
 	memset(&req, 0, sizeof(req));
 
-	ea = ether_aton(val);
+	ea = ether_aton(argv[arg]);
 	if (ea == NULL)
-		errx(1, "invalid address: %s",  val);
-
+		errx(1, "invalid address: %s", argv[arg]);
 	memcpy(req.ifba_dst, ea->octet, sizeof(req.ifba_dst));
+	++arg;
+
+	req.ifba_vlan = 0;
+	if (argc >= 2 && strcmp(argv[arg], "vlan") == 0) {
+		if (argc < 3)
+			errx(1, "usage: deladdr <address> [vlan <id>]");
+		++arg;
+
+		if (get_vlan_id(argv[arg], &req.ifba_vlan) < 0)
+			errx(1, "invalid vlan id: %s", argv[arg]);
+		++arg;
+	}
 
 	if (do_cmd(ctx, BRDGDADDR, &req, sizeof(req), 1) < 0)
-		err(1, "BRDGDADDR %s",  val);
+		err(1, "BRDGDADDR");
+
+	return arg;
 }
 
 static void
 setbridge_addr(if_ctx *ctx, const char *val __unused, int dummy __unused)
 {
-
 	bridge_addresses(ctx, "");
 }
 
@@ -698,18 +739,6 @@ unsetbridge_private(if_ctx *ctx, const char *val, int dummy __unused)
 	do_bridgeflag(ctx, val, IFBIF_PRIVATE, 0);
 }
 
-static void
-setbridge_vlanfilter(if_ctx *ctx, const char *val, int dummy __unused)
-{
-	do_bridgeflag(ctx, val, IFBIF_VLANFILTER, 1);
-}
-
-static void
-unsetbridge_vlanfilter(if_ctx *ctx, const char *val, int dummy __unused)
-{
-	do_bridgeflag(ctx, val, IFBIF_VLANFILTER, 0);
-}
-
 static int
 parse_vlans(ifbvlan_set_t *set, const char *str)
 {
@@ -801,6 +830,59 @@ delbridge_tagged(if_ctx *ctx, const char *ifn, const char *vlans)
 	set_bridge_vlanset(ctx, ifn, vlans, BRDG_VLAN_OP_DEL);
 }
 
+static void
+setbridge_flags(if_ctx *ctx, const char *val __unused, int newflags)
+{
+	struct ifbrparam req;
+
+	if (do_cmd(ctx, BRDGGFLAGS, &req, sizeof(req), 0) < 0)
+		err(1, "BRDGGFLAGS");
+
+	req.ifbrp_flags |= (uint32_t)newflags;
+
+	if (do_cmd(ctx, BRDGSFLAGS, &req, sizeof(req), 1) < 0)
+		err(1, "BRDGSFLAGS");
+}
+
+static void
+unsetbridge_flags(if_ctx *ctx, const char *val __unused, int newflags)
+{
+	struct ifbrparam req;
+
+	if (do_cmd(ctx, BRDGGFLAGS, &req, sizeof(req), 0) < 0)
+		err(1, "BRDGGFLAGS");
+
+	req.ifbrp_flags &= ~(uint32_t)newflags;
+
+	if (do_cmd(ctx, BRDGSFLAGS, &req, sizeof(req), 1) < 0)
+		err(1, "BRDGSFLAGS");
+}
+
+static void
+setbridge_defuntagged(if_ctx *ctx, const char *arg, int dummy __unused)
+{
+	struct ifbrparam req;
+
+	memset(&req, 0, sizeof(req));
+	if (get_vlan_id(arg, &req.ifbrp_defpvid) < 0)
+		errx(1, "invalid vlan id: %s", arg);
+
+	if (do_cmd(ctx, BRDGSDEFPVID, &req, sizeof(req), 1) < 0)
+		err(1, "BRDGSDEFPVID");
+}
+
+static void
+unsetbridge_defuntagged(if_ctx *ctx, const char *val __unused, int dummy __unused)
+{
+	struct ifbrparam req;
+
+	memset(&req, 0, sizeof(req));
+	req.ifbrp_defpvid = 0;
+
+	if (do_cmd(ctx, BRDGSDEFPVID, &req, sizeof(req), 1) < 0)
+		err(1, "BRDGSDEFPVID");
+}
+
 static struct cmd bridge_cmds[] = {
 	DEF_CMD_ARG("addm",		setbridge_add),
 	DEF_CMD_ARG("deletem",		setbridge_delete),
@@ -824,8 +906,8 @@ static struct cmd bridge_cmds[] = {
 	DEF_CMD_ARG("-autoptp",		unsetbridge_autoptp),
 	DEF_CMD("flush", 0,		setbridge_flush),
 	DEF_CMD("flushall", 0,		setbridge_flushall),
-	DEF_CMD_ARG2("static",		setbridge_static),
-	DEF_CMD_ARG("deladdr",		setbridge_deladdr),
+	DEF_CMD_VARG("static",		setbridge_static),
+	DEF_CMD_VARG("deladdr",		setbridge_deladdr),
 	DEF_CMD("addr",	 1,		setbridge_addr),
 	DEF_CMD_ARG("maxaddr",		setbridge_maxaddr),
 	DEF_CMD_ARG("hellotime",	setbridge_hellotime),
@@ -837,8 +919,6 @@ static struct cmd bridge_cmds[] = {
 	DEF_CMD_ARG2("ifpriority",	setbridge_ifpriority),
 	DEF_CMD_ARG2("ifpathcost",	setbridge_ifpathcost),
 	DEF_CMD_ARG2("ifmaxaddr",	setbridge_ifmaxaddr),
-	DEF_CMD_ARG("vlanfilter",	setbridge_vlanfilter),
-	DEF_CMD_ARG("-vlanfilter",	unsetbridge_vlanfilter),
 	DEF_CMD_ARG2("untagged",	setbridge_untagged),
 	DEF_CMD_ARG("-untagged",	unsetbridge_untagged),
 	DEF_CMD_ARG2("tagged",		setbridge_tagged),
@@ -847,7 +927,14 @@ static struct cmd bridge_cmds[] = {
 	DEF_CMD_ARG("timeout",		setbridge_timeout),
 	DEF_CMD_ARG("private",		setbridge_private),
 	DEF_CMD_ARG("-private",		unsetbridge_private),
+	DEF_CMD("vlanfilter", (int32_t)IFBRF_VLANFILTER,
+					setbridge_flags),
+	DEF_CMD("-vlanfilter", (int32_t)IFBRF_VLANFILTER,
+					unsetbridge_flags),
+	DEF_CMD_ARG("defuntagged",	setbridge_defuntagged),
+	DEF_CMD("-defuntagged", 0,	unsetbridge_defuntagged),
 };
+
 static struct afswtch af_bridge = {
 	.af_name	= "af_bridge",
 	.af_af		= AF_UNSPEC,
