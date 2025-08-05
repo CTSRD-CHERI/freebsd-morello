@@ -50,6 +50,7 @@
 #include <ucl.h>
 
 #include <machine/riscvreg.h>
+#include <machine/encoding.h>
 
 #include "hwc.h"
 #include "hwc_pmu.h"
@@ -64,6 +65,15 @@
 #else
 #define	dprintf(fmt, ...)
 #endif
+
+struct counter {
+	char *name;
+	bool valid;
+};
+
+#define	RISCV_NCOUNTERS	32
+
+static struct counter counters[RISCV_NCOUNTERS];
 
 static int
 pmu_request(struct hwc_context *tc, int mhpm_id, int event_id)
@@ -112,9 +122,18 @@ pmu_configure_counter(struct hwc_context *tc, const ucl_object_t *top)
 	printf("%s: Configuring id %d name %s event_id %d enabled %d\n",
 	    __func__, mhpm_id, name, event_id, enabled);
 
-	error = pmu_request(tc, mhpm_id, event_id);
+	/* Filter out reserved counters. */
+	if (mhpm_id < 3)
+		return (-1);
 
-	return (error);
+	error = pmu_request(tc, mhpm_id, event_id);
+	if (error)
+		return (error);
+
+	counters[mhpm_id].name = strdup(name);
+	counters[mhpm_id].valid = true;
+
+	return (0);
 }
 
 static int
@@ -191,6 +210,8 @@ pmu_init(struct hwc_context *tc __unused)
 
 	printf("%s\n", __func__);
 
+	bzero(counters, sizeof(struct counter) * RISCV_NCOUNTERS);
+
 	return (0);
 }
 
@@ -204,16 +225,28 @@ static int
 pmu_shutdown(struct hwc_context *tc __unused)
 {
 	struct hwc_stop hs;
+	struct counter *c;
 	int error;
+	int i;
 
-	hs.counter_mask = (1 << 3) | (1 << 4);
+	hs.counter_mask = 0;
+
+	for (i = 0; i < RISCV_NCOUNTERS; i++)
+		if (counters[i].valid == true)
+			hs.counter_mask |= (1 << i);
+
 	error = ioctl(tc->ctx_fd, HWC_IOC_STOP, &hs);
 	if (error) {
 		printf("%s: could not stop counters %x, error %d\n",
 		    __func__, hs.counter_mask, error);
 	}
 
-	printf("%s: hpmcounter3,4 %ld %ld\n", __func__, csr_read(hpmcounter3), csr_read(hpmcounter4));
+	for (i = 0; i < RISCV_NCOUNTERS; i++) {
+		c = &counters[i];
+		if (c->valid == true)
+			printf("%s: %s == %ld\n", __func__, c->name,
+			    csr_read(hpmcounter3));
+	}
 
 	return (error);
 }
