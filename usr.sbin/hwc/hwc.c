@@ -57,7 +57,7 @@
 #include "hwc_process.h"
 
 #if defined(__riscv)
-#include "hwc_pmu.h"
+#include "riscv/hwc_pmu.h"
 #endif
 
 #define	HWC_DEBUG
