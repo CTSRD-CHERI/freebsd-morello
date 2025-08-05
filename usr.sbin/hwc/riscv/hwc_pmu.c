@@ -75,6 +75,47 @@ struct counter {
 
 static struct counter counters[RISCV_NCOUNTERS];
 
+static uint64_t
+csr_read_num(int csr_num)
+{
+#define switchcase_csr_read(__csr_num, __val)		{\
+	case __csr_num:					\
+		__val = csr_read(__csr_num);		\
+		break; }
+#define switchcase_csr_read_2(__csr_num, __val)		{\
+	switchcase_csr_read(__csr_num + 0, __val)	\
+	switchcase_csr_read(__csr_num + 1, __val)}
+#define switchcase_csr_read_4(__csr_num, __val)		{\
+	switchcase_csr_read_2(__csr_num + 0, __val)	\
+	switchcase_csr_read_2(__csr_num + 2, __val)}
+#define switchcase_csr_read_8(__csr_num, __val)		{\
+	switchcase_csr_read_4(__csr_num + 0, __val)	\
+	switchcase_csr_read_4(__csr_num + 4, __val)}
+#define switchcase_csr_read_16(__csr_num, __val)	{\
+	switchcase_csr_read_8(__csr_num + 0, __val)	\
+	switchcase_csr_read_8(__csr_num + 8, __val)}
+#define switchcase_csr_read_32(__csr_num, __val)	{\
+	switchcase_csr_read_16(__csr_num + 0, __val)	\
+	switchcase_csr_read_16(__csr_num + 16, __val)}
+
+	unsigned long ret = 0;
+
+	switch (csr_num) {
+	switchcase_csr_read_32(CSR_CYCLE, ret)
+	switchcase_csr_read_32(CSR_CYCLEH, ret)
+	default :
+		break;
+	}
+
+	return ret;
+#undef switchcase_csr_read_32
+#undef switchcase_csr_read_16
+#undef switchcase_csr_read_8
+#undef switchcase_csr_read_4
+#undef switchcase_csr_read_2
+#undef switchcase_csr_read
+}
+
 static int
 pmu_request(struct hwc_context *tc, int mhpm_id, int event_id)
 {
@@ -157,6 +198,28 @@ pmu_configure_counters(struct hwc_context *tc, const ucl_object_t *top)
 }
 
 static int
+pmu_stop(struct hwc_context *tc)
+{
+	struct hwc_stop hs;
+	int error;
+	int i;
+
+	hs.counter_mask = 0;
+
+	for (i = 0; i < RISCV_NCOUNTERS; i++)
+		if (counters[i].valid == true)
+			hs.counter_mask |= (1 << i);
+
+	error = ioctl(tc->ctx_fd, HWC_IOC_STOP, &hs);
+	if (error) {
+		printf("%s: could not stop counters %x, error %d\n",
+		    __func__, hs.counter_mask, error);
+	}
+
+	return (error);
+}
+
+static int
 pmu_start(struct hwc_context *tc)
 {
 	struct hwc_start hs;
@@ -231,66 +294,13 @@ pmu_run_once(struct hwc_context *tc __unused)
 
 }
 
-static uint64_t
-csr_read_num(int csr_num)
-{
-#define switchcase_csr_read(__csr_num, __val)		{\
-	case __csr_num:					\
-		__val = csr_read(__csr_num);		\
-		break; }
-#define switchcase_csr_read_2(__csr_num, __val)		{\
-	switchcase_csr_read(__csr_num + 0, __val)	\
-	switchcase_csr_read(__csr_num + 1, __val)}
-#define switchcase_csr_read_4(__csr_num, __val)		{\
-	switchcase_csr_read_2(__csr_num + 0, __val)	\
-	switchcase_csr_read_2(__csr_num + 2, __val)}
-#define switchcase_csr_read_8(__csr_num, __val)		{\
-	switchcase_csr_read_4(__csr_num + 0, __val)	\
-	switchcase_csr_read_4(__csr_num + 4, __val)}
-#define switchcase_csr_read_16(__csr_num, __val)	{\
-	switchcase_csr_read_8(__csr_num + 0, __val)	\
-	switchcase_csr_read_8(__csr_num + 8, __val)}
-#define switchcase_csr_read_32(__csr_num, __val)	{\
-	switchcase_csr_read_16(__csr_num + 0, __val)	\
-	switchcase_csr_read_16(__csr_num + 16, __val)}
-
-	unsigned long ret = 0;
-
-	switch (csr_num) {
-	switchcase_csr_read_32(CSR_CYCLE, ret)
-	switchcase_csr_read_32(CSR_CYCLEH, ret)
-	default :
-		break;
-	}
-
-	return ret;
-#undef switchcase_csr_read_32
-#undef switchcase_csr_read_16
-#undef switchcase_csr_read_8
-#undef switchcase_csr_read_4
-#undef switchcase_csr_read_2
-#undef switchcase_csr_read
-}
-
 static int
 pmu_shutdown(struct hwc_context *tc __unused)
 {
-	struct hwc_stop hs;
 	struct counter *c;
-	int error;
 	int i;
 
-	hs.counter_mask = 0;
-
-	for (i = 0; i < RISCV_NCOUNTERS; i++)
-		if (counters[i].valid == true)
-			hs.counter_mask |= (1 << i);
-
-	error = ioctl(tc->ctx_fd, HWC_IOC_STOP, &hs);
-	if (error) {
-		printf("%s: could not stop counters %x, error %d\n",
-		    __func__, hs.counter_mask, error);
-	}
+	pmu_stop(tc);
 
 	/* Print out standard counters. */
 	printf(" time == %ld\n", csr_read(time));
@@ -304,7 +314,7 @@ pmu_shutdown(struct hwc_context *tc __unused)
 			    csr_read_num(CSR_HPMCOUNTER3 - 3 + i));
 	}
 
-	return (error);
+	return (0);
 }
 
 struct hwc_methods pmu_methods = {
