@@ -129,8 +129,8 @@ pmu_backend_start(struct hwc_context *ctx, struct hwc_start *hs)
 {
 	struct sbi_ret ret;
 
-	ret = SBI_CALL2(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_START, 0,
-	    hs->counter_mask);
+	ret = SBI_CALL4(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_START, 0,
+	    hs->counter_mask, SBI_PMU_START_FLAG_SET_INIT_VALUE, 0);
 
 	dprintf("start counters err %ld num %ld\n", ret.error, ret.value);
 
