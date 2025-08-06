@@ -92,6 +92,7 @@ SUBDIR=	${SUBDIR_BOOTSTRAP} \
 	librss \
 	librt \
 	librtld_db \
+	libsamplerate \
 	libsbuf \
 	libsmb \
 	libstatcounters \
@@ -106,6 +107,7 @@ SUBDIR=	${SUBDIR_BOOTSTRAP} \
 	libugidfw \
 	libulog \
 	libutil \
+	libutil++ \
 	${_libvgl} \
 	libwrap \
 	libxo \

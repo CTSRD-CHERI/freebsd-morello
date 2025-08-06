@@ -1051,7 +1051,7 @@ ufs_remove(
 #ifdef UFS_GJOURNAL
 	ufs_gjournal_orphan(vp);
 #endif
-	error = ufs_dirremove(dvp, ip, ap->a_cnp->cn_flags, 0);
+	error = ufs_dirremove(dvp, ip, ap->a_cnp->cn_flags, false);
 	if (ip->i_nlink <= 0)
 		vp->v_vflag |= VV_NOSYNC;
 	if (IS_SNAPSHOT(ip)) {
@@ -1209,7 +1209,7 @@ ufs_whiteout(
 #endif
 
 		cnp->cn_flags &= ~DOWHITEOUT;
-		error = ufs_dirremove(dvp, NULL, cnp->cn_flags, 0);
+		error = ufs_dirremove(dvp, NULL, cnp->cn_flags, false);
 		break;
 	default:
 		panic("ufs_whiteout: unknown op");
@@ -1728,7 +1728,7 @@ relock:
 			    "rename: missing .. entry");
 		cache_purge(fdvp);
 	}
-	error = ufs_dirremove(fdvp, fip, fcnp->cn_flags, 0);
+	error = ufs_dirremove(fdvp, fip, fcnp->cn_flags, false);
 	/*
 	 * The kern_renameat() looks up the fvp using the DELETE flag, which
 	 * causes the removal of the name cache entry for fvp.
@@ -2038,7 +2038,6 @@ ufs_mkdir(
 	{
 #ifdef QUOTA
 		struct ucred ucred, *ucp;
-		gid_t ucred_group;
 		ucp = cnp->cn_cred;
 #endif
 		/*
@@ -2065,13 +2064,8 @@ ufs_mkdir(
 				 */
 				ucred.cr_ref = 1;
 				ucred.cr_uid = ip->i_uid;
-
-				/*
-				 * XXXKE Fix this is cr_gid gets separated out
-				 */
-				ucred.cr_ngroups = 1;
-				ucred.cr_groups = &ucred_group;
-				ucred.cr_gid = ucred_group = dp->i_gid;
+				ucred.cr_gid = dp->i_gid;
+				ucred.cr_ngroups = 0;
 				ucp = &ucred;
 			}
 #endif
@@ -2309,7 +2303,7 @@ ufs_rmdir(
 	ip->i_effnlink--;
 	if (DOINGSOFTDEP(vp))
 		softdep_setup_rmdir(dp, ip);
-	error = ufs_dirremove(dvp, ip, cnp->cn_flags, 1);
+	error = ufs_dirremove(dvp, ip, cnp->cn_flags, true);
 	if (error) {
 		dp->i_effnlink++;
 		ip->i_effnlink++;
@@ -2802,7 +2796,6 @@ ufs_makeinode(int mode, struct vnode *dvp, struct vnode **vpp,
 	{
 #ifdef QUOTA
 		struct ucred ucred, *ucp;
-		gid_t ucred_group;
 		ucp = cnp->cn_cred;
 #endif
 		/*
@@ -2828,13 +2821,8 @@ ufs_makeinode(int mode, struct vnode *dvp, struct vnode **vpp,
 			 */
 			ucred.cr_ref = 1;
 			ucred.cr_uid = ip->i_uid;
-
-			/*
-			 * XXXKE Fix this is cr_gid gets separated out
-			 */
-			ucred.cr_ngroups = 1;
-			ucred.cr_groups = &ucred_group;
-			ucred.cr_gid = ucred_group = pdir->i_gid;
+			ucred.cr_gid = pdir->i_gid;
+			ucred.cr_ngroups = 0;
 			ucp = &ucred;
 #endif
 		} else {

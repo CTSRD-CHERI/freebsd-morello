@@ -206,10 +206,11 @@ options 	FDT
 # device 	iicoc		# OpenCores I2C controller support
 
 # Include SoC specific configuration
-# include 	"std.allwinner"
-# include 	"std.eswin"
-# include 	"std.sifive"
-# include 	"std.starfive"
+#include		"std.allwinner"
+#include		"std.cvitek"
+#include		"std.eswin"
+#include		"std.sifive"
+#include		"std.starfive"
 
 # Uncomment for memory disk
 # options 	MD_ROOT
