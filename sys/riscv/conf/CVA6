@@ -1,0 +1,22 @@
+cpu		RISCV
+ident		CVA6
+
+include		GENERIC
+
+# Uncomment for memory disk
+#options 	MD_ROOT
+#options 	MD_ROOT_SIZE=8192
+#makeoptions	MFS_IMAGE=/home/br/dev/freebsd/mdroot-small.img
+#options 	ROOTDEVNAME=\"ufs:/dev/md0\"
+#options 	ROOTDEVNAME=\"ufs:/dev/mmcsd0s3\"
+
+#options 	FDT
+#options 	FDT_DTB_STATIC
+#makeoptions	FDT_DTS_FILE=x730-mp1-hobgoblin-vcu118.dts
+#makeoptions	MODULES_OVERRIDE=""
+
+# Uncomment for memory disk
+options		MD_ROOT
+options		MD_ROOT_SIZE=8192
+makeoptions	MFS_IMAGE=/home/br/dev/freebsd/mdroot.img
+options		ROOTDEVNAME=\"ufs:/dev/md0\"
