@@ -68,7 +68,7 @@
 
 struct counter {
 	char *name;
-	bool valid;
+	bool enabled;
 };
 
 #define	RISCV_NCOUNTERS	32
@@ -160,6 +160,9 @@ pmu_configure_counter(struct hwc_context *tc, const ucl_object_t *top)
 			enabled = ucl_object_toboolean(obj);
 	}
 
+	if (enabled == false)
+		return (0);
+
 	dprintf("%s: Configuring id %d name %s event_id %d enabled %d\n",
 	    __func__, mhpm_id, name, event_id, enabled);
 
@@ -168,7 +171,7 @@ pmu_configure_counter(struct hwc_context *tc, const ucl_object_t *top)
 		return (error);
 
 	counters[mhpm_id].name = strdup(name);
-	counters[mhpm_id].valid = true;
+	counters[mhpm_id].enabled = true;
 
 	return (0);
 }
@@ -207,12 +210,12 @@ pmu_stop(struct hwc_context *tc)
 	hs.counter_mask = 0;
 
 	for (i = 0; i < RISCV_NCOUNTERS; i++)
-		if (counters[i].valid == true)
+		if (counters[i].enabled == true)
 			hs.counter_mask |= (1 << i);
 
 	error = ioctl(tc->ctx_fd, HWC_IOC_STOP, &hs);
 	if (error) {
-		printf("%s: could not stop counters %x, error %d\n",
+		printf("%s: could not stop counters (mask) 0x%x, error %d\n",
 		    __func__, hs.counter_mask, error);
 	}
 
@@ -229,12 +232,12 @@ pmu_start(struct hwc_context *tc)
 	hs.counter_mask = 0;
 
 	for (i = 0; i < RISCV_NCOUNTERS; i++)
-		if (counters[i].valid == true)
+		if (counters[i].enabled == true)
 			hs.counter_mask = (1 << i);
 
 	error = ioctl(tc->ctx_fd, HWC_IOC_START, &hs);
 	if (error) {
-		printf("%s: could not start counters %x, error %d\n",
+		printf("%s: could not start counters (mask) 0x%x, error %d\n",
 		    __func__, hs.counter_mask, error);
 		return (error);
 	}
@@ -272,9 +275,9 @@ pmu_configure(struct hwc_context *tc)
 		}
 	}
 
-	pmu_start(tc);
+	error = pmu_start(tc);
 
-	return (0);
+	return (error);
 }
 
 static int
@@ -309,7 +312,7 @@ pmu_shutdown(struct hwc_context *tc __unused)
 
 	for (i = 0; i < RISCV_NCOUNTERS; i++) {
 		c = &counters[i];
-		if (c->valid == true)
+		if (c->enabled == true)
 			printf(" %s == %ld\n", c->name,
 			    csr_read_num(CSR_HPMCOUNTER3 - 3 + i));
 	}
