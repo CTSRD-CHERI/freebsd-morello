@@ -666,63 +666,6 @@ initriscv(struct riscv_bootparams *rvbp)
 
 	early_boot = 0;
 
-#if 0
-		/* L1 I-Cache misses */
-		/* L1 D-Cache misses */
-		/* ITLB misses */
-		/* DTLB misses */
-		/* Load accesses */
-		/* Store accesses */
-		/* Exceptions */
-		/* Exception handler returns */
-		/* Branch instructions */
-		/* Branch mispredicts */
-		/* Branch exceptions */
-		/* Call */
-		/* Return */
-		/* MSB Full */
-		/* Instruction fetch Empty */
-		/* L1 I-Cache accesses */
-		/* L1 D-Cache accesses */
-		/* Eviction */
-		/* I-TLB flush */
-		/* Integer instructions */
-		/* Floating Point Instruction*/
-		/* Pipeline bubbles */
-#endif
-
-#if 1
-#define	SBI_PMU_START_FLAG_SET_INIT_VALUE	(1 << 0)
-#define	SBI_PMU_CFG_FLAG_AUTO_START		(1 << 2)
-	struct sbi_ret ret;
-	int i;
-
-	/* Get number of counters. */
-	ret = SBI_CALL0(SBI_EXT_ID_PMU, SBI_PMU_NUM_COUNTERS);
-	printf("num counters err %ld num %ld\n", ret.error, ret.value);
-
-	/*
-	 * Configure RAW counters.
-	 * Event 1 -> Counter 3
-	 * Event 2 -> Counter 4
-	 * ...
-	 */
-	for (i = 1; i <= 22; i++) {
-		ret = SBI_CALL5(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_CONFIG_MATCHING,
-		    0, (1 << (i + 2)), 0 /* flags */, 0x20000, i);
-		printf("match err %ld num %ld\n", ret.error, ret.value);
-	}
-#endif
-
-#if 1
-	/*
-	 * Enable all configured counters:
-	 *  IDs 3 to 24 (total 22).
-	 */
-	ret = SBI_CALL2(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_START, 0, 0x1fffff8);
-	printf("start all err %ld num %ld\n", ret.error, ret.value);
-#endif
-
 	if (bootverbose && kstack_pages != KSTACK_PAGES)
 		printf("kern.kstack_pages = %d ignored for thread0\n",
 		    kstack_pages);

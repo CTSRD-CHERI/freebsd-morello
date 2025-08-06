@@ -95,7 +95,6 @@ SUBDIR=	${SUBDIR_BOOTSTRAP} \
 	libsamplerate \
 	libsbuf \
 	libsmb \
-	libstatcounters \
 	libstdbuf \
 	libstdthreads \
 	libsysdecode \
