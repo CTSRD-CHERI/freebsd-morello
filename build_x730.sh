@@ -1,8 +1,8 @@
-make -j24 TARGET=riscv buildkernel || exit 1
+make -j24 KERNCONF=X730 TARGET=riscv buildkernel || exit 1
 
-cp /usr/obj/usr/home/br/dev/freebsd/riscv.riscv64/sys/GENERIC/kernel /tftpboot/root/boot/kernel
+cp /usr/obj/usr/home/br/dev/freebsd/riscv.riscv64/sys/X730/kernel /tftpboot/root/boot/kernel
 
-cp /usr/obj/usr/home/br/dev/freebsd/riscv.riscv64/sys/GENERIC/kernel /tftpboot/codasip_vcu118/
+cp /usr/obj/usr/home/br/dev/freebsd/riscv.riscv64/sys/X730/kernel /tftpboot/codasip_vcu118/
 riscv64-unknown-freebsd15.0-objcopy -O binary /tftpboot/codasip_vcu118/kernel /tftpboot/codasip_vcu118/kernel.bin
 
 # echo fdt move \$fdt_addr 0x88000000

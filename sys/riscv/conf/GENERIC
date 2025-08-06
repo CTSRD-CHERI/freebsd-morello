@@ -215,6 +215,7 @@ include		"std.eswin"
 include		"std.sifive"
 include		"std.starfive"
 
+# QEMU
 device		em
 device		iflib
 options		ROOTDEVNAME=\"ufs:/dev/da0p2\"
