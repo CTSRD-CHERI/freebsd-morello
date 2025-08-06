@@ -131,13 +131,15 @@
 #define	BRDGSFLAGS		35	/* set bridge flags (ifbrparam) */
 #define	BRDGGDEFPVID		36	/* get default pvid (ifbrparam) */
 #define	BRDGSDEFPVID		37	/* set default pvid (ifbrparam) */
+#define	BRDGSIFVLANPROTO	38	/* set if vlan protocol (ifbreq) */
 
 /* BRDGSFLAGS, Bridge flags (non-interface-specific) */
 typedef uint32_t ifbr_flags_t;
 
 #define	IFBRF_VLANFILTER	(1U<<0)	/* VLAN filtering enabled */
+#define	IFBRF_DEFQINQ		(1U<<1)	/* 802.1ad Q-in-Q allowed by default */
 
-#define	IFBRFBITS	"\020\01VLANFILTER"
+#define	IFBRFBITS	"\020\01VLANFILTER\02DEFQINQ"
 
 /*
  * Generic bridge control request.
@@ -156,6 +158,7 @@ struct ifbreq {
 	uint32_t	ifbr_addrmax;		/* member if addr max */
 	uint32_t	ifbr_addrexceeded;	/* member if addr violations */
 	ether_vlanid_t	ifbr_pvid;		/* member if PVID */
+	uint16_t	ifbr_vlanproto;		/* member if VLAN protocol */
 	uint8_t		pad[32];
 };
 
@@ -172,12 +175,11 @@ struct ifbreq {
 #define	IFBIF_BSTP_ADMEDGE	0x0200	/* member stp admin edge enabled */
 #define	IFBIF_BSTP_ADMCOST	0x0400	/* member stp admin path cost */
 #define	IFBIF_PRIVATE		0x0800	/* if is a private segment */
-/* was	IFBIF_VLANFILTER	0x1000 */
-#define	IFBIF_QINQ		0x2000	/* if allows 802.1ad Q-in-Q */
+#define	IFBIF_QINQ		0x1000	/* if allows 802.1ad Q-in-Q */
 
 #define	IFBIFBITS	"\020\001LEARNING\002DISCOVER\003STP\004SPAN" \
 			"\005STICKY\014PRIVATE\006EDGE\007AUTOEDGE\010PTP" \
-			"\011AUTOPTP"
+			"\011AUTOPTP\015QINQ"
 #define	IFBIFMASK	~(IFBIF_BSTP_EDGE|IFBIF_BSTP_AUTOEDGE|IFBIF_BSTP_PTP| \
 			IFBIF_BSTP_AUTOPTP|IFBIF_BSTP_ADMEDGE| \
 			IFBIF_BSTP_ADMCOST)	/* not saved */
@@ -252,6 +254,7 @@ struct ifbrparam {
 							 * addresses */
 #define	ifbrp_flags	ifbrp_ifbrpu.ifbrpu_int32	/* bridge flags */
 #define	ifbrp_defpvid	ifbrp_ifbrpu.ifbrpu_int16	/* default pvid */
+#define	ifbrp_vlanproto	ifbrp_ifbrpu.ifbrpu_int8	/* vlan protocol */
 
 /*
  * Bridge current operational parameters structure.

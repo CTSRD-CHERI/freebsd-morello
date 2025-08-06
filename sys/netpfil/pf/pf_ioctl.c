@@ -331,6 +331,8 @@ pfattach_vnet(void)
 
 	V_pf_limits[PF_LIMIT_STATES].limit = PFSTATE_HIWAT;
 	V_pf_limits[PF_LIMIT_SRC_NODES].limit = PFSNODE_HIWAT;
+	V_pf_limits[PF_LIMIT_ANCHORS].limit = PF_ANCHOR_HIWAT;
+	V_pf_limits[PF_LIMIT_ETH_ANCHORS].limit = PF_ANCHOR_HIWAT;
 
 	RB_INIT(&V_pf_anchors);
 	pf_init_kruleset(&pf_main_ruleset);
@@ -4973,6 +4975,7 @@ DIOCCHANGEADDR_error:
 			goto fail;
 		}
 		PF_RULES_WLOCK();
+		io->pfrio_nadd = 0;
 		error = pfr_add_addrs(&io->pfrio_table, pfras,
 		    io->pfrio_size, &io->pfrio_nadd, io->pfrio_flags |
 		    PFR_FLAG_USERIOCTL);

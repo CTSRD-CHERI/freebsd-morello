@@ -621,7 +621,7 @@ static void
 pf_packet_rework_nat(struct pf_pdesc *pd, int off, struct pf_state_key *nk)
 {
 
-	switch (pd->proto) {
+	switch (pd->virtual_proto) {
 	case IPPROTO_TCP: {
 		struct tcphdr *th = &pd->hdr.tcp;
 
@@ -1253,6 +1253,21 @@ pf_initialize(void)
 		mtx_init(&uh->lock, "pf_udpendpointhash", NULL,
 		    MTX_DEF | MTX_DUPOK);
 	}
+
+	/* Anchors */
+	V_pf_anchor_z = uma_zcreate("pf anchors",
+	    sizeof(struct pf_kanchor), NULL, NULL, NULL, NULL,
+	    UMA_ALIGN_PTR, 0);
+	V_pf_limits[PF_LIMIT_ANCHORS].zone = V_pf_anchor_z;
+	uma_zone_set_max(V_pf_anchor_z, PF_ANCHOR_HIWAT);
+	uma_zone_set_warning(V_pf_anchor_z, "PF anchor limit reached");
+
+	V_pf_eth_anchor_z = uma_zcreate("pf Ethernet anchors",
+	    sizeof(struct pf_keth_anchor), NULL, NULL, NULL, NULL,
+	    UMA_ALIGN_PTR, 0);
+	V_pf_limits[PF_LIMIT_ETH_ANCHORS].zone = V_pf_eth_anchor_z;
+	uma_zone_set_max(V_pf_eth_anchor_z, PF_ANCHOR_HIWAT);
+	uma_zone_set_warning(V_pf_eth_anchor_z, "PF Ethernet anchor limit reached");
 
 	/* ALTQ */
 	TAILQ_INIT(&V_pf_altqs[0]);
@@ -6376,7 +6391,7 @@ pf_translate_compat(struct pf_test_ctx *ctx)
 	KASSERT(ctx->sk != NULL, ("%s: null sk", __func__));
 	KASSERT(ctx->nk != NULL, ("%s: null nk", __func__));
 
-	switch (pd->proto) {
+	switch (pd->virtual_proto) {
 	case IPPROTO_TCP:
 		if (PF_ANEQ(&pd->nsaddr, &nk->addr[pd->sidx], pd->af) ||
 		    nk->port[pd->sidx] != pd->nsport) {

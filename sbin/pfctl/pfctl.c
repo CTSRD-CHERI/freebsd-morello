@@ -183,6 +183,8 @@ static const struct {
 	{ "src-nodes",		PF_LIMIT_SRC_NODES },
 	{ "frags",		PF_LIMIT_FRAGS },
 	{ "table-entries",	PF_LIMIT_TABLE_ENTRIES },
+	{ "anchors",		PF_LIMIT_ANCHORS },
+	{ "eth-anchors",	PF_LIMIT_ETH_ANCHORS },
 	{ NULL,			0 }
 };
 
@@ -3137,6 +3139,7 @@ pfctl_reset(int dev, int opts)
 	struct pfr_buffer t;
 	int i;
 
+	memset(&pf, 0, sizeof(pf));
 	pf.dev = dev;
 	pf.h = pfh;
 	pfctl_init_options(&pf);

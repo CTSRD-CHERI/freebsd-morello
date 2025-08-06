@@ -238,7 +238,7 @@ pf_create_kanchor(struct pf_kanchor *parent, const char *aname)
 	   ((parent != NULL) && (strlen(parent->path) >= PF_ANCHOR_MAXPATH)))
 		return (NULL);
 
-	anchor = rs_malloc(sizeof(*anchor));
+	anchor = uma_zalloc(V_pf_anchor_z, M_NOWAIT | M_ZERO);
 	if (anchor == NULL)
 		return (NULL);
 
@@ -259,7 +259,7 @@ pf_create_kanchor(struct pf_kanchor *parent, const char *aname)
 		printf("%s: RB_INSERT1 "
 		    "'%s' '%s' collides with '%s' '%s'\n", __func__,
 		    anchor->path, anchor->name, dup->path, dup->name);
-		rs_free(anchor);
+		uma_zfree(V_pf_anchor_z, anchor);
 		return (NULL);
 	}
 
@@ -273,7 +273,7 @@ pf_create_kanchor(struct pf_kanchor *parent, const char *aname)
 			    anchor->name, dup->path, dup->name);
 			RB_REMOVE(pf_kanchor_global, &V_pf_anchors,
 			    anchor);
-			rs_free(anchor);
+			uma_zfree(V_pf_anchor_z, anchor);
 			return (NULL);
 		}
 	}
@@ -350,7 +350,7 @@ pf_remove_if_empty_kruleset(struct pf_kruleset *ruleset)
 		if ((parent = ruleset->anchor->parent) != NULL)
 			RB_REMOVE(pf_kanchor_node, &parent->children,
 			    ruleset->anchor);
-		rs_free(ruleset->anchor);
+		uma_zfree(V_pf_anchor_z, ruleset->anchor);
 		if (parent == NULL)
 			return;
 		ruleset = &parent->ruleset;
@@ -613,7 +613,7 @@ pf_find_or_create_keth_ruleset(const char *path)
 			rs_free(p);
 			return (NULL);
 		}
-		anchor = (struct pf_keth_anchor *)rs_malloc(sizeof(*anchor));
+		anchor = uma_zalloc(V_pf_eth_anchor_z, M_NOWAIT | M_ZERO);
 		if (anchor == NULL) {
 			rs_free(p);
 			return (NULL);
@@ -631,7 +631,7 @@ pf_find_or_create_keth_ruleset(const char *path)
 			printf("%s: RB_INSERT1 "
 			    "'%s' '%s' collides with '%s' '%s'\n", __func__,
 			    anchor->path, anchor->name, dup->path, dup->name);
-			rs_free(anchor);
+			uma_zfree(V_pf_eth_anchor_z, anchor);
 			rs_free(p);
 			return (NULL);
 		}
@@ -645,7 +645,7 @@ pf_find_or_create_keth_ruleset(const char *path)
 				    anchor->name, dup->path, dup->name);
 				RB_REMOVE(pf_keth_anchor_global, &V_pf_keth_anchors,
 				    anchor);
-				rs_free(anchor);
+				uma_zfree(V_pf_eth_anchor_z, anchor);
 				rs_free(p);
 				return (NULL);
 			}
@@ -754,7 +754,7 @@ pf_remove_if_empty_keth_ruleset(struct pf_keth_ruleset *ruleset)
 		if ((parent = ruleset->anchor->parent) != NULL)
 			RB_REMOVE(pf_keth_anchor_node, &parent->children,
 			    ruleset->anchor);
-		rs_free(ruleset->anchor);
+		uma_zfree(V_pf_eth_anchor_z, ruleset->anchor);
 		if (parent == NULL)
 			return;
 		ruleset = &parent->ruleset;
