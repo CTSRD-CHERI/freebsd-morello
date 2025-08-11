@@ -123,6 +123,18 @@ auth_group_add_chap_mutual(const char *user, const char *secret,
 }
 
 bool
+auth_group_add_host_address(const char *portal)
+{
+	return (auth_group->add_host_address(portal));
+}
+
+bool
+auth_group_add_host_nqn(const char *name)
+{
+	return (auth_group->add_host_nqn(name));
+}
+
+bool
 auth_group_add_initiator_name(const char *name)
 {
 	return (auth_group->add_initiator_name(name));
@@ -175,7 +187,8 @@ portal_group_finish(void)
 bool
 portal_group_add_listen(const char *listen, bool iser)
 {
-	return (portal_group->add_portal(listen, iser));
+	return (portal_group->add_portal(listen, iser ? portal_protocol::ISER :
+	    portal_protocol::ISCSI));
 }
 
 bool
@@ -230,6 +243,29 @@ void
 portal_group_set_tag(uint16_t tag)
 {
 	portal_group->set_tag(tag);
+}
+
+bool
+transport_group_start(const char *name)
+{
+	if (strcmp(name, "default") == 0)
+		portal_group = conf->define_default_transport_group();
+	else
+		portal_group = conf->add_transport_group(name);
+	return (portal_group != NULL);
+}
+
+bool
+transport_group_add_listen_discovery_tcp(const char *listen)
+{
+	return portal_group->add_portal(listen,
+	    portal_protocol::NVME_DISCOVERY_TCP);
+}
+
+bool
+transport_group_add_listen_tcp(const char *listen)
+{
+	return portal_group->add_portal(listen, portal_protocol::NVME_TCP);
 }
 
 bool
@@ -387,6 +423,38 @@ target_start_lun(u_int id)
 }
 
 bool
+controller_start(const char *name)
+{
+	target = conf->add_controller(name);
+	return (target != nullptr);
+}
+
+bool
+controller_add_host_address(const char *addr)
+{
+	return (target->add_host_address(addr));
+}
+
+bool
+controller_add_host_nqn(const char *name)
+{
+	return (target->add_host_nqn(name));
+}
+
+bool
+controller_add_namespace(u_int id, const char *name)
+{
+	return (target->add_namespace(id, name));
+}
+
+bool
+controller_start_namespace(u_int id)
+{
+	lun = target->start_namespace(id);
+	return (lun != nullptr);
+}
+
+bool
 parse_conf(const char *path)
 {
 	freebsd::FILE_up fp(fopen(path, "r"));
@@ -398,7 +466,7 @@ parse_conf(const char *path)
 	bool parsed;
 	try {
 		parsed = yyparse_conf(fp.get());
-	} catch (std::bad_alloc) {
+	} catch (std::bad_alloc &) {
 		log_warnx("failed to allocate memory parsing %s", path);
 		return (false);
 	} catch (...) {

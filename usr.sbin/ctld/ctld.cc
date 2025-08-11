@@ -41,6 +41,7 @@
 #include <assert.h>
 #include <ctype.h>
 #include <errno.h>
+#include <libnvmf.h>
 #include <netdb.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -58,13 +59,6 @@
 #include "ctld.hh"
 #include "isns.hh"
 
-static bool	timed_out(void);
-#ifdef ICL_KERNEL_PROXY
-static void	pdu_receive_proxy(struct pdu *pdu);
-static void	pdu_send_proxy(struct pdu *pdu);
-#endif /* ICL_KERNEL_PROXY */
-static void	pdu_fail(const struct connection *conn, const char *reason);
-
 bool proxy_mode = false;
 
 static volatile bool sighup_received = false;
@@ -73,19 +67,8 @@ static volatile bool sigalrm_received = false;
 
 static int kqfd;
 static int nchildren = 0;
-static uint16_t last_portal_group_tag = 0xff;
 
-static struct connection_ops conn_ops = {
-	.timed_out = timed_out,
-#ifdef ICL_KERNEL_PROXY
-	.pdu_receive_proxy = pdu_receive_proxy,
-	.pdu_send_proxy = pdu_send_proxy,
-#else
-	.pdu_receive_proxy = nullptr,
-	.pdu_send_proxy = nullptr,
-#endif
-	.fail = pdu_fail,
-};
+uint32_t conf::global_genctr;
 
 static void
 usage(void)
@@ -94,6 +77,11 @@ usage(void)
 	fprintf(stderr, "usage: ctld [-d][-u][-f config-file]\n");
 	fprintf(stderr, "       ctld -t [-u][-f config-file]\n");
 	exit(1);
+}
+
+conf::conf()
+{
+	conf_genctr = global_genctr++;
 }
 
 void
@@ -298,20 +286,37 @@ auth_group::add_chap_mutual(const char *user, const char *secret,
 }
 
 bool
+auth_group::add_host_nqn(std::string_view nqn)
+{
+	/* Silently ignore duplicates. */
+	ag_host_names.emplace(nqn);
+	return (true);
+}
+
+bool
+auth_group::host_permitted(std::string_view nqn) const
+{
+	if (ag_host_names.empty())
+		return (true);
+
+	return (ag_host_names.count(std::string(nqn)) != 0);
+}
+
+bool
 auth_group::add_initiator_name(std::string_view name)
 {
 	/* Silently ignore duplicates. */
-	ag_names.emplace(name);
+	ag_initiator_names.emplace(name);
 	return (true);
 }
 
 bool
 auth_group::initiator_permitted(std::string_view initiator_name) const
 {
-	if (ag_names.empty())
+	if (ag_initiator_names.empty())
 		return (true);
 
-	return (ag_names.count(std::string(initiator_name)) != 0);
+	return (ag_initiator_names.count(std::string(initiator_name)) != 0);
 }
 
 bool
@@ -381,6 +386,20 @@ auth_portal::parse(const char *portal)
 }
 
 bool
+auth_group::add_host_address(const char *address)
+{
+	auth_portal ap;
+	if (!ap.parse(address)) {
+		log_warnx("invalid controller address \"%s\" for %s", address,
+		    label());
+		return (false);
+	}
+
+	ag_host_addresses.emplace_back(ap);
+	return (true);
+}
+
+bool
 auth_group::add_initiator_portal(const char *portal)
 {
 	auth_portal ap;
@@ -390,7 +409,7 @@ auth_group::add_initiator_portal(const char *portal)
 		return (false);
 	}
 
-	ag_portals.emplace_back(ap);
+	ag_initiator_portals.emplace_back(ap);
 	return (true);
 }
 
@@ -427,12 +446,24 @@ auth_portal::matches(const struct sockaddr *sa) const
 }
 
 bool
-auth_group::initiator_permitted(const struct sockaddr *sa) const
+auth_group::host_permitted(const struct sockaddr *sa) const
 {
-	if (ag_portals.empty())
+	if (ag_host_addresses.empty())
 		return (true);
 
-	for (const auth_portal &ap : ag_portals)
+	for (const auth_portal &ap : ag_host_addresses)
+		if (ap.matches(sa))
+			return (true);
+	return (false);
+}
+
+bool
+auth_group::initiator_permitted(const struct sockaddr *sa) const
+{
+	if (ag_initiator_portals.empty())
+		return (true);
+
+	for (const auth_portal &ap : ag_initiator_portals)
 		if (ap.matches(sa))
 			return (true);
 	return (false);
@@ -477,8 +508,8 @@ conf::find_auth_group(std::string_view name)
 	return (it->second);
 }
 
-portal_group::portal_group(struct conf *conf, std::string_view name)
-	: pg_conf(conf), pg_options(nvlist_create(0)), pg_name(name)
+portal_group::portal_group(struct conf *conf, std::string_view name) :
+    pg_conf(conf), pg_options(nvlist_create(0)), pg_name(name)
 {
 }
 
@@ -486,7 +517,7 @@ struct portal_group *
 conf::add_portal_group(const char *name)
 {
 	auto pair = conf_portal_groups.try_emplace(name,
-	    std::make_unique<portal_group>(this, name));
+	    iscsi_make_portal_group(this, name));
 	if (!pair.second) {
 		log_warnx("duplicated portal-group \"%s\"", name);
 		return (nullptr);
@@ -521,6 +552,45 @@ conf::find_portal_group(std::string_view name)
 	return (it->second.get());
 }
 
+struct portal_group *
+conf::add_transport_group(const char *name)
+{
+	auto pair = conf_transport_groups.try_emplace(name,
+	    nvmf_make_transport_group(this, name));
+	if (!pair.second) {
+		log_warnx("duplicated transport-group \"%s\"", name);
+		return (nullptr);
+	}
+
+	return (pair.first->second.get());
+}
+
+/*
+ * Make it possible to redefine the default transport-group, but only
+ * once.
+ */
+struct portal_group *
+conf::define_default_transport_group()
+{
+	if (conf_default_tg_defined) {
+		log_warnx("duplicated transport-group \"default\"");
+		return (nullptr);
+	}
+
+	conf_default_tg_defined = true;
+	return (find_transport_group("default"));
+}
+
+struct portal_group *
+conf::find_transport_group(std::string_view name)
+{
+	auto it = conf_transport_groups.find(std::string(name));
+	if (it == conf_transport_groups.end())
+		return (nullptr);
+
+	return (it->second.get());
+}
+
 bool
 portal_group::is_dummy() const
 {
@@ -531,7 +601,7 @@ portal_group::is_dummy() const
 	return (false);
 }
 
-static freebsd::addrinfo_up
+freebsd::addrinfo_up
 parse_addr_port(const char *address, const char *def_port)
 {
 	struct addrinfo hints, *ai;
@@ -599,25 +669,6 @@ portal_group::options() const
 }
 
 bool
-portal_group::add_portal(const char *value, bool iser)
-{
-	freebsd::addrinfo_up ai = parse_addr_port(value, "3260");
-	if (!ai) {
-		log_warnx("invalid listen address %s", value);
-		return (false);
-	}
-
-	/*
-	 * XXX: getaddrinfo(3) may return multiple addresses; we should turn
-	 *	those into multiple portals.
-	 */
-
-	pg_portals.emplace_back(std::make_unique<portal>(this, value, iser,
-	    std::move(ai)));
-	return (true);
-}
-
-bool
 portal_group::add_option(const char *name, const char *value)
 {
 	return (option_new(pg_options.get(), name, value));
@@ -627,14 +678,14 @@ bool
 portal_group::set_discovery_auth_group(const char *ag_name)
 {
 	if (pg_discovery_auth_group != nullptr) {
-		log_warnx("discovery-auth-group for portal-group "
-		    "\"%s\" specified more than once", name());
+		log_warnx("discovery-auth-group for %s "
+		    "\"%s\" specified more than once", keyword(), name());
 		return (false);
 	}
 	pg_discovery_auth_group = pg_conf->find_auth_group(ag_name);
 	if (pg_discovery_auth_group == nullptr) {
 		log_warnx("unknown discovery-auth-group \"%s\" "
-		    "for portal-group \"%s\"", ag_name, name());
+		    "for %s \"%s\"", ag_name, keyword(), name());
 		return (false);
 	}
 	return (true);
@@ -644,45 +695,12 @@ bool
 portal_group::set_dscp(u_int dscp)
 {
 	if (dscp >= 0x40) {
-		log_warnx("invalid DSCP value %u for portal-group \"%s\"",
-		    dscp, name());
+		log_warnx("invalid DSCP value %u for %s \"%s\"",
+		    dscp, keyword(), name());
 		return (false);
 	}
 
 	pg_dscp = dscp;
-	return (true);
-}
-
-bool
-portal_group::set_filter(const char *str)
-{
-	enum discovery_filter filter;
-
-	if (strcmp(str, "none") == 0) {
-		filter = discovery_filter::NONE;
-	} else if (strcmp(str, "portal") == 0) {
-		filter = discovery_filter::PORTAL;
-	} else if (strcmp(str, "portal-name") == 0) {
-		filter = discovery_filter::PORTAL_NAME;
-	} else if (strcmp(str, "portal-name-auth") == 0) {
-		filter = discovery_filter::PORTAL_NAME_AUTH;
-	} else {
-		log_warnx("invalid discovery-filter \"%s\" for portal-group "
-		    "\"%s\"; valid values are \"none\", \"portal\", "
-		    "\"portal-name\", and \"portal-name-auth\"",
-		    str, name());
-		return (false);
-	}
-
-	if (pg_discovery_filter != discovery_filter::UNKNOWN &&
-	    pg_discovery_filter != filter) {
-		log_warnx("cannot set discovery-filter to \"%s\" for "
-		    "portal-group \"%s\"; already has a different "
-		    "value", str, name());
-		return (false);
-	}
-
-	pg_discovery_filter = filter;
 	return (true);
 }
 
@@ -697,8 +715,8 @@ portal_group::set_offload(const char *offload)
 {
 	if (!pg_offload.empty()) {
 		log_warnx("cannot set offload to \"%s\" for "
-		    "portal-group \"%s\"; already defined",
-		    offload, name());
+		    "%s \"%s\"; already defined",
+		    offload, keyword(), name());
 		return (false);
 	}
 
@@ -710,8 +728,8 @@ bool
 portal_group::set_pcp(u_int pcp)
 {
 	if (pcp > 7) {
-		log_warnx("invalid PCP value %u for portal-group \"%s\"",
-		    pcp, name());
+		log_warnx("invalid PCP value %u for %s \"%s\"",
+		    pcp, keyword(), name());
 		return (false);
 	}
 
@@ -724,8 +742,8 @@ portal_group::set_redirection(const char *addr)
 {
 	if (!pg_redirection.empty()) {
 		log_warnx("cannot set redirection to \"%s\" for "
-		    "portal-group \"%s\"; already defined",
-		    addr, name());
+		    "%s \"%s\"; already defined",
+		    addr, keyword(), name());
 		return (false);
 	}
 
@@ -752,16 +770,17 @@ portal_group::verify(struct conf *conf)
 
 	if (!pg_redirection.empty()) {
 		if (!pg_ports.empty()) {
-			log_debugx("portal-group \"%s\" assigned to target, "
-			    "but configured for redirection", name());
+			log_debugx("%s \"%s\" assigned to target, "
+			    "but configured for redirection", keyword(),
+			    name());
 		}
 		pg_assigned = true;
 	} else if (!pg_ports.empty()) {
 		pg_assigned = true;
 	} else {
 		if (pg_name != "default")
-			log_warnx("portal-group \"%s\" not assigned "
-			    "to any target", name());
+			log_warnx("%s \"%s\" not assigned "
+			    "to any target", keyword(), name());
 		pg_assigned = false;
 	}
 }
@@ -789,8 +808,8 @@ portal_group::open_sockets(struct conf &oldconf)
 		return (0);
 
 	if (!pg_assigned) {
-		log_debugx("not listening on portal-group \"%s\", "
-		    "not assigned to any target", name());
+		log_debugx("not listening on %s \"%s\", "
+		    "not assigned to any target", keyword(), name());
 		return (0);
 	}
 
@@ -818,8 +837,8 @@ portal_group::close_sockets()
 	for (portal_up &portal : pg_portals) {
 		if (portal->socket() < 0)
 			continue;
-		log_debugx("closing socket for %s, portal-group \"%s\"",
-		    portal->listen(), name());
+		log_debugx("closing socket for %s, %s \"%s\"",
+		    portal->listen(), keyword(), name());
 		portal->close();
 	}
 }
@@ -1111,8 +1130,8 @@ conf::add_port(struct target *target, struct portal_group *pg, auth_group_sp ag)
 {
 	std::string name = freebsd::stringf("%s-%s", pg->name(),
 	    target->name());
-	const auto &pair = conf_ports.try_emplace(name,
-	    std::make_unique<portal_group_port>(target, pg, ag));
+	const auto &pair = conf_ports.try_emplace(name, pg->create_port(target,
+	    ag));
 	if (!pair.second) {
 		log_warnx("duplicate port \"%s\"", name.c_str());
 		return (false);
@@ -1127,8 +1146,8 @@ conf::add_port(struct target *target, struct portal_group *pg,
 {
 	std::string name = freebsd::stringf("%s-%s", pg->name(),
 	    target->name());
-	const auto &pair = conf_ports.try_emplace(name,
-	    std::make_unique<portal_group_port>(target, pg, ctl_port));
+	const auto &pair = conf_ports.try_emplace(name, pg->create_port(target,
+	    ctl_port));
 	if (!pair.second) {
 		log_warnx("duplicate port \"%s\"", name.c_str());
 		return (false);
@@ -1185,6 +1204,46 @@ portal_group::find_port(std::string_view target) const
 }
 
 struct target *
+conf::add_controller(const char *name)
+{
+	if (!nvmf_nqn_valid_strict(name)) {
+		log_warnx("controller name \"%s\" is invalid for NVMe", name);
+		return nullptr;
+	}
+
+	/*
+	 * Normalize the name to lowercase to match iSCSI.
+	 */
+	std::string t_name(name);
+	for (char &c : t_name)
+		c = tolower(c);
+
+	auto const &pair = conf_controllers.try_emplace(t_name,
+	    nvmf_make_controller(this, t_name));
+	if (!pair.second) {
+		log_warnx("duplicated controller \"%s\"", name);
+		return nullptr;
+	}
+
+	return pair.first->second.get();
+}
+
+struct target *
+conf::find_controller(std::string_view name)
+{
+	auto it = conf_controllers.find(std::string(name));
+	if (it == conf_controllers.end())
+		return nullptr;
+	return it->second.get();
+}
+
+target::target(struct conf *conf, const char *keyword, std::string_view name) :
+	t_conf(conf), t_name(name)
+{
+	t_label = freebsd::stringf("%s \"%s\"", keyword, t_name.c_str());
+}
+
+struct target *
 conf::add_target(const char *name)
 {
 	if (!valid_iscsi_name(name, log_warnx))
@@ -1198,7 +1257,7 @@ conf::add_target(const char *name)
 		c = tolower(c);
 
 	auto const &pair = conf_targets.try_emplace(t_name,
-	    std::make_unique<target>(this, t_name));
+	    iscsi_make_target(this, t_name));
 	if (!pair.second) {
 		log_warnx("duplicated target \"%s\"", name);
 		return (NULL);
@@ -1225,13 +1284,12 @@ target::use_private_auth(const char *keyword)
 		return (true);
 
 	if (t_auth_group != nullptr) {
-		log_warnx("cannot use both auth-group and %s for target \"%s\"",
-		    keyword, name());
+		log_warnx("cannot use both auth-group and %s for %s",
+		    keyword, label());
 		return (false);
 	}
 
-	std::string label = freebsd::stringf("target \"%s\"", name());
-	t_auth_group = std::make_shared<struct auth_group>(label);
+	t_auth_group = std::make_shared<struct auth_group>(t_label);
 	t_private_auth = true;
 	return (true);
 }
@@ -1254,40 +1312,24 @@ target::add_chap_mutual(const char *user, const char *secret,
 }
 
 bool
-target::add_initiator_name(std::string_view name)
-{
-	if (!use_private_auth("initiator-name"))
-		return (false);
-	return (t_auth_group->add_initiator_name(name));
-}
-
-bool
-target::add_initiator_portal(const char *addr)
-{
-	if (!use_private_auth("initiator-portal"))
-		return (false);
-	return (t_auth_group->add_initiator_portal(addr));
-}
-
-bool
-target::add_lun(u_int id, const char *lun_name)
+target::add_lun(u_int id, const char *lun_label, const char *lun_name)
 {
 	struct lun *t_lun;
 
 	if (id >= MAX_LUNS) {
-		log_warnx("LUN %u too big for target \"%s\"", id, name());
+		log_warnx("%s too big for %s", lun_label, label());
 		return (false);
 	}
 
 	if (t_luns[id] != NULL) {
-		log_warnx("duplicate LUN %u for target \"%s\"", id, name());
+		log_warnx("duplicate %s for %s", lun_label, label());
 		return (false);
 	}
 
 	t_lun = t_conf->find_lun(lun_name);
 	if (t_lun == NULL) {
-		log_warnx("unknown LUN named %s used for target \"%s\"",
-		    lun_name, name());
+		log_warnx("unknown LUN named %s used for %s", lun_name,
+		    label());
 		return (false);
 	}
 
@@ -1296,41 +1338,10 @@ target::add_lun(u_int id, const char *lun_name)
 }
 
 bool
-target::add_portal_group(const char *pg_name, const char *ag_name)
-{
-	struct portal_group *pg;
-	auth_group_sp ag;
-
-	pg = t_conf->find_portal_group(pg_name);
-	if (pg == NULL) {
-		log_warnx("unknown portal-group \"%s\" for target \"%s\"",
-		    pg_name, name());
-		return (false);
-	}
-
-	if (ag_name != NULL) {
-		ag = t_conf->find_auth_group(ag_name);
-		if (ag == NULL) {
-			log_warnx("unknown auth-group \"%s\" for target \"%s\"",
-			    ag_name, name());
-			return (false);
-		}
-	}
-
-	if (!t_conf->add_port(this, pg, std::move(ag))) {
-		log_warnx("can't link portal-group \"%s\" to target \"%s\"",
-		    pg_name, name());
-		return (false);
-	}
-	return (true);
-}
-
-bool
 target::set_alias(std::string_view alias)
 {
 	if (has_alias()) {
-		log_warnx("alias for target \"%s\" specified more than once",
-		    name());
+		log_warnx("alias for %s specified more than once", label());
 		return (false);
 	}
 	t_alias = alias;
@@ -1343,16 +1354,16 @@ target::set_auth_group(const char *ag_name)
 	if (t_auth_group != nullptr) {
 		if (t_private_auth)
 			log_warnx("cannot use both auth-group and explicit "
-			    "authorisations for target \"%s\"", name());
+			    "authorisations for %s", label());
 		else
-			log_warnx("auth-group for target \"%s\" "
-			    "specified more than once", name());
+			log_warnx("auth-group for %s "
+			    "specified more than once", label());
 		return (false);
 	}
 	t_auth_group = t_conf->find_auth_group(ag_name);
 	if (t_auth_group == nullptr) {
-		log_warnx("unknown auth-group \"%s\" for target \"%s\"",
-		    ag_name, name());
+		log_warnx("unknown auth-group \"%s\" for %s",
+		    ag_name, label());
 		return (false);
 	}
 	return (true);
@@ -1383,8 +1394,8 @@ target::set_redirection(const char *addr)
 {
 	if (!t_redirection.empty()) {
 		log_warnx("cannot set redirection to \"%s\" for "
-		    "target \"%s\"; already defined",
-		    addr, name());
+		    "%s; already defined",
+		    addr, label());
 		return (false);
 	}
 
@@ -1393,28 +1404,23 @@ target::set_redirection(const char *addr)
 }
 
 struct lun *
-target::start_lun(u_int id)
+target::start_lun(u_int id, const char *lun_label, const char *lun_name)
 {
-	struct lun *new_lun;
-
 	if (id >= MAX_LUNS) {
-		log_warnx("LUN %u too big for target \"%s\"", id,
-		    name());
+		log_warnx("%s too big for %s", lun_label, label());
 		return (nullptr);
 	}
 
 	if (t_luns[id] != NULL) {
-		log_warnx("duplicate LUN %u for target \"%s\"", id,
-		    name());
+		log_warnx("duplicate %s for %s", lun_label, label());
 		return (nullptr);
 	}
 
-	std::string lun_name = freebsd::stringf("%s,lun,%u", name(), id);
-	new_lun = t_conf->add_lun(lun_name.c_str());
+	struct lun *new_lun = t_conf->add_lun(lun_name);
 	if (new_lun == nullptr)
 		return (nullptr);
 
-	new_lun->set_scsiname(lun_name.c_str());
+	new_lun->set_scsiname(lun_name);
 
 	t_luns[id] = new_lun;
 
@@ -1449,7 +1455,7 @@ target::verify()
 		assert(t_auth_group != nullptr);
 	}
 	if (t_ports.empty()) {
-		struct portal_group *pg = t_conf->find_portal_group("default");
+		struct portal_group *pg = default_portal_group();
 		assert(pg != NULL);
 		t_conf->add_port(this, pg, nullptr);
 	}
@@ -1457,10 +1463,10 @@ target::verify()
 	bool found = std::any_of(t_luns.begin(), t_luns.end(),
 	    [](struct lun *lun) { return (lun != nullptr); });
 	if (!found && t_redirection.empty())
-		log_warnx("no LUNs defined for target \"%s\"", name());
+		log_warnx("no LUNs defined for %s", label());
 	if (found && !t_redirection.empty())
-		log_debugx("target \"%s\" contains luns,  but configured "
-		    "for redirection", name());
+		log_debugx("%s contains LUNs, but configured "
+		    "for redirection", label());
 }
 
 lun::lun(struct conf *conf, std::string_view name)
@@ -1484,6 +1490,8 @@ void
 conf::delete_target_luns(struct lun *lun)
 {
 	for (const auto &kv : conf_targets)
+		kv.second->remove_lun(lun);
+	for (const auto &kv : conf_controllers)
 		kv.second->remove_lun(lun);
 }
 
@@ -1714,59 +1722,6 @@ option_new(nvlist_t *nvl, const char *name, const char *value)
 	return (true);
 }
 
-#ifdef ICL_KERNEL_PROXY
-
-static void
-pdu_receive_proxy(struct pdu *pdu)
-{
-	struct connection *conn;
-	size_t len;
-
-	assert(proxy_mode);
-	conn = pdu->pdu_connection;
-
-	kernel_receive(pdu);
-
-	len = pdu_ahs_length(pdu);
-	if (len > 0)
-		log_errx(1, "protocol error: non-empty AHS");
-
-	len = pdu_data_segment_length(pdu);
-	assert(len <= (size_t)conn->conn_max_recv_data_segment_length);
-	pdu->pdu_data_len = len;
-}
-
-static void
-pdu_send_proxy(struct pdu *pdu)
-{
-
-	assert(proxy_mode);
-
-	pdu_set_data_segment_length(pdu, pdu->pdu_data_len);
-	kernel_send(pdu);
-}
-
-#endif /* ICL_KERNEL_PROXY */
-
-static void
-pdu_fail(const struct connection *conn __unused, const char *reason __unused)
-{
-}
-
-ctld_connection::ctld_connection(struct portal *portal, int fd,
-    const char *host, const struct sockaddr *client_sa) :
-	conn_portal(portal), conn_initiator_addr(host),
-	conn_initiator_sa(client_sa)
-{
-	connection_init(&conn, &conn_ops, proxy_mode);
-	conn.conn_socket = fd;
-}
-
-ctld_connection::~ctld_connection()
-{
-	chap_delete(conn_chap);
-}
-
 bool
 lun::verify()
 {
@@ -1838,7 +1793,13 @@ conf::verify()
 	for (auto &kv : conf_targets) {
 		kv.second->verify();
 	}
+	for (auto &kv : conf_controllers) {
+		kv.second->verify();
+	}
 	for (auto &kv : conf_portal_groups) {
+		kv.second->verify(this);
+	}
+	for (auto &kv : conf_transport_groups) {
 		kv.second->verify(this);
 	}
 	for (const auto &kv : conf_auth_groups) {
@@ -1882,23 +1843,23 @@ portal::init_socket()
 	struct portal_group *pg = portal_group();
 	struct kevent kev;
 	freebsd::fd_up s;
-	int error, sockbuf;
+	int error;
 	int one = 1;
 
 #ifdef ICL_KERNEL_PROXY
 	if (proxy_mode) {
 		int id = pg->conf()->add_proxy_portal(this);
-		log_debugx("listening on %s, portal-group \"%s\", "
-		    "portal id %d, using ICL proxy", listen(), pg->pg_name,
-		    id);
-		kernel_listen(ai(), p_iser, id);
+		log_debugx("listening on %s, %s \"%s\", "
+		    "portal id %d, using ICL proxy", listen(), pg->keyword(),
+		    pg->name(), id);
+		kernel_listen(ai(), protocol() == ISER, id);
 		return (true);
 	}
 #endif
 	assert(proxy_mode == false);
-	assert(p_iser == false);
+	assert(protocol() != portal_protocol::ISER);
 
-	log_debugx("listening on %s, portal-group \"%s\"", listen(),
+	log_debugx("listening on %s, %s \"%s\"", listen(), pg->keyword(),
 	    pg->name());
 	s = ::socket(p_ai->ai_family, p_ai->ai_socktype, p_ai->ai_protocol);
 	if (!s) {
@@ -1906,14 +1867,6 @@ portal::init_socket()
 		return (false);
 	}
 
-	sockbuf = SOCKBUF_SIZE;
-	if (setsockopt(s, SOL_SOCKET, SO_RCVBUF, &sockbuf,
-	    sizeof(sockbuf)) == -1)
-		log_warn("setsockopt(SO_RCVBUF) failed for %s", listen());
-	sockbuf = SOCKBUF_SIZE;
-	if (setsockopt(s, SOL_SOCKET, SO_SNDBUF, &sockbuf,
-	    sizeof(sockbuf)) == -1)
-		log_warn("setsockopt(SO_SNDBUF) failed for %s", listen());
 	if (setsockopt(s, SOL_SOCKET, SO_NO_DDP, &one,
 	    sizeof(one)) == -1)
 		log_warn("setsockopt(SO_NO_DDP) failed for %s", listen());
@@ -1960,6 +1913,9 @@ portal::init_socket()
 		}
 	}
 
+	if (!init_socket_options(s))
+		return (false);
+
 	error = bind(s, p_ai->ai_addr, p_ai->ai_addrlen);
 	if (error != 0) {
 		log_warn("bind(2) failed for %s", listen());
@@ -1984,6 +1940,12 @@ bool
 conf::reuse_portal_group_socket(struct portal &newp)
 {
 	for (auto &kv : conf_portal_groups) {
+		struct portal_group &pg = *kv.second;
+
+		if (pg.reuse_socket(newp))
+			return (true);
+	}
+	for (auto &kv : conf_transport_groups) {
 		struct portal_group &pg = *kv.second;
 
 		if (pg.reuse_socket(newp))
@@ -2038,7 +2000,18 @@ conf::apply(struct conf *oldconf)
 		if (it != oldconf->conf_portal_groups.end())
 			newpg.set_tag(it->second->tag());
 		else
-			newpg.set_tag(++last_portal_group_tag);
+			newpg.allocate_tag();
+	}
+	for (auto &kv : conf_transport_groups) {
+		struct portal_group &newpg = *kv.second;
+
+		if (newpg.tag() != 0)
+			continue;
+		auto it = oldconf->conf_transport_groups.find(kv.first);
+		if (it != oldconf->conf_transport_groups.end())
+			newpg.set_tag(it->second->tag());
+		else
+			newpg.allocate_tag();
 	}
 
 	/* Deregister on removed iSNS servers. */
@@ -2203,11 +2176,17 @@ conf::apply(struct conf *oldconf)
 	for (auto &kv : conf_portal_groups) {
 		cumulated_error += kv.second->open_sockets(*oldconf);
 	}
+	for (auto &kv : conf_transport_groups) {
+		cumulated_error += kv.second->open_sockets(*oldconf);
+	}
 
 	/*
 	 * Go through the no longer used sockets, closing them.
 	 */
 	for (auto &kv : oldconf->conf_portal_groups) {
+		kv.second->close_sockets();
+	}
+	for (auto &kv : oldconf->conf_transport_groups) {
 		kv.second->close_sockets();
 	}
 
@@ -2225,7 +2204,7 @@ conf::apply(struct conf *oldconf)
 	return (cumulated_error);
 }
 
-static bool
+bool
 timed_out(void)
 {
 
@@ -2342,7 +2321,7 @@ wait_for_children(bool block)
 }
 
 static void
-handle_connection(struct portal *portal, int fd,
+handle_connection(struct portal *portal, freebsd::fd_up fd,
     const struct sockaddr *client_sa, bool dont_fork)
 {
 	struct portal_group *pg;
@@ -2373,10 +2352,8 @@ handle_connection(struct portal *portal, int fd,
 		pid = fork();
 		if (pid < 0)
 			log_err(1, "fork");
-		if (pid > 0) {
-			close(fd);
+		if (pid > 0)
 			return;
-		}
 		conf->close_pidfile();
 	}
 
@@ -2390,17 +2367,7 @@ handle_connection(struct portal *portal, int fd,
 	log_set_peer_addr(host);
 	setproctitle("%s", host);
 
-	ctld_connection conn(portal, fd, host, client_sa);
-	start_timer(conf->timeout(), true);
-	kernel_capsicate();
-	conn.login();
-	if (conn.session_type() == CONN_SESSION_TYPE_NORMAL) {
-		conn.kernel_handoff();
-		log_debugx("connection handed off to the kernel");
-	} else {
-		assert(conn.session_type() == CONN_SESSION_TYPE_DISCOVERY);
-		conn.discovery();
-	}
+	portal->handle_connection(std::move(fd), host, client_sa);
 	log_debugx("nothing more to do; exiting");
 	exit(0);
 }
@@ -2585,6 +2552,9 @@ conf_new_from_file(const char *path, bool ucl)
 	pg = conf->add_portal_group("default");
 	assert(pg != NULL);
 
+	pg = conf->add_transport_group("default");
+	assert(pg != NULL);
+
 	conf_start(conf.get());
 	if (ucl)
 		valid = uclparse_conf(path);
@@ -2612,8 +2582,15 @@ conf_new_from_file(const char *path, bool ucl)
 		    "going with defaults");
 		pg = conf->find_portal_group("default");
 		assert(pg != NULL);
-		pg->add_portal("0.0.0.0", false);
-		pg->add_portal("[::]", false);
+		pg->add_default_portals();
+	}
+
+	if (!conf->default_portal_group_defined()) {
+		log_debugx("transport-group \"default\" not defined; "
+		    "going with defaults");
+		pg = conf->find_transport_group("default");
+		assert(pg != NULL);
+		pg->add_default_portals();
 	}
 
 	if (!conf->verify()) {
@@ -2644,7 +2621,7 @@ conf::add_pports(struct kports &kports)
 		if (ret > 0) {
 			if (!add_port(kports, targ, i_pp, i_vp)) {
 				log_warnx("can't create new ioctl port "
-				    "for target \"%s\"", targ->name());
+				    "for %s", targ->label());
 				return (false);
 			}
 
@@ -2653,19 +2630,19 @@ conf::add_pports(struct kports &kports)
 
 		pp = kports.find_port(targ->pport());
 		if (pp == NULL) {
-			log_warnx("unknown port \"%s\" for target \"%s\"",
-			    targ->pport(), targ->name());
+			log_warnx("unknown port \"%s\" for %s",
+			    targ->pport(), targ->label());
 			return (false);
 		}
 		if (pp->linked()) {
-			log_warnx("can't link port \"%s\" to target \"%s\", "
+			log_warnx("can't link port \"%s\" to %s, "
 			    "port already linked to some target",
-			    targ->pport(), targ->name());
+			    targ->pport(), targ->label());
 			return (false);
 		}
 		if (!add_port(targ, pp)) {
-			log_warnx("can't link port \"%s\" to target \"%s\"",
-			    targ->pport(), targ->name());
+			log_warnx("can't link port \"%s\" to %s",
+			    targ->pport(), targ->label());
 			return (false);
 		}
 	}
