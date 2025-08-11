@@ -233,7 +233,7 @@ pmu_start(struct hwc_context *tc)
 
 	for (i = 0; i < RISCV_NCOUNTERS; i++)
 		if (counters[i].enabled == true)
-			hs.counter_mask = (1 << i);
+			hs.counter_mask |= (1 << i);
 
 	error = ioctl(tc->ctx_fd, HWC_IOC_START, &hs);
 	if (error) {
