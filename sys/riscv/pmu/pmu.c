@@ -95,6 +95,9 @@ pmu_backend_deinit(struct hwc_context *ctx)
 #define	SBI_PMU_START_FLAG_SET_INIT_VALUE	(1 << 0)
 #define	SBI_PMU_START_FLAG_INIT_SNAPSHOT	(1 << 1)
 
+#define	SBI_PMU_STOP_FLAG_RESET			(1 << 0)
+#define	SBI_PMU_STOP_FLAG_TAKE_SNAPSHOT		(1 << 1)
+
 static int
 pmu_backend_configure(struct hwc_context *ctx, struct hwc_configure *hc)
 {
@@ -110,11 +113,16 @@ pmu_backend_configure(struct hwc_context *ctx, struct hwc_configure *hc)
 	ret = SBI_CALL5(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_CONFIG_MATCHING, 0,
 	    (1 << hc->counter_id), flags, 0x20000, hc->event_id);
 #else
+	/* Reset any mapping. */
+	SBI_CALL5(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_STOP,
+	    0, (1 << hc->counter_id), SBI_PMU_STOP_FLAG_RESET, 0, 0);
+
 	ret = SBI_CALL5(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_CONFIG_MATCHING, 0,
 	    (1 << hc->counter_id), flags, hc->event_id, 0);
 #endif
 
-	dprintf("config match err %ld num %ld\n", ret.error, ret.value);
+	dprintf("%s: config match ev_id %d counter_id %d, err %ld val %ld\n",
+	    __func__, hc->event_id, hc->counter_id, ret.error, ret.value);
 
 	/* Enable user access. */
 	reg = csr_read(scounteren);
