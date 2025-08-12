@@ -87,24 +87,19 @@ static int
 pmu_backend_configure(struct hwc_context *ctx, struct hwc_configure *hc)
 {
 	struct sbi_ret ret __unused;
-	int flags;
 	uint32_t reg;
 
 	dprintf("%s: event_id %d counter_id %d\n", __func__, hc->event_id,
 	    hc->counter_id);
 
-	flags = SBI_PMU_CFG_FLAG_CLEAR_VALUE;
-	flags |= SBI_PMU_CFG_FLAG_SET_SINH;
-	flags |= SBI_PMU_CFG_FLAG_SET_MINH;
-
 #if 0
 	/* Raw counter example usage. */
 	ret = SBI_CALL5(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_CONFIG_MATCHING, 0,
-	    (1 << hc->counter_id), flags, 0x20000, hc->event_id);
+	    (1 << hc->counter_id), hc->flags, 0x20000, hc->event_id);
 #endif
 
 	ret = SBI_CALL5(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_CONFIG_MATCHING, 0,
-	    (1 << hc->counter_id), flags, hc->event_id, 0);
+	    (1 << hc->counter_id), hc->flags, hc->event_id, 0);
 
 	dprintf("%s: config match ev_id %d counter_id %d, err %ld val %ld\n",
 	    __func__, hc->event_id, hc->counter_id, ret.error, ret.value);
