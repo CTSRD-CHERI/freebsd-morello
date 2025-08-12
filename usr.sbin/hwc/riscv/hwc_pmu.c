@@ -148,7 +148,9 @@ pmu_request(struct hwc_context *tc, int mhpm_id, int event_id)
 	hc.flags = SBI_PMU_CFG_FLAG_CLEAR_VALUE;
 	hc.flags |= SBI_PMU_CFG_FLAG_SET_SINH; /* S-mode Inhibit */
 	hc.flags |= SBI_PMU_CFG_FLAG_SET_MINH; /* M-mode Inhibit */
-	hc.flags |= SBI_PMU_CFG_FLAG_SET_MINH; /* U-mode Inhibit */
+	hc.flags |= SBI_PMU_CFG_FLAG_SET_UINH; /* U-mode Inhibit */
+	hc.flags |= SBI_PMU_CFG_FLAG_SET_VUINH; /* VU-mode Inhibit */
+	hc.flags |= SBI_PMU_CFG_FLAG_SET_VSINH; /* VS-mode Inhibit */
 
 	error = ioctl(tc->ctx_fd, HWC_IOC_CONFIGURE, &hc);
 	if (error) {
