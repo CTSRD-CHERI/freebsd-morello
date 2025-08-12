@@ -217,9 +217,10 @@ pmu_stop(struct hwc_context *tc)
 	if (error) {
 		printf("%s: could not stop counters (mask) 0x%x, error %d\n",
 		    __func__, hs.counter_mask, error);
+		return (error);
 	}
 
-	return (error);
+	return (0);
 }
 
 static int
