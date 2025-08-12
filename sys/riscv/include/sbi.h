@@ -114,6 +114,22 @@
 #define	 SBI_PMU_SNAPSHOT_SET_SHMEM		7
 #define	 SBI_PMU_EVENT_GET_INFO			8
 
+/* SBI PMU flags */
+#define	SBI_PMU_CFG_FLAG_SKIP_MATCH		(1 << 0)
+#define	SBI_PMU_CFG_FLAG_CLEAR_VALUE		(1 << 1)
+#define	SBI_PMU_CFG_FLAG_AUTO_START		(1 << 2)
+#define	SBI_PMU_CFG_FLAG_SET_VUINH		(1 << 3)
+#define	SBI_PMU_CFG_FLAG_SET_VSINH		(1 << 4)
+#define	SBI_PMU_CFG_FLAG_SET_UINH		(1 << 5)
+#define	SBI_PMU_CFG_FLAG_SET_SINH		(1 << 6)
+#define	SBI_PMU_CFG_FLAG_SET_MINH		(1 << 7)
+
+#define	SBI_PMU_START_FLAG_SET_INIT_VALUE	(1 << 0)
+#define	SBI_PMU_START_FLAG_INIT_SNAPSHOT	(1 << 1)
+
+#define	SBI_PMU_STOP_FLAG_RESET			(1 << 0)
+#define	SBI_PMU_STOP_FLAG_TAKE_SNAPSHOT		(1 << 1)
+
 /* System Reset (SRST) Extension */
 #define	SBI_EXT_ID_SRST			0x53525354
 #define	SBI_SRST_SYSTEM_RESET		0

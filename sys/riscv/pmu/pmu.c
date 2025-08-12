@@ -83,21 +83,6 @@ pmu_backend_deinit(struct hwc_context *ctx)
 	return (0);
 }
 
-#define	SBI_PMU_CFG_FLAG_SKIP_MATCH	(1 << 0)
-#define	SBI_PMU_CFG_FLAG_CLEAR_VALUE	(1 << 1)
-#define	SBI_PMU_CFG_FLAG_AUTO_START	(1 << 2)
-#define	SBI_PMU_CFG_FLAG_SET_VUINH	(1 << 3)
-#define	SBI_PMU_CFG_FLAG_SET_VSINH	(1 << 4)
-#define	SBI_PMU_CFG_FLAG_SET_UINH	(1 << 5)
-#define	SBI_PMU_CFG_FLAG_SET_SINH	(1 << 6)
-#define	SBI_PMU_CFG_FLAG_SET_MINH	(1 << 7)
-
-#define	SBI_PMU_START_FLAG_SET_INIT_VALUE	(1 << 0)
-#define	SBI_PMU_START_FLAG_INIT_SNAPSHOT	(1 << 1)
-
-#define	SBI_PMU_STOP_FLAG_RESET			(1 << 0)
-#define	SBI_PMU_STOP_FLAG_TAKE_SNAPSHOT		(1 << 1)
-
 static int
 pmu_backend_configure(struct hwc_context *ctx, struct hwc_configure *hc)
 {
@@ -111,17 +96,15 @@ pmu_backend_configure(struct hwc_context *ctx, struct hwc_configure *hc)
 	flags = SBI_PMU_CFG_FLAG_CLEAR_VALUE;
 	flags |= SBI_PMU_CFG_FLAG_SET_SINH;
 	flags |= SBI_PMU_CFG_FLAG_SET_MINH;
+
 #if 0
+	/* Raw counter example usage. */
 	ret = SBI_CALL5(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_CONFIG_MATCHING, 0,
 	    (1 << hc->counter_id), flags, 0x20000, hc->event_id);
-#else
-	/* Reset any mapping. */
-	SBI_CALL5(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_STOP,
-	    0, (1 << hc->counter_id), SBI_PMU_STOP_FLAG_RESET, 0, 0);
+#endif
 
 	ret = SBI_CALL5(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_CONFIG_MATCHING, 0,
 	    (1 << hc->counter_id), flags, hc->event_id, 0);
-#endif
 
 	dprintf("%s: config match ev_id %d counter_id %d, err %ld val %ld\n",
 	    __func__, hc->event_id, hc->counter_id, ret.error, ret.value);
@@ -140,7 +123,7 @@ pmu_backend_start(struct hwc_context *ctx, struct hwc_start *hs)
 	struct sbi_ret ret;
 
 	ret = SBI_CALL4(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_START, 0,
-	    hs->counter_mask, SBI_PMU_START_FLAG_SET_INIT_VALUE, 0);
+	    hs->counter_mask, hs->flags, hs->data);
 
 	dprintf("start counters err %ld num %ld\n", ret.error, ret.value);
 
@@ -152,8 +135,8 @@ pmu_backend_stop(struct hwc_context *ctx, struct hwc_stop *hs)
 {
 	struct sbi_ret ret;
 
-	ret = SBI_CALL2(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_STOP, 0,
-	    hs->counter_mask);
+	ret = SBI_CALL3(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_STOP, 0,
+	    hs->counter_mask, hs->flags);
 
 	dprintf("stop counters err %ld num %ld\n", ret.error, ret.value);
 

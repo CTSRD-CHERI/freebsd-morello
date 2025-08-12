@@ -75,10 +75,13 @@ struct hwc_configure {
 
 struct hwc_start {
 	int		counter_mask;
+	int		flags;
+	int		data;
 } __aligned(16);
 
 struct hwc_stop {
 	int		counter_mask;
+	int		flags;
 } __aligned(16);
 
 struct hwc_wakeup {

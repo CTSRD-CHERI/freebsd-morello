@@ -51,6 +51,7 @@
 
 #include <machine/riscvreg.h>
 #include <machine/encoding.h>
+#include <machine/sbi.h>
 
 #include "hwc.h"
 #include "hwc_pmu.h"
@@ -117,11 +118,31 @@ csr_read_num(int csr_num)
 }
 
 static int
+pmu_reset_mapping(struct hwc_context *tc, int mhpm_id)
+{
+	struct hwc_stop hs;
+	int error;
+
+	hs.counter_mask = (1 << mhpm_id);
+	hs.flags = SBI_PMU_STOP_FLAG_RESET;
+
+	error = ioctl(tc->ctx_fd, HWC_IOC_STOP, &hs);
+	if (error)
+		return (error);
+
+	return (0);
+}
+
+static int
 pmu_request(struct hwc_context *tc, int mhpm_id, int event_id)
 {
 	struct hwc_configure hc;
 	int error;
 
+	/* Reset previous mappings, if any. */
+	pmu_reset_mapping(tc, mhpm_id);
+
+	/* Map event_id to a counter mhpm_id. */
 	hc.event_id = event_id;
 	hc.counter_id = mhpm_id;
 	hc.flags = 0;
@@ -208,6 +229,7 @@ pmu_stop(struct hwc_context *tc)
 	int i;
 
 	hs.counter_mask = 0;
+	hs.flags = 0;
 
 	for (i = 0; i < RISCV_NCOUNTERS; i++)
 		if (counters[i].enabled == true)
@@ -231,6 +253,8 @@ pmu_start(struct hwc_context *tc)
 	int i;
 
 	hs.counter_mask = 0;
+	hs.flags = SBI_PMU_START_FLAG_SET_INIT_VALUE;
+	hs.data = 0;
 
 	for (i = 0; i < RISCV_NCOUNTERS; i++)
 		if (counters[i].enabled == true)
