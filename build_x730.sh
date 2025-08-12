@@ -25,3 +25,5 @@ echo "setenv serverip 10.5.0.1; setenv ipaddr 10.5.0.93; tftp 0x88000000 codasip
 # flash update
 # setenv serverip 10.5.0.1; setenv ipaddr 10.5.0.93; tftp 0x88000000 codasip_vcu118/flash.bin
 # fatwrite mmc 0 0x88000000 flash.bin $filesize
+
+scp /usr/obj/usr/home/br/dev/freebsd/riscv.riscv64/usr.sbin/hwc/hwc 10.5.0.151:~/
