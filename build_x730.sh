@@ -1,4 +1,11 @@
-make -j24 KERNCONF=X730 TARGET=riscv buildkernel || exit 1
+A=CONF
+if [ "$1" = "fast" ]; then
+	A=FAST
+else
+	make -j24 TARGET=riscv KERN${A}=X730 cleankernel
+fi
+
+make -j24 KERN${A}=X730 TARGET=riscv buildkernel || exit 1
 
 cp /usr/obj/usr/home/br/dev/freebsd/riscv.riscv64/sys/X730/kernel /tftpboot/root/boot/kernel
 
