@@ -109,6 +109,8 @@ pmu_backend_configure(struct hwc_context *ctx, struct hwc_configure *hc)
 	    hc->counter_id);
 
 	flags = SBI_PMU_CFG_FLAG_CLEAR_VALUE;
+	flags |= SBI_PMU_CFG_FLAG_SET_SINH;
+	flags |= SBI_PMU_CFG_FLAG_SET_MINH;
 #if 0
 	ret = SBI_CALL5(SBI_EXT_ID_PMU, SBI_PMU_COUNTER_CONFIG_MATCHING, 0,
 	    (1 << hc->counter_id), flags, 0x20000, hc->event_id);
