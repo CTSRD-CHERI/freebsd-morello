@@ -148,7 +148,7 @@ pmu_request(struct hwc_context *tc, int mhpm_id, int event_id)
 	hc.flags = SBI_PMU_CFG_FLAG_CLEAR_VALUE;
 	hc.flags |= SBI_PMU_CFG_FLAG_SET_SINH; /* S-mode Inhibit */
 	hc.flags |= SBI_PMU_CFG_FLAG_SET_MINH; /* M-mode Inhibit */
-	hc.flags |= SBI_PMU_CFG_FLAG_SET_UINH; /* U-mode Inhibit */
+	//hc.flags |= SBI_PMU_CFG_FLAG_SET_UINH; /* U-mode Inhibit */
 	hc.flags |= SBI_PMU_CFG_FLAG_SET_VUINH; /* VU-mode Inhibit */
 	hc.flags |= SBI_PMU_CFG_FLAG_SET_VSINH; /* VS-mode Inhibit */
 
@@ -327,13 +327,64 @@ pmu_run_once(struct hwc_context *tc __unused)
 
 }
 
+static void
+pmu_ucl_insert_entry(ucl_object_t *root, struct counter *c, int i)
+{
+	ucl_object_t *result;
+	uint64_t val;
+
+	val = csr_read_num(CSR_HPMCOUNTER3 - 3 + i);
+
+	result = ucl_object_typed_new(UCL_OBJECT);
+	ucl_object_insert_key(result, ucl_object_fromstring(c->name),
+	    "name", 0, false);
+	ucl_object_insert_key(result, ucl_object_fromint(val), "count", 0,
+	    false);
+
+	ucl_object_insert_key(root, result, "counters", 0, false);
+}
+
 static int
-pmu_shutdown(struct hwc_context *tc __unused)
+pmu_dump(void)
+{
+	unsigned char *json_str;
+	struct counter *c;
+	ucl_object_t *root;
+	FILE *fp;
+	int i;
+
+	root = ucl_object_typed_new(UCL_OBJECT);
+
+	for (i = 0; i < RISCV_NCOUNTERS; i++) {
+		c = &counters[i];
+		if (c->enabled == true)
+			pmu_ucl_insert_entry(root, c, i);
+	}
+
+	json_str = ucl_object_emit(root, UCL_EMIT_JSON_COMPACT);
+	if (json_str) {
+		fp = fopen("/tmp/output.json", "w");
+		if (!fp) {
+			perror("fopen");
+			free(json_str);
+			ucl_object_unref(root);
+			return (1);
+		}
+		fputs((const char *)json_str, fp);
+		fclose(fp);
+		free(json_str);
+	}
+
+	ucl_object_unref(root);
+
+	return (0);
+}
+
+static void
+pmu_print(struct hwc_context *tc __unused)
 {
 	struct counter *c;
 	int i;
-
-	pmu_stop(tc);
 
 	/* Print out standard counters. */
 	printf(" time == %ld\n", csr_read(time));
@@ -346,6 +397,15 @@ pmu_shutdown(struct hwc_context *tc __unused)
 			printf(" %s == %ld\n", c->name,
 			    csr_read_num(CSR_HPMCOUNTER3 - 3 + i));
 	}
+}
+
+static int
+pmu_shutdown(struct hwc_context *tc)
+{
+
+	pmu_stop(tc);
+	pmu_print(tc);
+	pmu_dump();
 
 	return (0);
 }
