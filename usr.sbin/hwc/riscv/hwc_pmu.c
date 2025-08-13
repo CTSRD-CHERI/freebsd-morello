@@ -119,22 +119,6 @@ csr_read_num(int csr_num)
 }
 
 static int
-pmu_reset_mapping(struct hwc_context *tc, int mhpm_id)
-{
-	struct hwc_stop hs;
-	int error;
-
-	hs.counter_mask = (1 << mhpm_id);
-	hs.flags = SBI_PMU_STOP_FLAG_RESET;
-
-	error = ioctl(tc->ctx_fd, HWC_IOC_STOP, &hs);
-	if (error)
-		return (error);
-
-	return (0);
-}
-
-static int
 pmu_request_configure(struct hwc_context *tc, int mhpm_id, int event_id)
 {
 	struct hwc_configure hc;
@@ -231,25 +215,22 @@ pmu_stop_one(struct hwc_context *tc, int i)
 }
 
 static int
-pmu_stop_all(struct hwc_context *tc)
+pmu_stop_all(struct hwc_context *tc, int flags)
 {
 	struct hwc_stop hs;
 	int error;
 	int i;
 
 	hs.counter_mask = 0;
-	hs.flags = 0;
+	hs.flags = flags;
 
 	for (i = 0; i < RISCV_NCOUNTERS; i++)
 		if (counters[i].enabled == true)
 			hs.counter_mask |= (1 << i);
 
 	error = ioctl(tc->ctx_fd, HWC_IOC_STOP, &hs);
-	if (error) {
-		printf("%s: could not stop counters (mask) 0x%x, error %d\n",
-		    __func__, hs.counter_mask, error);
+	if (error)
 		return (error);
-	}
 
 	return (0);
 }
@@ -323,18 +304,12 @@ pmu_configure(struct hwc_context *tc)
 	if (error)
 		return (error);
 
-	pmu_stop_all(tc);
+	/* Stop and reset any previous mappings. */
+	pmu_stop_all(tc, SBI_PMU_STOP_FLAG_RESET);
 
 	for (i = 0; i < RISCV_NCOUNTERS; i++) {
 		c = &counters[i];
 		if (c->enabled == true) {
-
-			/* Stop and reset previous mappings, if any. */
-			error = pmu_reset_mapping(tc, i);
-			if (error)
-				printf("%s: could not reset ctr id %d\n",
-				    __func__, i);
-
 			error = pmu_request_configure(tc, i, c->event_id);
 			if (error) {
 				printf("%s: cound not configure ctr id %d\n",
@@ -445,7 +420,7 @@ static int
 pmu_shutdown(struct hwc_context *tc)
 {
 
-	pmu_stop_all(tc);
+	pmu_stop_all(tc, 0);
 	pmu_print(tc);
 	pmu_dump(tc);
 
