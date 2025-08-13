@@ -262,7 +262,7 @@ hwc_mode_thread(struct hwc_context *tc, char **cmd, char **env)
 
 	error = tc->backend->methods->configure(tc);
 	if (error) {
-		printf("could not configure counters, error %d\n", error);
+		printf("could not configure backend, error %d\n", error);
 		return (error);
 	}
 

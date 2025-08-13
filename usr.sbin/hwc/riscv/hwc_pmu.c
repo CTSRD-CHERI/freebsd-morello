@@ -140,12 +140,9 @@ pmu_request_configure(struct hwc_context *tc, int mhpm_id, int event_id)
 	struct hwc_configure hc;
 	int error;
 
-	/* Reset previous mappings, if any. */
-	pmu_reset_mapping(tc, mhpm_id);
-
 	/* Map event_id to a counter mhpm_id. */
-	hc.event_id = event_id;
 	hc.counter_id = mhpm_id;
+	hc.event_id = event_id;
 	hc.flags = SBI_PMU_CFG_FLAG_CLEAR_VALUE;
 	hc.flags |= SBI_PMU_CFG_FLAG_SET_SINH; /* S-mode Inhibit */
 	hc.flags |= SBI_PMU_CFG_FLAG_SET_MINH; /* M-mode Inhibit */
@@ -154,11 +151,8 @@ pmu_request_configure(struct hwc_context *tc, int mhpm_id, int event_id)
 	hc.flags |= SBI_PMU_CFG_FLAG_SET_VSINH; /* VS-mode Inhibit */
 
 	error = ioctl(tc->ctx_fd, HWC_IOC_CONFIGURE, &hc);
-	if (error) {
-		printf("%s: could not configure event_id %d, error %d\n",
-		    __func__, hc.event_id, error);
+	if (error)
 		return (error);
-	}
 
 	return (0);
 }
@@ -241,7 +235,7 @@ pmu_stop(struct hwc_context *tc)
 	return (0);
 }
 
-static int
+static int __unused
 pmu_start(struct hwc_context *tc)
 {
 	struct hwc_start hs;
@@ -310,20 +304,26 @@ pmu_configure(struct hwc_context *tc)
 	if (error)
 		return (error);
 
-	pmu_stop(tc);
-
 	for (i = 0; i < RISCV_NCOUNTERS; i++) {
 		c = &counters[i];
 		if (c->enabled == true) {
+
+			/* Stop and reset previous mappings, if any. */
+			error = pmu_reset_mapping(tc, i);
+			if (error)
+				printf("%s: cound not reset ctr id %d\n",
+				    __func__, i);
+
 			error = pmu_request_configure(tc, i, c->event_id);
 			if (error) {
-				printf("%s: cound not configure id %d\n",
-				    __func__, c->event_id);
+				printf("%s: cound not configure ctr id %d\n",
+				    __func__, i);
 				return (error);
 			}
 		}
 	}
 
+	/* Start all counters. */
 	error = pmu_start(tc);
 
 	return (error);
