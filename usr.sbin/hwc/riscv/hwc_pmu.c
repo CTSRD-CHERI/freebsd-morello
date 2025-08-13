@@ -345,13 +345,22 @@ pmu_ucl_insert_entry(ucl_object_t *root, struct counter *c, int i)
 }
 
 static int
-pmu_dump(void)
+pmu_dump(struct hwc_context *tc)
 {
 	unsigned char *json_str;
 	struct counter *c;
 	ucl_object_t *root;
 	FILE *fp;
 	int i;
+
+	if (tc->output_file == NULL)
+		return (0);
+
+	fp = fopen(tc->output_file, "w");
+	if (!fp) {
+		perror("fopen");
+		return (-1);
+	}
 
 	root = ucl_object_typed_new(UCL_OBJECT);
 
@@ -363,17 +372,11 @@ pmu_dump(void)
 
 	json_str = ucl_object_emit(root, UCL_EMIT_JSON_COMPACT);
 	if (json_str) {
-		fp = fopen("/tmp/output.json", "w");
-		if (!fp) {
-			perror("fopen");
-			free(json_str);
-			ucl_object_unref(root);
-			return (1);
-		}
 		fputs((const char *)json_str, fp);
-		fclose(fp);
 		free(json_str);
 	}
+
+	fclose(fp);
 
 	ucl_object_unref(root);
 
@@ -405,7 +408,7 @@ pmu_shutdown(struct hwc_context *tc)
 
 	pmu_stop(tc);
 	pmu_print(tc);
-	pmu_dump();
+	pmu_dump(tc);
 
 	return (0);
 }

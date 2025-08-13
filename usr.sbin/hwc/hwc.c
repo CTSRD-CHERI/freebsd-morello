@@ -164,7 +164,7 @@ usage(void)
 	errx(EX_USAGE,
 		"hwc [-c devname] [path to executable]\n"
 		"\t -c\tname\t\tName of tracing device, e.g. 'coresight'.\n"
-		"\t -o\tkeywords\t\tList of decoder output keywords.\n"
+		"\t -o\toutput-file\t\tFile name to store results into.\n"
 		"\t -h\tHelp."
         );
 }
@@ -308,6 +308,9 @@ main(int argc, char **argv, char **env)
 			break;
 		case 'f':
 			tc->config_file = strdup(optarg);
+			break;
+		case 'o':
+			tc->output_file = strdup(optarg);
 			break;
 		case 'c':
 			backend_name = strdup(optarg);

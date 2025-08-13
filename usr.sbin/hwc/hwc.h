@@ -53,6 +53,7 @@ struct hwc_context {
 	int attach;
 	int ident;
 	char *config_file;
+	char *output_file;
 	int mode;
 	int ctx_fd;
 };
