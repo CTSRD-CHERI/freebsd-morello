@@ -445,7 +445,7 @@ static int
 pmu_shutdown(struct hwc_context *tc)
 {
 
-	pmu_stop(tc);
+	pmu_stop_all(tc);
 	pmu_print(tc);
 	pmu_dump(tc);
 
