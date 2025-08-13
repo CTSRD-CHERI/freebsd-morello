@@ -315,8 +315,10 @@ hwc_vm_ioctl(struct cdev *dev, u_long cmd, caddr_t addr, int flags,
 		break;
 
 	case HWC_IOC_STOP:
+#if 0
 		if (ctx->state == CTX_STATE_STOPPED)
 			return (ENXIO);
+#endif
 		hstop = (struct hwc_stop *)addr;
 		error = hwc_backend_stop(ctx, hstop);
 		if (error)
