@@ -86,7 +86,7 @@ pmu_backend_deinit(struct hwc_context *ctx)
 static int
 pmu_backend_configure(struct hwc_context *ctx, struct hwc_configure *hc)
 {
-	struct sbi_ret ret __unused;
+	struct sbi_ret ret;
 	uint32_t reg;
 
 	dprintf("%s: event_id %d counter_id %d\n", __func__, hc->event_id,
@@ -105,11 +105,13 @@ pmu_backend_configure(struct hwc_context *ctx, struct hwc_configure *hc)
 	    __func__, hc->event_id, hc->counter_id, ret.error, ret.value);
 
 	/* Enable user access. */
-	reg = csr_read(scounteren);
-	reg |= (1 << hc->counter_id);
-	csr_write(scounteren, reg);
+	if (ret.error == 0) {
+		reg = csr_read(scounteren);
+		reg |= (1 << hc->counter_id);
+		csr_write(scounteren, reg);
+	}
 
-	return (0);
+	return (ret.error);
 }
 
 static int
