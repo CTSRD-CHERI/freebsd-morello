@@ -27,7 +27,7 @@ for line in f.readlines():
 	spl = line.split()
 	event_id = spl[0]
 	name = ' '.join(spl[1:])
-	print("\tmhpmcounter {")
+	print("\tmhpmcounter = {")
 	print("\t\tid = 3;")
 	print("\t\tname = '%s';" % name)
 	print("\t\tevent_id = %s;" % event_id)
