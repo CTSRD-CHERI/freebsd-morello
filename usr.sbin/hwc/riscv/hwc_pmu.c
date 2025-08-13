@@ -211,8 +211,27 @@ pmu_parse_counters(struct hwc_context *tc, const ucl_object_t *top)
 	return (0);
 }
 
+static int __unused
+pmu_stop_one(struct hwc_context *tc, int i)
+{
+	struct hwc_stop hs;
+	int error;
+
+	hs.counter_mask = (1 << i);
+	hs.flags = 0;
+
+	error = ioctl(tc->ctx_fd, HWC_IOC_STOP, &hs);
+	if (error) {
+		printf("%s: could not stop counter (mask) 0x%x, error %d\n",
+		    __func__, hs.counter_mask, error);
+		return (error);
+	}
+
+	return (0);
+}
+
 static int
-pmu_stop(struct hwc_context *tc)
+pmu_stop_all(struct hwc_context *tc)
 {
 	struct hwc_stop hs;
 	int error;
@@ -236,7 +255,7 @@ pmu_stop(struct hwc_context *tc)
 }
 
 static int __unused
-pmu_start(struct hwc_context *tc)
+pmu_start_all(struct hwc_context *tc)
 {
 	struct hwc_start hs;
 	int error;
@@ -304,6 +323,8 @@ pmu_configure(struct hwc_context *tc)
 	if (error)
 		return (error);
 
+	pmu_stop_all(tc);
+
 	for (i = 0; i < RISCV_NCOUNTERS; i++) {
 		c = &counters[i];
 		if (c->enabled == true) {
@@ -311,7 +332,7 @@ pmu_configure(struct hwc_context *tc)
 			/* Stop and reset previous mappings, if any. */
 			error = pmu_reset_mapping(tc, i);
 			if (error)
-				printf("%s: cound not reset ctr id %d\n",
+				printf("%s: could not reset ctr id %d\n",
 				    __func__, i);
 
 			error = pmu_request_configure(tc, i, c->event_id);
@@ -323,8 +344,7 @@ pmu_configure(struct hwc_context *tc)
 		}
 	}
 
-	/* Start all counters. */
-	error = pmu_start(tc);
+	error = pmu_start_all(tc);
 
 	return (error);
 }
