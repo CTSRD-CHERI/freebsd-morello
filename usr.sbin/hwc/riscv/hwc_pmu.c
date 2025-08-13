@@ -68,8 +68,9 @@
 #endif
 
 struct counter {
-	char *name;
+	int event_id;
 	bool enabled;
+	char *name;
 };
 
 #define	RISCV_NCOUNTERS	32
@@ -134,7 +135,7 @@ pmu_reset_mapping(struct hwc_context *tc, int mhpm_id)
 }
 
 static int
-pmu_request(struct hwc_context *tc, int mhpm_id, int event_id)
+pmu_request_configure(struct hwc_context *tc, int mhpm_id, int event_id)
 {
 	struct hwc_configure hc;
 	int error;
@@ -163,7 +164,7 @@ pmu_request(struct hwc_context *tc, int mhpm_id, int event_id)
 }
 
 static int
-pmu_configure_counter(struct hwc_context *tc, const ucl_object_t *top)
+pmu_parse_counter(struct hwc_context *tc __unused, const ucl_object_t *top)
 {
 	const ucl_object_t *obj;
 	ucl_object_iter_t it = NULL;
@@ -172,7 +173,6 @@ pmu_configure_counter(struct hwc_context *tc, const ucl_object_t *top)
 	int mhpm_id;
 	const char *name;
 	bool enabled __unused;
-	int error;
 
 	while ((obj = ucl_iterate_object (top, &it, true))) {
 		k = ucl_object_key(obj);
@@ -186,24 +186,15 @@ pmu_configure_counter(struct hwc_context *tc, const ucl_object_t *top)
 			enabled = ucl_object_toboolean(obj);
 	}
 
-	if (enabled == false)
-		return (0);
-
-	dprintf("%s: Configuring id %d name %s event_id %d enabled %d\n",
-	    __func__, mhpm_id, name, event_id, enabled);
-
-	error = pmu_request(tc, mhpm_id, event_id);
-	if (error)
-		return (error);
-
+	counters[mhpm_id].event_id = event_id;
 	counters[mhpm_id].name = strdup(name);
-	counters[mhpm_id].enabled = true;
+	counters[mhpm_id].enabled = enabled;
 
 	return (0);
 }
 
 static int
-pmu_configure_counters(struct hwc_context *tc, const ucl_object_t *top)
+pmu_parse_counters(struct hwc_context *tc, const ucl_object_t *top)
 {
 	ucl_object_iter_t it_obj = NULL;
 	ucl_object_iter_t it = NULL;
@@ -217,7 +208,7 @@ pmu_configure_counters(struct hwc_context *tc, const ucl_object_t *top)
 		if (strcmp(k, "mhpmcounter") != 0)
 			continue;
 		while ((cur = ucl_iterate_object (obj, &it_obj, false))) {
-			error = pmu_configure_counter(tc, cur);
+			error = pmu_parse_counter(tc, cur);
 			if (error)
 				return (error);
 		}
@@ -276,7 +267,7 @@ pmu_start(struct hwc_context *tc)
 }
 
 static int
-pmu_configure(struct hwc_context *tc)
+pmu_parse_config(struct hwc_context *tc)
 {
 	struct ucl_parser *parser;
 	const ucl_object_t *obj;
@@ -299,9 +290,37 @@ pmu_configure(struct hwc_context *tc)
 	while ((obj = ucl_iterate_object(top, &it, true))) {
 		k = ucl_object_key(obj);
 		if (strcmp(k, "mhpmcounters") == 0) {
-			error = pmu_configure_counters(tc, obj);
+			error = pmu_parse_counters(tc, obj);
 			if (error)
 				return (error);
+		}
+	}
+
+	return (0);
+}
+
+static int
+pmu_configure(struct hwc_context *tc)
+{
+	struct counter *c;
+	int error;
+	int i;
+
+	error = pmu_parse_config(tc);
+	if (error)
+		return (error);
+
+	pmu_stop(tc);
+
+	for (i = 0; i < RISCV_NCOUNTERS; i++) {
+		c = &counters[i];
+		if (c->enabled == true) {
+			error = pmu_request_configure(tc, i, c->event_id);
+			if (error) {
+				printf("%s: cound not configure id %d\n",
+				    __func__, c->event_id);
+				return (error);
+			}
 		}
 	}
 
