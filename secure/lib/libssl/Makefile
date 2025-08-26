@@ -3,7 +3,6 @@
 LIB=		ssl
 SHLIB_MAJOR=	35
 VERSION_MAP=	${.CURDIR}/Version.map
-PACKAGE=	openssl-lib
 
 NO_LINT=
 
@@ -73,6 +72,8 @@ SRCS+=	rio_notifier.c poll_builder.c
 
 .if ${MK_OPENSSL_KTLS} == "no"
 CFLAGS+=-DOPENSSL_NO_KTLS
+.else
+SRCS+=	ktls_meth.c
 .endif
 
 LIBADD=	crypto

@@ -1,8 +1,10 @@
 .include <bsd.own.mk>
 
+PACKAGE=	openssl
+LIB_PACKAGE=
+
 # OpenSSL version used for manual page generation
-OPENSSL_VER=	3.5.0
-OPENSSL_DATE=	2025-07-01
+.include "Makefile.version"
 
 LCRYPTO_SRC=	${SRCTOP}/crypto/openssl
 LCRYPTO_DOC=	${LCRYPTO_SRC}/doc
