@@ -166,8 +166,8 @@ struct node_gid {
 };
 
 struct node_icmp {
-	u_int8_t		 code;
-	u_int8_t		 type;
+	uint16_t		 code;
+	uint16_t		 type;
 	u_int8_t		 proto;
 	struct node_icmp	*next;
 	struct node_icmp	*tail;
@@ -238,6 +238,7 @@ static struct pool_opts {
 #define POM_TYPE		0x01
 #define POM_STICKYADDRESS	0x02
 #define POM_ENDPI		0x04
+#define POM_IPV6NH		0x08
 	u_int8_t		 opts;
 	int			 type;
 	int			 staticport;
@@ -419,6 +420,8 @@ int	 rt_tableid_max(void);
 
 void	 mv_rules(struct pfctl_ruleset *, struct pfctl_ruleset *);
 void	 mv_eth_rules(struct pfctl_eth_ruleset *, struct pfctl_eth_ruleset *);
+void	 mv_tables(struct pfctl *, struct pfr_ktablehead *,
+		    struct pfctl_anchor *, struct pfctl_anchor *);
 void	 decide_address_family(struct node_host *, sa_family_t *);
 void	 remove_invalid_hosts(struct node_host **, sa_family_t *);
 int	 invalid_redirect(struct node_host *, sa_family_t);
@@ -543,7 +546,7 @@ int	parseport(char *, struct range *r, int);
 %token	MAXSRCCONN MAXSRCCONNRATE OVERLOAD FLUSH SLOPPY PFLOW ALLOW_RELATED
 %token	TAGGED TAG IFBOUND FLOATING STATEPOLICY STATEDEFAULTS ROUTE SETTOS
 %token	DIVERTTO DIVERTREPLY BRIDGE_TO RECEIVEDON NE LE GE AFTO NATTO RDRTO
-%token	BINATTO MAXPKTRATE MAXPKTSIZE
+%token	BINATTO MAXPKTRATE MAXPKTSIZE IPV6NH
 %token	<v.string>		STRING
 %token	<v.number>		NUMBER
 %token	<v.i>			PORTBINARY
@@ -948,6 +951,7 @@ anchorname	: STRING			{
 
 pfa_anchorlist	: /* empty */
 		| pfa_anchorlist '\n'
+		| pfa_anchorlist tabledef '\n'
 		| pfa_anchorlist pfrule '\n'
 		| pfa_anchorlist anchorrule '\n'
 		| pfa_anchorlist include '\n'
@@ -973,7 +977,7 @@ pfa_anchor	: '{'
 			snprintf(ta, PF_ANCHOR_NAME_SIZE, "_%d", pf->bn);
 			rs = pf_find_or_create_ruleset(ta);
 			if (rs == NULL)
-				err(1, "pfa_anchor: pf_find_or_create_ruleset");
+				err(1, "pfa_anchor: pf_find_or_create_ruleset (%s)", ta);
 			pf->astack[pf->asd] = rs->anchor;
 			pf->anchor = rs->anchor;
 		} '\n' pfa_anchorlist '}'
@@ -1025,6 +1029,7 @@ anchorrule	: ANCHOR anchorname dir quick interface af proto fromto
 					}
 					mv_rules(&pf->alast->ruleset,
 					    &r.anchor->ruleset);
+					mv_tables(pf, &pfr_ktables, r.anchor, pf->alast);
 				}
 				pf_remove_if_empty_ruleset(&pf->alast->ruleset);
 				pf->alast = r.anchor;
@@ -2648,13 +2653,16 @@ pfrule		: action dir logquick interface route af proto fromto
 					YYERROR;
 				}
 				r.rt = $5.rt;
-				decide_address_family($5.redirspec->host, &r.af);
-				if (!(r.rule_flag & PFRULE_AFTO))
-					remove_invalid_hosts(&($5.redirspec->host), &r.af);
-				if ($5.redirspec->host == NULL) {
-					yyerror("no routing address with "
-					    "matching address family found.");
-					YYERROR;
+
+				if (!($5.redirspec->pool_opts.opts & PF_POOL_IPV6NH)) {
+					decide_address_family($5.redirspec->host, &r.af);
+					if (!(r.rule_flag & PFRULE_AFTO))
+						remove_invalid_hosts(&($5.redirspec->host), &r.af);
+					if ($5.redirspec->host == NULL) {
+						yyerror("no routing address with "
+						    "matching address family found.");
+						YYERROR;
+					}
 				}
 			}
 #ifdef __FreeBSD__
@@ -2978,7 +2986,8 @@ filter_opt	: USER uids {
 
 			filter_opts.nat = $4;
 			filter_opts.nat->af = $2;
-			if ($4->af && $4->af != $2) {
+			remove_invalid_hosts(&($4->host), &(filter_opts.nat->af));
+			if ($4->host == NULL) {
 				yyerror("af-to addresses must be in the "
 				   "target address family");
 				YYERROR;
@@ -2998,8 +3007,9 @@ filter_opt	: USER uids {
 			filter_opts.nat->af = $2;
 			filter_opts.rdr = $6;
 			filter_opts.rdr->af = $2;
-			if (($4->af && $4->host->af != $2) ||
-			    ($6->af && $6->host->af != $2)) {
+			remove_invalid_hosts(&($4->host), &(filter_opts.nat->af));
+			remove_invalid_hosts(&($6->host), &(filter_opts.rdr->af));
+			if ($4->host == NULL || $6->host == NULL) {
 				yyerror("af-to addresses must be in the "
 				   "target address family");
 				YYERROR;
@@ -4674,6 +4684,14 @@ pool_opt	: BITMASK	{
 			pool_opts.marker |= POM_ENDPI;
 			pool_opts.opts |= PF_POOL_ENDPI;
 		}
+		| IPV6NH {
+			if (pool_opts.marker & POM_IPV6NH) {
+				yyerror("prefer-ipv6-nexthop cannot be redefined");
+				YYERROR;
+			}
+			pool_opts.marker |= POM_IPV6NH;
+			pool_opts.opts |= PF_POOL_IPV6NH;
+		}
 		| MAPEPORTSET number '/' number '/' number {
 			if (pool_opts.mape.offset) {
 				yyerror("map-e-portset cannot be redefined");
@@ -4811,6 +4829,12 @@ natrule		: nataction interface af proto fromto tag tagged rtable
 				if ($9 == NULL || $9->host == NULL) {
 					yyerror("translation rule requires '-> "
 					    "address'");
+					YYERROR;
+				}
+				if ($9->pool_opts.opts & PF_POOL_IPV6NH) {
+					yyerror("The prefer-ipv6-nexthop option "
+					    "can't be used for nat/rdr/binat pools"
+					);
 					YYERROR;
 				}
 				if (!r.af && ! $9->host->ifindex)
@@ -5074,13 +5098,6 @@ route_host	: STRING			{
 
 route_host_list	: route_host optnl			{ $$ = $1; }
 		| route_host_list comma route_host optnl {
-			if ($1->af == 0)
-				$1->af = $3->af;
-			if ($1->af != $3->af) {
-				yyerror("all pool addresses must be in the "
-				    "same address family");
-				YYERROR;
-			}
 			$1->tail->next = $3;
 			$1->tail = $3->tail;
 			$$ = $1;
@@ -5443,6 +5460,7 @@ process_tabledef(char *name, struct table_opts *opts, int popts)
 {
 	struct pfr_buffer	 ab;
 	struct node_tinit	*ti;
+	struct pfr_uktable	*ukt;
 	unsigned long		 maxcount;
 	size_t			 s = sizeof(maxcount);
 
@@ -5475,9 +5493,23 @@ process_tabledef(char *name, struct table_opts *opts, int popts)
 	else if (pf->opts & PF_OPT_VERBOSE)
 		fprintf(stderr, "%s:%d: skipping duplicate table checks"
 		    " for <%s>\n", file->name, yylval.lineno, name);
+	/*
+	 * postpone definition of non-root tables to moment
+	 * when path is fully resolved.
+	 */
+	if (pf->asd > 0) {
+		ukt = calloc(1, sizeof(struct pfr_uktable));
+		if (ukt == NULL) {
+			DBGPRINT(
+			    "%s:%d: not enough memory for <%s>\n", file->name,
+			    yylval.lineno, name);
+			goto _error;
+		}
+	} else
+		ukt = NULL;
 	if (!(pf->opts & PF_OPT_NOACTION) &&
 	    pfctl_define_table(name, opts->flags, opts->init_addr,
-	    pf->anchor->path, &ab, pf->anchor->ruleset.tticket)) {
+	    pf->anchor->path, &ab, pf->anchor->ruleset.tticket, ukt)) {
 
 		if (sysctlbyname("net.pf.request_maxcount", &maxcount, &s,
 		    NULL, 0) == -1)
@@ -5493,6 +5525,28 @@ process_tabledef(char *name, struct table_opts *opts, int popts)
 
 		goto _error;
 	}
+
+	if (ukt != NULL) {
+		ukt->pfrukt_init_addr = opts->init_addr;
+		if (RB_INSERT(pfr_ktablehead, &pfr_ktables,
+		    &ukt->pfrukt_kt) != NULL) {
+			/*
+			 * I think this should not happen, because
+			 * pfctl_define_table() above  does the same check
+			 * effectively.
+			 */
+			DBGPRINT(
+			    "%s:%d table %s already exists in %s\n",
+			    file->name, yylval.lineno,
+			    ukt->pfrukt_name, pf->anchor->path);
+			free(ukt);
+			goto _error;
+		}
+		DBGPRINT("%s %s@%s inserted to tree\n",
+		    __func__, ukt->pfrukt_name, pf->anchor->path);
+	} else
+		DBGPRINT("%s ukt is null\n", __func__);
+
 	pf->tdirty = 1;
 	pfr_buf_clear(&ab);
 	return (0);
@@ -6678,6 +6732,7 @@ lookup(char *s)
 		{ "pass",		PASS},
 		{ "pflow",		PFLOW},
 		{ "port",		PORT},
+		{ "prefer-ipv6-nexthop", IPV6NH},
 		{ "prio",		PRIO},
 		{ "priority",		PRIORITY},
 		{ "priq",		PRIQ},
@@ -7077,7 +7132,7 @@ pushfile(const char *name, int secret)
 			free(nfile);
 			return (NULL);
 		}
-	} else if ((nfile->stream = fopen(nfile->name, "r")) == NULL) {
+	} else if ((nfile->stream = pfctl_fopen(nfile->name, "r")) == NULL) {
 		warn("%s: %s", __func__, nfile->name);
 		free(nfile->name);
 		free(nfile);
@@ -7260,6 +7315,61 @@ mv_eth_rules(struct pfctl_eth_ruleset *src, struct pfctl_eth_ruleset *dst)
 		dst->anchor->match++;
 	}
 	src->anchor->match = 0;
+}
+
+void
+mv_tables(struct pfctl *pf, struct pfr_ktablehead *ktables,
+    struct pfctl_anchor *a, struct pfctl_anchor *alast)
+{
+	struct pfr_ktable *kt, *kt_safe;
+	char new_path[PF_ANCHOR_MAXPATH];
+	char *path_cut;
+	int sz;
+	struct pfr_uktable *ukt;
+	SLIST_HEAD(, pfr_uktable) ukt_list;
+
+	/*
+	 * Here we need to rename anchor path from temporal names such as
+	 * _1/_2/foo to _1/bar/foo etc.
+	 *
+	 * This also means we need to remove and insert table to ktables
+	 * tree as anchor path is being updated.
+	 */
+	SLIST_INIT(&ukt_list);
+	DBGPRINT("%s [ %s ] (%s)\n", __func__, a->path, alast->path);
+	RB_FOREACH_SAFE(kt, pfr_ktablehead, ktables, kt_safe) {
+		path_cut = strstr(kt->pfrkt_anchor, alast->path);
+		if (path_cut != NULL) {
+			path_cut += strlen(alast->path);
+			if (*path_cut)
+				sz = snprintf(new_path, sizeof (new_path),
+				    "%s%s", a->path, path_cut);
+			else
+				sz = snprintf(new_path, sizeof (new_path),
+				    "%s", a->path);
+			if (sz >= sizeof (new_path))
+				errx(1, "new path is too long for %s@%s\n",
+				    kt->pfrkt_name, kt->pfrkt_anchor);
+
+			DBGPRINT("%s %s@%s -> %s@%s\n", __func__,
+			    kt->pfrkt_name, kt->pfrkt_anchor,
+			    kt->pfrkt_name, new_path);
+			    RB_REMOVE(pfr_ktablehead, ktables, kt);
+			strlcpy(kt->pfrkt_anchor, new_path,
+			    sizeof(kt->pfrkt_anchor));
+			SLIST_INSERT_HEAD(&ukt_list, (struct pfr_uktable *)kt,
+			    pfrukt_entry);
+		}
+	}
+
+	while ((ukt = SLIST_FIRST(&ukt_list)) != NULL) {
+		SLIST_REMOVE_HEAD(&ukt_list, pfrukt_entry);
+		if (RB_INSERT(pfr_ktablehead, ktables,
+		    (struct pfr_ktable *)ukt) != NULL)
+			errx(1, "%s@%s exists already\n",
+			    ukt->pfrukt_name,
+			    ukt->pfrukt_anchor);
+	}
 }
 
 void
@@ -7471,7 +7581,7 @@ parseport(char *port, struct range *r, int extensions)
 }
 
 int
-pfctl_load_anchors(int dev, struct pfctl *pf, struct pfr_buffer *trans)
+pfctl_load_anchors(int dev, struct pfctl *pf)
 {
 	struct loadanchors	*la;
 
@@ -7480,7 +7590,7 @@ pfctl_load_anchors(int dev, struct pfctl *pf, struct pfr_buffer *trans)
 			fprintf(stderr, "\nLoading anchor %s from %s\n",
 			    la->anchorname, la->filename);
 		if (pfctl_rules(dev, la->filename, pf->opts, pf->optimize,
-		    la->anchorname, trans) == -1)
+		    la->anchorname, pf->trans) == -1)
 			return (-1);
 	}
 
