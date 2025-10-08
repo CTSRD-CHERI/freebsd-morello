@@ -27,3 +27,7 @@ echo "setenv serverip 10.5.0.1; setenv ipaddr 10.5.0.93; tftp 0x88000000 codasip
 # fatwrite mmc 0 0x88000000 flash.bin $filesize
 
 scp /usr/obj/usr/home/br/dev/freebsd/riscv.riscv64/usr.sbin/hwc/hwc 10.5.0.151:~/
+
+# fatwrite mmc 0 0x82000000 kernel $filesize
+# Hybrid
+echo "setenv serverip 10.5.0.1; setenv ipaddr 10.5.0.93; tftp 0x88000000 codasip_vcu118/x730-mp1-hobgoblin-vcu118.dtb; tftp 0x82000000 codasip_vcu118/loader_lua_hybrid.efi; bootefi 0x82000000 0x88000000"
