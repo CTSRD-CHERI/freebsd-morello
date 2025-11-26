@@ -168,7 +168,7 @@ axidma_setup_cb(device_t dev, int chan_id, void (*cb)(void *), void *arg)
 
 	sc = device_get_softc(dev);
 
-	if (sc->res[chan_id + 1] != NULL)
+	if (sc->ih[chan_id] != NULL)
 		return (EEXIST);
 
 	error = bus_setup_intr(dev, sc->res[chan_id + 1],
