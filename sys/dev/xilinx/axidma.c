@@ -31,7 +31,7 @@
  */
 
 /*
- * Xilinx AXI DMA controller driver.
+ * Xilinx AXI Ethernet DMA controller driver.
  */
 
 #include <sys/systm.h>

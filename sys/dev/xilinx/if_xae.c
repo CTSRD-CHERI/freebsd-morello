@@ -69,22 +69,15 @@
 #include "miibus_if.h"
 #include "axidma_if.h"
 
-#define	READ4(_sc, _reg) \
-	bus_read_4((_sc)->res[0], _reg)
-#define	WRITE4(_sc, _reg, _val) \
-	bus_write_4((_sc)->res[0], _reg, _val)
+#define	XAE_RD4(_sc, _reg)		bus_read_4((_sc)->res[0], _reg)
+#define	XAE_RD8(_sc, _reg)		bus_read_8((_sc)->res[0], _reg)
+#define	XAE_WR4(_sc, _reg, _val)	bus_write_4((_sc)->res[0], _reg, _val)
+#define	XAE_WR8(_sc, _reg, _val)	bus_write_8((_sc)->res[0], _reg, _val)
 
-#define	READ8(_sc, _reg) \
-	bus_read_8((_sc)->res[0], _reg)
-#define	WRITE8(_sc, _reg, _val) \
-	bus_write_8((_sc)->res[0], _reg, _val)
-
-#define	AXIDMA_RD4(_sc, _reg) \
-	bus_read_4((_sc)->dma_res, _reg)
-#define	AXIDMA_WR4(_sc, _reg, _val) \
-	bus_write_4((_sc)->dma_res, _reg, _val)
-#define	AXIDMA_WR8(_sc, _reg, _val) \
-	bus_write_8((_sc)->dma_res, _reg, _val)
+#define	AXIDMA_RD4(_sc, _reg)		bus_read_4((_sc)->dma_res, _reg)
+#define	AXIDMA_RD8(_sc, _reg)		bus_read_8((_sc)->dma_res, _reg)
+#define	AXIDMA_WR4(_sc, _reg, _val)	bus_write_4((_sc)->dma_res, _reg, _val)
+#define	AXIDMA_WR8(_sc, _reg, _val)	bus_write_8((_sc)->dma_res, _reg, _val)
 
 #define	XAE_LOCK(sc)			mtx_lock(&(sc)->mtx)
 #define	XAE_UNLOCK(sc)			mtx_unlock(&(sc)->mtx)
@@ -95,15 +88,11 @@
 
 #define	MDIO_CLK_DIV_DEFAULT	29
 
-#define	PHY1_RD(sc, _r)		\
-	xae_miibus_read_reg(sc->dev, 1, _r)
-#define	PHY1_WR(sc, _r, _v)	\
-	xae_miibus_write_reg(sc->dev, 1, _r, _v)
-
-#define	PHY_RD(sc, _r)		\
-	xae_miibus_read_reg(sc->dev, sc->phy_addr, _r)
+#define	PHY1_RD(sc, _r)		xae_miibus_read_reg(sc->dev, 1, _r)
+#define	PHY1_WR(sc, _r, _v)	xae_miibus_write_reg(sc->dev, 1, _r, _v)
+#define	PHY_RD(sc, _r)		xae_miibus_read_reg(sc->dev, sc->phy_addr, _r)
 #define	PHY_WR(sc, _r, _v)	\
-	xae_miibus_write_reg(sc->dev, sc->phy_addr, _r, _v)
+    xae_miibus_write_reg(sc->dev, sc->phy_addr, _r, _v)
 
 /* Use this macro to access regs > 0x1f */
 #define WRITE_TI_EREG(sc, reg, data) {					\
@@ -477,19 +466,19 @@ xae_write_maddr(void *arg, struct sockaddr_dl *sdl, u_int cnt)
 
 	ma = LLADDR(sdl);
 
-	reg = READ4(sc, XAE_FFC) & 0xffffff00;
+	reg = XAE_RD4(sc, XAE_FFC) & 0xffffff00;
 	reg |= cnt;
-	WRITE4(sc, XAE_FFC, reg);
+	XAE_WR4(sc, XAE_FFC, reg);
 
 	reg = (ma[0]);
 	reg |= (ma[1] << 8);
 	reg |= (ma[2] << 16);
 	reg |= (ma[3] << 24);
-	WRITE4(sc, XAE_FFV(0), reg);
+	XAE_WR4(sc, XAE_FFV(0), reg);
 
 	reg = ma[4];
 	reg |= ma[5] << 8;
-	WRITE4(sc, XAE_FFV(1), reg);
+	XAE_WR4(sc, XAE_FFV(1), reg);
 
 	return (1);
 }
@@ -508,13 +497,13 @@ xae_setup_rxfilter(struct xae_softc *sc)
 	 * Set the multicast (group) filter hash.
 	 */
 	if ((if_getflags(ifp) & (IFF_ALLMULTI | IFF_PROMISC)) != 0) {
-		reg = READ4(sc, XAE_FFC);
+		reg = XAE_RD4(sc, XAE_FFC);
 		reg |= FFC_PM;
-		WRITE4(sc, XAE_FFC, reg);
+		XAE_WR4(sc, XAE_FFC, reg);
 	} else {
-		reg = READ4(sc, XAE_FFC);
+		reg = XAE_RD4(sc, XAE_FFC);
 		reg &= ~FFC_PM;
-		WRITE4(sc, XAE_FFC, reg);
+		XAE_WR4(sc, XAE_FFC, reg);
 
 		if_foreach_llmaddr(ifp, xae_write_maddr, sc);
 	}
@@ -526,11 +515,11 @@ xae_setup_rxfilter(struct xae_softc *sc)
 	reg |= (sc->macaddr[1] << 8);
 	reg |= (sc->macaddr[2] << 16);
 	reg |= (sc->macaddr[3] << 24);
-	WRITE4(sc, XAE_UAW0, reg);
+	XAE_WR4(sc, XAE_UAW0, reg);
 
 	reg = sc->macaddr[4];
 	reg |= (sc->macaddr[5] << 8);
-	WRITE4(sc, XAE_UAW1, reg);
+	XAE_WR4(sc, XAE_UAW1, reg);
 }
 
 static int
@@ -571,14 +560,14 @@ xae_stop_locked(struct xae_softc *sc)
 	callout_stop(&sc->xae_callout);
 
 	/* Stop the transmitter */
-	reg = READ4(sc, XAE_TC);
+	reg = XAE_RD4(sc, XAE_TC);
 	reg &= ~TC_TX;
-	WRITE4(sc, XAE_TC, reg);
+	XAE_WR4(sc, XAE_TC, reg);
 
 	/* Stop the receiver. */
-	reg = READ4(sc, XAE_RCW1);
+	reg = XAE_RD4(sc, XAE_RCW1);
 	reg &= ~RCW1_RX;
-	WRITE4(sc, XAE_RCW1, reg);
+	XAE_WR4(sc, XAE_RCW1, reg);
 }
 
 static uint64_t
@@ -590,7 +579,7 @@ xae_stat(struct xae_softc *sc, int counter_id)
 	KASSERT(counter_id < XAE_MAX_COUNTERS,
 	    ("counter %d is out of range", counter_id));
 
-	new = READ8(sc, XAE_STATCNT(counter_id));
+	new = XAE_RD8(sc, XAE_STATCNT(counter_id));
 	old = sc->counters[counter_id];
 
 	if (new >= old)
@@ -674,10 +663,10 @@ xae_init_locked(struct xae_softc *sc)
 	xae_setup_rxfilter(sc);
 
 	/* Enable the transmitter */
-	WRITE4(sc, XAE_TC, TC_TX);
+	XAE_WR4(sc, XAE_TC, TC_TX);
 
 	/* Enable the receiver. */
-	WRITE4(sc, XAE_RCW1, RCW1_RX);
+	XAE_WR4(sc, XAE_RCW1, RCW1_RX);
 
 	/*
 	 * Call mii_mediachg() which will call back into xae_miibus_statchg()
@@ -832,7 +821,7 @@ mdio_wait(struct xae_softc *sc)
 	timeout = 200;
 
 	do {
-		reg = READ4(sc, XAE_MDIO_CTRL);
+		reg = XAE_RD4(sc, XAE_MDIO_CTRL);
 		if (reg & MDIO_CTRL_READY)
 			break;
 		DELAY(1);
@@ -862,12 +851,12 @@ xae_miibus_read_reg(device_t dev, int phy, int reg)
 	mii |= (reg << MDIO_TX_REGAD_S);
 	mii |= (phy << MDIO_TX_PHYAD_S);
 
-	WRITE4(sc, XAE_MDIO_CTRL, mii);
+	XAE_WR4(sc, XAE_MDIO_CTRL, mii);
 
 	if (mdio_wait(sc))
 		return (0);
 
-	rv = READ4(sc, XAE_MDIO_READ);
+	rv = XAE_RD4(sc, XAE_MDIO_READ);
 
 	return (rv);
 }
@@ -887,8 +876,8 @@ xae_miibus_write_reg(device_t dev, int phy, int reg, int val)
 	mii |= (reg << MDIO_TX_REGAD_S);
 	mii |= (phy << MDIO_TX_PHYAD_S);
 
-	WRITE4(sc, XAE_MDIO_WRITE, val);
-	WRITE4(sc, XAE_MDIO_CTRL, mii);
+	XAE_WR4(sc, XAE_MDIO_WRITE, val);
+	XAE_WR4(sc, XAE_MDIO_CTRL, mii);
 
 	if (mdio_wait(sc))
 		return (1);
@@ -1228,7 +1217,7 @@ xae_attach(device_t dev)
 	sc->bst = rman_get_bustag(sc->res[0]);
 	sc->bsh = rman_get_bushandle(sc->res[0]);
 
-	device_printf(sc->dev, "Identification: %x\n", READ4(sc, XAE_IDENT));
+	device_printf(sc->dev, "Identification: %x\n", XAE_RD4(sc, XAE_IDENT));
 
 	error = xae_setup_dma(sc);
 	if (error != 0)
@@ -1237,7 +1226,7 @@ xae_attach(device_t dev)
 	/* Enable MII clock */
 	reg = (MDIO_CLK_DIV_DEFAULT << MDIO_SETUP_CLK_DIV_S);
 	reg |= MDIO_SETUP_ENABLE;
-	WRITE4(sc, XAE_MDIO_SETUP, reg);
+	XAE_WR4(sc, XAE_MDIO_SETUP, reg);
 	if (mdio_wait(sc))
 		return (ENXIO);
 
@@ -1362,7 +1351,7 @@ xae_miibus_statchg(device_t dev)
 		return;
 	}
 
-	WRITE4(sc, XAE_SPEED, reg);
+	XAE_WR4(sc, XAE_SPEED, reg);
 }
 
 static device_method_t xae_methods[] = {
