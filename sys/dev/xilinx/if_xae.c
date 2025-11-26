@@ -91,7 +91,7 @@
 #define	XAE_ASSERT_LOCKED(sc)		mtx_assert(&(sc)->mtx, MA_OWNED)
 #define	XAE_ASSERT_UNLOCKED(sc)		mtx_assert(&(sc)->mtx, MA_NOTOWNED)
 
-#define dprintf(fmt, ...)
+#define	dprintf(fmt, ...)
 
 #define	MDIO_CLK_DIV_DEFAULT	29
 
@@ -398,7 +398,7 @@ xae_rxfinish_onebuf(struct xae_softc *sc, int len)
 static void
 xae_rxfinish_locked(struct xae_softc *sc)
 {
-	boolean_t produced_empty_buffer;
+	boolean_t desc_completed;
 	struct axidma_desc *desc;
 	uint32_t addr;
 	int len;
@@ -410,19 +410,19 @@ xae_rxfinish_locked(struct xae_softc *sc)
 
 	bus_dmamap_sync(sc->rxdesc_tag, sc->rxdesc_map, BUS_DMASYNC_PREREAD);
 	bus_dmamap_sync(sc->rxdesc_tag, sc->rxdesc_map, BUS_DMASYNC_POSTREAD);
-	produced_empty_buffer = false;
+	desc_completed = false;
 	for (;;) {
 		desc = &sc->rxdesc_ring[sc->rx_idx];
 		if ((desc->status & BD_STATUS_CMPLT) == 0)
 			break;
-		produced_empty_buffer = true;
+		desc_completed = true;
 		len = desc->status & BD_CONTROL_LEN_M;
 		xae_rxfinish_onebuf(sc, len);
 		tmp = sc->rx_idx;
 		sc->rx_idx = next_rxidx(sc, sc->rx_idx);
 	}
 
-	if (produced_empty_buffer) {
+	if (desc_completed) {
 		bus_dmamap_sync(sc->rxdesc_tag, sc->rxdesc_map,
 		    BUS_DMASYNC_PREWRITE);
 

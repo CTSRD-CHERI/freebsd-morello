@@ -58,7 +58,7 @@
 #define	AXIDMA_WR8(_sc, _reg, _val)	\
 	bus_space_write_8(_sc->bst, _sc->bsh, _reg, _val)
 
-#define dprintf(fmt, ...)
+#define	dprintf(fmt, ...)
 
 #define	AXIDMA_MAX_CHANNELS	2
 
