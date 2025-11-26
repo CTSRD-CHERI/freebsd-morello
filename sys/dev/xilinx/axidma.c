@@ -34,7 +34,6 @@
  * Xilinx AXI DMA controller driver.
  */
 
-#include "opt_platform.h"
 #include <sys/systm.h>
 #include <sys/bus.h>
 #include <sys/kernel.h>
@@ -43,11 +42,8 @@
 
 #include <machine/bus.h>
 
-#ifdef FDT
-#include <dev/fdt/fdt_common.h>
 #include <dev/ofw/ofw_bus.h>
 #include <dev/ofw/ofw_bus_subr.h>
-#endif
 
 #include <dev/xilinx/axidma.h>
 
