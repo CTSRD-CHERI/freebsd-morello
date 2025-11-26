@@ -168,6 +168,9 @@ axidma_setup_cb(device_t dev, int chan_id, void (*cb)(void *), void *arg)
 
 	sc = device_get_softc(dev);
 
+	if (sc->res[chan_id + 1] != NULL)
+		return (EEXIST);
+
 	error = bus_setup_intr(dev, sc->res[chan_id + 1],
 	    INTR_TYPE_MISC | INTR_MPSAFE, NULL, cb, arg,
 	    &sc->ih[chan_id]);
@@ -182,6 +185,7 @@ static device_method_t axidma_methods[] = {
 	DEVMETHOD(device_probe,			axidma_probe),
 	DEVMETHOD(device_attach,		axidma_attach),
 
+	/* Axidma interface */
 	DEVMETHOD(axidma_reset,			axidma_reset),
 	DEVMETHOD(axidma_memres,		axidma_memres),
 	DEVMETHOD(axidma_setup_cb,		axidma_setup_cb),

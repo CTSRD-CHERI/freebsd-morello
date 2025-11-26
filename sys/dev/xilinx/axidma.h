@@ -33,9 +33,6 @@
 #ifndef _DEV_XILINX_AXIDMA_H_
 #define _DEV_XILINX_AXIDMA_H_
 
-#define	AXIDMA_TX_CHAN		0
-#define	AXIDMA_RX_CHAN		1
-
 #define	AXI_DMACR(n)		(0x00 + 0x30 * (n)) /* DMA Control register */
 #define	 DMACR_RS		(1 << 0) /* Run / Stop. */
 #define	 DMACR_RESET		(1 << 2) /* Soft reset the AXI DMA core. */

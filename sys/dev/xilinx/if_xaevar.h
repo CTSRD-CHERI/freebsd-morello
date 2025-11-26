@@ -46,6 +46,9 @@ struct xae_bufmap {
 #define	TX_DESC_COUNT	64
 #define	TX_DESC_SIZE	(sizeof(struct axidma_desc) * TX_DESC_COUNT)
 
+#define	AXIDMA_TX_CHAN		0
+#define	AXIDMA_RX_CHAN		1
+
 struct xae_softc {
 	struct resource		*res[2];
 	bus_space_tag_t		bst;

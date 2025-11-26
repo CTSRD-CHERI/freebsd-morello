@@ -268,13 +268,11 @@ xae_txfinish_locked(struct xae_softc *sc)
 	struct axidma_desc *desc;
 	struct xae_bufmap *bmap;
 	boolean_t retired_buffer;
-	if_t ifp;
 
 	XAE_ASSERT_LOCKED(sc);
 
 	bus_dmamap_sync(sc->txdesc_tag, sc->txdesc_map, BUS_DMASYNC_PREREAD);
 	bus_dmamap_sync(sc->txdesc_tag, sc->txdesc_map, BUS_DMASYNC_POSTREAD);
-	ifp = sc->ifp;
 	retired_buffer = false;
 	while (sc->tx_idx_tail != sc->tx_idx_head) {
 		desc = &sc->txdesc_ring[sc->tx_idx_tail];
@@ -283,7 +281,7 @@ xae_txfinish_locked(struct xae_softc *sc)
 		retired_buffer = true;
 		bmap = &sc->txbuf_map[sc->tx_idx_tail];
 		bus_dmamap_sync(sc->txbuf_tag, bmap->map,
-		   BUS_DMASYNC_POSTWRITE);
+		    BUS_DMASYNC_POSTWRITE);
 		bus_dmamap_unload(sc->txbuf_tag, bmap->map);
 		m_freem(bmap->mbuf);
 		bmap->mbuf = NULL;
@@ -296,7 +294,7 @@ xae_txfinish_locked(struct xae_softc *sc)
 	 * the descriptor ring, go try to start some new output.
 	 */
 	if (retired_buffer) {
-		if_setdrvflagbits(ifp, 0, IFF_DRV_OACTIVE);
+		if_setdrvflagbits(sc->ifp, 0, IFF_DRV_OACTIVE);
 		xae_txstart_locked(sc);
 	}
 }
@@ -564,13 +562,11 @@ xae_qflush(if_t ifp)
 static void
 xae_stop_locked(struct xae_softc *sc)
 {
-	if_t ifp;
 	uint32_t reg;
 
 	XAE_ASSERT_LOCKED(sc);
 
-	ifp = sc->ifp;
-	if_setdrvflagbits(ifp, 0, (IFF_DRV_RUNNING | IFF_DRV_OACTIVE));
+	if_setdrvflagbits(sc->ifp, 0, (IFF_DRV_RUNNING | IFF_DRV_OACTIVE));
 
 	callout_stop(&sc->xae_callout);
 
@@ -592,7 +588,7 @@ xae_stat(struct xae_softc *sc, int counter_id)
 	uint64_t delta;
 
 	KASSERT(counter_id < XAE_MAX_COUNTERS,
-		("counter %d is out of range", counter_id));
+	    ("counter %d is out of range", counter_id));
 
 	new = READ8(sc, XAE_STATCNT(counter_id));
 	old = sc->counters[counter_id];
@@ -984,51 +980,51 @@ xae_setup_dma(struct xae_softc *sc)
 	 * Set up TX descriptor ring, descriptors, and dma maps.
 	 */
 	error = bus_dma_tag_create(
-	   bus_get_dma_tag(sc->dev),	/* Parent tag. */
-	   AXI_DESC_RING_ALIGN, 0,	/* alignment, boundary */
-	   BUS_SPACE_MAXADDR_32BIT,	/* lowaddr */
-	   BUS_SPACE_MAXADDR,		/* highaddr */
-	   NULL, NULL,			/* filter, filterarg */
-	   TX_DESC_SIZE, 1, 		/* maxsize, nsegments */
-	   TX_DESC_SIZE,		/* maxsegsize */
-	   0,				/* flags */
-	   NULL, NULL,			/* lockfunc, lockarg */
-	   &sc->txdesc_tag);
+	    bus_get_dma_tag(sc->dev),	/* Parent tag. */
+	    AXI_DESC_RING_ALIGN, 0,	/* alignment, boundary */
+	    BUS_SPACE_MAXADDR_32BIT,	/* lowaddr */
+	    BUS_SPACE_MAXADDR,		/* highaddr */
+	    NULL, NULL,			/* filter, filterarg */
+	    TX_DESC_SIZE, 1, 		/* maxsize, nsegments */
+	    TX_DESC_SIZE,		/* maxsegsize */
+	    0,				/* flags */
+	    NULL, NULL,			/* lockfunc, lockarg */
+	    &sc->txdesc_tag);
 	if (error != 0) {
 		device_printf(sc->dev, "could not create TX ring DMA tag.\n");
 		goto out;
 	}
 
 	error = bus_dmamem_alloc(sc->txdesc_tag, (void**)&sc->txdesc_ring,
-	   BUS_DMA_COHERENT | BUS_DMA_WAITOK | BUS_DMA_ZERO, &sc->txdesc_map);
+	    BUS_DMA_COHERENT | BUS_DMA_WAITOK | BUS_DMA_ZERO, &sc->txdesc_map);
 	if (error != 0) {
 		device_printf(sc->dev,
-		   "could not allocate TX descriptor ring.\n");
+		    "could not allocate TX descriptor ring.\n");
 		goto out;
 	}
 
 	error = bus_dmamap_load(sc->txdesc_tag, sc->txdesc_map, sc->txdesc_ring,
-	   TX_DESC_SIZE, xae_get1paddr, &sc->txdesc_ring_paddr, 0);
+	    TX_DESC_SIZE, xae_get1paddr, &sc->txdesc_ring_paddr, 0);
 	if (error != 0) {
 		device_printf(sc->dev,
-		   "could not load TX descriptor ring map.\n");
+		    "could not load TX descriptor ring map.\n");
 		goto out;
 	}
 
 	error = bus_dma_tag_create(
-	   bus_get_dma_tag(sc->dev),	/* Parent tag. */
-	   sc->txbuf_align, 0,		/* alignment, boundary */
-	   BUS_SPACE_MAXADDR_32BIT,	/* lowaddr */
-	   BUS_SPACE_MAXADDR,		/* highaddr */
-	   NULL, NULL,			/* filter, filterarg */
-	   MCLBYTES, 1, 		/* maxsize, nsegments */
-	   MCLBYTES,			/* maxsegsize */
-	   0,				/* flags */
-	   NULL, NULL,			/* lockfunc, lockarg */
-	   &sc->txbuf_tag);
+	    bus_get_dma_tag(sc->dev),	/* Parent tag. */
+	    sc->txbuf_align, 0,		/* alignment, boundary */
+	    BUS_SPACE_MAXADDR_32BIT,	/* lowaddr */
+	    BUS_SPACE_MAXADDR,		/* highaddr */
+	    NULL, NULL,			/* filter, filterarg */
+	    MCLBYTES, 1, 		/* maxsize, nsegments */
+	    MCLBYTES,			/* maxsegsize */
+	    0,				/* flags */
+	    NULL, NULL,			/* lockfunc, lockarg */
+	    &sc->txbuf_tag);
 	if (error != 0) {
 		device_printf(sc->dev,
-		   "could not create TX ring DMA tag.\n");
+		    "could not create TX ring DMA tag.\n");
 		goto out;
 	}
 
@@ -1052,23 +1048,23 @@ xae_setup_dma(struct xae_softc *sc)
 	* Set up RX descriptor ring, descriptors, dma maps, and mbufs.
 	*/
 	error = bus_dma_tag_create(
-	   bus_get_dma_tag(sc->dev),	/* Parent tag. */
-	   AXI_DESC_RING_ALIGN, 0,	/* alignment, boundary */
-	   BUS_SPACE_MAXADDR_32BIT,	/* lowaddr */
-	   BUS_SPACE_MAXADDR,		/* highaddr */
-	   NULL, NULL,			/* filter, filterarg */
-	   RX_DESC_SIZE, 1, 		/* maxsize, nsegments */
-	   RX_DESC_SIZE,		/* maxsegsize */
-	   0,				/* flags */
-	   NULL, NULL,			/* lockfunc, lockarg */
-	   &sc->rxdesc_tag);
+	    bus_get_dma_tag(sc->dev),	/* Parent tag. */
+	    AXI_DESC_RING_ALIGN, 0,	/* alignment, boundary */
+	    BUS_SPACE_MAXADDR_32BIT,	/* lowaddr */
+	    BUS_SPACE_MAXADDR,		/* highaddr */
+	    NULL, NULL,			/* filter, filterarg */
+	    RX_DESC_SIZE, 1, 		/* maxsize, nsegments */
+	    RX_DESC_SIZE,		/* maxsegsize */
+	    0,				/* flags */
+	    NULL, NULL,			/* lockfunc, lockarg */
+	    &sc->rxdesc_tag);
 	if (error != 0) {
 		device_printf(sc->dev, "could not create RX ring DMA tag.\n");
 		goto out;
 	}
 
 	error = bus_dmamem_alloc(sc->rxdesc_tag, (void **)&sc->rxdesc_ring, 
-	   BUS_DMA_COHERENT | BUS_DMA_WAITOK | BUS_DMA_ZERO, &sc->rxdesc_map);
+	    BUS_DMA_COHERENT | BUS_DMA_WAITOK | BUS_DMA_ZERO, &sc->rxdesc_map);
 	if (error != 0) {
 		device_printf(sc->dev,
 		    "could not allocate RX descriptor ring.\n");
@@ -1076,7 +1072,7 @@ xae_setup_dma(struct xae_softc *sc)
 	}
 
 	error = bus_dmamap_load(sc->rxdesc_tag, sc->rxdesc_map, sc->rxdesc_ring,
-	   RX_DESC_SIZE, xae_get1paddr, &sc->rxdesc_ring_paddr, 0);
+	    RX_DESC_SIZE, xae_get1paddr, &sc->rxdesc_ring_paddr, 0);
 	if (error != 0) {
 		device_printf(sc->dev,
 		   "could not load RX descriptor ring map.\n");
@@ -1084,19 +1080,18 @@ xae_setup_dma(struct xae_softc *sc)
 	}
 
 	error = bus_dma_tag_create(
-	   bus_get_dma_tag(sc->dev),	/* Parent tag. */
-	   1, 0,			/* alignment, boundary */
-	   BUS_SPACE_MAXADDR_32BIT,	/* lowaddr */
-	   BUS_SPACE_MAXADDR,		/* highaddr */
-	   NULL, NULL,			/* filter, filterarg */
-	   MCLBYTES, 1, 		/* maxsize, nsegments */
-	   MCLBYTES,			/* maxsegsize */
-	   0,				/* flags */
-	   NULL, NULL,			/* lockfunc, lockarg */
-	   &sc->rxbuf_tag);
+	    bus_get_dma_tag(sc->dev),	/* Parent tag. */
+	    1, 0,			/* alignment, boundary */
+	    BUS_SPACE_MAXADDR_32BIT,	/* lowaddr */
+	    BUS_SPACE_MAXADDR,		/* highaddr */
+	    NULL, NULL,			/* filter, filterarg */
+	    MCLBYTES, 1, 		/* maxsize, nsegments */
+	    MCLBYTES,			/* maxsegsize */
+	    0,				/* flags */
+	    NULL, NULL,			/* lockfunc, lockarg */
+	    &sc->rxbuf_tag);
 	if (error != 0) {
-		device_printf(sc->dev,
-		   "could not create RX buf DMA tag.\n");
+		device_printf(sc->dev, "could not create RX buf DMA tag.\n");
 		goto out;
 	}
 
@@ -1107,10 +1102,10 @@ xae_setup_dma(struct xae_softc *sc)
 
 	for (idx = 0; idx < RX_DESC_COUNT; ++idx) {
 		error = bus_dmamap_create(sc->rxbuf_tag, 0,
-		   &sc->rxbuf_map[idx].map);
+		    &sc->rxbuf_map[idx].map);
 		if (error != 0) {
 			device_printf(sc->dev,
-			   "could not create RX buffer DMA map.\n");
+			    "could not create RX buffer DMA map.\n");
 			goto out;
 		}
 		if ((m = xae_alloc_mbufcl(sc)) == NULL) {
@@ -1120,19 +1115,27 @@ xae_setup_dma(struct xae_softc *sc)
 		}
 		if ((error = xae_setup_rxbuf(sc, idx, m)) != 0) {
 			device_printf(sc->dev,
-			   "could not create new RX buffer.\n");
+			    "could not create new RX buffer.\n");
 			goto out;
 		}
 	}
 
-	if (AXIDMA_RESET(sc->dma_dev, AXIDMA_TX_CHAN) != 0)
-		return (-1);
-	if (AXIDMA_RESET(sc->dma_dev, AXIDMA_RX_CHAN) != 0)
-		return (-1);
-	if (AXIDMA_SETUP_CB(sc->dma_dev, AXIDMA_TX_CHAN, xae_intr_tx, sc))
-		return (-1);
-	if (AXIDMA_SETUP_CB(sc->dma_dev, AXIDMA_RX_CHAN, xae_intr_rx, sc))
-		return (-1);
+	if (AXIDMA_RESET(sc->dma_dev, AXIDMA_TX_CHAN) != 0) {
+		device_printf(sc->dev, "Could not reset TX channel.\n");
+		goto out;
+	}
+	if (AXIDMA_RESET(sc->dma_dev, AXIDMA_RX_CHAN) != 0) {
+		device_printf(sc->dev, "Could not reset TX channel.\n");
+		goto out;
+	}
+	if (AXIDMA_SETUP_CB(sc->dma_dev, AXIDMA_TX_CHAN, xae_intr_tx, sc)) {
+		device_printf(sc->dev, "Could not setup TX intr callback.\n");
+		goto out;
+	}
+	if (AXIDMA_SETUP_CB(sc->dma_dev, AXIDMA_RX_CHAN, xae_intr_rx, sc)) {
+		device_printf(sc->dev, "Could not setup RX intr callback.\n");
+		goto out;
+	}
 
 	dprintf("%s: tx desc base %lx\n", __func__, sc->txdesc_ring_paddr);
 	AXIDMA_WR8(sc, AXI_CURDESC(AXIDMA_TX_CHAN), sc->txdesc_ring_paddr);
@@ -1157,6 +1160,7 @@ xae_setup_dma(struct xae_softc *sc)
 	return (0);
 
 out:
+	/* TODO: release resources. */
 	return (-1);
 }
 
