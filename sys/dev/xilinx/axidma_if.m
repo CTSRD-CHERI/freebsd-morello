@@ -28,15 +28,7 @@
 #
 #
 
-#include "opt_platform.h"
-
 #include <machine/bus.h>
-
-#ifdef FDT
-#include <dev/fdt/fdt_common.h>
-#include <dev/ofw/ofw_bus.h>
-#include <dev/ofw/ofw_bus_subr.h>
-#endif
 
 INTERFACE axidma;
 
