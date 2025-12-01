@@ -171,7 +171,9 @@ literal:
 				flags &= ~(NEED_GROUPING);
 				continue;
 			case '+':	/* use locale defined signs */
-				if (flags & SIGN_POSN_USED)
+				if ((flags & SIGN_POSN_USED) ||
+				    ((lc->positive_sign[0] == '\0') &&
+				    (lc->negative_sign[0] == '\0')))
 					goto format_error;
 				flags |= (SIGN_POSN_USED | LOCALE_POSN);
 				continue;
@@ -455,7 +457,7 @@ __setup_vars(int flags, char *cs_precedes, char *sep_by_space, char *sign_posn,
 	if (*sep_by_space == CHAR_MAX)
 		*sep_by_space = 0;
 	if (*sign_posn == CHAR_MAX)
-		*sign_posn = 0;
+		*sign_posn = 1;
 }
 
 static int
