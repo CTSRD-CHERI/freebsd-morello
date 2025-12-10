@@ -677,7 +677,7 @@ nvme_ctrlr_log_critical_warnings(struct nvme_controller *ctrlr,
 		nvme_printf(ctrlr, "SMART WARNING: unknown critical warning(s): state = 0x%02x\n",
 		    state & NVME_CRIT_WARN_ST_RESERVED_MASK);
 
-	nvme_ctrlr_devctl(ctrlr, "critical", "SMART_ERROR", "state=0x%02x", state);
+	nvme_ctrlr_devctl(ctrlr, "SMART_ERROR", "state=0x%02x", state);
 }
 
 static void
@@ -1143,6 +1143,10 @@ nvme_ctrlr_aer_task(void *arg, int pending)
 		goto out;
 	}
 
+	nvme_ctrlr_devctl(ctrlr, "aen", "type=0x%x info=0x%x page=0x%x",
+	    NVMEV(NVME_ASYNC_EVENT_TYPE, aer->cpl.cdw0),
+	    NVMEV(NVME_ASYNC_EVENT_INFO, aer->cpl.cdw0), aer->log_page_id);
+
 	aer->log_page_size = 0;
 	len = nvme_ctrlr_get_log_page_size(aer->ctrlr, aer->log_page_id);
 	nvme_ctrlr_cmd_get_log_page(aer->ctrlr, aer->log_page_id,
@@ -1226,10 +1230,10 @@ nvme_ctrlr_aer_task(void *arg, int pending)
 				break;
 
 			ns = &ctrlr->ns[id - 1];
-			ns->flags |= NVME_NS_CHANGED;
+			ns->flags |= NVME_NS_DELTA;
 			nvme_ns_construct(ns, id, ctrlr);
 			nvme_notify_ns(ctrlr, id);
-			ns->flags &= ~NVME_NS_CHANGED;
+			ns->flags &= ~NVME_NS_DELTA;
 		}
 	}
 
