@@ -28,10 +28,9 @@
 #ifndef _LINUX_COMMON_H_
 #define _LINUX_COMMON_H_
 
-int	ifname_bsd_to_linux_ifp(struct ifnet *, char *, size_t);
+int	ifname_bsd_to_linux_ifp(const struct ifnet *, char *, size_t);
 int	ifname_bsd_to_linux_idx(u_int, char *, size_t);
-int	ifname_bsd_to_linux_name(const char *, char *, size_t);
-struct ifnet *ifname_linux_to_ifp(struct thread *, const char *);
+struct ifnet *ifname_linux_to_ifp( const char *);
 int	ifname_linux_to_bsd(struct thread *, const char *, char *);
 
 unsigned short	linux_ifflags(struct ifnet *);
@@ -43,7 +42,7 @@ sa_family_t	bsd_to_linux_domain(sa_family_t domain);
 #define	AF_UNKNOWN	UINT8_MAX
 int		bsd_to_linux_sockaddr(const struct sockaddr *sa,
 		    struct l_sockaddr **lsa, socklen_t len);
-int		linux_to_bsd_sockaddr(const struct l_sockaddr *lsa,
+int		linux_to_bsd_sockaddr(struct l_sockaddr *lsa,
 		    struct sockaddr **sap, socklen_t *len);
 void		linux_to_bsd_poll_events(struct thread *td, int fd,
 		    short lev, short *bev);

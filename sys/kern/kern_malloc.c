@@ -303,7 +303,7 @@ sysctl_vm_malloc_zone_sizes(SYSCTL_HANDLER_ARGS)
  */
 #if MALLOC_DEBUG_MAXZONES > 1
 static void
-tunable_set_numzones(void)
+tunable_set_numzones(void *dummy __unused)
 {
 
 	TUNABLE_INT_FETCH("debug.malloc.numzones",
@@ -1302,7 +1302,7 @@ mallocinit(void *dummy)
 #endif
 			    align, UMA_ZONE_MALLOC);
 		}
-		for (;i <= size; i+= KMEM_ZBASE)
+		for (; i <= size; i+= KMEM_ZBASE)
 			kmemsize[i >> KMEM_ZSHIFT] = indx;
 	}
 }

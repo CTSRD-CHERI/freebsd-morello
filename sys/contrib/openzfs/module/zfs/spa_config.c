@@ -161,7 +161,7 @@ spa_write_cachefile(spa_t *target, boolean_t removing, boolean_t postsysevent,
 	boolean_t ccw_failure;
 	int error = 0;
 
-	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+	ASSERT(spa_namespace_held());
 
 	if (!(spa_mode_global & SPA_MODE_WRITE))
 		return;
@@ -287,7 +287,7 @@ spa_all_configs(uint64_t *generation, nvlist_t **pools)
 	if (*generation == spa_config_generation)
 		return (SET_ERROR(EEXIST));
 
-	int error = mutex_enter_interruptible(&spa_namespace_lock);
+	int error = spa_namespace_enter_interruptible(FTAG);
 	if (error)
 		return (SET_ERROR(EINTR));
 
@@ -302,7 +302,7 @@ spa_all_configs(uint64_t *generation, nvlist_t **pools)
 		}
 	}
 	*generation = spa_config_generation;
-	mutex_exit(&spa_namespace_lock);
+	spa_namespace_exit(FTAG);
 
 	return (0);
 }
@@ -372,6 +372,8 @@ spa_config_generate(spa_t *spa, vdev_t *vd, uint64_t txg, int getstats)
 	fnvlist_add_uint64(config, ZPOOL_CONFIG_POOL_TXG, txg);
 	fnvlist_add_uint64(config, ZPOOL_CONFIG_POOL_GUID, spa_guid(spa));
 	fnvlist_add_uint64(config, ZPOOL_CONFIG_ERRATA, spa->spa_errata);
+	fnvlist_add_uint64(config, ZPOOL_CONFIG_MIN_ALLOC, spa->spa_min_alloc);
+	fnvlist_add_uint64(config, ZPOOL_CONFIG_MAX_ALLOC, spa->spa_max_alloc);
 	if (spa->spa_comment != NULL)
 		fnvlist_add_string(config, ZPOOL_CONFIG_COMMENT,
 		    spa->spa_comment);
@@ -481,7 +483,7 @@ spa_config_update(spa_t *spa, int what)
 	uint64_t txg;
 	int c;
 
-	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+	ASSERT(spa_namespace_held());
 
 	spa_config_enter(spa, SCL_ALL, FTAG, RW_WRITER);
 	txg = spa_last_synced_txg(spa) + 1;

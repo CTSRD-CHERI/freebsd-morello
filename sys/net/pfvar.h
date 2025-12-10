@@ -571,7 +571,11 @@ extern struct sx pf_end_lock;
 
 #ifdef _KERNEL
 
-void				 unhandled_af(int) __dead2;
+static inline __dead2 void
+unhandled_af(int af)
+{
+	panic("unhandled af %d", af);
+}
 
 static void inline
 pf_addrcpy(struct pf_addr *dst, const struct pf_addr *src, sa_family_t af)
@@ -901,6 +905,7 @@ struct pf_krule {
 	LIST_ENTRY(pf_krule)	 allrulelist;
 	bool			 allrulelinked;
 #endif
+	time_t			 exptime;
 };
 
 struct pf_krule_item {
@@ -1165,7 +1170,6 @@ struct pf_test_ctx {
 	int			 rewrite;
 	u_short			 reason;
 	struct pf_src_node	*sns[PF_SN_MAX];
-	struct pf_krule_slist	 rules;
 	struct pf_krule		*nr;
 	struct pf_krule		*tr;
 	struct pf_krule		**rm;
@@ -2038,14 +2042,15 @@ struct pfioc_trans {
 	}		*array;
 };
 
-#define PFR_FLAG_ATOMIC		0x00000001	/* unused */
+#define PFR_FLAG_START		0x00000001
 #define PFR_FLAG_DUMMY		0x00000002
 #define PFR_FLAG_FEEDBACK	0x00000004
 #define PFR_FLAG_CLSTATS	0x00000008
 #define PFR_FLAG_ADDRSTOO	0x00000010
 #define PFR_FLAG_REPLACE	0x00000020
 #define PFR_FLAG_ALLRSETS	0x00000040
-#define PFR_FLAG_ALLMASK	0x0000007F
+#define PFR_FLAG_DONE		0x00000080
+#define PFR_FLAG_ALLMASK	0x000000FF
 #ifdef _KERNEL
 #define PFR_FLAG_USERIOCTL	0x10000000
 #endif
@@ -2435,6 +2440,7 @@ extern struct pf_ksrc_node	*pf_find_src_node(struct pf_addr *,
 				    struct pf_srchash **, pf_sn_types_t, bool);
 extern void			 pf_unlink_src_node(struct pf_ksrc_node *);
 extern u_int			 pf_free_src_nodes(struct pf_ksrc_node_list *);
+extern void			 pf_free_src_node(struct pf_ksrc_node *);
 extern void			 pf_print_state(struct pf_kstate *);
 extern void			 pf_print_flags(uint16_t);
 extern int			 pf_addr_wrap_neq(struct pf_addr_wrap *,
@@ -2521,6 +2527,9 @@ uint16_t	pf_qname2qid(const char *, bool);
 
 void	pfr_initialize(void);
 void	pfr_cleanup(void);
+struct pfr_kentry *
+	pfr_kentry_byaddr(struct pfr_ktable *, struct pf_addr *, sa_family_t,
+	    int);
 int	pfr_match_addr(struct pfr_ktable *, struct pf_addr *, sa_family_t);
 void	pfr_update_stats(struct pfr_ktable *, struct pf_addr *, sa_family_t,
 	    u_int64_t, int, int, int);
@@ -2723,8 +2732,10 @@ int	pf_osfp_match(struct pf_osfp_enlist *, pf_osfp_t);
 #ifdef _KERNEL
 void			 pf_print_host(struct pf_addr *, u_int16_t, sa_family_t);
 
-enum pf_test_status	 pf_step_into_anchor(struct pf_test_ctx *, struct pf_krule *);
-enum pf_test_status	 pf_match_rule(struct pf_test_ctx *, struct pf_kruleset *);
+enum pf_test_status	 pf_step_into_anchor(struct pf_test_ctx *, struct pf_krule *,
+			    struct pf_krule_slist *match_rules);
+enum pf_test_status	 pf_match_rule(struct pf_test_ctx *, struct pf_kruleset *,
+			    struct pf_krule_slist *);
 void			 pf_step_into_keth_anchor(struct pf_keth_anchor_stackframe *,
 			    int *, struct pf_keth_ruleset **,
 			    struct pf_keth_rule **, struct pf_keth_rule **,

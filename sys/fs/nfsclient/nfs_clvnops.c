@@ -1081,12 +1081,14 @@ nfs_setattr(struct vop_setattr_args *ap)
 #endif
 
 	/*
-	 * Only setting of UF_HIDDEN and UF_SYSTEM are supported and
+	 * Only setting of UF_ARCHIVE, UF_HIDDEN and UF_SYSTEM are supported and
 	 * only for NFSv4 servers that support them.
 	 */
 	nmp = VFSTONFS(vp->v_mount);
 	if (vap->va_flags != VNOVAL && (!NFSHASNFSV4(nmp) ||
-	    (vap->va_flags & ~(UF_HIDDEN | UF_SYSTEM)) != 0 ||
+	    (vap->va_flags & ~(UF_ARCHIVE | UF_HIDDEN | UF_SYSTEM)) != 0 ||
+	    ((vap->va_flags & UF_ARCHIVE) != 0 &&
+	     !NFSISSET_ATTRBIT(&np->n_vattr.na_suppattr, NFSATTRBIT_ARCHIVE)) ||
 	    ((vap->va_flags & UF_HIDDEN) != 0 &&
 	     !NFSISSET_ATTRBIT(&np->n_vattr.na_suppattr, NFSATTRBIT_HIDDEN)) ||
 	    ((vap->va_flags & UF_SYSTEM) != 0 &&
@@ -1284,7 +1286,7 @@ nfs_lookup(struct vop_lookup_args *ap)
 	bool is_nameddir, needs_nameddir, opennamed;
 
 	dattrflag = 0;
-	*vpp = NULLVP;
+	*vpp = NULL;
 	nmp = VFSTONFS(mp);
 	opennamed = (flags & (OPENNAMED | ISLASTCN)) == (OPENNAMED | ISLASTCN);
 	if (opennamed && (!NFSHASNFSV4(nmp) || !NFSHASNFSV4N(nmp)))
@@ -1309,7 +1311,7 @@ nfs_lookup(struct vop_lookup_args *ap)
 	/*
 	 * If the named attribute directory is needed, acquire it now.
 	 */
-	newvp = NULLVP;
+	newvp = NULL;
 	if (needs_nameddir) {
 		KASSERT(np->n_v4 == NULL, ("nfs_lookup: O_NAMEDATTR when"
 		    " n_v4 not NULL"));
@@ -1322,10 +1324,10 @@ nfs_lookup(struct vop_lookup_args *ap)
 		}
 		dvp = newvp;
 		np = VTONFS(dvp);
-		newvp = NULLVP;
+		newvp = NULL;
 	} else if (opennamed && cnp->cn_namelen == 1 &&
 	    *cnp->cn_nameptr == '.') {
-		VREF(dvp);
+		vref(dvp);
 		*vpp = dvp;
 		return (0);
 	}
@@ -1399,7 +1401,7 @@ nfs_lookup(struct vop_lookup_args *ap)
 				vput(newvp);
 			else
 				vrele(newvp);
-			*vpp = NULLVP;
+			*vpp = NULL;
 		} else if (error == ENOENT) {
 			if (VN_IS_DOOMED(dvp))
 				return (ENOENT);
@@ -1450,7 +1452,7 @@ nfs_lookup(struct vop_lookup_args *ap)
 	NFSUNLOCKMNT(nmp);
 #endif
 
-	newvp = NULLVP;
+	newvp = NULL;
 	NFSINCRGLOBAL(nfsstatsv1.lookupcache_misses);
 	nanouptime(&ts);
 	error = nfsrpc_lookup(dvp, cnp->cn_nameptr, cnp->cn_namelen,
@@ -1464,9 +1466,9 @@ nfs_lookup(struct vop_lookup_args *ap)
 	}
 handle_error:
 	if (error) {
-		if (newvp != NULLVP) {
+		if (newvp != NULL) {
 			vput(newvp);
-			*vpp = NULLVP;
+			*vpp = NULL;
 		}
 
 		if (error != ENOENT) {
@@ -1587,7 +1589,7 @@ handle_error:
 			    0, 1);
 	} else if (NFS_CMPFH(np, nfhp->nfh_fh, nfhp->nfh_len)) {
 		free(nfhp, M_NFSFH);
-		VREF(dvp);
+		vref(dvp);
 		newvp = dvp;
 		if (attrflag)
 			(void) nfscl_loadattrcache(&newvp, &nfsva, NULL,
@@ -2863,7 +2865,7 @@ nfs_sillyrename(struct vnode *dvp, struct vnode *vp, struct componentname *cnp)
 	    M_NEWNFSREQ, M_WAITOK);
 	sp->s_cred = crhold(cnp->cn_cred);
 	sp->s_dvp = dvp;
-	VREF(dvp);
+	vref(dvp);
 
 	/* 
 	 * Fudge together a funny name.
@@ -2961,7 +2963,7 @@ nfs_lookitup(struct vnode *dvp, char *name, int len, struct ucred *cred,
 		    newvp = NFSTOV(np);
 		} else if (NFS_CMPFH(dnp, nfhp->nfh_fh, nfhp->nfh_len)) {
 		    free(nfhp, M_NFSFH);
-		    VREF(dvp);
+		    vref(dvp);
 		    newvp = dvp;
 		} else {
 		    cn.cn_nameptr = name;
@@ -3894,11 +3896,15 @@ nfs_allocate(struct vop_allocate_args *ap)
 			mtx_lock(&nmp->nm_mtx);
 			nmp->nm_privflag |= NFSMNTP_NOALLOCATE;
 			mtx_unlock(&nmp->nm_mtx);
-			error = EINVAL;
+			error = EOPNOTSUPP;
 		}
 	} else {
+		/*
+		 * Pre-v4.2 NFS server that doesn't support it, or a newer
+		 * NFS server that has indicated that it doesn't support it.
+		 */
 		mtx_unlock(&nmp->nm_mtx);
-		error = EINVAL;
+		error = EOPNOTSUPP;
 	}
 	if (attrflag != 0) {
 		ret = nfscl_loadattrcache(&vp, &nfsva, NULL, 0, 1);
@@ -4675,12 +4681,13 @@ nfs_pathconf(struct vop_pathconf_args *ap)
 	clone_blksize = 0;
 	if ((NFS_ISV34(vp) && (ap->a_name == _PC_LINK_MAX ||
 	    ap->a_name == _PC_NAME_MAX || ap->a_name == _PC_CHOWN_RESTRICTED ||
-	    ap->a_name == _PC_NO_TRUNC)) ||
+	    ap->a_name == _PC_NO_TRUNC ||
+	    ap->a_name == _PC_CASE_INSENSITIVE)) ||
 	    (NFS_ISV4(vp) && (ap->a_name == _PC_ACL_NFS4 ||
 	     ap->a_name == _PC_HAS_NAMEDATTR ||
 	     ap->a_name == _PC_CLONE_BLKSIZE))) {
 		/*
-		 * Since only the above 4 a_names are returned by the NFSv3
+		 * Since only the above 5 a_names are returned by the NFSv3
 		 * Pathconf RPC, there is no point in doing it for others.
 		 * For NFSv4, the Pathconf RPC (actually a Getattr Op.) can
 		 * be used for _PC_ACL_NFS4, _PC_HAS_NAMEDATTR and
@@ -4835,6 +4842,8 @@ nfs_pathconf(struct vop_pathconf_args *ap)
 		break;
 	case _PC_HAS_HIDDENSYSTEM:
 		if (NFS_ISV4(vp) && NFSISSET_ATTRBIT(&np->n_vattr.na_suppattr,
+		    NFSATTRBIT_ARCHIVE) &&
+		    NFSISSET_ATTRBIT(&np->n_vattr.na_suppattr,
 		    NFSATTRBIT_HIDDEN) &&
 		    NFSISSET_ATTRBIT(&np->n_vattr.na_suppattr,
 		    NFSATTRBIT_SYSTEM))
@@ -4844,6 +4853,9 @@ nfs_pathconf(struct vop_pathconf_args *ap)
 		break;
 	case _PC_CLONE_BLKSIZE:
 		*ap->a_retval = clone_blksize;
+		break;
+	case _PC_CASE_INSENSITIVE:
+		*ap->a_retval = pc.pc_caseinsensitive;
 		break;
 
 	default:

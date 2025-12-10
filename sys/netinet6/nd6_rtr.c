@@ -31,7 +31,6 @@
  *	$KAME: nd6_rtr.c,v 1.111 2001/04/27 01:37:15 jinmei Exp $
  */
 
-#include <sys/cdefs.h>
 #include "opt_inet.h"
 #include "opt_inet6.h"
 
@@ -73,6 +72,8 @@
 #include <netinet6/nd6.h>
 #include <netinet/icmp6.h>
 #include <netinet6/scope6_var.h>
+
+#include <machine/atomic.h>
 
 static struct nd_defrouter *defrtrlist_update(struct nd_defrouter *);
 static int prelist_update(struct nd_prefixctl *, struct nd_defrouter *,
@@ -252,6 +253,9 @@ nd6_rs_input(struct mbuf *m, int off, int icmp6len)
  * interface to see whether they are all advertising the "S"
  * (IPv6-Only) flag.  If they do set, otherwise unset, the
  * interface flag we later use to filter on.
+ *
+ * XXXGL: The use of IF_ADDR_WLOCK (previously it was IF_AFDATA_LOCK) in this
+ * function is quite strange.
  */
 static void
 defrtr_ipv6_only_ifp(struct ifnet *ifp)
@@ -275,9 +279,9 @@ defrtr_ipv6_only_ifp(struct ifnet *ifp)
 			ipv6_only = false;
 	ND6_RUNLOCK();
 
-	IF_AFDATA_WLOCK(ifp);
+	IF_ADDR_WLOCK(ifp);
 	ipv6_only_old = ND_IFINFO(ifp)->flags & ND6_IFF_IPV6_ONLY;
-	IF_AFDATA_WUNLOCK(ifp);
+	IF_ADDR_WUNLOCK(ifp);
 
 	/* If nothing changed, we have an early exit. */
 	if (ipv6_only == ipv6_only_old)
@@ -311,12 +315,12 @@ defrtr_ipv6_only_ifp(struct ifnet *ifp)
 	}
 #endif
 
-	IF_AFDATA_WLOCK(ifp);
+	IF_ADDR_WLOCK(ifp);
 	if (ipv6_only)
 		ND_IFINFO(ifp)->flags |= ND6_IFF_IPV6_ONLY;
 	else
 		ND_IFINFO(ifp)->flags &= ~ND6_IFF_IPV6_ONLY;
-	IF_AFDATA_WUNLOCK(ifp);
+	IF_ADDR_WUNLOCK(ifp);
 
 #ifdef notyet
 	/* Send notification of flag change. */
@@ -327,9 +331,9 @@ static void
 defrtr_ipv6_only_ipf_down(struct ifnet *ifp)
 {
 
-	IF_AFDATA_WLOCK(ifp);
+	IF_ADDR_WLOCK(ifp);
 	ND_IFINFO(ifp)->flags &= ~ND6_IFF_IPV6_ONLY;
-	IF_AFDATA_WUNLOCK(ifp);
+	IF_ADDR_WUNLOCK(ifp);
 }
 #endif	/* EXPERIMENTAL */
 
@@ -1243,9 +1247,8 @@ in6_ifadd(struct nd_prefixctl *pr, int mcast)
 
 		/* No suitable LL address, get the ifid directly */
 		if (ifid_addr == NULL) {
-			struct in6_addr taddr;
-			ifa = ifa_alloc(sizeof(taddr), M_WAITOK);
-			if (ifa) {
+			ifa = ifa_alloc(sizeof(struct in6_ifaddr), M_NOWAIT);
+			if (ifa != NULL) {
 				ib = (struct in6_ifaddr *)ifa;
 				ifid_addr = &ib->ia_addr.sin6_addr;
 				if(in6_get_ifid(ifp, NULL, ifid_addr) != 0) {
@@ -1757,7 +1760,7 @@ prelist_update(struct nd_prefixctl *new, struct nd_defrouter *dr,
 		 * to fail and no further retries should happen.
 		 */
 		if (ND_IFINFO(ifp)->flags & ND6_IFF_STABLEADDR &&
-		    counter_u64_fetch(DAD_FAILURES(ifp)) <= V_ip6_stableaddr_maxretries &&
+		    atomic_load_int(&DAD_FAILURES(ifp)) <= V_ip6_stableaddr_maxretries &&
 		    ifa6->ia6_flags & (IN6_IFF_DUPLICATED | IN6_IFF_TEMPORARY))
 			continue;
 

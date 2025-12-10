@@ -216,7 +216,7 @@ KLDLOAD='kldload %s'
 LN_SF='ln -sf "%s" "%s"'
 MKDIR_P='mkdir -p "%s"'
 MOUNT_TYPE='mount -t %s "%s" "%s"'
-NEWFS_ESP='newfs_msdos "%s"'
+NEWFS_ESP='newfs_msdos -F 32 -c 1 "%s"'
 PRINTF_CONF="printf '%s=\"%%s\"\\\n' %s >> \"%s\""
 PRINTF_FSTAB='printf "$FSTAB_FMT" "%s" "%s" "%s" "%s" "%s" "%s" >> "%s"'
 SHELL_TRUNCATE=':> "%s"'
@@ -255,7 +255,7 @@ msg_encrypt_disks="Encrypt Disks?"
 msg_encrypt_disks_help="Use geli(8) to encrypt all data partitions"
 msg_error="Error"
 msg_force_4k_sectors="Force 4K Sectors?"
-msg_force_4k_sectors_help="Align partitions to 4K sector boundries and set vfs.zfs.vdev.min_auto_ashift=12"
+msg_force_4k_sectors_help="Align partitions to 4K sector boundaries and set vfs.zfs.vdev.min_auto_ashift=12"
 msg_freebsd_installer="$OSNAME Installer"
 msg_geli_password="Enter a strong passphrase, used to protect your encryption keys. You will be required to enter this passphrase each time the system is booted"
 msg_geli_setup="Initializing encryption on selected disks,\n this will take several seconds per disk"
@@ -760,6 +760,7 @@ zfs_create_diskpart()
 {
 	local funcname=zfs_create_diskpart
 	local disk="$1" index="$2"
+	local efibootpart
 
 	# Check arguments
 	if [ ! "$disk" ]; then
@@ -867,18 +868,22 @@ zfs_create_diskpart()
 			             $disk || return $FAILURE
 
 			# We'll configure the ESP in bootconfig
-			if [ -z "$efibootpart" ]; then
-				efibootpart="/dev/gpt/efiboot$index"
-				f_dprintf "$funcname: configuring ESP at [%s]" \
-				          "${efibootpart}"
+			# Note: This will always be p1
+			efibootpart="/dev/gpt/efiboot$index"
+			f_dprintf "$funcname: configuring ESP at [%s]" \
+			          "${efibootpart}"
 
-				f_eval_catch $funcname newfs_msdos "$NEWFS_ESP"\
-				             "$efibootpart" \
-				             || return $FAILURE
+			f_eval_catch $funcname newfs_msdos "$NEWFS_ESP"\
+			             "$efibootpart" \
+			             || return $FAILURE
+			if [ $index -eq 0 ]; then
 				f_eval_catch $funcname printf "$PRINTF_FSTAB" \
-					     $efibootpart /boot/efi msdosfs \
-				             rw 2 2 "$BSDINSTALL_TMPETC/fstab" \
-				             || return $FAILURE
+					$efibootpart /boot/efi msdosfs \
+					rw 2 2 "$BSDINSTALL_TMPETC/fstab" \
+					|| return $FAILURE
+			else
+				# Record the extra ones
+				echo "${efibootpart}" >> ${TMPDIR:-"/tmp"}/bsdinstall-esps
 			fi
 		fi
 
@@ -1021,7 +1026,6 @@ zfs_create_boot()
 	local isswapmirror
 	local bootpart targetpart swappart # Set by zfs_create_diskpart() below
 	local create_options
-	local efibootpart
 
 	#
 	# Pedantic checks; should never be seen

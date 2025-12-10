@@ -3352,13 +3352,22 @@ vget_abort(struct vnode *vp, enum vgetstate vs)
 	switch (vs) {
 	case VGET_USECOUNT:
 		vrele(vp);
-		break;
+		goto out_ok;
 	case VGET_HOLDCNT:
 		vdrop(vp);
+		goto out_ok;
+	case VGET_NONE:
 		break;
-	default:
-		__assert_unreachable();
 	}
+
+	__assert_unreachable();
+
+	/*
+	 * This is a goto label should the cases above have more in common than
+	 * just the 'return' statement.
+	 */
+out_ok:
+	return;
 }
 
 int
@@ -3644,26 +3653,26 @@ vput_final(struct vnode *vp, enum vput_op func)
 		}
 		break;
 	}
-	if (error == 0) {
-		if (func == VUNREF) {
-			VNASSERT((vp->v_vflag & VV_UNREF) == 0, vp,
-			    ("recursive vunref"));
-			vp->v_vflag |= VV_UNREF;
-		}
-		for (;;) {
-			error = vinactive(vp);
-			if (want_unlock)
-				VOP_UNLOCK(vp);
-			if (error != ERELOOKUP || !want_unlock)
-				break;
-			VOP_LOCK(vp, LK_EXCLUSIVE);
-		}
-		if (func == VUNREF)
-			vp->v_vflag &= ~VV_UNREF;
-		vdropl(vp);
-	} else {
+	if (error != 0) {
 		vdefer_inactive(vp);
+		return;
 	}
+	if (func == VUNREF) {
+		VNASSERT((vp->v_vflag & VV_UNREF) == 0, vp,
+		    ("recursive vunref"));
+		vp->v_vflag |= VV_UNREF;
+	}
+	for (;;) {
+		error = vinactive(vp);
+		if (want_unlock)
+			VOP_UNLOCK(vp);
+		if (error != ERELOOKUP || !want_unlock)
+			break;
+		VOP_LOCK(vp, LK_EXCLUSIVE);
+	}
+	if (func == VUNREF)
+		vp->v_vflag &= ~VV_UNREF;
+	vdropl(vp);
 	return;
 out:
 	if (func == VPUT)
@@ -6536,6 +6545,7 @@ const struct filterops fs_filtops = {
 	.f_attach = filt_fsattach,
 	.f_detach = filt_fsdetach,
 	.f_event = filt_fsevent,
+	.f_copy = knote_triv_copy,
 };
 
 static int
@@ -6615,24 +6625,28 @@ static int	filt_vfsvnode(struct knote *kn, long hint);
 static void	filt_vfsdetach(struct knote *kn);
 static int	filt_vfsdump(struct proc *p, struct knote *kn,
 		    struct kinfo_knote *kin);
+static int	filt_vfscopy(struct knote *kn, struct proc *p1);
 
 static const struct filterops vfsread_filtops = {
 	.f_isfd = 1,
 	.f_detach = filt_vfsdetach,
 	.f_event = filt_vfsread,
 	.f_userdump = filt_vfsdump,
+	.f_copy = filt_vfscopy,
 };
 static const struct filterops vfswrite_filtops = {
 	.f_isfd = 1,
 	.f_detach = filt_vfsdetach,
 	.f_event = filt_vfswrite,
 	.f_userdump = filt_vfsdump,
+	.f_copy = filt_vfscopy,
 };
 static const struct filterops vfsvnode_filtops = {
 	.f_isfd = 1,
 	.f_detach = filt_vfsdetach,
 	.f_event = filt_vfsvnode,
 	.f_userdump = filt_vfsdump,
+	.f_copy = filt_vfscopy,
 };
 
 static void
@@ -6813,6 +6827,16 @@ filt_vfsdump(struct proc *p, struct knote *kn, struct kinfo_knote *kin)
 	if (freepath != NULL)
 		free(freepath, M_TEMP);
 
+	return (0);
+}
+
+static int
+filt_vfscopy(struct knote *kn, struct proc *p1)
+{
+	struct vnode *vp;
+
+	vp = (struct vnode *)kn->kn_hook;
+	vhold(vp);
 	return (0);
 }
 

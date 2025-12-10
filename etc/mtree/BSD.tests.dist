@@ -382,6 +382,8 @@
             ..
             ssp
             ..
+            stdbit
+            ..
             stdio
             ..
             stdlib
@@ -520,6 +522,8 @@
     ..
     secure
         lib
+            libcrypto
+            ..
         ..
         libexec
         ..
@@ -832,6 +836,8 @@
                 gate
                 ..
                 gpt
+                ..
+                label
                 ..
                 mirror
                 ..
@@ -1161,6 +1167,8 @@
         ..
         jot
         ..
+        lam
+        ..
         lastcomm
         ..
         limits
@@ -1282,6 +1290,8 @@
         praudit
         ..
         pw
+        ..
+        quot
         ..
         rpcbind
         ..

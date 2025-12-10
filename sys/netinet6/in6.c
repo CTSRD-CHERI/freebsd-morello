@@ -60,7 +60,6 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/cdefs.h>
 #include "opt_inet.h"
 #include "opt_inet6.h"
 
@@ -1295,8 +1294,8 @@ in6_addifaddr(struct ifnet *ifp, struct in6_aliasreq *ifra, struct in6_ifaddr *i
 	 */
 	bzero(&pr0, sizeof(pr0));
 	pr0.ndpr_ifp = ifp;
-	pr0.ndpr_plen = in6_mask2len(&ifra->ifra_prefixmask.sin6_addr,
-	    NULL);
+	pr0.ndpr_plen = ia->ia_plen =
+	    in6_mask2len(&ifra->ifra_prefixmask.sin6_addr, NULL);
 	if (pr0.ndpr_plen == 128) {
 		/* we don't need to install a host route. */
 		goto aifaddr_out;
@@ -1490,16 +1489,16 @@ in6_unlink_ifa(struct in6_ifaddr *ia, struct ifnet *ifp)
 	 * positive reference.
 	 */
 	remove_lle = 0;
-	if (ia->ia6_ndpr == NULL) {
-		nd6log((LOG_NOTICE,
-		    "in6_unlink_ifa: autoconf'ed address "
-		    "%s has no prefix\n", ip6_sprintf(ip6buf, IA6_IN6(ia))));
-	} else {
+	if (ia->ia6_ndpr != NULL) {
 		ia->ia6_ndpr->ndpr_addrcnt--;
 		/* Do not delete lles within prefix if refcont != 0 */
 		if (ia->ia6_ndpr->ndpr_addrcnt == 0)
 			remove_lle = 1;
 		ia->ia6_ndpr = NULL;
+	} else if (ia->ia_plen < 128) {
+		nd6log((LOG_NOTICE,
+		    "in6_unlink_ifa: autoconf'ed address "
+		    "%s has no prefix\n", ip6_sprintf(ip6buf, IA6_IN6(ia))));
 	}
 
 	nd6_rem_ifa_lle(ia, remove_lle);
@@ -2254,15 +2253,13 @@ in6_lltable_match_prefix(const struct sockaddr *saddr,
 static void
 in6_lltable_free_entry(struct lltable *llt, struct llentry *lle)
 {
-	struct ifnet *ifp __diagused;
 
 	LLE_WLOCK_ASSERT(lle);
 	KASSERT(llt != NULL, ("lltable is NULL"));
 
 	/* Unlink entry from table */
 	if ((lle->la_flags & LLE_LINKED) != 0) {
-		ifp = llt->llt_ifp;
-		IF_AFDATA_WLOCK_ASSERT(ifp);
+		LLTABLE_LOCK_ASSERT(llt);
 		lltable_unlink_entry(llt, lle);
 	}
 
@@ -2422,7 +2419,7 @@ in6_lltable_lookup(struct lltable *llt, u_int flags,
 	int family = flags >> 16;
 	struct llentry *lle;
 
-	IF_AFDATA_LOCK_ASSERT(llt->llt_ifp);
+	LLTABLE_RLOCK_ASSERT(llt);
 	KASSERT(l3addr->sa_family == AF_INET6,
 	    ("sin_family %d", l3addr->sa_family));
 	KASSERT((flags & (LLE_UNLOCKED | LLE_EXCLUSIVE)) !=
@@ -2446,7 +2443,7 @@ in6_lltable_lookup(struct lltable *llt, u_int flags,
 		LLE_RLOCK(lle);
 
 	/*
-	 * If the afdata lock is not held, the LLE may have been unlinked while
+	 * If the lltable lock is not held, the LLE may have been unlinked while
 	 * we were blocked on the LLE lock.  Check for this case.
 	 */
 	if (__predict_false((lle->la_flags & LLE_LINKED) == 0)) {
@@ -2604,8 +2601,6 @@ in6_domifattach(struct ifnet *ifp)
 	COUNTER_ARRAY_ALLOC(ext->icmp6_ifstat,
 	    sizeof(struct icmp6_ifstat) / sizeof(uint64_t), M_WAITOK);
 
-	ext->dad_failures = counter_u64_alloc(M_WAITOK);
-
 	ext->nd_ifinfo = nd6_ifattach(ifp);
 	ext->scope6_id = scope6_ifattach(ifp);
 	ext->lltable = in6_lltattach(ifp);
@@ -2615,12 +2610,9 @@ in6_domifattach(struct ifnet *ifp)
 	return ext;
 }
 
-int
-in6_domifmtu(struct ifnet *ifp)
+uint32_t
+in6_ifmtu(struct ifnet *ifp)
 {
-	if (ifp->if_afdata[AF_INET6] == NULL)
-		return ifp->if_mtu;
-
 	return (IN6_LINKMTU(ifp));
 }
 
@@ -2641,7 +2633,6 @@ in6_domifdetach(struct ifnet *ifp, void *aux)
 	COUNTER_ARRAY_FREE(ext->icmp6_ifstat,
 	    sizeof(struct icmp6_ifstat) / sizeof(uint64_t));
 	free(ext->icmp6_ifstat, M_IFADDR);
-	counter_u64_free(ext->dad_failures);
 	free(ext, M_IFADDR);
 }
 
@@ -2750,9 +2741,9 @@ in6_purge_proxy_ndp(struct ifnet *ifp)
 		return;
 
 	llt = LLTABLE6(ifp);
-	IF_AFDATA_WLOCK(ifp);
+	LLTABLE_LOCK(llt);
 	need_purge = ((llt->llt_flags & LLT_ADDEDPROXY) != 0);
-	IF_AFDATA_WUNLOCK(ifp);
+	LLTABLE_UNLOCK(llt);
 
 	/*
 	 * Ever added proxy ndp entries, leave solicited node multicast

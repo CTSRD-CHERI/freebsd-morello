@@ -198,13 +198,18 @@ _GCC_BROKEN=boot code linker script issues.
 .endif
 
 .if ${.MAKE.OS} != "FreeBSD"
-CROSSBUILD_HOST=${.MAKE.OS}
+CROSSBUILD_HOST=${.MAKE.OS} # Unset for native FreeBSD builds
 .if ${.MAKE.OS} != "Linux" && ${.MAKE.OS} != "Darwin"
 .warning Unsupported crossbuild system: ${.MAKE.OS}. Build will probably fail!
 .endif
+.endif
 # We need to force NO_ROOT/DB_FROM_SRC builds when building on other operating
 # systems since the BSD.foo.dist specs contain users and groups that do not
-# exist by default on a Linux/MacOS system.
+# exist by default on a Linux/MacOS system.  The distribute* and package*
+# targets used for install media legacy distribution sets also always use and
+# require NO_ROOT mode.
+.if defined(CROSSBUILD_HOST) || make(distributeworld) || make(packageworld) || \
+    make(distributekernel) || make(packagekernel)
 NO_ROOT:=	1
 DB_FROM_SRC:=	1
 .export NO_ROOT
@@ -466,7 +471,7 @@ SUBDIR+=	${_DIR}
 # by calling 'makedb' in share/man.  This is only relevant for
 # install/distribute so they build the whatis file after every manpage is
 # installed.
-.if make(installworld) || make(install)
+.if make(installworld) || make(install) || make(distributeworld) || make(distribute)
 SUBDIR+=.WAIT
 .endif
 SUBDIR+=etc
@@ -518,25 +523,6 @@ BUILDENV_SHELL?=/bin/sh
 .endif
 
 .if !defined(_MKSHOWCONFIG)
-.if !defined(VCS_REVISION) || empty(VCS_REVISION)
-.if !defined(SVNVERSION_CMD) || empty(SVNVERSION_CMD)
-. for _D in ${PATH:S,:, ,g}
-.  if exists(${_D}/svnversion)
-SVNVERSION_CMD?=${_D}/svnversion
-.  endif
-.  if exists(${_D}/svnliteversion)
-SVNVERSION_CMD?=${_D}/svnliteversion
-.  endif
-. endfor
-.endif
-.if defined(SVNVERSION_CMD) && !empty(SVNVERSION_CMD)
-_VCS_REVISION?=	$$(eval ${SVNVERSION_CMD} ${SRCDIR})
-. if !empty(_VCS_REVISION)
-VCS_REVISION=	$$(echo r${_VCS_REVISION})
-.export VCS_REVISION
-. endif
-.endif
-.endif
 
 .if !defined(GIT_CMD) || empty(GIT_CMD)
 . for _P in /usr/bin /usr/local/bin
@@ -598,9 +584,19 @@ EXTRA_REVISION=	p${_BRANCH:C/.*-p([0-9]+$)/\1/}
 .if !defined(PKG_VERSION)
 PKG_VERSION:=	${_PKG_REVISION}${EXTRA_REVISION:C/[[:space:]]//g}
 .endif
+
 .endif	# !defined(_MKSHOWCONFIG)
 
+PKG_NAME_PREFIX?=	FreeBSD
+PKG_MAINTAINER?=	re@FreeBSD.org
+PKG_WWW?=		https://www.FreeBSD.org
+PKG_WORKERS_COUNT?=	1
+
 .if make(*package*)
+.export PKG_NAME_PREFIX
+.export PKG_MAINTAINER
+.export PKG_WWW
+
 .if !defined(PKG_TIMESTAMP)
 .if !empty(GIT_CMD) && exists(${GIT_CMD}) && exists(${SRCDIR}/.git)
 SOURCE_DATE_EPOCH!=	${GIT_CMD} -C ${SRCDIR} show -s --format=%ct HEAD
@@ -611,14 +607,6 @@ SOURCE_DATE_EPOCH=	${TIMEEPOCHNOW:gmtime}
 .else
 SOURCE_DATE_EPOCH=	${PKG_TIMESTAMP}
 .endif
-PKG_WORKERS_COUNT?=	1
-
-PKG_NAME_PREFIX?=	FreeBSD
-PKG_MAINTAINER?=	re@FreeBSD.org
-PKG_WWW?=		https://www.FreeBSD.org
-.export PKG_NAME_PREFIX
-.export PKG_MAINTAINER
-.export PKG_WWW
 .endif
 
 .if !defined(_MKSHOWCONFIG)
@@ -1366,6 +1354,28 @@ __installcheck_DESTDIR: .PHONY
 .endif
 .endif
 
+#
+# Don't allow installworld or installkernel on a pkgbase system.  This avoids
+# accidentally updating a pkgbase system with install{world,kernel}, causing
+# the installed system to become out of date with the package database.
+#
+# Skip the check if DESTDIR is defined on the assumption the user knows what
+# they're doing.  This means the check can be disabled for the running system
+# using DESTDIR=/.
+#
+.if !make(distributeworld) && !defined(DESTDIR)
+_installcheck_world: __installcheck_PKG
+_installcheck_kernel: __installcheck_PKG
+__installcheck_PKG: .PHONY
+.if exists(${LOCALBASE}/sbin/pkg-static)
+	@if ${LOCALBASE}/sbin/pkg-static info -e ${PKG_NAME_PREFIX}-runtime; then \
+		echo >&2 "ERROR: This target should not be used on a system installed from packages." ; \
+		echo >&2 "       To override this check, set DESTDIR=/."; \
+		false; \
+	fi
+.endif
+.endif
+
 .if !defined(DB_FROM_SRC)
 #
 # Check for missing UIDs/GIDs.
@@ -1977,6 +1987,7 @@ REPODIR?=	${OBJROOT}repo
 PKG_FORMAT?=	tzst
 PKG_LEVEL?=	-1
 PKG_CLEVEL?=	${"${PKG_FORMAT:Mtar}" != "":?:-l ${PKG_LEVEL}}
+PKG_CTHREADS?=	0
 PKG_REPO_SIGNING_KEY?=	# empty
 PKG_OUTPUT_DIR?=	${PKG_VERSION}
 PKG_ABI_FILE?=	${WSTAGEDIR}/usr/bin/uname
@@ -2004,12 +2015,8 @@ _pkgbootstrap: .PHONY
 .endif
 
 PKG_BIN_VERSION!=${PKG_CMD} --version </dev/null 2>/dev/null |\
-    awk -F. '/^[0-9.]+$$/ {print $$1 * 10000 + $$2 * 100 + $$3}'
-.if ${PKG_BIN_VERSION} < 11700
-PKG_EXT=	${PKG_FORMAT}
-.else
+    awk -F. '/^[0-9.]+(-.*)?$$/ {print $$1 * 10000 + $$2 * 100 + $$3}'
 PKG_EXT=	pkg
-.endif
 
 .if !defined(PKG_VERSION_FROM) && make(real-update-packages) && \
     exists(${PKG_ABI_FILE}) && exists(${REPODIR}/${PKG_ABI}/latest)
@@ -2053,7 +2060,7 @@ package-pkg: _pkgbootstrap _repodir .PHONY
 	env ${WMAKEENV} SRCDIR=${.CURDIR} PORTSDIR=${PORTSDIR} REVISION=${_REVISION} \
 		PKG_CMD=${PKG_CMD} PKG_VERSION=${PKG_VERSION} REPODIR=${REPODIR} \
 		WSTAGEDIR=${WSTAGEDIR} \
-		OSVERSION="${SRCRELDATE}" \
+		OSVERSION="${SRCRELDATE}" LOCALBASE=${LOCALBASE} \
 		sh ${.CURDIR}/release/scripts/make-pkg-package.sh
 .endif
 .endif
@@ -2111,6 +2118,7 @@ create-packages-world:	_pkgbootstrap _repodir .PHONY
 
 .ORDER: create-packages-world create-packages-sets
 .ORDER: create-packages-kernel create-packages-sets
+.ORDER: create-packages-source create-packages-sets
 create-packages-sets:	_pkgbootstrap _repodir .PHONY
 	${_+_}@cd ${.CURDIR}; \
 		${MAKE} -f Makefile.inc1 \
@@ -2160,7 +2168,7 @@ create-source-src-package: _pkgbootstrap .PHONY
 		${SSTAGEDIR}/src.ucl
 	${PKG_CMD} -o ABI=${PKG_ABI} \
 		-o OSVERSION="${SRCRELDATE}" \
-		create -f ${PKG_FORMAT} ${PKG_CLEVEL} \
+		create -f ${PKG_FORMAT} ${PKG_CLEVEL} -T${PKG_CTHREADS} \
 		-M ${SSTAGEDIR}/src.ucl \
 		-p ${SSTAGEDIR}/src.plist \
 		-r ${SRCDIR} \
@@ -2186,7 +2194,7 @@ create-source-src-sys-package: _pkgbootstrap .PHONY
 		${SSTAGEDIR}/src-sys.ucl
 	${PKG_CMD} -o ABI=${PKG_ABI} \
 		-o OSVERSION="${SRCRELDATE}" \
-		create -f ${PKG_FORMAT} ${PKG_CLEVEL} \
+		create -f ${PKG_FORMAT} ${PKG_CLEVEL} -T${PKG_CTHREADS} \
 		-M ${SSTAGEDIR}/src-sys.ucl \
 		-p ${SSTAGEDIR}/src-sys.plist \
 		-r ${SRCDIR} \
@@ -2224,12 +2232,9 @@ create-world-package-${pkgname}: .PHONY
 		/^name/ { printf("===> Creating %s-", $$2); next } \
 		/^version/ { print $$2; next } \
 		' ${WSTAGEDIR}/${pkgname}.ucl
-	@if [ "${pkgname}" == "runtime" ]; then \
-		sed -i '' -e "s/%VCS_REVISION%/${VCS_REVISION}/" ${WSTAGEDIR}/${pkgname}.ucl ; \
-	fi
 	${PKG_CMD} -o ABI=${PKG_ABI} -o ALLOW_BASE_SHLIBS=yes \
 		-o OSVERSION="${SRCRELDATE}" \
-		create -f ${PKG_FORMAT} ${PKG_CLEVEL} \
+		create -f ${PKG_FORMAT} ${PKG_CLEVEL} -T${PKG_CTHREADS} \
 		-M ${WSTAGEDIR}/${pkgname}.ucl \
 		-p ${WSTAGEDIR}/${pkgname}.plist \
 		-r ${WSTAGEDIR} \
@@ -2248,7 +2253,7 @@ create-sets-packages: .PHONY
 	@for manifest in ${WSTAGEDIR}/set-*.ucl; do \
 		echo "--> Processing manifest: $$manifest"; \
 		${PKG_CMD} -o ABI=${PKG_ABI} -o OSVERSION="${SRCRELDATE}" \
-			create -f ${PKG_FORMAT} ${PKG_CLEVEL} \
+			create -f ${PKG_FORMAT} ${PKG_CLEVEL} -T${PKG_CTHREADS} \
 			-M $$manifest \
 			-o "${REPODIR}/${PKG_ABI}/${PKG_OUTPUT_DIR}" \
 			|| exit 1; \
@@ -2260,7 +2265,7 @@ _default_flavor=	-default
 _debug=-dbg
 . endif
 
-create-dtb-package:
+create-dtb-package:	.PHONY
 	@if [ -f ${KSTAGEDIR}/${DISTDIR}/dtb.plist ]; then \
 	${SRCDIR}/release/packages/generate-ucl.lua \
 		PKGNAME "dtb" \
@@ -2278,16 +2283,19 @@ create-dtb-package:
 		${KSTAGEDIR}/${DISTDIR}/dtb.ucl ; \
 	${PKG_CMD} -o ABI=${PKG_ABI} -o ALLOW_BASE_SHLIBS=yes \
 		-o OSVERSION="${SRCRELDATE}" \
-		create -f ${PKG_FORMAT} ${PKG_CLEVEL} \
+		create -f ${PKG_FORMAT} ${PKG_CLEVEL} -T${PKG_CTHREADS} \
 		-M ${KSTAGEDIR}/${DISTDIR}/dtb.ucl \
 		-p ${KSTAGEDIR}/${DISTDIR}/dtb.plist \
 		-r ${KSTAGEDIR}/${DISTDIR} \
 		-o ${REPODIR}/${PKG_ABI}/${PKG_OUTPUT_DIR} ; \
 	fi
 
-create-kernel-packages:	.PHONY
+create-kernel-packages:	.PHONY create-kernel-flavored-packages create-dtb-package
+create-kernel-flavored-packages:	.PHONY
+.ORDER: create-kernel-flavored-packages create-dtb-package
+
 . for flavor in "" ${_debug}
-create-kernel-packages: create-kernel-packages-flavor${flavor:C,^""$,${_default_flavor},} create-dtb-package
+create-kernel-flavored-packages: create-kernel-packages-flavor${flavor:C,^""$,${_default_flavor},}
 create-kernel-packages-flavor${flavor:C,^""$,${_default_flavor},}: _pkgbootstrap .PHONY
 	@cd ${KSTAGEDIR}/${DISTDIR} ; \
 	${METALOG_SORT_CMD} ${KSTAGEDIR}/kernel.meta | \
@@ -2312,12 +2320,15 @@ create-kernel-packages-flavor${flavor:C,^""$,${_default_flavor},}: _pkgbootstrap
 		${KSTAGEDIR}/${DISTDIR}/kernel.${INSTALLKERNEL}${flavor}.ucl ; \
 	${PKG_CMD} -o ABI=${PKG_ABI} -o ALLOW_BASE_SHLIBS=yes \
 		-o OSVERSION="${SRCRELDATE}" \
-		create -f ${PKG_FORMAT} ${PKG_CLEVEL} \
+		create -f ${PKG_FORMAT} ${PKG_CLEVEL} -T${PKG_CTHREADS} \
 		-M ${KSTAGEDIR}/${DISTDIR}/kernel.${INSTALLKERNEL}${flavor}.ucl \
 		-p ${KSTAGEDIR}/${DISTDIR}/kernel.${INSTALLKERNEL}${flavor}.plist \
 		-r ${KSTAGEDIR}/${DISTDIR} \
 		-o ${REPODIR}/${PKG_ABI}/${PKG_OUTPUT_DIR}
 . endfor
+.else
+create-kernel-packages: .PHONY
+
 .endif
 .if ${BUILDKERNELS:[#]} > 1 && ${NO_INSTALLEXTRAKERNELS} != "yes"
 . for _kernel in ${BUILDKERNELS:[2..-1]}
@@ -2352,7 +2363,7 @@ create-kernel-packages-extra-flavor${flavor:C,^""$,${_default_flavor},}-${_kerne
 		${KSTAGEDIR}/kernel.${_kernel}/kernel.${_kernel}${flavor}.ucl ; \
 	${PKG_CMD} -o ABI=${PKG_ABI} -o ALLOW_BASE_SHLIBS=yes \
 		-o OSVERSION="${SRCRELDATE}" \
-		create -f ${PKG_FORMAT} ${PKG_CLEVEL} \
+		create -f ${PKG_FORMAT} ${PKG_CLEVEL} -T${PKG_CTHREADS} \
 		-M ${KSTAGEDIR}/kernel.${_kernel}/kernel.${_kernel}${flavor}.ucl \
 		-p ${KSTAGEDIR}/kernel.${_kernel}/kernel.${_kernel}${flavor}.plist \
 		-r ${KSTAGEDIR}/kernel.${_kernel} \
@@ -2371,9 +2382,6 @@ sign-packages:	.PHONY
 
 real-sign-packages:	_pkgbootstrap .PHONY
 	printf "version = 2;\n" > ${WSTAGEDIR}/meta
-.if ${PKG_BIN_VERSION} < 11700
-	printf "packing_format = \"${PKG_FORMAT}\";\n" >> ${WSTAGEDIR}/meta
-.endif
 	@${PKG_CMD} -o ABI=${PKG_ABI} -o OSVERSION="${SRCRELDATE}" \
 		-o WORKERS_COUNT=${PKG_WORKERS_COUNT} repo \
 		-m ${WSTAGEDIR}/meta \
@@ -2547,6 +2555,10 @@ ${_bt}-usr.sbin/kldxref: ${_bt_libelf_depend} ${_bt_libkldelf_depend}
 .if ${BOOTSTRAPPING} < 1300059
 ${_bt}-libexec/flua: ${_bt}-lib/liblua
 _flua= lib/liblua libexec/flua
+.if ${BOOTSTRAPPING} == 0
+_flua+= lib/libmd lib/libucl lib/libyaml
+${_bt}-libexec/flua: ${_bt}-lib/libmd ${_bt}-lib/libucl ${_bt}-lib/libyaml
+.endif # BOOTSTRAPPING == 0
 .endif
 
 # r245440 mtree -N support added
@@ -2812,7 +2824,7 @@ ${_bt}-link-${_tool}: .PHONY
 	if [ ! -e "$${source_path}" ] ; then \
 		echo "Cannot find host tool '${_tool}'"; false; \
 	fi; \
-	cp -pf "$${source_path}" "${WORLDTMP}/legacy/bin/${_tool}"
+	install -p "$${source_path}" "${WORLDTMP}/legacy/bin/${_tool}"
 ${_bt}-links: ${_bt}-link-${_tool}
 .endfor
 
@@ -2858,6 +2870,15 @@ bootstrap-tools: ${_bt}-links .PHONY
     ${_mkesdb} \
     ${_zic} \
     ${LOCAL_BSTOOL_DIRS}
+# We don't enforce any particular uniqueness of targets in the above list; it
+# may be the case that different bootstrap tools may have shared dependencies
+# at different BOOTSTRAPPING points, so we don't object to them using their own
+# conditionals and duplicating them into their ${_foo} variable to ease future
+# maintenance if we purge some entries.  These target names are purposefully
+# unique and this is the only place that should be generating commands for them,
+# but the target may have been defined earlier to express dependencies -- thus,
+# we specifically want commands() here.
+.if !commands(${_bt}-${_tool})
 ${_bt}-${_tool}: ${_bt}-links .PHONY .MAKE
 	${_+_}@${ECHODIR} "===> ${_tool} (obj,all,install)"; \
 		cd ${.CURDIR}/${_tool}; \
@@ -2867,8 +2888,8 @@ ${_bt}-${_tool}: ${_bt}-links .PHONY .MAKE
 		fi; \
 		${MAKE} DIRPRFX=${_tool}/ all; \
 		${MAKE} DIRPRFX=${_tool}/ DESTDIR=${WORLDTMP}/legacy install
-
 bootstrap-tools: ${_bt}-${_tool}
+.endif
 .endfor
 .if target(${_bt}-lib/libmd)
 # If we are bootstrapping libmd (e.g. when building on macOS/Linux) add the
@@ -3295,12 +3316,10 @@ _prebuild_libs=	${_kerberos5_lib_libasn1} \
 		lib/libgeom \
 		${_lib_librt} \
 		${_cddl_lib_libumem} ${_cddl_lib_libnvpair} \
-		${_cddl_lib_libuutil} \
 		${_cddl_lib_libavl} \
 		${_cddl_lib_libicp} \
 		${_cddl_lib_libicp_rescue} \
 		${_cddl_lib_libspl} \
-		${_cddl_lib_libtpool} \
 		${_cddl_lib_libzfs_core} ${_cddl_lib_libzfs} \
 		${_cddl_lib_libzutil} \
 		${_cddl_lib_libctf} ${_cddl_lib_libzfsbootenv} \
@@ -3337,10 +3356,12 @@ _prebuild_libs+= \
 	lib/ofed/libibmad \
 	lib/ofed/libibumad \
 	lib/ofed/complib \
+	lib/ofed/libbnxtre \
 	lib/ofed/libmlx5
 
 lib/ofed/libibmad__L:	lib/ofed/libibumad__L
 lib/ofed/complib__L:	lib/libthr__L
+lib/ofed/libbnxtre__L:	lib/ofed/libibverbs__L lib/libthr__L
 lib/ofed/libmlx5__L:	lib/ofed/libibverbs__L lib/libthr__L
 .endif
 
@@ -3371,32 +3392,27 @@ lib/libxo__L: lib/libutil__L
 _cddl_lib_libumem= cddl/lib/libumem
 _cddl_lib_libnvpair= cddl/lib/libnvpair
 _cddl_lib_libavl= cddl/lib/libavl
-_cddl_lib_libuutil= cddl/lib/libuutil
 _cddl_lib_libspl= cddl/lib/libspl
 
 cddl/lib/libavl__L: cddl/lib/libspl__L
 cddl/lib/libnvpair__L: cddl/lib/libspl__L
-cddl/lib/libuutil__L: cddl/lib/libavl__L cddl/lib/libspl__L
 
 .if ${MK_ZFS} != "no"
 _lib_librt= lib/librt
 _cddl_lib_libicp= cddl/lib/libicp
 _cddl_lib_libicp_rescue= cddl/lib/libicp_rescue
-_cddl_lib_libtpool= cddl/lib/libtpool
 _cddl_lib_libzutil= cddl/lib/libzutil
 _cddl_lib_libzfs_core= cddl/lib/libzfs_core
 _cddl_lib_libzfs= cddl/lib/libzfs
 _cddl_lib_libzfsbootenv= cddl/lib/libzfsbootenv
 
-cddl/lib/libtpool__L: cddl/lib/libspl__L
-
-cddl/lib/libzutil__L: cddl/lib/libavl__L lib/libgeom__L lib/msun__L cddl/lib/libtpool__L
+cddl/lib/libzutil__L: cddl/lib/libavl__L lib/libgeom__L lib/msun__L
 
 cddl/lib/libzfs_core__L: cddl/lib/libnvpair__L cddl/lib/libspl__L cddl/lib/libzutil__L
 
 cddl/lib/libzfs__L: cddl/lib/libzfs_core__L lib/msun__L lib/libutil__L lib/librt__L
 cddl/lib/libzfs__L: lib/libthr__L lib/libmd__L lib/libz__L cddl/lib/libumem__L
-cddl/lib/libzfs__L: cddl/lib/libuutil__L cddl/lib/libavl__L lib/libgeom__L
+cddl/lib/libzfs__L: cddl/lib/libavl__L lib/libgeom__L
 cddl/lib/libzfs__L: cddl/lib/libnvpair__L cddl/lib/libzutil__L
 cddl/lib/libzfs__L: secure/lib/libcrypto__L
 

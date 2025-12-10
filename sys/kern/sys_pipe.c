@@ -181,20 +181,23 @@ static int	filt_pipedump(struct proc *p, struct knote *kn,
 static const struct filterops pipe_nfiltops = {
 	.f_isfd = 1,
 	.f_detach = filt_pipedetach_notsup,
-	.f_event = filt_pipenotsup
+	.f_event = filt_pipenotsup,
 	/* no userdump */
+	.f_copy = knote_triv_copy,
 };
 static const struct filterops pipe_rfiltops = {
 	.f_isfd = 1,
 	.f_detach = filt_pipedetach,
 	.f_event = filt_piperead,
 	.f_userdump = filt_pipedump,
+	.f_copy = knote_triv_copy,
 };
 static const struct filterops pipe_wfiltops = {
 	.f_isfd = 1,
 	.f_detach = filt_pipedetach,
 	.f_event = filt_pipewrite,
 	.f_userdump = filt_pipedump,
+	.f_copy = knote_triv_copy,
 };
 
 /*
@@ -567,7 +570,7 @@ pipespace_new(struct pipe *cpipe, int size)
 	static int curfail = 0;
 	static struct timeval lastfail;
 
-	KASSERT(!mtx_owned(PIPE_MTX(cpipe)), ("pipespace: pipe mutex locked"));
+	PIPE_LOCK_ASSERT(cpipe, MA_NOTOWNED);
 	KASSERT(!(cpipe->pipe_state & PIPE_DIRECTW),
 		("pipespace: resize of direct writes not allowed"));
 retry:
@@ -1679,8 +1682,7 @@ static void
 pipe_free_kmem(struct pipe *cpipe)
 {
 
-	KASSERT(!mtx_owned(PIPE_MTX(cpipe)),
-	    ("pipe_free_kmem: pipe mutex locked"));
+	PIPE_LOCK_ASSERT(cpipe, MA_NOTOWNED);
 
 	if (cpipe->pipe_buffer.buffer != NULL) {
 		atomic_subtract_long(&amountpipekva, cpipe->pipe_buffer.size);

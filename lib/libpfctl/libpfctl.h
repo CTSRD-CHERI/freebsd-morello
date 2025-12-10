@@ -285,6 +285,8 @@ struct pfctl_rule {
 		struct pf_addr		addr;
 		uint16_t		port;
 	}			divert;
+
+	time_t			exptime;
 };
 
 TAILQ_HEAD(pfctl_rulequeue, pfctl_rule);
@@ -521,9 +523,14 @@ int	pfctl_table_del_addrs_h(struct pfctl_handle *h, struct pfr_table *tbl,
 	    struct pfr_addr *addr, int size, int *ndel, int flags);
 int	pfctl_table_del_addrs(int dev, struct pfr_table *tbl, struct pfr_addr
 	    *addr, int size, int *ndel, int flags);
-int     pfctl_table_set_addrs(int dev, struct pfr_table *tbl, struct pfr_addr
+int	pfctl_table_set_addrs_h(struct pfctl_handle *h, struct pfr_table *tbl,
+	    struct pfr_addr *addr, int size, int *nadd, int *ndel,
+	    int *nchange, int flags);
+int	pfctl_table_set_addrs(int dev, struct pfr_table *tbl, struct pfr_addr
 	    *addr, int size, int *size2, int *nadd, int *ndel, int *nchange,
 	    int flags);
+int	pfctl_table_get_addrs_h(struct pfctl_handle *h, struct pfr_table *tbl, struct pfr_addr *addr,
+	    int *size, int flags);
 int	pfctl_table_get_addrs(int dev, struct pfr_table *tbl, struct pfr_addr
 	    *addr, int *size, int flags);
 int	pfctl_set_statusif(struct pfctl_handle *h, const char *ifname);
@@ -576,5 +583,8 @@ int	pfctl_clear_tstats(struct pfctl_handle *h, const struct pfr_table *filter,
 	    int *nzero, int flags);
 int	pfctl_clear_addrs(struct pfctl_handle *h, const struct pfr_table *filter,
 	    int *ndel, int flags);
+
+int	pfctl_get_astats(struct pfctl_handle *h, const struct pfr_table *tbl,
+	    struct pfr_astats *addr, int *size, int flags);
 
 #endif

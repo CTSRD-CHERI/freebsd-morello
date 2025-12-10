@@ -677,7 +677,7 @@ nvme_ctrlr_log_critical_warnings(struct nvme_controller *ctrlr,
 		nvme_printf(ctrlr, "SMART WARNING: unknown critical warning(s): state = 0x%02x\n",
 		    state & NVME_CRIT_WARN_ST_RESERVED_MASK);
 
-	nvme_ctrlr_devctl(ctrlr, "critical", "SMART_ERROR", "state=0x%02x", state);
+	nvme_ctrlr_devctl(ctrlr, "SMART_ERROR", "state=0x%02x", state);
 }
 
 static void
@@ -907,7 +907,7 @@ again:
 
 	size = sizeof(struct nvme_hmb_desc) * ctrlr->hmb_nchunks;
 	err = bus_dma_tag_create(bus_get_dma_tag(ctrlr->dev),
-	    16, 0, BUS_SPACE_MAXADDR, BUS_SPACE_MAXADDR, NULL, NULL,
+	    PAGE_SIZE, 0, BUS_SPACE_MAXADDR, BUS_SPACE_MAXADDR, NULL, NULL,
 	    size, 1, size, 0, NULL, NULL, &ctrlr->hmb_desc_tag);
 	if (err != 0) {
 		nvme_printf(ctrlr, "HMB desc tag create failed %d\n", err);
@@ -1143,6 +1143,10 @@ nvme_ctrlr_aer_task(void *arg, int pending)
 		goto out;
 	}
 
+	nvme_ctrlr_devctl(ctrlr, "aen", "type=0x%x info=0x%x page=0x%x",
+	    NVMEV(NVME_ASYNC_EVENT_TYPE, aer->cpl.cdw0),
+	    NVMEV(NVME_ASYNC_EVENT_INFO, aer->cpl.cdw0), aer->log_page_id);
+
 	aer->log_page_size = 0;
 	len = nvme_ctrlr_get_log_page_size(aer->ctrlr, aer->log_page_id);
 	nvme_ctrlr_cmd_get_log_page(aer->ctrlr, aer->log_page_id,
@@ -1153,7 +1157,7 @@ nvme_ctrlr_aer_task(void *arg, int pending)
 		mtx_sleep(aer, &aer->mtx, PRIBIO, "nvme_pt", 0);
 	mtx_unlock(&aer->mtx);
 
-	if (aer->log_page_size != (uint32_t)-1) {
+	if (aer->log_page_size == (uint32_t)-1) {
 		/*
 		 * If the log page fetch for some reason completed with an
 		 * error, don't pass log page data to the consumers.  In
@@ -1216,10 +1220,20 @@ nvme_ctrlr_aer_task(void *arg, int pending)
 	} else if (aer->log_page_id == NVME_LOG_CHANGED_NAMESPACE) {
 		struct nvme_ns_list *nsl =
 		    (struct nvme_ns_list *)aer->log_page_buffer;
+		struct nvme_controller *ctrlr = aer->ctrlr;
+
 		for (int i = 0; i < nitems(nsl->ns) && nsl->ns[i] != 0; i++) {
+			struct nvme_namespace *ns;
+			uint32_t id = nsl->ns[i];
+
 			if (nsl->ns[i] > NVME_MAX_NAMESPACES)
 				break;
-			nvme_notify_ns(aer->ctrlr, nsl->ns[i]);
+
+			ns = &ctrlr->ns[id - 1];
+			ns->flags |= NVME_NS_DELTA;
+			nvme_ns_construct(ns, id, ctrlr);
+			nvme_notify_ns(ctrlr, id);
+			ns->flags &= ~NVME_NS_DELTA;
 		}
 	}
 
@@ -1495,6 +1509,11 @@ nvme_ctrlr_ioctl(struct cdev *cdev, u_long cmd, caddr_t arg, int flag,
 	case NVME_GET_CONTROLLER_DATA:
 		memcpy(arg, &ctrlr->cdata, sizeof(ctrlr->cdata));
 		break;
+	case DIOCGIDENT: {
+		uint8_t *sn = arg;
+		nvme_cdata_get_disk_ident(&ctrlr->cdata, sn);
+		break;
+	}
 	/* Linux Compatible (see nvme_linux.h) */
 	case NVME_IOCTL_ID:
 		td->td_retval[0] = 0xfffffffful;
@@ -1738,9 +1757,14 @@ noadminq:
 		bus_release_resource(ctrlr->dev, SYS_RES_IRQ,
 		    rman_get_rid(ctrlr->res), ctrlr->res);
 
-	if (ctrlr->bar4_resource != NULL) {
+	if (ctrlr->msix_table_resource != NULL) {
 		bus_release_resource(dev, SYS_RES_MEMORY,
-		    ctrlr->bar4_resource_id, ctrlr->bar4_resource);
+		    ctrlr->msix_table_resource_id, ctrlr->msix_table_resource);
+	}
+
+	if (ctrlr->msix_pba_resource != NULL) {
+		bus_release_resource(dev, SYS_RES_MEMORY,
+		    ctrlr->msix_pba_resource_id, ctrlr->msix_pba_resource);
 	}
 
 	bus_release_resource(dev, SYS_RES_MEMORY,

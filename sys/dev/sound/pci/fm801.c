@@ -440,7 +440,7 @@ fm801ch_trigger(kobj_t obj, void *data, int go)
 {
 	struct fm801_chinfo *ch = data;
 	struct fm801_info *fm801 = ch->parent;
-	u_int32_t baseaddr = sndbuf_getbufaddr(ch->buffer);
+	u_int32_t baseaddr = ch->buffer->buf_addr;
 	u_int32_t k1;
 
 	DPRINT("fm801ch_trigger go %d , ", go);
@@ -708,7 +708,7 @@ fm801_pci_probe( device_t dev )
 }
 
 static struct resource *
-fm801_alloc_resource(device_t bus, device_t child, int type, int *rid,
+fm801_alloc_resource(device_t bus, device_t child, int type, int rid,
 		     rman_res_t start, rman_res_t end, rman_res_t count,
 		     u_int flags)
 {
@@ -716,7 +716,7 @@ fm801_alloc_resource(device_t bus, device_t child, int type, int *rid,
 
 	fm801 = pcm_getdevinfo(bus);
 
-	if (type == SYS_RES_IOPORT && *rid == PCIR_BAR(0))
+	if (type == SYS_RES_IOPORT && rid == PCIR_BAR(0))
 		return (fm801->reg);
 
 	return (NULL);

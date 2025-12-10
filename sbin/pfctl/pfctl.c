@@ -376,7 +376,7 @@ pfctl_enable(int dev, int opts)
 		if (ret == EEXIST)
 			errx(1, "pf already enabled");
 		else if (ret == ESRCH)
-			errx(1, "pfil registeration failed");
+			errx(1, "pfil registration failed");
 		else
 			errc(1, ret, "DIOCSTART");
 	}
@@ -1142,6 +1142,9 @@ pfctl_print_rule_counters(struct pfctl_rule *rule, int opts)
 
 		printf("  [ queue: qname=%s qid=%u pqname=%s pqid=%u ]\n",
 		    rule->qname, rule->qid, rule->pqname, rule->pqid);
+		if (rule->rule_flag & PFRULE_EXPIRED)
+			printf("  [ Expired: %lld secs ago ]\n",
+			    (long long)(time(NULL) - rule->exptime));
 	}
 	if (opts & PF_OPT_VERBOSE) {
 		printf("  [ Evaluations: %-8llu  Packets: %-8llu  "
@@ -1312,7 +1315,6 @@ pfctl_show_rules(int dev, char *path, int opts, enum pfctl_show format,
 	struct pfctl_rule rule;
 	char anchor_call[MAXPATHLEN];
 	u_int32_t nr, header = 0;
-	int rule_numbers = opts & (PF_OPT_VERBOSE2 | PF_OPT_DEBUG);
 	int numeric = opts & PF_OPT_NUMERIC;
 	int len = strlen(path), ret = 0;
 	char *npath, *p;
@@ -1410,8 +1412,14 @@ pfctl_show_rules(int dev, char *path, int opts, enum pfctl_show format,
 		case PFCTL_SHOW_RULES:
 			if (rule.label[0][0] && (opts & PF_OPT_SHOWALL))
 				labels = 1;
-			print_rule(&rule, anchor_call, rule_numbers, numeric);
-			printf("\n");
+			print_rule(&rule, anchor_call, opts, numeric);
+			/*
+			 * Do not print newline, when we have not
+			 * printed expired rule.
+			 */
+			if (!(rule.rule_flag & PFRULE_EXPIRED) ||
+			    (opts & (PF_OPT_VERBOSE2|PF_OPT_DEBUG)))
+				printf("\n");
 			pfctl_print_rule_counters(&rule, opts);
 			break;
 		case PFCTL_SHOW_NOTHING:
@@ -1483,7 +1491,7 @@ pfctl_show_rules(int dev, char *path, int opts, enum pfctl_show format,
 			if (rule.label[0][0] && (opts & PF_OPT_SHOWALL))
 				labels = 1;
 			INDENT(depth, !(opts & PF_OPT_VERBOSE));
-			print_rule(&rule, anchor_call, rule_numbers, numeric);
+			print_rule(&rule, anchor_call, opts, numeric);
 
 			/*
 			 * If this is a 'unnamed' brace notation
@@ -1852,43 +1860,18 @@ pfctl_init_rule(struct pfctl_rule *r)
 	TAILQ_INIT(&(r->route.list));
 }
 
-int
-pfctl_append_rule(struct pfctl *pf, struct pfctl_rule *r,
-    const char *anchor_call)
+void
+pfctl_append_rule(struct pfctl *pf, struct pfctl_rule *r)
 {
 	u_int8_t		rs_num;
 	struct pfctl_rule	*rule;
 	struct pfctl_ruleset	*rs;
-	char 			*p;
 
 	rs_num = pf_get_ruleset_number(r->action);
 	if (rs_num == PF_RULESET_MAX)
 		errx(1, "Invalid rule type %d", r->action);
 
 	rs = &pf->anchor->ruleset;
-
-	if (anchor_call[0] && r->anchor == NULL) {
-		/* 
-		 * Don't make non-brace anchors part of the main anchor pool.
-		 */
-		if ((r->anchor = calloc(1, sizeof(*r->anchor))) == NULL)
-			err(1, "pfctl_append_rule: calloc");
-		
-		pf_init_ruleset(&r->anchor->ruleset);
-		r->anchor->ruleset.anchor = r->anchor;
-		if (strlcpy(r->anchor->path, anchor_call,
-		    sizeof(rule->anchor->path)) >= sizeof(rule->anchor->path))
-			errx(1, "pfctl_append_rule: strlcpy");
-		if ((p = strrchr(anchor_call, '/')) != NULL) {
-			if (!strlen(p))
-				err(1, "pfctl_append_rule: bad anchor name %s",
-				    anchor_call);
-		} else
-			p = (char *)anchor_call;
-		if (strlcpy(r->anchor->name, p,
-		    sizeof(rule->anchor->name)) >= sizeof(rule->anchor->name))
-			errx(1, "pfctl_append_rule: strlcpy");
-	}
 
 	if ((rule = calloc(1, sizeof(*rule))) == NULL)
 		err(1, "calloc");
@@ -1901,7 +1884,6 @@ pfctl_append_rule(struct pfctl *pf, struct pfctl_rule *r,
 	pfctl_move_pool(&r->route, &rule->route);
 
 	TAILQ_INSERT_TAIL(rs->rules[rs_num].active.ptr, rule, entries);
-	return (0);
 }
 
 int
@@ -2201,6 +2183,7 @@ pfctl_load_rule(struct pfctl *pf, char *path, struct pfctl_rule *r, int depth)
 {
 	u_int8_t		rs_num = pf_get_ruleset_number(r->action);
 	char			*name;
+	uint32_t		ticket;
 	char			anchor[PF_ANCHOR_NAME_SIZE];
 	int			len = strlen(path);
 	int			error;
@@ -2210,7 +2193,9 @@ pfctl_load_rule(struct pfctl *pf, char *path, struct pfctl_rule *r, int depth)
 	if ((pf->opts & PF_OPT_NOACTION) == 0) {
 		if (pf->trans == NULL)
 			errx(1, "pfctl_load_rule: no transaction");
-		pf->anchor->ruleset.tticket = pfctl_get_ticket(pf->trans, rs_num, path);
+		ticket = pfctl_get_ticket(pf->trans, rs_num, path);
+		if (rs_num == PF_RULESET_FILTER)
+			 pf->anchor->ruleset.tticket = ticket;
 	}
 	if (strlcpy(anchor, path, sizeof(anchor)) >= sizeof(anchor))
 		errx(1, "pfctl_load_rule: strlcpy");
@@ -2243,7 +2228,7 @@ pfctl_load_rule(struct pfctl *pf, char *path, struct pfctl_rule *r, int depth)
 			return (1);
 		if (pfctl_add_pool(pf, &r->route, PF_RT))
 			return (1);
-		error = pfctl_add_rule_h(pf->h, r, anchor, name, pf->anchor->ruleset.tticket,
+		error = pfctl_add_rule_h(pf->h, r, anchor, name, ticket,
 		    pf->paddr.ticket);
 		switch (error) {
 		case 0:
@@ -2633,6 +2618,8 @@ pfctl_apply_limit(struct pfctl *pf, const char *opt, unsigned int limit)
 int
 pfctl_load_limit(struct pfctl *pf, unsigned int index, unsigned int limit)
 {
+	static int restore_limit_handler_armed = 0;
+
 	if (pfctl_set_limit(pf->h, index, limit)) {
 		if (errno == EBUSY)
 			warnx("Current pool size exceeds requested %s limit %u",
@@ -2641,6 +2628,9 @@ pfctl_load_limit(struct pfctl *pf, unsigned int index, unsigned int limit)
 			warnx("Cannot set %s limit to %u",
 			    pf_limits[index].name, limit);
 		return (1);
+	} else if (restore_limit_handler_armed == 0) {
+		atexit(pfctl_restore_limits);
+		restore_limit_handler_armed = 1;
 	}
 	return (0);
 }
@@ -3182,10 +3172,7 @@ pfctl_show_eth_anchors(int dev, int opts, char *anchorname)
 	int ret;
 
 	if ((ret = pfctl_get_eth_rulesets_info(dev, &ri, anchorname)) != 0) {
-		if (ret == ENOENT)
-			fprintf(stderr, "Anchor '%s' not found.\n",
-			    anchorname);
-		else
+		if (ret != ENOENT)
 			errc(1, ret, "DIOCGETETHRULESETS");
 		return (-1);
 	}
@@ -3419,7 +3406,8 @@ main(int argc, char *argv[])
 	if ((opts & PF_OPT_NODNS) && (opts & PF_OPT_USEDNS))
 		errx(1, "-N and -r are mutually exclusive");
 
-	if ((tblcmdopt == NULL) ^ (tableopt == NULL))
+	if ((tblcmdopt == NULL) ^ (tableopt == NULL) &&
+	    (tblcmdopt == NULL || *tblcmdopt != 'l'))
 		usage();
 
 	if (tblcmdopt != NULL) {
@@ -3492,7 +3480,6 @@ main(int argc, char *argv[])
 
 	if ((opts & PF_OPT_NOACTION) == 0) {
 		pfctl_read_limits(pfh);
-		atexit(pfctl_restore_limits);
 	}
 
 	if (opts & PF_OPT_DISABLE)
@@ -3600,6 +3587,12 @@ main(int argc, char *argv[])
 	}
 
 	if (clearopt != NULL) {
+		int	 mnr;
+
+		/* Check if anchor exists. */
+		if ((pfctl_get_rulesets(pfh, anchorname, &mnr)) == ENOENT)
+			errx(1, "No such anchor %s", anchorname);
+
 		switch (*clearopt) {
 		case 'e':
 			pfctl_flush_eth_rules(dev, opts, anchorname);

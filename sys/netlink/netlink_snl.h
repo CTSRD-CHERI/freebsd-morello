@@ -631,6 +631,17 @@ snl_attr_get_int64(struct snl_state *ss, struct nlattr *nla, const void *arg,
 }
 
 static inline bool
+snl_attr_get_time_t(struct snl_state *ss __unused, struct nlattr *nla,
+    const void *arg __unused, void *target)
+{
+	if (NLA_DATA_LEN(nla) == sizeof(time_t)) {
+		memcpy(target, NLA_DATA_CONST(nla), sizeof(time_t));
+		return (true);
+	}
+	return (false);
+}
+
+static inline bool
 snl_attr_get_string(struct snl_state *ss __unused, struct nlattr *nla,
     const void *arg __unused, void *target)
 {
@@ -1057,14 +1068,14 @@ snl_init_writer(struct snl_state *ss, struct snl_writer *nw)
 {
 	nw->size = SNL_WRITER_BUFFER_SIZE;
 	nw->base = (char *)snl_allocz(ss, nw->size);
-	if (nw->base == NULL) {
+	if (__predict_false(nw->base == NULL)) {
 		nw->error = true;
 		nw->size = 0;
-	}
+	} else
+		nw->error = false;
 
 	nw->offset = 0;
 	nw->hdr = NULL;
-	nw->error = false;
 	nw->ss = ss;
 }
 
@@ -1072,6 +1083,7 @@ static inline bool
 snl_realloc_msg_buffer(struct snl_writer *nw, size_t sz)
 {
 	uint32_t new_size = nw->size * 2;
+	char *new_base;
 
 	while (new_size < nw->size + sz)
 		new_size *= 2;
@@ -1079,23 +1091,20 @@ snl_realloc_msg_buffer(struct snl_writer *nw, size_t sz)
 	if (nw->error)
 		return (false);
 
-	if (snl_allocz(nw->ss, new_size) == NULL) {
+	new_base = snl_allocz(nw->ss, new_size);
+	if (new_base == NULL) {
 		nw->error = true;
 		return (false);
 	}
-	nw->size = new_size;
 
-	void *new_base = nw->ss->lb->base;
-	if (new_base != nw->base) {
-		memcpy(new_base, nw->base, nw->offset);
-		if (nw->hdr != NULL) {
-			int hdr_off = (char *)(nw->hdr) - nw->base;
+	memcpy(new_base, nw->base, nw->offset);
+	if (nw->hdr != NULL) {
+		int hdr_off = (char *)(nw->hdr) - nw->base;
 
-			nw->hdr = (struct nlmsghdr *)
-			    (void *)((char *)new_base + hdr_off);
-		}
-		nw->base = (char *)new_base;
+		nw->hdr = (struct nlmsghdr *)(void *)(new_base + hdr_off);
 	}
+	nw->base = new_base;
+	nw->size = new_size;
 
 	return (true);
 }

@@ -163,11 +163,11 @@ pfr_del_addrs(struct pfr_table *tbl, struct pfr_addr *addr, int size,
 
 int
 pfr_set_addrs(struct pfr_table *tbl, struct pfr_addr *addr, int size,
-    int *size2, int *nadd, int *ndel, int *nchange, int flags)
+    int *nadd, int *ndel, int *nchange, int flags)
 {
 	int ret;
 
-	ret = pfctl_table_set_addrs(dev, tbl, addr, size, size2, nadd, ndel,
+	ret = pfctl_table_set_addrs_h(pfh, tbl, addr, size, nadd, ndel,
 	    nchange, flags);
 	if (ret) {
 		errno = ret;
@@ -182,7 +182,7 @@ pfr_get_addrs(struct pfr_table *tbl, struct pfr_addr *addr, int *size,
 {
 	int ret;
 
-	ret = pfctl_table_get_addrs(dev, tbl, addr, size, flags);
+	ret = pfctl_table_get_addrs_h(pfh, tbl, addr, size, flags);
 	if (ret) {
 		errno = ret;
 		return (-1);
@@ -194,25 +194,7 @@ int
 pfr_get_astats(struct pfr_table *tbl, struct pfr_astats *addr, int *size,
     int flags)
 {
-	struct pfioc_table io;
-
-	if (tbl == NULL || size == NULL || *size < 0 ||
-	    (*size && addr == NULL)) {
-		errno = EINVAL;
-		return (-1);
-	}
-	bzero(&io, sizeof io);
-	io.pfrio_flags = flags;
-	io.pfrio_table = *tbl;
-	io.pfrio_buffer = addr;
-	io.pfrio_esize = sizeof(*addr);
-	io.pfrio_size = *size;
-	if (ioctl(dev, DIOCRGETASTATS, &io)) {
-		pfr_report_error(tbl, &io, "get astats from");
-		return (-1);
-	}
-	*size = io.pfrio_size;
-	return (0);
+	return (pfctl_get_astats(pfh, tbl, addr, size, flags));
 }
 
 int

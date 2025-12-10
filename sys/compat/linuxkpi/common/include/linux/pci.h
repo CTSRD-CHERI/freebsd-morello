@@ -832,6 +832,19 @@ lkpi_pci_restore_state(struct pci_dev *pdev)
 #define pci_restore_state(dev)	lkpi_pci_restore_state(dev)
 
 static inline int
+linuxkpi_pci_enable_wake(struct pci_dev *pdev, pci_power_t state, bool ena)
+{
+	/*
+	 * We do not currently support this in device.h either to
+	 * check if the device is allowed to wake up in first place.
+	 */
+	pr_debug("%s: TODO\n", __func__);
+	return (0);
+}
+#define	pci_enable_wake(dev, state, ena)				\
+    linuxkpi_pci_enable_wake(dev, state, ena)
+
+static inline int
 pci_reset_function(struct pci_dev *pdev)
 {
 
@@ -1331,6 +1344,12 @@ struct pci_dev *lkpi_pci_get_domain_bus_and_slot(int domain,
     unsigned int bus, unsigned int devfn);
 #define	pci_get_domain_bus_and_slot(domain, bus, devfn)	\
 	lkpi_pci_get_domain_bus_and_slot(domain, bus, devfn)
+
+struct pci_dev *lkpi_pci_get_slot(struct pci_bus *, unsigned int);
+#ifndef	WANT_NATIVE_PCI_GET_SLOT
+#define	pci_get_slot(_pbus, _devfn)				\
+    lkpi_pci_get_slot(_pbus, _devfn)
+#endif
 
 static inline int
 pci_domain_nr(struct pci_bus *pbus)

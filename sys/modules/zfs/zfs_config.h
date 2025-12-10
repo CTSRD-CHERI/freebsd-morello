@@ -204,6 +204,10 @@
 /* BLK_STS_RESV_CONFLICT is defined */
 /* #undef HAVE_BLK_STS_RESV_CONFLICT */
 
+/* Define if getgeo() in block_device_operations takes struct gendisk * as its
+   first arg */
+/* #undef HAVE_BLOCK_DEVICE_OPERATIONS_GETGEO_GENDISK */
+
 /* Define if release() in block_device_operations takes 1 arg */
 /* #undef HAVE_BLOCK_DEVICE_OPERATIONS_RELEASE_1ARG */
 
@@ -338,6 +342,9 @@
 
 /* Define if compiler supports -Winfinite-recursion */
 /* #undef HAVE_INFINITE_RECURSION */
+
+/* inode_generic_drop() exists */
+/* #undef HAVE_INODE_GENERIC_DROP */
 
 /* inode_get_atime() exists in linux/fs.h */
 /* #undef HAVE_INODE_GET_ATIME */
@@ -510,6 +517,9 @@
 /* Define if host toolchain supports MOVBE */
 #define HAVE_MOVBE 1
 
+/* Define if ns_type is accessible through ns_common */
+/* #undef HAVE_NS_COMMON_TYPE */
+
 /* folio_wait_bit() exists */
 /* #undef HAVE_PAGEMAP_FOLIO_WAIT_BIT */
 
@@ -581,6 +591,9 @@
 
 /* iops->set_acl() takes 4 args, arg2 is struct dentry * */
 /* #undef HAVE_SET_ACL_USERNS_DENTRY_ARG2 */
+
+/* Define if set_default_d_op() is available */
+/* #undef HAVE_SET_DEFAULT_D_OP */
 
 /* shrinker_register exists */
 /* #undef HAVE_SHRINKER_REGISTER */
@@ -756,6 +769,9 @@
 /* int (*writepage_t)() takes struct folio* */
 /* #undef HAVE_WRITEPAGE_T_FOLIO */
 
+/* write_cache_pages() is available */
+/* #undef HAVE_WRITE_CACHE_PAGES */
+
 /* xattr_handler->get() wants dentry and inode and flags */
 /* #undef HAVE_XATTR_GET_DENTRY_INODE_FLAGS */
 
@@ -840,7 +856,7 @@
 /* #undef ZFS_DEVICE_MINOR */
 
 /* Define the project alias string. */
-#define ZFS_META_ALIAS "zfs-2.4.99-52-FreeBSD_g3f4312a0a"
+#define ZFS_META_ALIAS "zfs-2.4.99-248-FreeBSD_g89f729dcc"
 
 /* Define the project author. */
 #define ZFS_META_AUTHOR "OpenZFS"
@@ -849,7 +865,7 @@
 /* #undef ZFS_META_DATA */
 
 /* Define the maximum compatible kernel version. */
-#define ZFS_META_KVER_MAX "6.16"
+#define ZFS_META_KVER_MAX "6.17"
 
 /* Define the minimum compatible kernel version. */
 #define ZFS_META_KVER_MIN "4.18"
@@ -870,7 +886,7 @@
 #define ZFS_META_NAME "zfs"
 
 /* Define the project release. */
-#define ZFS_META_RELEASE "52-FreeBSD_g3f4312a0a"
+#define ZFS_META_RELEASE "248-FreeBSD_g89f729dcc"
 
 /* Define the project version. */
 #define ZFS_META_VERSION "2.4.99"

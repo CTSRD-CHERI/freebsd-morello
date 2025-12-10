@@ -54,7 +54,8 @@
  * consumer of a socket is starting to tear down the socket, and that the
  * protocol should terminate the connection.  Historically, pr_abort() also
  * detached protocol state from the socket state, but this is no longer the
- * case.
+ * case.  pr_fdclose() is called when userspace invokes close(2) on a socket
+ * file descriptor.
  *
  * socreate() creates a socket and attaches protocol state.  This is a public
  * interface that may be used by socket layer consumers to create new
@@ -191,16 +192,19 @@ static const struct filterops soread_filtops = {
 	.f_isfd = 1,
 	.f_detach = filt_sordetach,
 	.f_event = filt_soread,
+	.f_copy = knote_triv_copy,
 };
 static const struct filterops sowrite_filtops = {
 	.f_isfd = 1,
 	.f_detach = filt_sowdetach,
 	.f_event = filt_sowrite,
+	.f_copy = knote_triv_copy,
 };
 static const struct filterops soempty_filtops = {
 	.f_isfd = 1,
 	.f_detach = filt_sowdetach,
 	.f_event = filt_soempty,
+	.f_copy = knote_triv_copy,
 };
 
 so_gen_t	so_gencnt;	/* generation count for sockets */
@@ -1722,6 +1726,10 @@ so_splice(struct socket *so, struct socket *so2, struct splice *splice)
 		error = EBUSY;
 	if (error != 0) {
 		SOCK_UNLOCK(so2);
+		mtx_lock(&sp->mtx);
+		sp->dst = NULL;
+		sp->state = SPLICE_EXCEPTION;
+		mtx_unlock(&sp->mtx);
 		so_unsplice(so, false);
 		return (error);
 	}
@@ -1729,6 +1737,10 @@ so_splice(struct socket *so, struct socket *so2, struct splice *splice)
 	if (so->so_snd.sb_tls_info != NULL) {
 		SOCK_SENDBUF_UNLOCK(so2);
 		SOCK_UNLOCK(so2);
+		mtx_lock(&sp->mtx);
+		sp->dst = NULL;
+		sp->state = SPLICE_EXCEPTION;
+		mtx_unlock(&sp->mtx);
 		so_unsplice(so, false);
 		return (EINVAL);
 	}
@@ -1795,20 +1807,20 @@ so_unsplice(struct socket *so, bool timeout)
 	SOCK_UNLOCK(so);
 
 	so2 = sp->dst;
-	SOCK_LOCK(so2);
-	KASSERT(!SOLISTENING(so2), ("%s: so2 is listening", __func__));
-	SOCK_SENDBUF_LOCK(so2);
-	KASSERT(sp->state == SPLICE_INIT ||
-	    (so2->so_snd.sb_flags & SB_SPLICED) != 0,
-	    ("%s: so2 is not spliced", __func__));
-	KASSERT(sp->state == SPLICE_INIT ||
-	    so2->so_splice_back == sp,
-	    ("%s: so_splice_back != sp", __func__));
-	so2->so_snd.sb_flags &= ~SB_SPLICED;
-	so2rele = so2->so_splice_back != NULL;
-	so2->so_splice_back = NULL;
-	SOCK_SENDBUF_UNLOCK(so2);
-	SOCK_UNLOCK(so2);
+	if (so2 != NULL) {
+		SOCK_LOCK(so2);
+		KASSERT(!SOLISTENING(so2), ("%s: so2 is listening", __func__));
+		SOCK_SENDBUF_LOCK(so2);
+		KASSERT((so2->so_snd.sb_flags & SB_SPLICED) != 0,
+		    ("%s: so2 is not spliced", __func__));
+		KASSERT(so2->so_splice_back == sp,
+		    ("%s: so_splice_back != sp", __func__));
+		so2->so_snd.sb_flags &= ~SB_SPLICED;
+		so2rele = so2->so_splice_back != NULL;
+		so2->so_splice_back = NULL;
+		SOCK_SENDBUF_UNLOCK(so2);
+		SOCK_UNLOCK(so2);
+	}
 
 	/*
 	 * No new work is being enqueued.  The worker thread might be
@@ -1848,9 +1860,11 @@ so_unsplice(struct socket *so, bool timeout)
 	sorwakeup(so);
 	CURVNET_SET(so->so_vnet);
 	sorele(so);
-	sowwakeup(so2);
-	if (so2rele)
-		sorele(so2);
+	if (so2 != NULL) {
+		sowwakeup(so2);
+		if (so2rele)
+			sorele(so2);
+	}
 	CURVNET_RESTORE();
 	so_splice_free(sp);
 	return (0);

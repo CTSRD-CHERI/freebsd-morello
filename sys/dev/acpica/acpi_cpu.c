@@ -92,6 +92,7 @@ struct acpi_cpu_softc {
     int			 cpu_non_c2;	/* Index of lowest non-C2 state. */
     int			 cpu_non_c3;	/* Index of lowest non-C3 state. */
     u_int		 cpu_cx_stats[MAX_CX_STATES];/* Cx usage history. */
+    uint64_t		 cpu_cx_duration[MAX_CX_STATES];/* Cx cumulative sleep */
     /* Values for sysctl. */
     struct sysctl_ctx_list cpu_sysctl_ctx;
     struct sysctl_oid	*cpu_sysctl_tree;
@@ -185,6 +186,7 @@ static void	acpi_cpu_quirks(void);
 static void	acpi_cpu_quirks_piix4(void);
 static int	acpi_cpu_usage_sysctl(SYSCTL_HANDLER_ARGS);
 static int	acpi_cpu_usage_counters_sysctl(SYSCTL_HANDLER_ARGS);
+static int	acpi_cpu_duration_counters_sysctl(SYSCTL_HANDLER_ARGS);
 static int	acpi_cpu_set_cx_lowest(struct acpi_cpu_softc *sc);
 static int	acpi_cpu_cx_lowest_sysctl(SYSCTL_HANDLER_ARGS);
 static int	acpi_cpu_global_cx_lowest_sysctl(SYSCTL_HANDLER_ARGS);
@@ -730,7 +732,7 @@ acpi_cpu_generic_cx_probe(struct acpi_cpu_softc *sc)
     if (AcpiGbl_FADT.C2Latency <= 100) {
 	gas.Address = sc->cpu_p_blk + 4;
 	cx_ptr->res_rid = 0;
-	acpi_bus_alloc_gas(sc->cpu_dev, &cx_ptr->res_type, &cx_ptr->res_rid,
+	acpi_bus_alloc_gas(sc->cpu_dev, &cx_ptr->res_type, cx_ptr->res_rid,
 	    &gas, &cx_ptr->p_lvlx, RF_SHAREABLE);
 	if (cx_ptr->p_lvlx != NULL) {
 	    cx_ptr->type = ACPI_STATE_C2;
@@ -747,7 +749,7 @@ acpi_cpu_generic_cx_probe(struct acpi_cpu_softc *sc)
     if (AcpiGbl_FADT.C3Latency <= 1000 && !(cpu_quirks & CPU_QUIRK_NO_C3)) {
 	gas.Address = sc->cpu_p_blk + 5;
 	cx_ptr->res_rid = 1;
-	acpi_bus_alloc_gas(sc->cpu_dev, &cx_ptr->res_type, &cx_ptr->res_rid,
+	acpi_bus_alloc_gas(sc->cpu_dev, &cx_ptr->res_type, cx_ptr->res_rid,
 	    &gas, &cx_ptr->p_lvlx, RF_SHAREABLE);
 	if (cx_ptr->p_lvlx != NULL) {
 	    cx_ptr->type = ACPI_STATE_C3;
@@ -924,7 +926,7 @@ acpi_cpu_cx_cst(struct acpi_cpu_softc *sc)
 	{
 	    cx_ptr->res_rid = sc->cpu_cx_count;
 	    acpi_PkgGas(sc->cpu_dev, pkg, 0, &cx_ptr->res_type,
-		&cx_ptr->res_rid, &cx_ptr->p_lvlx, RF_SHAREABLE);
+		cx_ptr->res_rid, &cx_ptr->p_lvlx, RF_SHAREABLE);
 	    if (cx_ptr->p_lvlx) {
 		cx_ptr->do_mwait = false;
 		ACPI_DEBUG_PRINT((ACPI_DB_INFO,
@@ -1055,6 +1057,12 @@ acpi_cpu_startup_cx(struct acpi_cpu_softc *sc)
 	"cx_usage_counters", CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_MPSAFE,
 	(void *)sc, 0, acpi_cpu_usage_counters_sysctl, "A",
 	"Cx sleep state counters");
+    SYSCTL_ADD_PROC(&sc->cpu_sysctl_ctx,
+        SYSCTL_CHILDREN(device_get_sysctl_tree(sc->cpu_dev)), OID_AUTO,
+	"cx_duration_counters", CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_MPSAFE,
+	(void *)sc, 0, acpi_cpu_duration_counters_sysctl, "A",
+	"Cx sleep duration cumulative time");
+
 #if defined(__i386__) || defined(__amd64__)
     SYSCTL_ADD_PROC(&sc->cpu_sysctl_ctx,
         SYSCTL_CHILDREN(device_get_sysctl_tree(sc->cpu_dev)), OID_AUTO,
@@ -1168,6 +1176,7 @@ acpi_cpu_idle(sbintime_t sbt)
 	if (!cx_next->do_mwait && curthread->td_critnest == 0)
 		end_time = min(end_time, 500000 / hz);
 	sc->cpu_prev_sleep = (sc->cpu_prev_sleep * 3 + end_time) / 4;
+	sc->cpu_cx_duration[cx_next_idx] += end_time;
 	return;
     }
 
@@ -1224,6 +1233,7 @@ acpi_cpu_idle(sbintime_t sbt)
     else
 	end_time = ((end_ticks - start_ticks) << 20) / cpu_tickrate();
     sc->cpu_prev_sleep = (sc->cpu_prev_sleep * 3 + end_time) / 4;
+    sc->cpu_cx_duration[cx_next_idx] += end_time;
 }
 #endif
 
@@ -1407,6 +1417,26 @@ acpi_cpu_usage_counters_sysctl(SYSCTL_HANDLER_ARGS)
 	sbuf_delete(&sb);
 	return (error);
 }
+
+static int
+acpi_cpu_duration_counters_sysctl(SYSCTL_HANDLER_ARGS)
+{
+	struct acpi_cpu_softc *sc = (struct acpi_cpu_softc *)arg1;
+	struct sbuf	 sb;
+	char		 buf[128];
+	int		 error, i;
+
+	sbuf_new_for_sysctl(&sb, buf, sizeof(buf), req);
+	for (i = 0; i < sc->cpu_cx_count; i++) {
+		if (i > 0)
+			sbuf_putc(&sb, ' ');
+		sbuf_printf(&sb, "%ju", (uintmax_t) sc->cpu_cx_duration[i]);
+	}
+	error = sbuf_finish(&sb);
+	sbuf_delete(&sb);
+	return (error);
+}
+
 
 #if defined(__i386__) || defined(__amd64__)
 static int

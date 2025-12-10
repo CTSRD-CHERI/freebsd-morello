@@ -28,7 +28,7 @@
  * Copyright (c) 2017 Datto Inc.
  * Copyright (c) 2017, Intel Corporation.
  * Copyright (c) 2019, loli10K <ezomori.nozomu@gmail.com>. All rights reserved.
- * Copyright (c) 2023, 2024, Klara Inc.
+ * Copyright (c) 2023, 2024, 2025, Klara, Inc.
  */
 
 #include <sys/zfs_context.h>
@@ -237,9 +237,10 @@
  * locking is, always, based on spa_namespace_lock and spa_config_lock[].
  */
 
-avl_tree_t spa_namespace_avl;
-kmutex_t spa_namespace_lock;
-kcondvar_t spa_namespace_cv;
+static avl_tree_t spa_namespace_avl;
+static kmutex_t spa_namespace_lock;
+static kcondvar_t spa_namespace_cv;
+
 static const int spa_max_replication_override = SPA_DVAS_PER_BP;
 
 static kmutex_t spa_spare_lock;
@@ -510,7 +511,7 @@ spa_config_tryenter(spa_t *spa, int locks, const void *tag, krw_t rw)
 
 static void
 spa_config_enter_impl(spa_t *spa, int locks, const void *tag, krw_t rw,
-    int mmp_flag)
+    int priority_flag)
 {
 	(void) tag;
 	int wlocks_held = 0;
@@ -526,7 +527,7 @@ spa_config_enter_impl(spa_t *spa, int locks, const void *tag, krw_t rw,
 		mutex_enter(&scl->scl_lock);
 		if (rw == RW_READER) {
 			while (scl->scl_writer ||
-			    (!mmp_flag && scl->scl_write_wanted)) {
+			    (!priority_flag && scl->scl_write_wanted)) {
 				cv_wait(&scl->scl_cv, &scl->scl_lock);
 			}
 		} else {
@@ -551,7 +552,7 @@ spa_config_enter(spa_t *spa, int locks, const void *tag, krw_t rw)
 }
 
 /*
- * The spa_config_enter_mmp() allows the mmp thread to cut in front of
+ * The spa_config_enter_priority() allows the mmp thread to cut in front of
  * outstanding write lock requests. This is needed since the mmp updates are
  * time sensitive and failure to service them promptly will result in a
  * suspended pool. This pool suspension has been seen in practice when there is
@@ -560,7 +561,7 @@ spa_config_enter(spa_t *spa, int locks, const void *tag, krw_t rw)
  */
 
 void
-spa_config_enter_mmp(spa_t *spa, int locks, const void *tag, krw_t rw)
+spa_config_enter_priority(spa_t *spa, int locks, const void *tag, krw_t rw)
 {
 	spa_config_enter_impl(spa, locks, tag, rw, 1);
 }
@@ -608,6 +609,58 @@ spa_config_held(spa_t *spa, int locks, krw_t rw)
  * ==========================================================================
  */
 
+void
+spa_namespace_enter(const void *tag)
+{
+	(void) tag;
+	ASSERT(!MUTEX_HELD(&spa_namespace_lock));
+	mutex_enter(&spa_namespace_lock);
+}
+
+boolean_t
+spa_namespace_tryenter(const void *tag)
+{
+	(void) tag;
+	ASSERT(!MUTEX_HELD(&spa_namespace_lock));
+	return (mutex_tryenter(&spa_namespace_lock));
+}
+
+int
+spa_namespace_enter_interruptible(const void *tag)
+{
+	(void) tag;
+	ASSERT(!MUTEX_HELD(&spa_namespace_lock));
+	return (mutex_enter_interruptible(&spa_namespace_lock));
+}
+
+void
+spa_namespace_exit(const void *tag)
+{
+	(void) tag;
+	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+	mutex_exit(&spa_namespace_lock);
+}
+
+boolean_t
+spa_namespace_held(void)
+{
+	return (MUTEX_HELD(&spa_namespace_lock));
+}
+
+void
+spa_namespace_wait(void)
+{
+	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+	cv_wait(&spa_namespace_cv, &spa_namespace_lock);
+}
+
+void
+spa_namespace_broadcast(void)
+{
+	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+	cv_broadcast(&spa_namespace_cv);
+}
+
 /*
  * Lookup the named spa_t in the AVL tree.  The spa_namespace_lock must be held.
  * Returns NULL if no matching spa_t is found.
@@ -620,7 +673,7 @@ spa_lookup(const char *name)
 	avl_index_t where;
 	char *cp;
 
-	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+	ASSERT(spa_namespace_held());
 
 retry:
 	(void) strlcpy(search.spa_name, name, sizeof (search.spa_name));
@@ -645,7 +698,7 @@ retry:
 	    spa->spa_load_thread != curthread) ||
 	    (spa->spa_export_thread != NULL &&
 	    spa->spa_export_thread != curthread)) {
-		cv_wait(&spa_namespace_cv, &spa_namespace_lock);
+		spa_namespace_wait();
 		goto retry;
 	}
 
@@ -697,7 +750,7 @@ spa_add(const char *name, nvlist_t *config, const char *altroot)
 	spa_t *spa;
 	spa_config_dirent_t *dp;
 
-	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+	ASSERT(spa_namespace_held());
 
 	spa = kmem_zalloc(sizeof (spa_t), KM_SLEEP);
 
@@ -747,7 +800,7 @@ spa_add(const char *name, nvlist_t *config, const char *altroot)
 	spa_config_lock_init(spa);
 	spa_stats_init(spa);
 
-	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+	ASSERT(spa_namespace_held());
 	avl_add(&spa_namespace_avl, spa);
 
 	/*
@@ -806,6 +859,7 @@ spa_add(const char *name, nvlist_t *config, const char *altroot)
 	spa->spa_min_ashift = INT_MAX;
 	spa->spa_max_ashift = 0;
 	spa->spa_min_alloc = INT_MAX;
+	spa->spa_max_alloc = 0;
 	spa->spa_gcd_alloc = INT_MAX;
 
 	/* Reset cached value */
@@ -836,7 +890,7 @@ spa_remove(spa_t *spa)
 {
 	spa_config_dirent_t *dp;
 
-	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+	ASSERT(spa_namespace_held());
 	ASSERT(spa_state(spa) == POOL_STATE_UNINITIALIZED);
 	ASSERT3U(zfs_refcount_count(&spa->spa_refcount), ==, 0);
 	ASSERT0(spa->spa_waiters);
@@ -915,7 +969,7 @@ spa_remove(spa_t *spa)
 spa_t *
 spa_next(spa_t *prev)
 {
-	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+	ASSERT(spa_namespace_held());
 
 	if (prev)
 		return (AVL_NEXT(&spa_namespace_avl, prev));
@@ -937,7 +991,7 @@ void
 spa_open_ref(spa_t *spa, const void *tag)
 {
 	ASSERT(zfs_refcount_count(&spa->spa_refcount) >= spa->spa_minref ||
-	    MUTEX_HELD(&spa_namespace_lock) ||
+	    spa_namespace_held() ||
 	    spa->spa_load_thread == curthread);
 	(void) zfs_refcount_add(&spa->spa_refcount, tag);
 }
@@ -950,7 +1004,7 @@ void
 spa_close(spa_t *spa, const void *tag)
 {
 	ASSERT(zfs_refcount_count(&spa->spa_refcount) > spa->spa_minref ||
-	    MUTEX_HELD(&spa_namespace_lock) ||
+	    spa_namespace_held() ||
 	    spa->spa_load_thread == curthread ||
 	    spa->spa_export_thread == curthread);
 	(void) zfs_refcount_remove(&spa->spa_refcount, tag);
@@ -979,7 +1033,7 @@ spa_async_close(spa_t *spa, const void *tag)
 boolean_t
 spa_refcount_zero(spa_t *spa)
 {
-	ASSERT(MUTEX_HELD(&spa_namespace_lock) ||
+	ASSERT(spa_namespace_held() ||
 	    spa->spa_export_thread == curthread);
 
 	return (zfs_refcount_count(&spa->spa_refcount) == spa->spa_minref);
@@ -1226,7 +1280,7 @@ uint64_t
 spa_vdev_enter(spa_t *spa)
 {
 	mutex_enter(&spa->spa_vdev_top_lock);
-	mutex_enter(&spa_namespace_lock);
+	spa_namespace_enter(FTAG);
 
 	ASSERT0(spa->spa_export_thread);
 
@@ -1245,7 +1299,7 @@ uint64_t
 spa_vdev_detach_enter(spa_t *spa, uint64_t guid)
 {
 	mutex_enter(&spa->spa_vdev_top_lock);
-	mutex_enter(&spa_namespace_lock);
+	spa_namespace_enter(FTAG);
 
 	ASSERT0(spa->spa_export_thread);
 
@@ -1269,7 +1323,7 @@ spa_vdev_detach_enter(spa_t *spa, uint64_t guid)
 uint64_t
 spa_vdev_config_enter(spa_t *spa)
 {
-	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+	ASSERT(spa_namespace_held());
 
 	spa_config_enter(spa, SCL_ALL, spa, RW_WRITER);
 
@@ -1284,7 +1338,7 @@ void
 spa_vdev_config_exit(spa_t *spa, vdev_t *vd, uint64_t txg, int error,
     const char *tag)
 {
-	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+	ASSERT(spa_namespace_held());
 
 	int config_changed = B_FALSE;
 
@@ -1373,7 +1427,7 @@ spa_vdev_exit(spa_t *spa, vdev_t *vd, uint64_t txg, int error)
 	vdev_rebuild_restart(spa);
 
 	spa_vdev_config_exit(spa, vd, txg, error, FTAG);
-	mutex_exit(&spa_namespace_lock);
+	spa_namespace_exit(FTAG);
 	mutex_exit(&spa->spa_vdev_top_lock);
 
 	return (error);
@@ -1451,9 +1505,9 @@ spa_vdev_state_exit(spa_t *spa, vdev_t *vd, int error)
 	 * If the config changed, update the config cache.
 	 */
 	if (config_changed) {
-		mutex_enter(&spa_namespace_lock);
+		spa_namespace_enter(FTAG);
 		spa_write_cachefile(spa, B_FALSE, B_TRUE, B_FALSE);
-		mutex_exit(&spa_namespace_lock);
+		spa_namespace_exit(FTAG);
 	}
 
 	return (error);
@@ -1500,7 +1554,7 @@ spa_by_guid(uint64_t pool_guid, uint64_t device_guid)
 	spa_t *spa;
 	avl_tree_t *t = &spa_namespace_avl;
 
-	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+	ASSERT(spa_namespace_held());
 
 	for (spa = avl_first(t); spa != NULL; spa = AVL_NEXT(t, spa)) {
 		if (spa->spa_state == POOL_STATE_UNINITIALIZED)
@@ -1582,7 +1636,7 @@ spa_load_guid_exists(uint64_t guid)
 {
 	avl_tree_t *t = &spa_namespace_avl;
 
-	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+	ASSERT(spa_namespace_held());
 
 	for (spa_t *spa = avl_first(t); spa != NULL; spa = AVL_NEXT(t, spa)) {
 		if (spa_load_guid(spa) == guid)
@@ -1862,6 +1916,19 @@ spa_get_worst_case_asize(spa_t *spa, uint64_t lsize)
 	if (lsize == 0)
 		return (0);	/* No inflation needed */
 	return (MAX(lsize, 1 << spa->spa_max_ashift) * spa_asize_inflation);
+}
+
+/*
+ * Return the range of minimum allocation sizes for the normal allocation
+ * class. This can be used by external consumers of the DMU to estimate
+ * potential wasted capacity when setting the recordsize for an object.
+ * This is mainly for dRAID pools which always pad to a full stripe width.
+ */
+void
+spa_get_min_alloc_range(spa_t *spa, uint64_t *min_alloc, uint64_t *max_alloc)
+{
+	*min_alloc = spa->spa_min_alloc;
+	*max_alloc = spa->spa_max_alloc;
 }
 
 /*
@@ -2186,10 +2253,10 @@ spa_set_deadman_ziotime(hrtime_t ns)
 	spa_t *spa = NULL;
 
 	if (spa_mode_global != SPA_MODE_UNINIT) {
-		mutex_enter(&spa_namespace_lock);
+		spa_namespace_enter(FTAG);
 		while ((spa = spa_next(spa)) != NULL)
 			spa->spa_deadman_ziotime = ns;
-		mutex_exit(&spa_namespace_lock);
+		spa_namespace_exit(FTAG);
 	}
 }
 
@@ -2199,10 +2266,10 @@ spa_set_deadman_synctime(hrtime_t ns)
 	spa_t *spa = NULL;
 
 	if (spa_mode_global != SPA_MODE_UNINIT) {
-		mutex_enter(&spa_namespace_lock);
+		spa_namespace_enter(FTAG);
 		while ((spa = spa_next(spa)) != NULL)
 			spa->spa_deadman_synctime = ns;
-		mutex_exit(&spa_namespace_lock);
+		spa_namespace_exit(FTAG);
 	}
 }
 
@@ -3034,10 +3101,10 @@ param_set_deadman_failmode_common(const char *val)
 		return (SET_ERROR(EINVAL));
 
 	if (spa_mode_global != SPA_MODE_UNINIT) {
-		mutex_enter(&spa_namespace_lock);
+		spa_namespace_enter(FTAG);
 		while ((spa = spa_next(spa)) != NULL)
 			spa_set_deadman_failmode(spa, val);
-		mutex_exit(&spa_namespace_lock);
+		spa_namespace_exit(FTAG);
 	}
 
 	return (0);
@@ -3085,6 +3152,7 @@ EXPORT_SYMBOL(spa_version);
 EXPORT_SYMBOL(spa_state);
 EXPORT_SYMBOL(spa_load_state);
 EXPORT_SYMBOL(spa_freeze_txg);
+EXPORT_SYMBOL(spa_get_min_alloc_range); /* for Lustre */
 EXPORT_SYMBOL(spa_get_dspace);
 EXPORT_SYMBOL(spa_update_dspace);
 EXPORT_SYMBOL(spa_deflate);
@@ -3120,7 +3188,6 @@ EXPORT_SYMBOL(spa_has_slogs);
 EXPORT_SYMBOL(spa_is_root);
 EXPORT_SYMBOL(spa_writeable);
 EXPORT_SYMBOL(spa_mode);
-EXPORT_SYMBOL(spa_namespace_lock);
 EXPORT_SYMBOL(spa_trust_config);
 EXPORT_SYMBOL(spa_missing_tvds_allowed);
 EXPORT_SYMBOL(spa_set_missing_tvds);

@@ -39,6 +39,7 @@
 
 struct nl_buf;
 struct nl_writer;
+struct ifnet;
 typedef bool nl_writer_cb(struct nl_writer *nw);
 
 struct nl_writer {
@@ -53,6 +54,7 @@ struct nl_writer {
 			int		priv;
 		} group;
 	};
+	const struct ifnet *ifp;	/* Used by Linux translation only */
 	u_int		num_messages;	/* Number of messages in the buffer */
 	int		malloc_flag;	/* M_WAITOK or M_NOWAIT */
 	bool		ignore_limit;	/* If true, ignores RCVBUF limit */
@@ -281,6 +283,12 @@ static inline bool
 nlattr_add_s64(struct nl_writer *nw, uint16_t attrtype, int64_t value)
 {
 	return (nlattr_add(nw, attrtype, sizeof(int64_t), &value));
+}
+
+static inline bool
+nlattr_add_time_t(struct nl_writer *nw, uint16_t attrtype, time_t value)
+{
+	return (nlattr_add(nw, attrtype, sizeof(time_t), &value));
 }
 
 static inline bool

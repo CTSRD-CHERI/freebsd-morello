@@ -188,6 +188,7 @@ fjoe [label="Max Khon\nfjoe@FreeBSD.org\n2001/08/06"]
 flz [label="Florent Thoumie\nflz@FreeBSD.org\n2006/03/30"]
 freqlabs [label="Ryan Moeller\nfreqlabs@FreeBSD.org\n2020/02/10"]
 fsu [label="Fedor Uporov\nfsu@FreeBSD.org\n2017/08/28"]
+fuz [label="Robert Clausecker\nfuz@FreeBSD.org\n2025/10/21"]
 gabor [label="Gabor Kovesdan\ngabor@FreeBSD.org\n2010/02/02"]
 gad [label="Garance A. Drosehn\ngad@FreeBSD.org\n2000/10/27"]
 gallatin [label="Andrew Gallatin\ngallatin@FreeBSD.org\n1999/01/15"]
@@ -376,6 +377,7 @@ thompsa [label="Andrew Thompson\nthompsa@FreeBSD.org\n2005/05/25"]
 ticso [label="Bernd Walter\nticso@FreeBSD.org\n2002/01/31"]
 tijl [label="Tijl Coosemans\ntijl@FreeBSD.org\n2010/07/16"]
 tmunro [label="Thomas Munro\ntmunro@FreeBSD.org\n2018/10/15"]
+tpearson [label="Timothy Pearson\ntpearson@FreeBSD.org\n2025/12/02"]
 tsoome [label="Toomas Soome\ntsoome@FreeBSD.org\n2016/08/10"]
 trasz [label="Edward Tomasz Napierala\ntrasz@FreeBSD.org\n2008/08/22"]
 trhodes [label="Tom Rhodes\ntrhodes@FreeBSD.org\n2002/05/28"]
@@ -677,6 +679,7 @@ jhibbits -> alfredo
 jhibbits -> bdragon
 jhibbits -> leitao
 jhibbits -> luporl
+jhibbits -> tpearson
 
 jimharris -> carl
 
@@ -789,6 +792,7 @@ markj -> bnovkov
 markj -> cem
 markj -> christos
 markj -> dougm
+markj -> fuz
 markj -> igoro
 markj -> jfree
 markj -> lwhsu
