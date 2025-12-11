@@ -101,15 +101,20 @@ linux_ifnet_vnet_init(void *arg __unused)
 VNET_SYSINIT(linux_ifnet_vnet_init, SI_SUB_PROTO_IF, SI_ORDER_ANY,
     linux_ifnet_vnet_init, NULL);
 
-#ifdef VIMAGE
 static void
 linux_ifnet_vnet_uninit(void *arg __unused)
 {
+	/*
+	 * At a normal vnet shutdown all interfaces are gone at this point.
+	 * But when we kldunload linux.ko, the vnet_deregister_sysuninit()
+	 * would call this function for the default vnet.
+	 */
+	if (IS_DEFAULT_VNET(curvnet))
+		clear_unrhdr(V_linux_eth_unr);
 	delete_unrhdr(V_linux_eth_unr);
 }
 VNET_SYSUNINIT(linux_ifnet_vnet_uninit, SI_SUB_PROTO_IF, SI_ORDER_ANY,
     linux_ifnet_vnet_uninit, NULL);
-#endif
 
 /*
  * Translate a FreeBSD interface name to a Linux interface name
