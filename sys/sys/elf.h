@@ -38,4 +38,8 @@
 #include <sys/elf32.h>
 #include <sys/elf64.h>
 
+#ifndef ELF_IS_CHERI
+#define ELF_IS_CHERI(hdr) false
+#endif
+
 #endif /* !_SYS_ELF_H_ */
