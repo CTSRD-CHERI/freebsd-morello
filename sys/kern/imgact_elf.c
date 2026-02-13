@@ -36,6 +36,7 @@
 #include <sys/param.h>
 #include <sys/capsicum.h>
 #include <sys/compressor.h>
+#include <sys/elf.h>
 #include <sys/exec.h>
 #include <sys/fcntl.h>
 #include <sys/imgact.h>
@@ -500,6 +501,7 @@ __elfN(check_header)(const Elf_Ehdr *hdr)
 	    hdr->e_ident[EI_DATA] != ELF_TARG_DATA ||
 	    hdr->e_ident[EI_VERSION] != EV_CURRENT ||
 	    hdr->e_phentsize != sizeof(Elf_Phdr) ||
+	    ELF_IS_CHERI(hdr) ||
 	    hdr->e_version != ELF_TARG_VER)
 		return (ENOEXEC);
 
