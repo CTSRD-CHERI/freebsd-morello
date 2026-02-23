@@ -318,7 +318,7 @@ usage(void)
         );
 }
 
-static int
+static int __noinline
 hwt_process_loop(struct trace_context *tc)
 {
 	int status;
@@ -358,7 +358,7 @@ hwt_process_loop(struct trace_context *tc)
 	return (0);
 }
 
-static int
+static int __noinline
 hwt_process(struct trace_context *tc)
 {
 	int error;

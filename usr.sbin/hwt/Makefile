@@ -1,4 +1,4 @@
-PROG_CXX=	hwt
+PROG=	hwt
 MAN=		hwt.8
 
 CFLAGS+= -I${SRCTOP}/lib/libpmcstat -I${SRCTOP}/sys -I${SRCTOP}/usr.sbin/hwt
