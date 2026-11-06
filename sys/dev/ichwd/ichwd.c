@@ -90,7 +90,7 @@ static struct ichwd_device ichwd_devices[] = {
 	{ DEVICEID_82801E,   "Intel 82801E watchdog timer",	5, 1 },
 	{ DEVICEID_82801EB,  "Intel 82801EB watchdog timer",	5, 1 },
 	{ DEVICEID_82801EBR, "Intel 82801EB/ER watchdog timer",	5, 1 },
-	{ DEVICEID_6300ESB,  "Intel 6300ESB watchdog timer",	5, 1 },
+	{ DEVICEID_6300ESB_1,  "Intel 6300ESB watchdog timer",	5, 1 },
 	{ DEVICEID_82801FBR, "Intel 82801FB/FR watchdog timer",	6, 2 },
 	{ DEVICEID_ICH6M,    "Intel ICH6M watchdog timer",	6, 2 },
 	{ DEVICEID_ICH6W,    "Intel ICH6W watchdog timer",	6, 2 },
@@ -561,13 +561,12 @@ static device_t
 ichwd_find_ich_lpc_bridge(device_t isa, struct ichwd_device **id_p)
 {
 	struct ichwd_device *id;
-	device_t isab, pci;
+	device_t isab;
 	uint16_t devid;
 
 	/* Check whether parent ISA bridge looks familiar. */
 	isab = device_get_parent(isa);
-	pci = device_get_parent(isab);
-	if (pci == NULL || device_get_devclass(pci) != devclass_find("pci"))
+	if (!is_pci_device(isab))
 		return (NULL);
 	if (pci_get_vendor(isab) != VENDORID_INTEL)
 		return (NULL);

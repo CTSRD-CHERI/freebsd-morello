@@ -59,46 +59,46 @@ struct ac97_info {
 	kobj_t methods;
 	device_t dev;
 	void *devinfo;
-	u_int32_t id;
-	u_int32_t subvendor;
+	uint32_t id;
+	uint32_t subvendor;
 	unsigned count, caps, se, extcaps, extid, extstat, noext:1;
-	u_int32_t flags;
+	uint32_t flags;
 	struct ac97mixtable_entry mix[AC97_MIXER_SIZE];
 	char name[16];
-	struct mtx *lock;
+	struct mtx lock;
 };
 
 struct ac97_vendorid {
-	u_int32_t   id;
+	uint32_t   id;
 	const char *name;
 };
 
 struct ac97_codecid {
-	u_int32_t  id;
-	u_int8_t   stepmask;
-	u_int8_t   noext:1;
-	char 	  *name;
+	uint32_t  id;
+	uint8_t   stepmask;
+	uint8_t   noext:1;
+	char	  *name;
 	ac97_patch patch;
 };
 
 static const struct ac97mixtable_entry ac97mixtable_default[AC97_MIXER_SIZE] = {
     /*	[offset]			reg	     bits of st mu re mk en */
-	[SOUND_MIXER_VOLUME]	= { AC97_MIX_MASTER, 	5, 0, 1, 1, 6, 0, 1 },
-	[SOUND_MIXER_OGAIN]	= { AC97_MIX_AUXOUT, 	5, 0, 1, 1, 0, 0, 0 },
-	[SOUND_MIXER_PHONEOUT]	= { AC97_MIX_MONO, 	5, 0, 0, 1, 7, 0, 0 },
-	[SOUND_MIXER_BASS]	= { AC97_MIX_TONE, 	4, 8, 0, 0, 0, 1, 0 },
-	[SOUND_MIXER_TREBLE]	= { AC97_MIX_TONE, 	4, 0, 0, 0, 0, 1, 0 },
-	[SOUND_MIXER_PCM]	= { AC97_MIX_PCM, 	5, 0, 1, 1, 0, 0, 1 },
-	[SOUND_MIXER_SPEAKER]	= { AC97_MIX_BEEP, 	4, 1, 0, 1, 0, 0, 0 },
-	[SOUND_MIXER_LINE]	= { AC97_MIX_LINE, 	5, 0, 1, 1, 5, 0, 1 },
-	[SOUND_MIXER_PHONEIN]	= { AC97_MIX_PHONE, 	5, 0, 0, 1, 8, 0, 0 },
-	[SOUND_MIXER_MIC] 	= { AC97_MIX_MIC, 	5, 0, 0, 1, 1, 1, 1 },
+	[SOUND_MIXER_VOLUME]	= { AC97_MIX_MASTER,	5, 0, 1, 1, 6, 0, 1 },
+	[SOUND_MIXER_OGAIN]	= { AC97_MIX_AUXOUT,	5, 0, 1, 1, 0, 0, 0 },
+	[SOUND_MIXER_PHONEOUT]	= { AC97_MIX_MONO,	5, 0, 0, 1, 7, 0, 0 },
+	[SOUND_MIXER_BASS]	= { AC97_MIX_TONE,	4, 8, 0, 0, 0, 1, 0 },
+	[SOUND_MIXER_TREBLE]	= { AC97_MIX_TONE,	4, 0, 0, 0, 0, 1, 0 },
+	[SOUND_MIXER_PCM]	= { AC97_MIX_PCM,	5, 0, 1, 1, 0, 0, 1 },
+	[SOUND_MIXER_SPEAKER]	= { AC97_MIX_BEEP,	4, 1, 0, 1, 0, 0, 0 },
+	[SOUND_MIXER_LINE]	= { AC97_MIX_LINE,	5, 0, 1, 1, 5, 0, 1 },
+	[SOUND_MIXER_PHONEIN]	= { AC97_MIX_PHONE,	5, 0, 0, 1, 8, 0, 0 },
+	[SOUND_MIXER_MIC]	= { AC97_MIX_MIC,	5, 0, 0, 1, 1, 1, 1 },
 	/* use igain for the mic 20dB boost */
-	[SOUND_MIXER_IGAIN] 	= { -AC97_MIX_MIC, 	1, 6, 0, 0, 0, 1, 1 },
-	[SOUND_MIXER_CD]	= { AC97_MIX_CD, 	5, 0, 1, 1, 2, 0, 1 },
-	[SOUND_MIXER_LINE1]	= { AC97_MIX_AUX, 	5, 0, 1, 1, 4, 0, 0 },
-	[SOUND_MIXER_VIDEO]	= { AC97_MIX_VIDEO, 	5, 0, 1, 1, 3, 0, 0 },
-	[SOUND_MIXER_RECLEV]	= { -AC97_MIX_RGAIN, 	4, 0, 1, 1, 0, 0, 1 }
+	[SOUND_MIXER_IGAIN]	= { -AC97_MIX_MIC,	1, 6, 0, 0, 0, 1, 1 },
+	[SOUND_MIXER_CD]	= { AC97_MIX_CD,	5, 0, 1, 1, 2, 0, 1 },
+	[SOUND_MIXER_LINE1]	= { AC97_MIX_AUX,	5, 0, 1, 1, 4, 0, 0 },
+	[SOUND_MIXER_VIDEO]	= { AC97_MIX_VIDEO,	5, 0, 1, 1, 3, 0, 0 },
+	[SOUND_MIXER_RECLEV]	= { -AC97_MIX_RGAIN,	4, 0, 1, 1, 0, 0, 1 }
 };
 
 static const struct ac97_vendorid ac97vendorid[] = {
@@ -125,12 +125,7 @@ static const struct ac97_vendorid ac97vendorid[] = {
 	{ 0x57454300, "Winbond" },
 	{ 0x574d4c00, "Wolfson" },
 	{ 0x594d4800, "Yamaha" },
-	/* 
-	 * XXX This is a fluke, really! The real vendor
-	 * should be SigmaTel, not this! This should be
-	 * removed someday!
-	 */
-	{ 0x01408300, "Creative" },
+	{ 0x01408300, "SigmaTel" },
 	{ 0x00000000, NULL }
 };
 
@@ -145,32 +140,32 @@ static struct ac97_codecid ac97codecid[] = {
 	{ 0x41445340, 0x00, 0, "AD1881",	0 },
 	{ 0x41445348, 0x00, 0, "AD1881A",	0 },
 	{ 0x41445360, 0x00, 0, "AD1885",	0 },
-	{ 0x41445361, 0x00, 0, "AD1886", 	ad1886_patch },
-	{ 0x41445362, 0x00, 0, "AD1887", 	0 },
-	{ 0x41445363, 0x00, 0, "AD1886A", 	0 },
-	{ 0x41445368, 0x00, 0, "AD1888", 	ad198x_patch },
+	{ 0x41445361, 0x00, 0, "AD1886",	ad1886_patch },
+	{ 0x41445362, 0x00, 0, "AD1887",	0 },
+	{ 0x41445363, 0x00, 0, "AD1886A",	0 },
+	{ 0x41445368, 0x00, 0, "AD1888",	ad198x_patch },
 	{ 0x41445370, 0x00, 0, "AD1980",	ad198x_patch },
 	{ 0x41445372, 0x00, 0, "AD1981A",	0 },
 	{ 0x41445374, 0x00, 0, "AD1981B",	ad1981b_patch },
 	{ 0x41445375, 0x00, 0, "AD1985",	ad198x_patch },
 	{ 0x41445378, 0x00, 0, "AD1986",	ad198x_patch },
-	{ 0x414b4d00, 0x00, 1, "AK4540", 	0 },
-	{ 0x414b4d01, 0x00, 1, "AK4542", 	0 },
-	{ 0x414b4d02, 0x00, 1, "AK4543", 	0 },
+	{ 0x414b4d00, 0x00, 1, "AK4540",	0 },
+	{ 0x414b4d01, 0x00, 1, "AK4542",	0 },
+	{ 0x414b4d02, 0x00, 1, "AK4543",	0 },
 	{ 0x414b4d06, 0x00, 0, "AK4544A",	0 },
 	{ 0x454b4d07, 0x00, 0, "AK4545",	0 },
 	{ 0x414c4320, 0x0f, 0, "ALC100",	0 },
 	{ 0x414c4730, 0x0f, 0, "ALC101",	0 },
-	{ 0x414c4710, 0x0f, 0, "ALC200", 	0 },
-	{ 0x414c4740, 0x0f, 0, "ALC202", 	0 },
-	{ 0x414c4720, 0x0f, 0, "ALC650", 	0 },
+	{ 0x414c4710, 0x0f, 0, "ALC200",	0 },
+	{ 0x414c4740, 0x0f, 0, "ALC202",	0 },
+	{ 0x414c4720, 0x0f, 0, "ALC650",	0 },
 	{ 0x414c4752, 0x0f, 0, "ALC250",	0 },
 	{ 0x414c4760, 0x0f, 0, "ALC655",	alc655_patch },
 	{ 0x414c4770, 0x0f, 0, "ALC203",	0 },
 	{ 0x414c4780, 0x0f, 0, "ALC658",	0 },
 	{ 0x414c4790, 0x0f, 0, "ALC850",	0 },
-	{ 0x43525900, 0x07, 0, "CS4297", 	0 },
-	{ 0x43525910, 0x07, 0, "CS4297A", 	0 },
+	{ 0x43525900, 0x07, 0, "CS4297",	0 },
+	{ 0x43525910, 0x07, 0, "CS4297A",	0 },
 	{ 0x43525920, 0x07, 0, "CS4294/98",	0 },
 	{ 0x4352592d, 0x07, 0, "CS4294",	0 },
 	{ 0x43525930, 0x07, 0, "CS4299",	0 },
@@ -238,12 +233,7 @@ static struct ac97_codecid ac97codecid[] = {
 	{ 0x594d4800, 0x00, 0, "YMF743",	0 },
 	{ 0x594d4802, 0x00, 0, "YMF752",	0 },
 	{ 0x594d4803, 0x00, 0, "YMF753",	0 },
-	/* 
-	 * XXX This is a fluke, really! The real codec
-	 * should be STAC9704, not this! This should be
-	 * removed someday!
-	 */
-	{ 0x01408384, 0x00, 0, "EV1938",	0 },
+	{ 0x01408384, 0x00, 0, "STAC9704",	0 },
 	{ 0, 0, 0, NULL, 0 }
 };
 
@@ -312,11 +302,11 @@ static char *ac97extfeature[] = {
 	"reserved 7",
 };
 
-u_int16_t
+uint16_t
 ac97_rdcd(struct ac97_info *codec, int reg)
 {
 	if (codec->flags & AC97_F_RDCD_BUG) {
-		u_int16_t i[2], j = 100;
+		uint16_t i[2], j = 100;
 
 		i[0] = AC97_READ(codec->methods, codec->devinfo, reg);
 		i[1] = AC97_READ(codec->methods, codec->devinfo, reg);
@@ -328,7 +318,7 @@ ac97_rdcd(struct ac97_info *codec, int reg)
 }
 
 void
-ac97_wrcd(struct ac97_info *codec, int reg, u_int16_t val)
+ac97_wrcd(struct ac97_info *codec, int reg, uint16_t val)
 {
 	AC97_WRITE(codec->methods, codec->devinfo, reg, val);
 }
@@ -336,7 +326,7 @@ ac97_wrcd(struct ac97_info *codec, int reg, u_int16_t val)
 static void
 ac97_reset(struct ac97_info *codec)
 {
-	u_int32_t i, ps;
+	uint32_t i, ps;
 	ac97_wrcd(codec, AC97_REG_RESET, 0);
 	for (i = 0; i < 500; i++) {
 		ps = ac97_rdcd(codec, AC97_REG_POWER) & AC97_POWER_STATUS;
@@ -350,7 +340,7 @@ ac97_reset(struct ac97_info *codec)
 int
 ac97_setrate(struct ac97_info *codec, int which, int rate)
 {
-	u_int16_t v;
+	uint16_t v;
 
 	switch(which) {
 	case AC97_REGEXT_FDACRATE:
@@ -364,7 +354,7 @@ ac97_setrate(struct ac97_info *codec, int which, int rate)
 		return -1;
 	}
 
-	snd_mtxlock(codec->lock);
+	mtx_lock(&codec->lock);
 	if (rate != 0) {
 		v = rate;
 		if (codec->extstat & AC97_EXTCAP_DRA)
@@ -374,12 +364,12 @@ ac97_setrate(struct ac97_info *codec, int which, int rate)
 	v = ac97_rdcd(codec, which);
 	if (codec->extstat & AC97_EXTCAP_DRA)
 		v <<= 1;
-	snd_mtxunlock(codec->lock);
+	mtx_unlock(&codec->lock);
 	return v;
 }
 
 int
-ac97_setextmode(struct ac97_info *codec, u_int16_t mode)
+ac97_setextmode(struct ac97_info *codec, uint16_t mode)
 {
 	mode &= AC97_EXTCAPS;
 	if ((mode & ~codec->extcaps) != 0) {
@@ -387,32 +377,32 @@ ac97_setextmode(struct ac97_info *codec, u_int16_t mode)
 			      mode);
 		return -1;
 	}
-	snd_mtxlock(codec->lock);
+	mtx_lock(&codec->lock);
 	ac97_wrcd(codec, AC97_REGEXT_STAT, mode);
 	codec->extstat = ac97_rdcd(codec, AC97_REGEXT_STAT) & AC97_EXTCAPS;
-	snd_mtxunlock(codec->lock);
+	mtx_unlock(&codec->lock);
 	return (mode == codec->extstat)? 0 : -1;
 }
 
-u_int16_t
+uint16_t
 ac97_getextmode(struct ac97_info *codec)
 {
 	return codec->extstat;
 }
 
-u_int16_t
+uint16_t
 ac97_getextcaps(struct ac97_info *codec)
 {
 	return codec->extcaps;
 }
 
-u_int16_t
+uint16_t
 ac97_getcaps(struct ac97_info *codec)
 {
 	return codec->caps;
 }
 
-u_int32_t
+uint32_t
 ac97_getsubvendor(struct ac97_info *codec)
 {
 	return codec->subvendor;
@@ -426,9 +416,9 @@ ac97_setrecsrc(struct ac97_info *codec, int channel)
 	if (e->recidx > 0) {
 		int val = e->recidx - 1;
 		val |= val << 8;
-		snd_mtxlock(codec->lock);
+		mtx_lock(&codec->lock);
 		ac97_wrcd(codec, AC97_REG_RECSEL, val);
-		snd_mtxunlock(codec->lock);
+		mtx_unlock(&codec->lock);
 		return 0;
 	} else
 		return -1;
@@ -497,13 +487,13 @@ ac97_setmixer(struct ac97_info *codec, unsigned channel, unsigned left, unsigned
 		/*
 		 * If the mask bit is set, do not alter the other bits.
 		 */
-		snd_mtxlock(codec->lock);
+		mtx_lock(&codec->lock);
 		if (e->mask) {
 			int cur = ac97_rdcd(codec, reg);
 			val |= cur & ~(mask);
 		}
 		ac97_wrcd(codec, reg, val);
-		snd_mtxunlock(codec->lock);
+		mtx_unlock(&codec->lock);
 		return left | (right << 8);
 	} else {
 		return -1;
@@ -575,7 +565,7 @@ ac97_fix_tone(struct ac97_info *codec)
 }
 
 static const char*
-ac97_hw_desc(u_int32_t id, const char* vname, const char* cname, char* buf)
+ac97_hw_desc(uint32_t id, const char* vname, const char* cname, char* buf)
 {
 	if (cname == NULL) {
 		sprintf(buf, "Unknown AC97 Codec (id = 0x%08x)", id);
@@ -600,14 +590,14 @@ ac97_initmixer(struct ac97_info *codec)
 	char desc[80];
 	device_t pdev;
 	unsigned i, j, k, bit, old;
-	u_int32_t id;
+	uint32_t id;
 	int reg;
 
-	snd_mtxlock(codec->lock);
+	mtx_lock(&codec->lock);
 	codec->count = AC97_INIT(codec->methods, codec->devinfo);
 	if (codec->count == 0) {
 		device_printf(codec->dev, "ac97 codec init failed\n");
-		snd_mtxunlock(codec->lock);
+		mtx_unlock(&codec->lock);
 		return ENODEV;
 	}
 
@@ -633,25 +623,25 @@ ac97_initmixer(struct ac97_info *codec)
 	id = (ac97_rdcd(codec, AC97_REG_ID1) << 16) | ac97_rdcd(codec, AC97_REG_ID2);
 	if (id == 0 || id == 0xffffffff) {
 		device_printf(codec->dev, "ac97 codec invalid or not present (id == %x)\n", id);
-		snd_mtxunlock(codec->lock);
+		mtx_unlock(&codec->lock);
 		return ENODEV;
 	}
 
 	pdev = codec->dev;
-	while (strcmp(device_get_name(device_get_parent(pdev)), "pci") != 0) {
+	while (!is_pci_device(pdev)) {
 		/* find the top-level PCI device handler */
 		pdev = device_get_parent(pdev);
 	}
 	codec->id = id;
-	codec->subvendor = (u_int32_t)pci_get_subdevice(pdev) << 16;
-	codec->subvendor |= (u_int32_t)pci_get_subvendor(pdev) &
+	codec->subvendor = (uint32_t)pci_get_subdevice(pdev) << 16;
+	codec->subvendor |= (uint32_t)pci_get_subvendor(pdev) &
 	    0x0000ffff;
 	codec->noext = 0;
 	codec_patch = NULL;
 
 	cname = NULL;
 	for (i = 0; ac97codecid[i].id; i++) {
-		u_int32_t modelmask = 0xffffffff ^ ac97codecid[i].stepmask;
+		uint32_t modelmask = 0xffffffff ^ ac97codecid[i].stepmask;
 		if ((ac97codecid[i].id & modelmask) == (id & modelmask)) {
 			codec->noext = ac97codecid[i].noext;
 			codec_patch = ac97codecid[i].patch;
@@ -780,18 +770,18 @@ ac97_initmixer(struct ac97_info *codec)
 	}
 	if (bootverbose)
 		device_printf(codec->dev, "ac97 codec dac ready count: %d\n", i);
-	snd_mtxunlock(codec->lock);
+	mtx_unlock(&codec->lock);
 	return 0;
 }
 
 static unsigned
 ac97_reinitmixer(struct ac97_info *codec)
 {
-	snd_mtxlock(codec->lock);
+	mtx_lock(&codec->lock);
 	codec->count = AC97_INIT(codec->methods, codec->devinfo);
 	if (codec->count == 0) {
 		device_printf(codec->dev, "ac97 codec init failed\n");
-		snd_mtxunlock(codec->lock);
+		mtx_unlock(&codec->lock);
 		return ENODEV;
 	}
 
@@ -811,7 +801,7 @@ ac97_reinitmixer(struct ac97_info *codec)
 
 	if ((ac97_rdcd(codec, AC97_REG_POWER) & 2) == 0)
 		device_printf(codec->dev, "ac97 codec reports dac not ready\n");
-	snd_mtxunlock(codec->lock);
+	mtx_unlock(&codec->lock);
 	return 0;
 }
 
@@ -824,7 +814,7 @@ ac97_create(device_t dev, void *devinfo, kobj_class_t cls)
 	codec = malloc(sizeof(*codec), M_AC97, M_WAITOK | M_ZERO);
 	snprintf(codec->name, sizeof(codec->name), "%s:ac97",
 	    device_get_nameunit(dev));
-	codec->lock = snd_mtxcreate(codec->name, "ac97 codec");
+	mtx_init(&codec->lock, codec->name, "ac97 codec", MTX_DEF);
 	codec->methods = kobj_create(cls, M_AC97, M_WAITOK | M_ZERO);
 	codec->dev = dev;
 	codec->devinfo = devinfo;
@@ -844,20 +834,19 @@ ac97_create(device_t dev, void *devinfo, kobj_class_t cls)
 void
 ac97_destroy(struct ac97_info *codec)
 {
-	snd_mtxlock(codec->lock);
-	if (codec->methods != NULL)
-		kobj_delete(codec->methods, M_AC97);
-	snd_mtxfree(codec->lock);
+	mtx_lock(&codec->lock);
+	kobj_delete(codec->methods, M_AC97);
+	mtx_destroy(&codec->lock);
 	free(codec, M_AC97);
 }
 
 void
-ac97_setflags(struct ac97_info *codec, u_int32_t val)
+ac97_setflags(struct ac97_info *codec, uint32_t val)
 {
 	codec->flags = val;
 }
 
-u_int32_t
+uint32_t
 ac97_getflags(struct ac97_info *codec)
 {
 	return codec->flags;
@@ -957,24 +946,24 @@ sysctl_hw_snd_ac97_eapd(SYSCTL_HANDLER_ARGS)
 {
 	struct ac97_info *codec;
 	int ea, inv, err = 0;
-	u_int16_t val;
+	uint16_t val;
 
 	codec = oidp->oid_arg1;
-	if (codec == NULL || codec->id == 0 || codec->lock == NULL)
+	if (codec == NULL || codec->id == 0)
 		return EINVAL;
-	snd_mtxlock(codec->lock);
+	mtx_lock(&codec->lock);
 	val = ac97_rdcd(codec, AC97_REG_POWER);
 	inv = (codec->flags & AC97_F_EAPD_INV) ? 0 : 1;
 	ea = (val >> 15) ^ inv;
-	snd_mtxunlock(codec->lock);
+	mtx_unlock(&codec->lock);
 	err = sysctl_handle_int(oidp, &ea, 0, req);
 	if (err == 0 && req->newptr != NULL) {
 		if (ea != 0 && ea != 1)
 			return EINVAL;
 		if (ea != ((val >> 15) ^ inv)) {
-			snd_mtxlock(codec->lock);
+			mtx_lock(&codec->lock);
 			ac97_wrcd(codec, AC97_REG_POWER, val ^ 0x8000);
-			snd_mtxunlock(codec->lock);
+			mtx_unlock(&codec->lock);
 		}
 	}
 	return err;
@@ -983,16 +972,16 @@ sysctl_hw_snd_ac97_eapd(SYSCTL_HANDLER_ARGS)
 static void
 ac97_init_sysctl(struct ac97_info *codec)
 {
-	u_int16_t orig, val;
+	uint16_t orig, val;
 
 	if (codec == NULL || codec->dev == NULL)
 		return;
-	snd_mtxlock(codec->lock);
+	mtx_lock(&codec->lock);
 	orig = ac97_rdcd(codec, AC97_REG_POWER);
 	ac97_wrcd(codec, AC97_REG_POWER, orig ^ 0x8000);
 	val = ac97_rdcd(codec, AC97_REG_POWER);
 	ac97_wrcd(codec, AC97_REG_POWER, orig);
-	snd_mtxunlock(codec->lock);
+	mtx_unlock(&codec->lock);
 	if ((val & 0x8000) == (orig & 0x8000))
 		return;
 	SYSCTL_ADD_PROC(device_get_sysctl_ctx(codec->dev),
@@ -1007,7 +996,7 @@ static int
 ac97mix_init(struct snd_mixer *m)
 {
 	struct ac97_info *codec = mix_getdevinfo(m);
-	u_int32_t i, mask;
+	uint32_t i, mask;
 
 	if (codec == NULL)
 		return -1;
@@ -1104,10 +1093,6 @@ ac97mix_uninit(struct snd_mixer *m)
 
 	if (codec == NULL)
 		return -1;
-	/*
-	if (ac97_uninitmixer(codec))
-		return -1;
-	*/
 	ac97_destroy(codec);
 	return 0;
 }
@@ -1132,8 +1117,8 @@ ac97mix_set(struct snd_mixer *m, unsigned dev, unsigned left, unsigned right)
 	return ac97_setmixer(codec, dev, left, right);
 }
 
-static u_int32_t
-ac97mix_setrecsrc(struct snd_mixer *m, u_int32_t src)
+static uint32_t
+ac97mix_setrecsrc(struct snd_mixer *m, uint32_t src)
 {
 	int i;
 	struct ac97_info *codec = mix_getdevinfo(m);
@@ -1147,11 +1132,11 @@ ac97mix_setrecsrc(struct snd_mixer *m, u_int32_t src)
 }
 
 static kobj_method_t ac97mixer_methods[] = {
-    	KOBJMETHOD(mixer_init,		ac97mix_init),
-    	KOBJMETHOD(mixer_uninit,	ac97mix_uninit),
-    	KOBJMETHOD(mixer_reinit,	ac97mix_reinit),
-    	KOBJMETHOD(mixer_set,		ac97mix_set),
-    	KOBJMETHOD(mixer_setrecsrc,	ac97mix_setrecsrc),
+	KOBJMETHOD(mixer_init,		ac97mix_init),
+	KOBJMETHOD(mixer_uninit,	ac97mix_uninit),
+	KOBJMETHOD(mixer_reinit,	ac97mix_reinit),
+	KOBJMETHOD(mixer_set,		ac97mix_set),
+	KOBJMETHOD(mixer_setrecsrc,	ac97mix_setrecsrc),
 	KOBJMETHOD_END
 };
 MIXER_DECLARE(ac97mixer);

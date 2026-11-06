@@ -152,7 +152,7 @@ typedef struct Struct_Obj_Entry {
     const Elf_Dyn *dynamic;	/* Dynamic section */
     caddr_t entry;		/* Entry point */
     const Elf_Phdr *phdr;	/* Program header if it is mapped, else NULL */
-    size_t phsize;		/* Size of program header in bytes */
+    size_t phnum;		/* Number of program headers */
     const char *interp;		/* Pathname of the interpreter, if any */
     Elf_Word stack_flags;
 
@@ -212,11 +212,11 @@ typedef struct Struct_Obj_Entry {
     Ver_Entry *vertab;		/* Versions required /defined by this object */
     int vernum;			/* Number of entries in vertab */
 
-    Elf_Addr init;		/* Initialization function to call */
-    Elf_Addr fini;		/* Termination function to call */
-    Elf_Addr preinit_array;	/* Pre-initialization array of functions */
-    Elf_Addr init_array;	/* Initialization array of functions */
-    Elf_Addr fini_array;	/* Termination array of functions */
+    uintptr_t init;		/* Initialization function to call */
+    uintptr_t fini;		/* Termination function to call */
+    uintptr_t *preinit_array;	/* Pre-initialization array of functions */
+    uintptr_t *init_array;	/* Initialization array of functions */
+    uintptr_t *fini_array;	/* Termination array of functions */
     int preinit_array_num;	/* Number of entries in preinit_array */
     int init_array_num; 	/* Number of entries in init_array */
     int fini_array_num; 	/* Number of entries in fini_array */
@@ -314,18 +314,29 @@ typedef struct Struct_SymCache {
 } SymCache;
 
 /*
+ * Heap memory for the DoneList array that is too large for alloca().
+ */
+struct donelist_mem {
+	TAILQ_ENTRY(donelist_mem) next;
+	const Obj_Entry *objs[];
+};
+
+/*
  * This structure provides a reentrant way to keep a list of objects and
  * check which ones have already been processed in some way.
  */
 typedef struct Struct_DoneList {
-    const Obj_Entry **objs;		/* Array of object pointers */
-    unsigned int num_alloc;		/* Allocated size of the array */
-    unsigned int num_used;		/* Number of array slots used */
+	const Obj_Entry **objs;		/* Array of object pointers */
+	struct donelist_mem *mem;	/* Heap memory for objs */
+	struct Struct_RtldLockState *lockstate; /* Lockstate listing mem */
+	unsigned int num_alloc;		/* Allocated size of the array */
+	unsigned int num_used;		/* Number of array slots used */
 } DoneList;
 
 struct Struct_RtldLockState {
 	int lockstate;
 	sigjmp_buf env;
+	TAILQ_HEAD(, donelist_mem) donelists;
 };
 
 struct fill_search_info_args {

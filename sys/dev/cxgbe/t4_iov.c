@@ -49,13 +49,12 @@
 struct t4iov_softc {
 	device_t sc_dev;
 	device_t sc_main;
+	struct port_info *sc_port;
 	bool sc_attached;
 
 	int pf;
 	int regs_rid;
 	struct resource *regs_res;
-	bus_space_handle_t bh;
-	bus_space_tag_t bt;
 };
 
 struct {
@@ -119,13 +118,35 @@ struct {
 	{0x6085, "Chelsio T6240-SO 85"},
 	{0x6086, "Chelsio T6225-SO-CR 86"},
 	{0x6087, "Chelsio T6225-CR 87"},
+}, t7iov_pciids[] = {
+	{0xd000, "Chelsio Terminator 7 FPGA"},	/* T7 PE12K FPGA */
+	{0x7000, "Chelsio T72200-DBG"},		/* 2 x 200G, debug */
+	{0x7001, "Chelsio T7250"},		/* 2 x 10/25/50G, 1 mem */
+	{0x7002, "Chelsio S7250"},		/* 2 x 10/25/50G, nomem */
+	{0x7003, "Chelsio T7450"},		/* 4 x 10/25/50G, 1 mem */
+	{0x7004, "Chelsio S7450"},		/* 4 x 10/25/50G, nomem */
+	{0x7005, "Chelsio T72200"},		/* 2 x 40/100/200G, 1 mem */
+	{0x7006, "Chelsio S72200"},		/* 2 x 40/100/200G, nomem */
+	{0x7007, "Chelsio T72200-FH"},		/* 2 x 40/100/200G, 2 mem */
+	{0x7008, "Chelsio T71400"},		/* 1 x 400G, nomem */
+	{0x7009, "Chelsio S7210-BT"},		/* 2 x 10GBASE-T, nomem */
+	{0x700a, "Chelsio T7450-RC"},		/* 4 x 10/25/50G, 1 mem, RC */
+	{0x700b, "Chelsio T72200-RC"},		/* 2 x 40/100/200G, 1 mem, RC */
+	{0x700c, "Chelsio T72200-FH-RC"},	/* 2 x 40/100/200G, 2 mem, RC */
+	{0x700d, "Chelsio S72200-OCP3"},	/* 2 x 40/100/200G OCP3 */
+	{0x700e, "Chelsio S7450-OCP3"},		/* 4 x 1/20/25/50G OCP3 */
+	{0x700f, "Chelsio S7410-BT-OCP3"},	/* 4 x 10GBASE-T OCP3 */
+	{0x7010, "Chelsio S7210-BT-A"},		/* 2 x 10GBASE-T */
+	{0x7011, "Chelsio T7_MAYRA_7"},		/* Motherboard */
+
+	{0x7080, "Custom T7"},
 };
 
 static inline uint32_t
 t4iov_read_reg(struct t4iov_softc *sc, uint32_t reg)
 {
 
-	return bus_space_read_4(sc->bt, sc->bh, reg);
+	return bus_read_4(sc->regs_res, reg);
 }
 
 static int	t4iov_attach_child(device_t dev);
@@ -191,6 +212,26 @@ t6iov_probe(device_t dev)
 }
 
 static int
+chiov_probe(device_t dev)
+{
+	uint16_t d;
+	size_t i;
+
+	if (pci_get_vendor(dev) != PCI_VENDOR_ID_CHELSIO)
+		return (ENXIO);
+
+	d = pci_get_device(dev);
+	for (i = 0; i < nitems(t7iov_pciids); i++) {
+		if (d == t7iov_pciids[i].device) {
+			device_set_desc(dev, t7iov_pciids[i].desc);
+			device_quiet(dev);
+			return (BUS_PROBE_DEFAULT);
+		}
+	}
+	return (ENXIO);
+}
+
+static int
 t4iov_attach(device_t dev)
 {
 	struct t4iov_softc *sc;
@@ -207,8 +248,6 @@ t4iov_attach(device_t dev)
 		device_printf(dev, "cannot map registers.\n");
 		return (ENXIO);
 	}
-	sc->bt = rman_get_bustag(sc->regs_res);
-	sc->bh = rman_get_bushandle(sc->regs_res);
 
 	pl_rev = t4iov_read_reg(sc, A_PL_REV);
 	whoami = t4iov_read_reg(sc, A_PL_WHOAMI);
@@ -239,6 +278,7 @@ t4iov_attach_child(device_t dev)
 {
 	struct t4iov_softc *sc;
 #ifdef PCI_IOV
+	struct adapter *adap;
 	nvlist_t *pf_schema, *vf_schema;
 #endif
 	device_t pdev;
@@ -268,6 +308,16 @@ t4iov_attach_child(device_t dev)
 		device_printf(dev, "Failed to initialize SR-IOV: %d\n", error);
 		return (0);
 	}
+	sc->sc_port = device_get_softc(pdev);
+	adap = device_get_softc(sc->sc_main);
+	error = begin_synchronized_op(adap, NULL, SLEEP_OK, "t4iovatt");
+	if (error != 0) {
+		(void)pci_iov_detach(dev);
+		sc->sc_port = NULL;
+		return (error);
+	}
+	sc->sc_port->iov_status_supported = true;
+	end_synchronized_op(adap, 0);
 #endif
 
 	sc->sc_attached = true;
@@ -279,6 +329,7 @@ t4iov_detach_child(device_t dev)
 {
 	struct t4iov_softc *sc;
 #ifdef PCI_IOV
+	struct adapter *adap;
 	int error;
 #endif
 
@@ -292,6 +343,13 @@ t4iov_detach_child(device_t dev)
 		device_printf(dev, "Failed to disable SR-IOV\n");
 		return (error);
 	}
+	adap = device_get_softc(sc->sc_main);
+	error = begin_synchronized_op(adap, NULL, SLEEP_OK, "t4iovdet");
+	if (error != 0)
+		return (error);
+	sc->sc_port->iov_status_supported = false;
+	end_synchronized_op(adap, 0);
+	sc->sc_port = NULL;
 #endif
 
 	sc->sc_attached = false;
@@ -321,14 +379,46 @@ t4iov_detach(device_t dev)
 static int
 t4iov_iov_init(device_t dev, uint16_t num_vfs, const struct nvlist *config)
 {
+	struct t4iov_softc *sc;
+	struct t4_vf_info *vfs;
+	struct adapter *adap;
+	int error;
 
 	/* XXX: The Linux driver sets up a vf_monitor task on T4 adapters. */
+	sc = device_get_softc(dev);
+	MPASS(sc->sc_port != NULL);
+	vfs = mallocarray(num_vfs, sizeof(*vfs), M_CXGBE,
+	    M_WAITOK | M_ZERO);
+	adap = device_get_softc(sc->sc_main);
+	error = begin_synchronized_op(adap, NULL, SLEEP_OK, "t4vfinit");
+	if (error != 0) {
+		free(vfs, M_CXGBE);
+		return (error);
+	}
+	MPASS(sc->sc_port->iov_vfs == NULL);
+	sc->sc_port->iov_vfs = vfs;
+	sc->sc_port->iov_num_vfs = num_vfs;
+	end_synchronized_op(adap, 0);
 	return (0);
 }
 
 static void
 t4iov_iov_uninit(device_t dev)
 {
+	struct t4iov_softc *sc;
+	struct t4_vf_info *vfs;
+	struct adapter *adap;
+
+	sc = device_get_softc(dev);
+	MPASS(sc->sc_port != NULL);
+	adap = device_get_softc(sc->sc_main);
+	if (begin_synchronized_op(adap, NULL, SLEEP_OK, "t4vffini") != 0)
+		return;
+	vfs = sc->sc_port->iov_vfs;
+	sc->sc_port->iov_vfs = NULL;
+	sc->sc_port->iov_num_vfs = 0;
+	end_synchronized_op(adap, 0);
+	free(vfs, M_CXGBE);
 }
 
 static int
@@ -338,6 +428,8 @@ t4iov_add_vf(device_t dev, uint16_t vfnum, const struct nvlist *config)
 	struct t4iov_softc *sc;
 	struct adapter *adap;
 	uint8_t ma[ETHER_ADDR_LEN];
+	uint16_t vlan;
+	bool access_vlan, has_mac, has_vlan;
 	size_t size;
 	int rc;
 
@@ -345,27 +437,19 @@ t4iov_add_vf(device_t dev, uint16_t vfnum, const struct nvlist *config)
 	MPASS(sc->sc_attached);
 	MPASS(sc->sc_main != NULL);
 	adap = device_get_softc(sc->sc_main);
+	memset(ma, 0, sizeof(ma));
+	vlan = 0;
+	access_vlan = false;
+	has_mac = nvlist_exists_binary(config, "mac-addr");
+	has_vlan = nvlist_exists_number(config, "vlan");
 
-	if (nvlist_exists_binary(config, "mac-addr")) {
+	if (has_mac) {
 		mac = nvlist_get_binary(config, "mac-addr", &size);
 		bcopy(mac, ma, ETHER_ADDR_LEN);
-
-		if (begin_synchronized_op(adap, NULL, SLEEP_OK | INTR_OK,
-		    "t4vfma") != 0)
-			return (ENXIO);
-		rc = -t4_set_vf_mac(adap, sc->pf, vfnum + 1, 1, ma);
-		end_synchronized_op(adap, 0);
-		if (rc != 0) {
-			device_printf(dev,
-			    "Failed to set VF%d MAC address to "
-			    "%02x:%02x:%02x:%02x:%02x:%02x, rc = %d\n", vfnum,
-			    ma[0], ma[1], ma[2], ma[3], ma[4], ma[5], rc);
-			return (rc);
-		}
 	}
 
-	if (nvlist_exists_number(config, "vlan")) {
-		uint16_t vlan = nvlist_get_number(config, "vlan");
+	if (has_vlan) {
+		vlan = nvlist_get_number(config, "vlan");
 
 		/* We can't restrict to VID 0 */
 		if (vlan == DOT1Q_VID_NULL)
@@ -373,21 +457,46 @@ t4iov_add_vf(device_t dev, uint16_t vfnum, const struct nvlist *config)
 
 		if (vlan == VF_VLAN_TRUNK)
 			vlan = DOT1Q_VID_NULL;
+		else
+			access_vlan = true;
+	}
 
-		if (begin_synchronized_op(adap, NULL, SLEEP_OK | INTR_OK,
-		    "t4vfvl") != 0)
-			return (ENXIO);
+	if (begin_synchronized_op(adap, NULL, SLEEP_OK | INTR_OK,
+	    "t4vfadd") != 0)
+		return (ENXIO);
+
+	if (has_mac) {
+		rc = -t4_set_vf_mac(adap, sc->pf, vfnum + 1, 1, ma);
+		if (rc != 0) {
+			device_printf(dev,
+			    "Failed to set VF%d MAC address to "
+			    "%02x:%02x:%02x:%02x:%02x:%02x, rc = %d\n", vfnum,
+			    ma[0], ma[1], ma[2], ma[3], ma[4], ma[5], rc);
+			goto out;
+		}
+	}
+
+	if (has_vlan) {
 		rc = t4_set_vlan_acl(adap, sc->pf, vfnum + 1, vlan);
-		end_synchronized_op(adap, 0);
 		if (rc != 0) {
 			device_printf(dev,
 			    "Failed to set VF%d VLAN to %d, rc = %d\n",
 			    vfnum, vlan, rc);
-			return (rc);
+			goto out;
 		}
 	}
 
-	return (0);
+	if (has_mac)
+		memcpy(sc->sc_port->iov_vfs[vfnum].mac, ma,
+		    ETHER_ADDR_LEN);
+	sc->sc_port->iov_vfs[vfnum].vlan = vlan;
+	sc->sc_port->iov_vfs[vfnum].access_vlan = access_vlan;
+	sc->sc_port->iov_vfs[vfnum].configured = true;
+	rc = 0;
+
+out:
+	end_synchronized_op(adap, 0);
+	return (rc);
 }
 #endif
 
@@ -460,6 +569,28 @@ static driver_t t6iov_driver = {
 	sizeof(struct t4iov_softc)
 };
 
+static device_method_t chiov_methods[] = {
+	DEVMETHOD(device_probe,		chiov_probe),
+	DEVMETHOD(device_attach,	t4iov_attach),
+	DEVMETHOD(device_detach,	t4iov_detach),
+
+#ifdef PCI_IOV
+	DEVMETHOD(pci_iov_init,		t4iov_iov_init),
+	DEVMETHOD(pci_iov_uninit,	t4iov_iov_uninit),
+	DEVMETHOD(pci_iov_add_vf,	t4iov_add_vf),
+#endif
+
+	DEVMETHOD(t4_attach_child,	t4iov_attach_child),
+	DEVMETHOD(t4_detach_child,	t4iov_detach_child),
+
+	DEVMETHOD_END
+};
+
+static driver_t chiov_driver = {
+	"chiov",
+	chiov_methods,
+	sizeof(struct t4iov_softc)
+};
 DRIVER_MODULE(t4iov, pci, t4iov_driver, 0, 0);
 MODULE_VERSION(t4iov, 1);
 
@@ -468,3 +599,6 @@ MODULE_VERSION(t5iov, 1);
 
 DRIVER_MODULE(t6iov, pci, t6iov_driver, 0, 0);
 MODULE_VERSION(t6iov, 1);
+
+DRIVER_MODULE(chiov, pci, chiov_driver, 0, 0);
+MODULE_VERSION(chiov, 1);

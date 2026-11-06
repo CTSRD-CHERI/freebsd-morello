@@ -61,13 +61,7 @@
 #define	__has_builtin(x)	0
 #endif
 
-#if defined(__cplusplus)
-#define	__BEGIN_DECLS	extern "C" {
-#define	__END_DECLS	}
-#else
-#define	__BEGIN_DECLS
-#define	__END_DECLS
-#endif
+#include <sys/_decls.h>
 
 /*
  * This code has been put in place to help reduce the addition of
@@ -152,6 +146,7 @@
 #define	__weak_symbol	__attribute__((__weak__))
 #define	__dead2		__attribute__((__noreturn__))
 #define	__pure2		__attribute__((__const__))
+#define	__maybe_unused	__attribute__((__unused__))
 #define	__unused	__attribute__((__unused__))
 #define	__used		__attribute__((__used__))
 #define __deprecated	__attribute__((__deprecated__))
@@ -230,6 +225,27 @@
 #define	__generic(expr, t, yes, no)					\
 	__builtin_choose_expr(__builtin_types_compatible_p(		\
 	    __typeof(((void)0, (expr))), t), yes, no)
+#endif
+
+/*
+ * __qualsel() is the building block for C23 qualifier-preserving macros
+ * as proposed in N3020: it selects cexpr when the pointer expression p
+ * references a const-qualified object, and expr otherwise.
+ *
+ * The conditional operator's composite-type rule collapses every
+ * pointer-to-const-object type onto the single "const void *"" association,
+ * so callers passing any such pointer are matched even though _Generic()
+ * otherwise compares types exactly.
+ *
+ * The (__uintptr_t) round-trip only suppresses -Wcast-qual on the throwaway
+ * second operand.
+ */
+#if (defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L) || \
+    __has_extension(c_generic_selections)
+#define	__qualsel(p, cexpr, expr)					\
+	_Generic(1 ? (p) : (void *)(__uintptr_t)(p),			\
+	    const void *: (cexpr),					\
+	    default: (expr))
 #endif
 
 /*
@@ -392,6 +408,13 @@
 	    __attribute__((__format__ (__printf0__, fmtarg, firstvararg)))
 #else
 #define	__printf0like(fmtarg, firstvararg)
+#endif
+
+/* To silence warnings about null terminator not fitting into an array. */
+#if __has_attribute(__nonstring__)
+#define	__nonstring	__attribute__((__nonstring__))
+#else
+#define	__nonstring
 #endif
 
 #define	__strong_reference(sym,aliassym)	\
@@ -642,7 +665,7 @@
 #endif
 #if !__has_builtin(__builtin_align_down)
 #define __builtin_align_down(x, align)	\
-	((__typeof__(x))((x)&(~((align)-1))))
+	((__typeof__(x))((__uintptr_t)(x)&(~((align)-1))))
 #endif
 
 #define __align_up(x, y) __builtin_align_up(x, y)

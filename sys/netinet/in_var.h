@@ -102,8 +102,7 @@ struct in_ifaddr {
 	((((d).s_addr ^ (a).s_addr) & (m).s_addr)) == 0 )
 #endif
 
-#define LLTABLE(ifp)	\
-	((struct in_ifinfo *)(ifp)->if_afdata[AF_INET])->ii_llt
+#define LLTABLE(ifp)	((struct in_ifinfo *)(ifp)->if_inet)->ii_llt
 /*
  * Hash table for IP addresses.
  */
@@ -151,21 +150,6 @@ do {									\
 	INADDR_TO_IFADDR(addr, ia); \
 	(ifp) = (ia == NULL) ? NULL : ia->ia_ifp; \
 }
-
-/*
- * Macro for finding the internet address structure (in_ifaddr) corresponding
- * to a given interface (ifnet structure).
- */
-#define IFP_TO_IA(ifp, ia)						\
-	/* struct ifnet *ifp; */					\
-	/* struct in_ifaddr *ia; */					\
-do {									\
-	NET_EPOCH_ASSERT();						\
-	for ((ia) = CK_STAILQ_FIRST(&V_in_ifaddrhead);			\
-	    (ia) != NULL && (ia)->ia_ifp != (ifp);			\
-	    (ia) = CK_STAILQ_NEXT((ia), ia_link))			\
-		continue;						\
-} while (0)
 
 /*
  * Legacy IPv4 IGMP per-link structure.
@@ -225,9 +209,18 @@ struct in_mfilter {
 };
 
 /*
- * Helper types and functions for IPv4 multicast filters.
+ * Structure attached to inpcb.ip_moptions and passed to ip_output() when IP
+ * multicast options are in use.
+ * This structure is lazy-allocated.
  */
-STAILQ_HEAD(ip_mfilter_head, in_mfilter);
+struct ip_moptions {
+	struct ifnet *imo_multicast_ifp; /* ifp for outgoing multicasts */
+	struct in_addr imo_multicast_addr; /* ifindex/addr on MULTICAST_IF */
+	u_long imo_multicast_vif;	/* vif num outgoing multicasts */
+	u_char imo_multicast_ttl;	/* TTL for outgoing multicasts */
+	u_char imo_multicast_loop;	/* 1 => hear sends if a member */
+	STAILQ_HEAD(ip_mfilter_head, in_mfilter) imo_head;
+};
 
 struct in_mfilter *ip_mfilter_alloc(int mflags, int st0, int st1);
 void ip_mfilter_free(struct in_mfilter *);
@@ -292,9 +285,7 @@ ip_mfilter_count(struct ip_mfilter_head *head)
  * and kept if retransmissions are necessary.
  *
  * FUTURE: inm_link is now only used when groups are being purged
- * on a detaching ifnet. It could be demoted to a SLIST_ENTRY, but
- * because it is at the very start of the struct, we can't do this
- * w/o breaking the ABI for ifmcstat.
+ * on a detaching ifnet. It could be demoted to a SLIST_ENTRY.
  */
 struct in_multi {
 	LIST_ENTRY(in_multi) inm_link;	/* to-be-released by in_ifdetach */
@@ -340,7 +331,6 @@ struct in_multi {
  *  A source is only excluded if all listeners exclude it.
  *  A source is only included if no listeners exclude it,
  *  and at least one listener includes it.
- * May be used by ifmcstat(8).
  */
 static __inline uint8_t
 ims_get_mode(const struct in_multi *inm, const struct ip_msource *ims,
@@ -438,7 +428,6 @@ inm_rele_locked(struct in_multi_head *inmh, struct in_multi *inm)
 #define MCAST_MUTED		3	/* [deprecated] */
 
 struct rib_head;
-struct	ip_moptions;
 struct ucred;
 
 struct in_multi *inm_lookup_locked(struct ifnet *, const struct in_addr);
@@ -471,12 +460,17 @@ void	ip_input(struct mbuf *);
 void	ip_direct_input(struct mbuf *);
 void	in_ifadown(struct ifaddr *ifa, int);
 struct	mbuf	*ip_tryforward(struct mbuf *);
-void	*in_domifattach(struct ifnet *);
-void	in_domifdetach(struct ifnet *, void *);
 struct rib_head *in_inithead(uint32_t fibnum);
+void	in_ifattach(void *, struct ifnet *);
+
 #ifdef VIMAGE
 void	in_detachhead(struct rib_head *rh);
 #endif
+
+struct sockopt;
+
+int	inp_join_group(struct inpcb *, struct sockopt *);
+int	inp_leave_group(struct inpcb *, struct sockopt *);
 
 #endif /* _KERNEL */
 

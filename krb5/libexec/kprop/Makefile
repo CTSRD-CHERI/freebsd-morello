@@ -1,5 +1,5 @@
 #
-# SPDX-License-Idendifier: BSD-2-Clause
+# SPDX-License-Identifier: BSD-2-Clause
 #
 # Copyright (c) 2025 FreeBSD Foundation
 #
@@ -18,7 +18,8 @@ SRCS=	kprop.c
 MAN=	kprop.8
 
 CFLAGS+=-I${KRB5_DIR}/include \
-	-I${KRB5_SRCTOP}/include
+	-I${KRB5_SRCTOP}/include \
+	-I${KRB5_OBJTOP}/util/profile
 
 .include <bsd.prog.mk>
 

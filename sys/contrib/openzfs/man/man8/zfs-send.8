@@ -1,23 +1,13 @@
 .\" SPDX-License-Identifier: CDDL-1.0
 .\"
-.\" CDDL HEADER START
+.\" This file and its contents are supplied under the terms of the
+.\" Common Development and Distribution License ("CDDL"), version 1.0.
+.\" You may only use this file in accordance with the terms of version
+.\" 1.0 of the CDDL.
 .\"
-.\" The contents of this file are subject to the terms of the
-.\" Common Development and Distribution License (the "License").
-.\" You may not use this file except in compliance with the License.
-.\"
-.\" You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-.\" or https://opensource.org/licenses/CDDL-1.0.
-.\" See the License for the specific language governing permissions
-.\" and limitations under the License.
-.\"
-.\" When distributing Covered Code, include this CDDL HEADER in each
-.\" file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-.\" If applicable, add the following below this CDDL HEADER, with the
-.\" fields enclosed by brackets "[]" replaced with your own identifying
-.\" information: Portions Copyright [yyyy] [name of copyright owner]
-.\"
-.\" CDDL HEADER END
+.\" A full copy of the text of the CDDL should have accompanied this
+.\" source.  A copy of the CDDL is also available via the Internet at
+.\" https://opensource.org/license/CDDL-1.0.
 .\"
 .\" Copyright (c) 2009 Sun Microsystems, Inc. All Rights Reserved.
 .\" Copyright 2011 Joshua M. Clulow <josh@sysmgr.org>
@@ -31,7 +21,7 @@
 .\" Copyright 2019 Joyent, Inc.
 .\" Copyright (c) 2024, Klara, Inc.
 .\"
-.Dd October 2, 2024
+.Dd February 20, 2026
 .Dt ZFS-SEND 8
 .Os
 .
@@ -41,13 +31,13 @@
 .Sh SYNOPSIS
 .Nm zfs
 .Cm send
-.Op Fl DLPVbcehnpsvw
+.Op Fl DLPUVbcehnpsvw
 .Op Fl R Op Fl X Ar dataset Ns Oo , Ns Ar dataset Oc Ns …
 .Op Oo Fl I Ns | Ns Fl i Oc Ar snapshot
 .Ar snapshot
 .Nm zfs
 .Cm send
-.Op Fl DLPVcensvw
+.Op Fl DLPUVcensvw
 .Op Fl i Ar snapshot Ns | Ns Ar bookmark
 .Ar filesystem Ns | Ns Ar volume Ns | Ns Ar snapshot
 .Nm zfs
@@ -75,7 +65,7 @@
 .It Xo
 .Nm zfs
 .Cm send
-.Op Fl DLPVbcehnpsvw
+.Op Fl DLPUVbcehnpsvw
 .Op Fl R Op Fl X Ar dataset Ns Oo , Ns Ar dataset Oc Ns …
 .Op Oo Fl I Ns | Ns Fl i Oc Ar snapshot
 .Ar snapshot
@@ -107,15 +97,32 @@ option.
 Generate a stream which may contain blocks larger than 128 KiB.
 This flag has no effect if the
 .Sy large_blocks
-pool feature is disabled, or if the
+pool feature is disabled, or if this filesystem has never contained a
+block larger than 128 KiB.
+Note that it is writing such a block, not setting the
 .Sy recordsize
-property of this filesystem has never been set above 128 KiB.
+property, that activates the per-dataset
+.Sy large_blocks
+feature and lets this flag take effect.
 The receiving system must have the
 .Sy large_blocks
 pool feature enabled as well.
 This flag is required if the
 .Sy large_microzap
 pool feature is active.
+.Pp
+Replicating a filesystem that contains large blocks without this flag
+splits them into 128 KiB blocks on the receiving side, so the received
+copy does not activate the
+.Sy large_blocks
+feature.
+The two copies then have different physical block layouts, and an
+incremental stream sent back in the opposite direction is rejected,
+because that stream cannot carry the large blocks the original
+filesystem still has.
+Recovering from this requires a full receive into a new dataset.
+Use this flag from the first replication onwards if the direction of
+replication may ever be reversed.
 See
 .Xr zpool-features 7
 for details on ZFS feature flags and the
@@ -146,6 +153,8 @@ If the
 .Fl R
 flag is used to send encrypted datasets, then
 .Fl w
+or
+.Fl U
 must also be specified.
 .It Fl V , -proctitle
 Set the process title to a per-second report of how much data has been sent.
@@ -173,8 +182,10 @@ The receiving system must have the
 feature enabled.
 If the
 .Sy lz4_compress
-feature is active on the sending system, then the receiving system must have
-that feature enabled as well.
+or
+.Sy zstd_compress
+features are active on the sending system, then the receiving system must have
+the corresponding features enabled as well.
 Datasets that are sent with this flag may not be
 received as an encrypted dataset, since encrypted datasets cannot use the
 .Sy embedded_data
@@ -201,8 +212,10 @@ property for details
 .Pc .
 If the
 .Sy lz4_compress
-feature is active on the sending system, then the receiving system must have
-that feature enabled as well.
+or
+.Sy zstd_compress
+features are active on the sending system, then the receiving system must have
+the corresponding features enabled as well.
 If the
 .Sy large_blocks
 feature is enabled on the sending system but the
@@ -289,6 +302,8 @@ is specified.
 The receiving system must also support this feature.
 Sends of encrypted datasets must use
 .Fl w
+or
+.Fl U
 when using this flag.
 .It Fl s , -skip-missing
 Allows sending a replication stream even when there are snapshots missing in the
@@ -299,6 +314,11 @@ belongs
 and its descendants are skipped.
 This flag can only be used in conjunction with
 .Fl R .
+.It Fl U , -no-preserve-encryption
+Allow sending an encrypted dataset with properties, but without keeping
+encryption.
+When this flag is specified, encrypted datasets that would otherwise be blocked
+from sending are sent as unencrypted data.
 .It Fl v , -verbose
 Print verbose information about the stream package generated.
 This information includes a per-second report of how much data has been sent.
@@ -335,12 +355,29 @@ non-deduplicated stream will be generated.
 Generate a stream which may contain blocks larger than 128 KiB.
 This flag has no effect if the
 .Sy large_blocks
-pool feature is disabled, or if the
+pool feature is disabled, or if this filesystem has never contained a
+block larger than 128 KiB.
+Note that it is writing such a block, not setting the
 .Sy recordsize
-property of this filesystem has never been set above 128 KiB.
+property, that activates the per-dataset
+.Sy large_blocks
+feature and lets this flag take effect.
 The receiving system must have the
 .Sy large_blocks
 pool feature enabled as well.
+.Pp
+Replicating a filesystem that contains large blocks without this flag
+splits them into 128 KiB blocks on the receiving side, so the received
+copy does not activate the
+.Sy large_blocks
+feature.
+The two copies then have different physical block layouts, and an
+incremental stream sent back in the opposite direction is rejected,
+because that stream cannot carry the large blocks the original
+filesystem still has.
+Recovering from this requires a full receive into a new dataset.
+Use this flag from the first replication onwards if the direction of
+replication may ever be reversed.
 See
 .Xr zpool-features 7
 for details on ZFS feature flags and the
@@ -357,8 +394,10 @@ property for details
 .Pc .
 If the
 .Sy lz4_compress
-feature is active on the sending system, then the receiving system must have
-that feature enabled as well.
+or
+.Sy zstd_compress
+features are active on the sending system, then the receiving system must have
+the corresponding features enabled as well.
 If the
 .Sy large_blocks
 feature is enabled on the sending system but the
@@ -400,8 +439,10 @@ The receiving system must have the
 feature enabled.
 If the
 .Sy lz4_compress
-feature is active on the sending system, then the receiving system must have
-that feature enabled as well.
+or
+.Sy zstd_compress
+features are active on the sending system, then the receiving system must have
+the corresponding features enabled as well.
 Datasets that are sent with this flag may not be received as an encrypted
 dataset,
 since encrypted datasets cannot use the

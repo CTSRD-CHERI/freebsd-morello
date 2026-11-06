@@ -68,29 +68,15 @@ static device_method_t  openpic_ofw_methods[] = {
 	/* Device interface */
 	DEVMETHOD(device_probe,		openpic_ofw_probe),
 	DEVMETHOD(device_attach,	openpic_ofw_attach),
-	DEVMETHOD(device_suspend,	openpic_suspend),
-	DEVMETHOD(device_resume,	openpic_resume),
 
 	/* PIC interface */
-	DEVMETHOD(pic_bind,		openpic_bind),
-	DEVMETHOD(pic_config,		openpic_config),
-	DEVMETHOD(pic_dispatch,		openpic_dispatch),
-	DEVMETHOD(pic_enable,		openpic_enable),
-	DEVMETHOD(pic_eoi,		openpic_eoi),
-	DEVMETHOD(pic_ipi,		openpic_ipi),
-	DEVMETHOD(pic_mask,		openpic_mask),
-	DEVMETHOD(pic_unmask,		openpic_unmask),
-
 	DEVMETHOD(pic_translate_code,	openpic_ofw_translate_code),
 
 	DEVMETHOD_END
 };
 
-static driver_t openpic_ofw_driver = {
-	"openpic",
-	openpic_ofw_methods,
-	sizeof(struct openpic_softc),
-};
+DEFINE_CLASS_1(openpic, openpic_ofw_driver, openpic_ofw_methods,
+    sizeof(struct openpic_softc), openpic_class);
 
 EARLY_DRIVER_MODULE(openpic, ofwbus, openpic_ofw_driver, 0, 0,
     BUS_PASS_INTERRUPT);
@@ -139,6 +125,7 @@ openpic_ofw_attach(device_t dev)
 	if (ofw_bus_is_compatible(dev, "fsl,mpic")) {
 		sc->sc_quirks = OPENPIC_QUIRK_SINGLE_BIND;
 		sc->sc_quirks |= OPENPIC_QUIRK_HIDDEN_IRQS;
+		sc->sc_quirks |= OPENPIC_QUIRK_WHOAMI_WORKS;
 	}
 
 	return (openpic_common_attach(dev, xref));

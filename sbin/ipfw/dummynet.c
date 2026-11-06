@@ -680,7 +680,7 @@ ipfw_delete_pipe(int do_pipe, int i)
 	i = do_cmd(IP_DUMMYNET3, &cmd, cmd.oid.len);
 	if (i) {
 		i = 1;
-		warn("rule %u: setsockopt(IP_DUMMYNET_DEL)", i);
+		warn("rule %u: setsockopt(IP_DUMMYNET3)", i);
 	}
 	return i;
 }
@@ -959,6 +959,9 @@ load_extra_delays(const char *filename, struct dn_profile *p,
 		} else if (do_points) {
 		    if (!is_valid_number(name) || !is_valid_number(arg))
 			errx(ED_EFMT("invalid point found"));
+		    if (points_no >= ED_MAX_SAMPLES_NO)
+			errx(ED_EFMT("too many samples, maximum is %d"),
+			    ED_MAX_SAMPLES_NO);
 		    if (delay_first) {
 			points[points_no].delay = atof(name);
 			points[points_no].prob = atof(arg);
@@ -1863,7 +1866,7 @@ end_mask:
 	i = do_cmd(IP_DUMMYNET3, base, (char *)buf - (char *)base);
 
 	if (i)
-		err(1, "setsockopt(%s)", "IP_DUMMYNET_CONFIGURE");
+		err(1, "setsockopt(%s)", "IP_DUMMYNET3");
 }
 
 void

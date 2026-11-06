@@ -1,16 +1,8 @@
-# SPDX-License-Identifier: BSD-2-Clause
-#
-# $Id: meta.autodep.mk,v 1.70 2025/05/28 20:03:00 sjg Exp $
-
+# $Id: meta.autodep.mk,v 1.73 2026/06/21 19:01:21 sjg Exp $
 #
 #	@(#) Copyright (c) 2010-2025, Simon J. Gerraty
 #
-#	This file is provided in the hope that it will
-#	be of use.  There is absolutely NO WARRANTY.
-#	Permission to copy, redistribute or otherwise
-#	use this file is hereby granted provided that
-#	the above copyright notice and this notice are
-#	left intact.
+#	SPDX-License-Identifier: BSD-2-Clause
 #
 #	Please send copies of changes and bug-fixes to:
 #	sjg@crufty.net
@@ -283,7 +275,7 @@ META_FILES = ${.MAKE.META.FILES:N.depend*}
 # objects in subdirs
 META_FILE_FILTER += S,${_OBJDIR}/,,:O:u
 # we have to defer evaluation until the target script runs
-GENDIRDEPS_ENV += META_FILES="${META_FILES:${META_FILE_FILTER:O:u:ts:}}}"
+GENDIRDEPS_ENV += META_FILES="${META_FILES:${META_FILE_FILTER:O:u:ts:}}"
 
 .if ${_debug.autodep}
 .info ${_DEPENDFILE:S,${SRCTOP}/,,}: ${_depend} ${.PARSEDIR}/gendirdeps.mk ${META2DEPS} xtras=${META_XTRAS}
@@ -313,7 +305,7 @@ GENDIRDEPS_ENV += MAKESYSPATH=${_makesyspath}
 GENDIRDEPS_ENV += MAKESYSPATH=${.SYSPATH:ts:}
 .endif
 
-${_DEPENDFILE}: ${_depend} ${.PARSEDIR}/gendirdeps.mk  ${META2DEPS} $${.MAKE.META.CREATED}
+${_DEPENDFILE}: .NOMETA ${_depend} ${.PARSEDIR}/gendirdeps.mk  ${META2DEPS} $${.MAKE.META.CREATED}
 	@echo Checking $@: ${.OODATE:T:[1..8]}
 	@(cd . && ${GENDIRDEPS_ENV} \
 	SKIP_GENDIRDEPS='${SKIP_GENDIRDEPS:O:u}' \

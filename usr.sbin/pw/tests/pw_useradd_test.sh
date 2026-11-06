@@ -1,4 +1,3 @@
-
 # Import helper functions
 . $(atf_get_srcdir)/helper_functions.shin
 
@@ -357,15 +356,28 @@ user_add_skel_body() {
 	echo "c" > ${HOME}/skel/c/d/dot.c
 	mkdir ${HOME}/home
 	ln -sf /nonexistent ${HOME}/skel/c/foo
-	atf_check -s exit:0 ${RPW} useradd foo -k /skel -m
+	atf_check -s exit:0 ${RPW} -M METALOG useradd foo -k /skel -m
 	test -d ${HOME}/home/foo || atf_fail "Directory not created"
 	test -f ${HOME}/home/foo/.a || atf_fail "File not created"
 	atf_check -o file:${HOME}/skel/.a -s exit:0 cat ${HOME}/home/foo/.a
 	atf_check -o file:${HOME}/skel/b -s exit:0 cat ${HOME}/home/foo/b
-	test -d ${HOME}/home/foo/c || atf_fail "Dotted directory in skel not copied"
-	test -d ${HOME}/home/foo/.plop || atf_fail "Directory in skell not created"
+	test -d ${HOME}/home/foo/c || atf_fail "Directory in skel not copied"
+	test -d ${HOME}/home/foo/.plop || atf_fail "Dotted directory in skel not created"
 	atf_check -o inline:"/nonexistent\n" -s ignore readlink -f ${HOME}/home/foo/c/foo
 	atf_check -o file:${HOME}/skel/c/d/dot.c -s exit:0 cat ${HOME}/home/foo/c/d/.c
+
+	cat <<__EOF__ >METALOG.expected
+./home/foo type=dir mode=0755 uid=1001 gid=1001
+./home/foo/.a type=file mode=0644 uid=1001 gid=1001
+./home/foo/.plop type=dir mode=0755 uid=1001 gid=1001
+./home/foo/b type=file mode=0644 uid=1001 gid=1001
+./home/foo/c type=dir mode=0755 uid=1001 gid=1001
+./home/foo/c/d type=dir mode=0755 uid=1001 gid=1001
+./home/foo/c/d/.c type=file mode=0644 uid=1001 gid=1001
+./home/foo/c/foo type=link mode=0755 uid=1001 gid=1001 link=/nonexistent
+__EOF__
+	atf_check -o save:METALOG.out sort METALOG
+	atf_check diff METALOG.out METALOG.expected
 }
 
 atf_test_case user_add_uid0
@@ -390,7 +402,7 @@ user_add_bad_shell_body() {
 	populate_etc_skel
 
 	atf_check -s exit:0 ${PW} useradd foo -s sh
-	atf_check -s exit:78 -e ignore ${PW} useradd bar -s badshell
+	atf_check -s exit:72 -e inline:"pw: can't find shell \`badshell' in shell paths\n" ${PW} useradd bar -s badshell
 }
 
 atf_test_case user_add_already_exists
@@ -516,6 +528,38 @@ user_add_already_in_group_body()
 		grep testuser ${HOME}/group
 }
 
+atf_test_case user_add_fd_dash
+user_add_fd_dash_body()
+{
+	populate_etc_skel
+
+	atf_check -s exit:0 ${PW} useradd fdtest -h -
+	atf_check -s exit:0 -o match:"^fdtest:\*:" \
+		grep "^fdtest:" ${HOME}/master.passwd
+}
+
+atf_test_case user_add_fd_numeric
+user_add_fd_numeric_body()
+{
+	populate_etc_skel
+
+	echo "testpass123" > ${HOME}/pwfile
+	fd=$(echo ${HOME}/pwfile)
+	echo "stdinpass" | atf_check -s exit:0 \
+		${PW} useradd fdstdin -h 0
+	atf_check -s exit:0 -o not-match:"^fdstdin:\*:" \
+		grep "^fdstdin:" ${HOME}/master.passwd
+}
+
+atf_test_case user_add_H_dash_rejected
+user_add_H_dash_rejected_body()
+{
+	populate_etc_skel
+
+	atf_check -s exit:64 -e inline:"pw: -H expects a file descriptor\n" \
+		${PW} useradd htest -H -
+}
+
 atf_init_test_cases() {
 	atf_add_test_case user_add
 	atf_add_test_case user_add_noupdate
@@ -560,4 +604,7 @@ atf_init_test_cases() {
 	atf_add_test_case user_add_conf_defaultpasswd
 	atf_add_test_case user_add_existing_login_group
 	atf_add_test_case user_add_already_in_group
+	atf_add_test_case user_add_fd_dash
+	atf_add_test_case user_add_fd_numeric
+	atf_add_test_case user_add_H_dash_rejected
 }

@@ -1,6 +1,6 @@
 .include <src.opts.mk>
 
-PACKAGE=	kernel
+MANPACKAGE=	kernel-man
 
 MAN=	accept_filter.9 \
 	accf_data.9 \
@@ -12,6 +12,7 @@ MAN=	accept_filter.9 \
 	altq.9 \
 	atomic.9 \
 	backlight.9 \
+	bcopy.9 \
 	bhnd.9 \
 	bhnd_erom.9 \
 	bios.9 \
@@ -90,6 +91,7 @@ MAN=	accept_filter.9 \
 	DECLARE_MODULE.9 \
 	DEFINE_IFUNC.9 \
 	DELAY.9 \
+	deadfs.9 \
 	devclass.9 \
 	devclass_find.9 \
 	devclass_get_device.9 \
@@ -143,12 +145,14 @@ MAN=	accept_filter.9 \
 	drbr.9 \
 	driver.9 \
 	DRIVER_MODULE.9 \
+	ecn.9 \
 	efirt.9 \
 	epoch.9 \
 	ether_gen_addr.9 \
 	EVENTHANDLER.9 \
 	eventtimers.9 \
 	extattr.9 \
+	exterror.9 \
 	fail.9 \
 	fdt_pinctrl.9 \
 	fetch.9 \
@@ -171,6 +175,7 @@ MAN=	accept_filter.9 \
 	gone_in.9 \
 	hardclock.9 \
 	hash.9 \
+	hashalloc.9 \
 	hashinit.9 \
 	hexdump.9 \
 	hhook.9 \
@@ -224,7 +229,9 @@ MAN=	accept_filter.9 \
 	mbuf_tags.9 \
 	mdchain.9 \
 	memcchr.9 \
+	memcpy.9 \
 	memguard.9 \
+	memmove.9 \
 	microseq.9 \
 	microtime.9 \
 	microuptime.9 \
@@ -238,6 +245,7 @@ MAN=	accept_filter.9 \
 	mutex.9 \
 	namei.9 \
 	netisr.9 \
+	nhop.9 \
 	nv.9 \
 	nvmem.9 \
 	OF_child.9 \
@@ -313,6 +321,7 @@ MAN=	accept_filter.9 \
 	rtentry.9 \
 	runqueue.9 \
 	rwlock.9 \
+	sbintime.9 \
 	sbuf.9 \
 	scheduler.9 \
 	SDT.9 \
@@ -326,6 +335,7 @@ MAN=	accept_filter.9 \
 	signal.9 \
 	sleep.9 \
 	sleepqueue.9 \
+	smp_rendezvous.9 \
 	smr.9 \
 	socket.9 \
 	stack.9 \
@@ -417,7 +427,7 @@ MAN=	accept_filter.9 \
 	vn_deallocate.9 \
 	vn_fullpath.9 \
 	vn_isdisk.9 \
-	vnet.9 \
+	VNET.9 \
 	vnode.9 \
 	vnode_pager_setsize.9 \
 	vnode_pager_purge_range.9 \
@@ -939,6 +949,7 @@ MLINKS+=cpu_machdep.9 cpu_copy_thread.9 \
 	cpu_machdep.9 cpu_thread_clean.9 \
 	cpu_machdep.9 cpu_thread_exit.9 \
 	cpu_machdep.9 cpu_thread_free.9 \
+	cpu_machdep.9 cpu_thread_new_kstack.9 \
 	cpu_machdep.9 cpu_throw.9 \
 	cpu_machdep.9 cpu_update_pcb.9
 MLINKS+=cpuset.9 CPUSET_T_INITIALIZER.9 \
@@ -1038,6 +1049,7 @@ MLINKS+=devfs_set_cdevpriv.9 devfs_clear_cdevpriv.9 \
 MLINKS+=device_add_child.9 device_add_child_ordered.9
 MLINKS+=device_enable.9 device_disable.9 \
 	device_enable.9 device_is_enabled.9
+MLINKS+=device_get_children.9 device_has_children.9
 MLINKS+=device_get_ivars.9 device_set_ivars.9
 MLINKS+=device_get_name.9 device_get_nameunit.9
 MLINKS+=device_get_state.9 device_busy.9 \
@@ -1105,6 +1117,10 @@ MLINKS+=drbr.9 drbr_free.9 \
 MLINKS+=DRIVER_MODULE.9 DRIVER_MODULE_ORDERED.9 \
 	DRIVER_MODULE.9 EARLY_DRIVER_MODULE.9 \
 	DRIVER_MODULE.9 EARLY_DRIVER_MODULE_ORDERED.9
+MLINKS+=ecn.9 ip_ecn_ingress.9 \
+	ecn.9 ip_ecn_egress.9 \
+	ecn.9 ip6_ecn_ingress.9 \
+	ecn.9 ip6_ecn_egress.9
 MLINKS+=epoch.9 epoch_context.9 \
 	epoch.9 epoch_alloc.9 \
 	epoch.9 epoch_free.9 \
@@ -1147,6 +1163,7 @@ MLINKS+=fetch.9 fubyte.9 \
 	fetch.9 fuword16.9 \
 	fetch.9 fuword32.9 \
 	fetch.9 fuword64.9 \
+	fetch.9 fueptr.9 \
 	fetch.9 fueword.9 \
 	fetch.9 fueword32.9 \
 	fetch.9 fueword64.9
@@ -1208,6 +1225,7 @@ MLINKS+=hash.9 hash32.9 \
 	hash.9 hash32_strne.9 \
 	hash.9 jenkins_hash.9 \
 	hash.9 jenkins_hash32.9
+MLINKS+=hashalloc.9 hashfree.9
 MLINKS+=hashinit.9 hashdestroy.9 \
 	hashinit.9 hashinit_flags.9 \
 	hashinit.9 phashinit.9
@@ -1310,12 +1328,14 @@ MLINKS+=iflibdd.9 ifdi_attach_pre.9 \
 	iflibdd.9 ifdi_media_change.9 \
 	iflibdd.9 ifdi_mtu_set.9 \
 	iflibdd.9 ifdi_multi_set.9 \
+	iflibdd.9 ifdi_power_prepare.9 \
 	iflibdd.9 ifdi_promisc_set.9 \
 	iflibdd.9 ifdi_queues_alloc.9 \
 	iflibdd.9 ifdi_queues_free.9 \
 	iflibdd.9 ifdi_queue_intr_enable.9 \
 	iflibdd.9 ifdi_resume.9 \
 	iflibdd.9 ifdi_rxq_setup.9 \
+	iflibdd.9 ifdi_shutdown.9 \
 	iflibdd.9 ifdi_stop.9 \
 	iflibdd.9 ifdi_suspend.9 \
 	iflibdd.9 ifdi_sysctl_int_delay.9 \
@@ -1339,8 +1359,11 @@ MLINKS+=iflibdi.9 iflib_add_int_delay_sysctl.9 \
 	iflibdi.9 iflib_led_create.9 \
 	iflibdi.9 iflib_irq_alloc.9 \
 	iflibdi.9 iflib_irq_alloc_generic.9 \
+	iflibdi.9 iflib_init_failed.9 \
 	iflibdi.9 iflib_link_intr_deferred.9 \
 	iflibdi.9 iflib_link_state_change.9 \
+	iflibdi.9 iflib_request_reset.9 \
+	iflibdi.9 iflib_request_reset_if_up.9 \
 	iflibdi.9 iflib_rx_intr_deferred.9 \
 	iflibdi.9 iflib_tx_intr_deferred.9
 MLINKS+=iflibtxrx.9 isc_rxd_available.9 \
@@ -1601,6 +1624,8 @@ MLINKS+=mdchain.9 md_append_record.9 \
 	mdchain.9 md_get_uio.9 \
 	mdchain.9 md_initm.9 \
 	mdchain.9 md_next_record.9
+MLINKS+=memcpy.9 memcpy_data.9
+MLINKS+=memmove.9 memmove_data.9
 MLINKS+=microtime.9 bintime.9 \
 	microtime.9 getbintime.9 \
 	microtime.9 getmicrotime.9 \
@@ -1659,6 +1684,7 @@ MLINKS+=netisr.9 netisr_clearqdrops.9 \
 	netisr.9 netisr_register.9 \
 	netisr.9 netisr_setqlimit.9 \
 	netisr.9 netisr_unregister.9
+MLINKS+=nhop.9 nhop_object.9
 MLINKS+=nv.9 libnv.9 \
 	nv.9 nvlist.9 \
 	nv.9 nvlist_add_binary.9 \
@@ -1793,7 +1819,8 @@ MLINKS+=osd.9 osd_call.9 \
 	osd.9 osd_set_reserved.9
 MLINKS+=panic.9 vpanic.9 \
 	panic.9 KERNEL_PANICKED.9
-MLINKS+=pci.9 pci_alloc_msi.9 \
+MLINKS+=pci.9 is_pci_device.9 \
+	pci.9 pci_alloc_msi.9 \
 	pci.9 pci_alloc_msix.9 \
 	pci.9 pci_clear_pme.9 \
 	pci.9 pci_disable_busmaster.9 \
@@ -1814,6 +1841,7 @@ MLINKS+=pci.9 pci_alloc_msi.9 \
 	pci.9 pci_get_vpd_ident.9 \
 	pci.9 pci_get_vpd_readonly.9 \
 	pci.9 pci_has_pm.9 \
+	pci.9 pci_has_pme.9 \
 	pci.9 pci_iov_attach.9 \
 	pci.9 pci_iov_attach_name.9 \
 	pci.9 pci_iov_detach.9 \
@@ -1850,7 +1878,8 @@ MLINKS+=pfil.9 pfil_add_hook.9 \
 	pfil.9 pfil_remove_hook.9 \
 	pfil.9 pfil_run_hooks.9 \
 	pfil.9 pfil_link.9
-MLINKS+=pfind.9 zpfind.9
+MLINKS+=pfind.9 pfind_any.9 \
+	pfind.9 pfind_any_locked.9
 MLINKS+=PHOLD.9 PRELE.9 \
 	PHOLD.9 _PHOLD.9 \
 	PHOLD.9 _PRELE.9 \
@@ -1969,6 +1998,19 @@ MLINKS+=rwlock.9 rw_assert.9 \
 	rwlock.9 rw_wlock.9 \
 	rwlock.9 rw_wowned.9 \
 	rwlock.9 rw_wunlock.9
+MLINKS+=sbintime.9 bttosbt.9 \
+	sbintime.9 mstosbt.9 \
+	sbintime.9 nstosbt.9 \
+	sbintime.9 sbintime_getsec.9 \
+	sbintime.9 sbttobt.9 \
+	sbintime.9 sbttoms.9 \
+	sbintime.9 sbttons.9 \
+	sbintime.9 sbttots.9 \
+	sbintime.9 sbttotv.9 \
+	sbintime.9 sbttous.9 \
+	sbintime.9 tstosbt.9 \
+	sbintime.9 tvtosbt.9 \
+	sbintime.9 ustosbt.9
 MLINKS+=sbuf.9 sbuf_bcat.9 \
 	sbuf.9 sbuf_bcopyin.9 \
 	sbuf.9 sbuf_bcpy.9 \
@@ -2174,6 +2216,7 @@ MLINKS+=stack.9 stack_copy.9 \
 	stack.9 stack_sbuf_print_ddb.9 \
 	stack.9 stack_zero.9
 MLINKS+=store.9 subyte.9 \
+	store.9 suptr.9 \
 	store.9 suword.9 \
 	store.9 suword16.9 \
 	store.9 suword32.9 \
@@ -2207,6 +2250,7 @@ MLINKS+=syscall_helper_register.9 syscall_helper_unregister.9 \
 	syscall_helper_register.9 SYSCALL_INIT_HELPER_COMPAT_F.9 \
 	syscall_helper_register.9 SYSCALL_INIT_HELPER_F.9
 MLINKS+=sysctl.9 SYSCTL_DECL.9 \
+	sysctl.9 SYSCTL_ADD_BOOL.9 \
 	sysctl.9 SYSCTL_ADD_CONST_STRING.9 \
 	sysctl.9 SYSCTL_ADD_INT.9 \
 	sysctl.9 SYSCTL_ADD_LONG.9 \
@@ -2233,6 +2277,7 @@ MLINKS+=sysctl.9 SYSCTL_DECL.9 \
 	sysctl.9 SYSCTL_ADD_UMA_CUR.9 \
 	sysctl.9 SYSCTL_ADD_UMA_MAX.9 \
 	sysctl.9 SYSCTL_ADD_UQUAD.9 \
+	sysctl.9 SYSCTL_BOOL.9 \
 	sysctl.9 SYSCTL_CHILDREN.9 \
 	sysctl.9 SYSCTL_STATIC_CHILDREN.9 \
 	sysctl.9 SYSCTL_NODE_CHILDREN.9 \
@@ -2320,6 +2365,7 @@ MLINKS+=uidinfo.9 uifind.9 \
 	uidinfo.9 uihold.9
 MLINKS+=uio.9 uiomove.9 \
 	uio.9 uiomove_frombuf.9 \
+	uio.9 uiomove_fromphys.9 \
 	uio.9 uiomove_nofault.9
 MLINKS+=unr.9 alloc_unr.9 \
 	unr.9 alloc_unrl.9 \
@@ -2449,12 +2495,14 @@ MLINKS+=vm_page_aflag.9 vm_page_aflag_clear.9 \
 	vm_page_aflag.9 vm_page_aflag_set.9 \
 	vm_page_aflag.9 vm_page_reference.9
 MLINKS+=vm_page_free.9 vm_page_free_toq.9 \
-	vm_page_free.9 vm_page_free_zero.9 \
-	vm_page_free.9 vm_page_try_to_free.9
+	vm_page_free.9 vm_page_free_zero.9
 MLINKS+=vm_page_insert.9 vm_page_remove.9
 MLINKS+=vm_page_wire.9 vm_page_unwire.9 \
 	vm_page_wire.9 vm_page_unwire_noq.9 \
 	vm_page_wire.9 vm_page_wire_mapped.9
+MLINKS+=vn_fullpath.9 vn_fullpath_jail.9 \
+	vn_fullpath.9 vn_fullpath_global.9 \
+	vn_fullpath.9 vn_fullpath_hardlink.9
 MLINKS+=VOP_ACCESS.9 VOP_ACCESSX.9
 MLINKS+=VOP_ATTRIB.9 VOP_GETATTR.9 \
 	VOP_ATTRIB.9 VOP_SETATTR.9 \
@@ -2474,9 +2522,8 @@ MLINKS+=VOP_OPENCLOSE.9 VOP_CLOSE.9 \
 MLINKS+=VOP_RDWR.9 VOP_READ.9 \
 	VOP_RDWR.9 VOP_WRITE.9
 MLINKS+=VOP_REMOVE.9 VOP_RMDIR.9
-MLINKS+=vnet.9 vimage.9
-MLINKS+=vref.9 VREF.9 \
-	vref.9 vrefl.9
+MLINKS+=VNET.9 VIMAGE.9
+MLINKS+=vref.9 vrefl.9
 MLINKS+=vrele.9 vput.9 \
 	vrele.9 vunref.9
 MLINKS+=vslock.9 vsunlock.9

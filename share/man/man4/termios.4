@@ -25,7 +25,7 @@
 .\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 .\" SUCH DAMAGE.
 .\"
-.Dd June 28, 2020
+.Dd October 16, 2026
 .Dt TERMIOS 4
 .Os
 .Sh NAME
@@ -160,10 +160,11 @@ creates a new session with the
 function; other processes
 remaining in the old session that had this terminal as their controlling
 terminal continue to have it.
-A process does not relinquish its
-controlling terminal simply by closing all of its file descriptors
-associated with the controlling terminal if other processes continue to
-have it open.
+Closing all file descriptors associated with the controlling terminal in
+one process does not disassociate the terminal from the session while
+another process continues to have it open.
+When the last file descriptor associated with the controlling terminal is
+closed, the terminal is disassociated from the session.
 .Pp
 When a controlling process terminates, the controlling terminal is
 disassociated from the current session, allowing it to be acquired by a
@@ -759,7 +760,9 @@ wait channel, the number of user and system seconds used,
 the percentage of cpu the process is getting, and the resident
 set size of the process.
 .Pp
-In case the
+In case the kernel has
+.Xr stack 9
+support configured and the
 .Xr sysctl 8
 variable
 .Va kern.tty_info_kstacks
@@ -1594,4 +1597,14 @@ the values in the header
 .Xr tcsetattr 3 ,
 .Xr tcsetsid 3 ,
 .Xr tty 4 ,
+.Xr uart 4 ,
 .Xr stack 9
+.Sh BUGS
+Before the Internet, serial ports were primarily used for inbound
+connections from terminals, either directly or through modems, these
+days serial ports are primarily used for outbound connections to
+devices, an evolution which unfortunately has spread the relevant
+documentation over three different manual pages:
+.Xr termios 4 ,
+.Xr uart 4 and
+.Xr tty 4 .

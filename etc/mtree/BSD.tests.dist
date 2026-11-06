@@ -31,6 +31,8 @@
         ..
         echo
         ..
+        ed
+        ..
         expr
         ..
         hostname
@@ -48,6 +50,8 @@
         pkill
         ..
         pwait
+        ..
+        pwd
         ..
         rm
         ..
@@ -80,8 +84,8 @@
     ..
     cddl
         lib
-            libtpool
-            ..
+        ..
+        oclo
         ..
         sbin
         ..
@@ -288,14 +292,6 @@
     ..
     games
     ..
-    gnu
-        lib
-        ..
-        usr.bin
-            diff
-            ..
-        ..
-    ..
     include
     ..
     lib
@@ -382,6 +378,8 @@
             ..
             ssp
             ..
+            stdbit
+            ..
             stdio
             ..
             stdlib
@@ -457,6 +455,8 @@
         ..
         libutil
         ..
+        libutil++
+        ..
         libxo
         ..
         msun
@@ -472,6 +472,8 @@
             ..
         ..
         nuageinit
+        ..
+        pkg-serve
         ..
         rc
         ..
@@ -489,7 +491,11 @@
         ..
         dhclient
         ..
+        fsck_msdosfs
+        ..
         growfs
+        ..
+        hastd
         ..
         ifconfig
         ..
@@ -517,9 +523,13 @@
         ..
         sysctl
         ..
+        tunefs
+        ..
     ..
     secure
         lib
+            libcrypto
+            ..
         ..
         libexec
         ..
@@ -548,6 +558,8 @@
         acl
         ..
         aio
+        ..
+        arch
         ..
         audit
         ..
@@ -807,6 +819,8 @@
         ..
         compat32
         ..
+        cpuctl
+        ..
         devrandom
         ..
         dtrace
@@ -816,11 +830,21 @@
         file
         ..
         fs
+            cd9660
+            ..
+            fdescfs
+            ..
             fusefs
+            ..
+            pjdfstest
             ..
             tarfs
             ..
             tmpfs
+            ..
+            ufs
+            ..
+            unionfs
             ..
         ..
         geom
@@ -832,6 +856,8 @@
                 gate
                 ..
                 gpt
+                ..
+                label
                 ..
                 mirror
                 ..
@@ -855,6 +881,8 @@
                 ..
                 virstor
                 ..
+                zoned
+                ..
             ..
         ..
         kern
@@ -874,6 +902,8 @@
         mac
             bsdextended
             ..
+            do
+            ..
             ipacl
             ..
             portacl
@@ -889,6 +919,8 @@
                 ..
             ..
             routing
+            ..
+            wg
             ..
         ..
         netgraph
@@ -954,6 +986,8 @@
             ..
             utimensat
             ..
+        ..
+        pmc
         ..
         posixshm
         ..
@@ -1161,6 +1195,8 @@
         ..
         jot
         ..
+        lam
+        ..
         lastcomm
         ..
         limits
@@ -1229,6 +1265,8 @@
         ..
         truncate
         ..
+        truss
+        ..
         tsort
         ..
         unifdef
@@ -1252,6 +1290,8 @@
         yacc
             yacc
             ..
+        ..
+        yes
         ..
     ..
     usr.sbin
@@ -1283,15 +1323,21 @@
         ..
         pw
         ..
+        quot
+        ..
         rpcbind
         ..
         sa
+        ..
+        sysconf
         ..
         syslogd
         ..
         sysrc
         ..
         traceroute
+        ..
+        zonectl
         ..
     ..
 ..

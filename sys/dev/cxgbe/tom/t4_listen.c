@@ -508,10 +508,11 @@ send_flowc_wr_synqe(struct adapter *sc, struct synq_entry *synqe)
 	    V_FW_WR_FLOWID(synqe->tid));
 	flowc->mnemval[0].mnemonic = FW_FLOWC_MNEM_PFNVFN;
 	flowc->mnemval[0].val = htobe32(pfvf);
+	/* Firmware expects hw port and will translate to channel itself. */
 	flowc->mnemval[1].mnemonic = FW_FLOWC_MNEM_CH;
-	flowc->mnemval[1].val = htobe32(pi->tx_chan);
+	flowc->mnemval[1].val = htobe32(pi->hw_port);
 	flowc->mnemval[2].mnemonic = FW_FLOWC_MNEM_PORT;
-	flowc->mnemval[2].val = htobe32(pi->tx_chan);
+	flowc->mnemval[2].val = htobe32(pi->hw_port);
 	flowc->mnemval[3].mnemonic = FW_FLOWC_MNEM_IQID;
 	flowc->mnemval[3].val = htobe32(ofld_rxq->iq.abs_id);
 	flowc->mnemval[4].mnemonic = FW_FLOWC_MNEM_SNDBUF;
@@ -885,6 +886,7 @@ do_pass_open_rpl(struct sge_iq *iq, const struct rss_header *rss,
 	unsigned int status = cpl->status;
 	struct listen_ctx *lctx = lookup_stid(sc, stid);
 	struct inpcb *inp = lctx->inp;
+	struct tcpcb *tp = intotcpcb(inp);
 #ifdef INVARIANTS
 	unsigned int opcode = G_CPL_OPCODE(be32toh(OPCODE_TID(cpl)));
 #endif
@@ -910,13 +912,13 @@ do_pass_open_rpl(struct sge_iq *iq, const struct rss_header *rss,
 	 * If the inp has been dropped (listening socket closed) then
 	 * listen_stop must have run and taken the inp out of the hash.
 	 */
-	if (inp->inp_flags & INP_DROPPED) {
+	if (tp->t_flags & TF_DISCONNECTED) {
 		KASSERT(listen_hash_del(sc, inp) == NULL,
 		    ("%s: inp %p still in listen hash", __func__, inp));
 	}
 #endif
 
-	if (inp->inp_flags & INP_DROPPED && status != CPL_ERR_NONE) {
+	if (tp->t_flags & TF_DISCONNECTED && status != CPL_ERR_NONE) {
 		if (release_lctx(sc, lctx) != NULL)
 			INP_WUNLOCK(inp);
 		return (status);
@@ -927,7 +929,7 @@ do_pass_open_rpl(struct sge_iq *iq, const struct rss_header *rss,
 	 * it has started the hardware listener.  Stop it; the lctx will be
 	 * released in do_close_server_rpl.
 	 */
-	if (inp->inp_flags & INP_DROPPED) {
+	if (tp->t_flags & TF_DISCONNECTED) {
 		destroy_server(sc, lctx);
 		INP_WUNLOCK(inp);
 		return (status);
@@ -1335,6 +1337,7 @@ do_pass_accept_req(struct sge_iq *iq, const struct rss_header *rss,
 	unsigned int tid = GET_TID(cpl);
 	struct listen_ctx *lctx = lookup_stid(sc, stid);
 	struct inpcb *inp;
+	struct tcpcb *tp;
 	struct socket *so;
 	struct in_conninfo inc;
 	struct tcphdr th;
@@ -1476,10 +1479,11 @@ found:
 	}
 
 	inp = lctx->inp;		/* listening socket, not owned by TOE */
+	tp = intotcpcb(inp);
 	INP_RLOCK(inp);
 
 	/* Don't offload if the listening socket has closed */
-	if (__predict_false(inp->inp_flags & INP_DROPPED)) {
+	if (__predict_false(tp->t_flags & TF_DISCONNECTED)) {
 		INP_RUNLOCK(inp);
 		NET_EPOCH_EXIT(et);
 		REJECT_PASS_ACCEPT_REQ(false);
@@ -1507,6 +1511,8 @@ found:
 
 	init_conn_params(vi, &settings, &inc, so, &cpl->tcpopt, e->idx,
 	    &synqe->params);
+	if (sc->params.tid_qid_sel_mask != 0)
+		update_tid_qid_sel(vi, &synqe->params, tid);
 
 	/*
 	 * If all goes well t4_syncache_respond will get called during
@@ -1619,6 +1625,7 @@ do_pass_establish(struct sge_iq *iq, const struct rss_header *rss,
 	struct synq_entry *synqe = lookup_tid(sc, tid);
 	struct listen_ctx *lctx = synqe->lctx;
 	struct inpcb *inp = lctx->inp, *new_inp;
+	struct tcpcb *tp = intotcpcb(inp);
 	struct socket *so;
 	struct tcphdr th;
 	struct tcpopt to;
@@ -1650,7 +1657,7 @@ do_pass_establish(struct sge_iq *iq, const struct rss_header *rss,
 	KASSERT(vi->adapter == sc,
 	    ("%s: vi %p, sc %p mismatch", __func__, vi, sc));
 
-	if (__predict_false(inp->inp_flags & INP_DROPPED)) {
+	if (__predict_false(tp->t_flags & TF_DISCONNECTED)) {
 reset:
 		send_abort_rpl_synqe(TOEDEV(ifp), synqe, CPL_ABORT_SEND_RST);
 		INP_WUNLOCK(inp);

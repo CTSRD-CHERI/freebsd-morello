@@ -41,7 +41,6 @@ SUBDIR=	adduser \
 	makefs \
 	memcontrol \
 	mfiutil \
-	mixer \
 	mlxcontrol \
 	mountd \
 	mount_smbfs \
@@ -52,6 +51,7 @@ SUBDIR=	adduser \
 	nfscbd \
 	nfsd \
 	nfsdumpstate \
+	nfsdtop \
 	nfsrevoke \
 	nfsuserd \
 	nmtree \
@@ -82,11 +82,12 @@ SUBDIR=	adduser \
 	setfib \
 	setfmac \
 	setpmac \
+	smart \
 	smbmsg \
 	snapinfo \
-	sndctl \
 	spi \
 	spray \
+	sysconf \
 	syslogd \
 	sysrc \
 	tcpdrop \
@@ -117,10 +118,13 @@ SUBDIR.${MK_AUDIT}+=	auditdistd
 .endif
 SUBDIR.${MK_AUDIT}+=	auditreduce
 SUBDIR.${MK_AUDIT}+=	praudit
+SUBDIR.${MK_AUDIT}+=	setaudit
 SUBDIR.${MK_AUTHPF}+=	authpf
 SUBDIR.${MK_AUTOFS}+=	autofs
 SUBDIR.${MK_BLACKLIST}+=	blacklistctl
 SUBDIR.${MK_BLACKLIST}+=	blacklistd
+SUBDIR.${MK_BLOCKLIST}+=	blocklistctl
+SUBDIR.${MK_BLOCKLIST}+=	blocklistd
 SUBDIR.${MK_BLUETOOTH}+=	bluetooth
 SUBDIR.${MK_BOOTPARAMD}+=	bootparamd
 SUBDIR.${MK_BSDINSTALL}+=	bsdinstall
@@ -139,9 +143,7 @@ SUBDIR.${MK_FLOPPY}+=	fdformat
 SUBDIR.${MK_FLOPPY}+=	fdread
 SUBDIR.${MK_FLOPPY}+=	fdwrite
 SUBDIR.${MK_FREEBSD_UPDATE}+=	freebsd-update
-.if ${MK_KERBEROS_SUPPORT} != "no"
-SUBDIR.${MK_GSSAPI}+=	gssd
-.endif
+SUBDIR.${MK_KERBEROS_SUPPORT}+=	gssd
 SUBDIR.${MK_GPIO}+=	gpioctl
 SUBDIR.${MK_HYPERV}+=	hyperv
 SUBDIR.${MK_INET6}+=	ip6addrctl
@@ -174,6 +176,7 @@ SUBDIR.${MK_NETGRAPH}+=	flowctl
 SUBDIR.${MK_NETGRAPH}+=	ngctl
 SUBDIR.${MK_NETGRAPH}+=	nghook
 SUBDIR.${MK_NIS}+=	rpc.yppasswdd
+SUBDIR.${MK_NIS}+=	rpc.ypupdated
 SUBDIR.${MK_NIS}+=	rpc.ypxfrd
 SUBDIR.${MK_NIS}+=	ypbind
 SUBDIR.${MK_NIS}+=	ypldap
@@ -197,6 +200,9 @@ SUBDIR.${MK_SENDMAIL}+=	mailstats
 SUBDIR.${MK_SENDMAIL}+=	makemap
 SUBDIR.${MK_SENDMAIL}+=	praliases
 SUBDIR.${MK_SENDMAIL}+=	sendmail
+SUBDIR.${MK_SOUND}+=	mixer
+SUBDIR.${MK_SOUND}+=	sndctl
+SUBDIR.${MK_CUSE}.${MK_SOUND}+=	virtual_oss
 SUBDIR.${MK_TCP_WRAPPERS}+=	tcpdchk
 SUBDIR.${MK_TCP_WRAPPERS}+=	tcpdmatch
 SUBDIR.${MK_TOOLCHAIN}+=	config
@@ -210,7 +216,7 @@ SUBDIR.${MK_UTMPX}+=	ac
 SUBDIR.${MK_UTMPX}+=	lastlogin
 SUBDIR.${MK_UTMPX}+=	utx
 SUBDIR.${MK_WIRELESS}+=	wlandebug
-SUBDIR.${MK_WIRELESS}+=	wlanstats
+SUBDIR.${MK_WIRELESS}+=	wlanstat
 SUBDIR.${MK_WIRELESS}+=	wpa
 
 SUBDIR.${MK_TESTS}+=	tests
@@ -221,8 +227,7 @@ SUBDIR_PARALLEL=
 
 # Add architecture-specific manpages
 # to be included anyway
-MAN=   apmd/apmd.8 \
-       nvram/nvram.8
+MAN=   nvram/nvram.8
 
 .include <bsd.prog.mk>
 

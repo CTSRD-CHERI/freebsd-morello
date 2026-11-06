@@ -293,14 +293,11 @@ esp_input(struct mbuf *m, struct secasvar *sav, int skip, int protoff)
 		goto bad;
 	}
 
-	if (m->m_len < skip + sizeof(*esp)) {
-		m = m_pullup(m, skip + sizeof(*esp));
-		if (m == NULL) {
-			DPRINTF(("%s: cannot pullup header\n", __func__));
-			ESPSTAT_INC(esps_hdrops);	/*XXX*/
-			error = ENOBUFS;
-			goto bad;
-		}
+	if ((m = m_pullup(m, skip + sizeof(*esp))) == NULL) {
+		DPRINTF(("%s: cannot pullup header\n", __func__));
+		ESPSTAT_INC(esps_hdrops);	/*XXX*/
+		error = ENOBUFS;
+		goto bad;
 	}
 	esp = (struct newesp *)(mtod(m, caddr_t) + skip);
 
@@ -492,6 +489,7 @@ static int
 esp_input_cb(struct cryptop *crp)
 {
 	IPSEC_DEBUG_DECLARE(char buf[128]);
+	struct rm_priotracker sahtree_tracker;
 	uint8_t lastthree[3];
 	const struct auth_hash *esph;
 	struct mbuf *m;
@@ -507,6 +505,7 @@ esp_input_cb(struct cryptop *crp)
 	xd = crp->crp_opaque;
 	CURVNET_SET(xd->vnet);
 	sav = xd->sav;
+	ipsec_sahtree_rlock(&sahtree_tracker);
 	if (sav->state >= SADB_SASTATE_DEAD) {
 		/* saidx is freed */
 		DPRINTF(("%s: dead SA %p spi %#x\n", __func__, sav, sav->spi));
@@ -527,6 +526,7 @@ esp_input_cb(struct cryptop *crp)
 			if (ipsec_updateid(sav, &crp->crp_session, &cryptoid) != 0)
 				crypto_freesession(cryptoid);
 			xd->cryptoid = crp->crp_session;
+			ipsec_sahtree_runlock(&sahtree_tracker);
 			CURVNET_RESTORE();
 			return (crypto_dispatch(crp));
 		}
@@ -658,12 +658,14 @@ esp_input_cb(struct cryptop *crp)
 	switch (saidx->dst.sa.sa_family) {
 #ifdef INET6
 	case AF_INET6:
-		error = ipsec6_common_input_cb(m, sav, skip, protoff);
+		error = ipsec6_common_input_cb(m, sav, skip, protoff,
+		    &sahtree_tracker);
 		break;
 #endif
 #ifdef INET
 	case AF_INET:
-		error = ipsec4_common_input_cb(m, sav, skip, protoff);
+		error = ipsec4_common_input_cb(m, sav, skip, protoff,
+		    &sahtree_tracker);
 		break;
 #endif
 	default:
@@ -673,6 +675,7 @@ esp_input_cb(struct cryptop *crp)
 	CURVNET_RESTORE();
 	return error;
 bad:
+	ipsec_sahtree_runlock(&sahtree_tracker);
 	if (sav != NULL)
 		key_freesav(&sav);
 	if (m != NULL)

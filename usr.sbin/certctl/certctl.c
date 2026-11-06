@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <sys/types.h>
 #include <sys/sysctl.h>
 #include <sys/stat.h>
 #include <sys/tree.h>
@@ -63,6 +64,7 @@ static bool verbose;
 
 static const char *localbase;
 static const char *destdir;
+static const char *distbase;
 static const char *metalog;
 
 static const char *uname = "root";
@@ -100,6 +102,50 @@ static char *bundle_dest;
 static FILE *mlf;
 
 /*
+ * Create a directory and its parents as needed.
+ */
+static void
+mkdirp(const char *dir)
+{
+	struct stat sb;
+	const char *sep;
+	char *parent;
+
+	if (stat(dir, &sb) == 0)
+		return;
+	if ((sep = strrchr(dir, '/')) != NULL) {
+		parent = xasprintf("%.*s", (int)(sep - dir), dir);
+		mkdirp(parent);
+		free(parent);
+	}
+	info("creating %s", dir);
+	if (mkdir(dir, 0755) != 0)
+		err(1, "mkdir %s", dir);
+}
+
+/*
+ * Remove duplicate and trailing slashes from a path.
+ */
+static char *
+normalize_path(const char *str)
+{
+	char *buf, *dst;
+
+	if ((buf = malloc(strlen(str) + 1)) == NULL)
+		err(1, NULL);
+	for (dst = buf; *str != '\0'; dst++) {
+		if ((*dst = *str++) == '/') {
+			while (*str == '/')
+				str++;
+			if (*str == '\0')
+				break;
+		}
+	}
+	*dst = '\0';
+	return (buf);
+}
+
+/*
  * Split a colon-separated list into a NULL-terminated array.
  */
 static char **
@@ -124,14 +170,14 @@ split_paths(const char *str)
 }
 
 /*
- * Expand %L into LOCALBASE and prefix DESTDIR.
+ * Expand %L into LOCALBASE and prefix DESTDIR and DISTBASE as needed.
  */
 static char *
 expand_path(const char *template)
 {
 	if (template[0] == '%' && template[1] == 'L')
 		return (xasprintf("%s%s%s", destdir, localbase, template + 2));
-	return (xasprintf("%s%s", destdir, template));
+	return (xasprintf("%s%s%s", destdir, distbase, template));
 }
 
 /*
@@ -155,6 +201,9 @@ expand_paths(const char *const *templates)
 /*
  * If destdir is a prefix of path, returns a pointer to the rest of path,
  * otherwise returns path.
+ *
+ * Note that this intentionally does not strip distbase from the path!
+ * Unlike destdir, distbase is expected to be included in the metalog.
  */
 static const char *
 unexpand_path(const char *path)
@@ -268,7 +317,7 @@ read_cert(const char *path, struct cert_tree *tree, struct cert_tree *exclude)
 	X509_NAME *name;
 	struct cert *cert;
 	unsigned long hash;
-	int ni, no;
+	int len, ni, no;
 
 	if ((f = fopen(path, "r")) == NULL) {
 		warn("%s", path);
@@ -293,11 +342,21 @@ read_cert(const char *path, struct cert_tree *tree, struct cert_tree *exclude)
 		cert->x509 = x509;
 		name = X509_get_subject_name(x509);
 		cert->hash = X509_NAME_hash_ex(name, NULL, NULL, NULL);
-		cert->name = X509_NAME_oneline(name, NULL, 0);
+		len = X509_NAME_get_text_by_NID(name, NID_commonName,
+		    NULL, 0);
+		if (len > 0) {
+			if ((cert->name = malloc(len + 1)) == NULL)
+				err(1, NULL);
+			X509_NAME_get_text_by_NID(name, NID_commonName,
+			    cert->name, len + 1);
+		} else {
+			/* fallback for certificates without CN */
+			cert->name = X509_NAME_oneline(name, NULL, 0);
+		}
 		cert->path = xstrdup(unexpand_path(path));
 		if (RB_INSERT(cert_tree, tree, cert) != NULL)
 			errx(1, "unexpected duplicate");
-		info("%08lx: %s", cert->hash, strrchr(cert->name, '=') + 1);
+		info("%08lx: %s", cert->hash, cert->name);
 		no++;
 	}
 	/*
@@ -321,7 +380,7 @@ static int
 read_certs(const char *path, struct cert_tree *tree, struct cert_tree *exclude)
 {
 	struct stat sb;
-	char *paths[] = { (char *)(uintptr_t)path, NULL };
+	char *paths[] = { __DECONST(char *, path), NULL };
 	FTS *fts;
 	FTSENT *ent;
 	int fts_options = FTS_LOGICAL | FTS_NOCHDIR;
@@ -464,6 +523,8 @@ write_certs(const char *dir, struct cert_tree *tree)
 				tmppath = xasprintf(".%s", path);
 				fd = openat(d, tmppath,
 				    O_CREAT | O_WRONLY | O_EXCL, mode);
+				if (!unprivileged && fd >= 0)
+					(void)fchmod(fd, mode);
 			}
 		}
 		/* write the certificate */
@@ -488,9 +549,10 @@ write_certs(const char *dir, struct cert_tree *tree)
 			free(tmppath);
 			tmppath = NULL;
 		}
+		fflush(f);
 		/* emit metalog */
 		if (mlf != NULL) {
-			fprintf(mlf, "%s/%s type=file "
+			fprintf(mlf, ".%s/%s type=file "
 			    "uname=%s gname=%s mode=%#o size=%ld\n",
 			    unexpand_path(dir), path,
 			    uname, gname, mode, ftell(f));
@@ -534,6 +596,8 @@ write_bundle(const char *dir, const char *file, struct cert_tree *tree)
 	} else {
 		tmpfile = xasprintf(".%s", file);
 		fd = openat(d, tmpfile, O_WRONLY | O_CREAT | O_EXCL, mode);
+		if (!unprivileged && fd >= 0)
+			(void)fchmod(fd, mode);
 	}
 	if (fd < 0 || (f = fdopen(fd, "w")) == NULL) {
 		if (tmpfile != NULL && fd >= 0) {
@@ -561,7 +625,7 @@ write_bundle(const char *dir, const char *file, struct cert_tree *tree)
 	}
 	if (ret == 0 && mlf != NULL) {
 		fprintf(mlf,
-		    "%s/%s type=file uname=%s gname=%s mode=%#o size=%ld\n",
+		    ".%s/%s type=file uname=%s gname=%s mode=%#o size=%ld\n",
 		    unexpand_path(dir), file, uname, gname, mode, ftell(f));
 	}
 	fclose(f);
@@ -576,22 +640,17 @@ write_bundle(const char *dir, const char *file, struct cert_tree *tree)
  * Returns the number of certificates loaded.
  */
 static unsigned int
-load_trusted(bool all, struct cert_tree *exclude)
+load_trusted(void)
 {
 	unsigned int i, n;
 	int ret;
 
 	/* load external trusted certs */
-	for (i = n = 0; all && trusted_paths[i] != NULL; i++) {
-		ret = read_certs(trusted_paths[i], &trusted, exclude);
+	for (i = n = 0; trusted_paths[i] != NULL; i++) {
+		ret = read_certs(trusted_paths[i], &trusted, &untrusted);
 		if (ret > 0)
 			n += ret;
 	}
-
-	/* load installed trusted certs */
-	ret = read_certs(trusted_dest, &trusted, exclude);
-	if (ret > 0)
-		n += ret;
 
 	info("%d trusted certificates found", n);
 	return (n);
@@ -603,23 +662,18 @@ load_trusted(bool all, struct cert_tree *exclude)
  * Returns the number of certificates loaded.
  */
 static unsigned int
-load_untrusted(bool all)
+load_untrusted(void)
 {
 	char *path;
 	unsigned int i, n;
 	int ret;
 
 	/* load external untrusted certs */
-	for (i = n = 0; all && untrusted_paths[i] != NULL; i++) {
+	for (i = n = 0; untrusted_paths[i] != NULL; i++) {
 		ret = read_certs(untrusted_paths[i], &untrusted, NULL);
 		if (ret > 0)
 			n += ret;
 	}
-
-	/* load installed untrusted certs */
-	ret = read_certs(untrusted_dest, &untrusted, NULL);
-	if (ret > 0)
-		n += ret;
 
 	/* load legacy untrusted certs */
 	path = expand_path(LEGACY_PATH);
@@ -648,7 +702,7 @@ save_trusted(void)
 {
 	int ret;
 
-	/* save untrusted certs */
+	mkdirp(trusted_dest);
 	ret = write_certs(trusted_dest, &trusted);
 	return (ret);
 }
@@ -663,6 +717,7 @@ save_untrusted(void)
 {
 	int ret;
 
+	mkdirp(untrusted_dest);
 	ret = write_certs(untrusted_dest, &untrusted);
 	return (ret);
 }
@@ -684,6 +739,7 @@ save_bundle(void)
 	} else {
 		dir = xasprintf("%.*s", (int)(sep - bundle_dest), bundle_dest);
 		file = sep + 1;
+		mkdirp(dir);
 	}
 	ret = write_bundle(dir, file, &trusted);
 	free(dir);
@@ -734,8 +790,8 @@ certctl_list(int argc, char **argv __unused)
 {
 	if (argc > 1)
 		usage();
-	/* load trusted certificates */
-	load_trusted(false, NULL);
+	/* load installed trusted certificates */
+	read_certs(trusted_dest, &trusted, NULL);
 	/* list them */
 	list_certs(&trusted);
 	free_certs(&trusted);
@@ -752,8 +808,8 @@ certctl_untrusted(int argc, char **argv __unused)
 {
 	if (argc > 1)
 		usage();
-	/* load untrusted certificates */
-	load_untrusted(false);
+	/* load installed untrusted certificates */
+	read_certs(untrusted_dest, &untrusted, NULL);
 	/* list them */
 	list_certs(&untrusted);
 	free_certs(&untrusted);
@@ -780,10 +836,10 @@ certctl_rehash(int argc, char **argv __unused)
 	}
 
 	/* load untrusted certs first */
-	load_untrusted(true);
+	load_untrusted();
 
 	/* load trusted certs, excluding any that are already untrusted */
-	load_trusted(true, &untrusted);
+	load_trusted();
 
 	/* save everything */
 	ret = save_all();
@@ -797,7 +853,8 @@ certctl_rehash(int argc, char **argv __unused)
 }
 
 /*
- * Manually add one or more certificates to the list of trusted certificates.
+ * Manually add one or more certificates to the list of trusted
+ * certificates.
  *
  * Returns 0 on success and -1 on failure.
  */
@@ -813,10 +870,10 @@ certctl_trust(int argc, char **argv)
 		usage();
 
 	/* load untrusted certs first */
-	load_untrusted(true);
+	load_untrusted();
 
 	/* load trusted certs, excluding any that are already untrusted */
-	load_trusted(true, &untrusted);
+	load_trusted();
 
 	/* now load the additional trusted certificates */
 	n = 0;
@@ -829,9 +886,9 @@ certctl_trust(int argc, char **argv)
 		warnx("no new trusted certificates found");
 		free_certs(&untrusted);
 		free_certs(&trusted);
-		free_certs(&extra);
 		return (0);
 	}
+	warnx("%u new trusted certificate%s found", n, n > 1 ? "s" : "");
 
 	/*
 	 * For each new trusted cert, move it from the extra list to the
@@ -844,10 +901,16 @@ certctl_trust(int argc, char **argv)
 		RB_INSERT(cert_tree, &trusted, cert);
 		if ((other = RB_FIND(cert_tree, &untrusted, cert)) != NULL) {
 			warnx("%s was previously untrusted", cert->name);
+			warnx("source of untrust: %s", other->path);
 			RB_REMOVE(cert_tree, &untrusted, other);
 			free_cert(other);
 		}
 	}
+	warnx("This operation is not persistent.  To persistently add");
+	warnx("trusted certificates to the system store, copy them to");
+	warnx("one of these directories, then run `certctl rehash`:");
+	for (i = 0; trusted_paths[i] != NULL; i++)
+		warnx("    %s", trusted_paths[i]);
 
 	/* save everything */
 	ret = save_all();
@@ -867,6 +930,8 @@ certctl_trust(int argc, char **argv)
 static int
 certctl_untrust(int argc, char **argv)
 {
+	struct cert_tree extra = RB_INITIALIZER(&extra);
+	struct cert *cert, *other, *tmp;
 	unsigned int n;
 	int i, ret;
 
@@ -874,23 +939,47 @@ certctl_untrust(int argc, char **argv)
 		usage();
 
 	/* load untrusted certs first */
-	load_untrusted(true);
+	load_untrusted();
+
+	/* load trusted certs, excluding any that are already untrusted */
+	load_trusted();
 
 	/* now load the additional untrusted certificates */
 	n = 0;
 	for (i = 1; i < argc; i++) {
-		ret = read_cert(argv[i], &untrusted, NULL);
+		ret = read_cert(argv[i], &extra, NULL);
 		if (ret > 0)
 			n += ret;
 	}
 	if (n == 0) {
 		warnx("no new untrusted certificates found");
 		free_certs(&untrusted);
+		free_certs(&trusted);
 		return (0);
 	}
+	warnx("%u new untrusted certificate%s found", n, n > 1 ? "s" : "");
 
-	/* load trusted certs, excluding any that are already untrusted */
-	load_trusted(true, &untrusted);
+	/*
+	 * For each new untrusted cert, move it from the extra list to the
+	 * untrusted list, then check if a matching certificate exists on
+	 * the trusted list.  If that is the case, warn the user, then
+	 * remove the matching certificate from the trusted list.
+	 */
+	RB_FOREACH_SAFE(cert, cert_tree, &extra, tmp) {
+		RB_REMOVE(cert_tree, &extra, cert);
+		RB_INSERT(cert_tree, &untrusted, cert);
+		if ((other = RB_FIND(cert_tree, &trusted, cert)) != NULL) {
+			warnx("%s was previously trusted", cert->name);
+			warnx("source of trust: %s", other->path);
+			RB_REMOVE(cert_tree, &trusted, other);
+			free_cert(other);
+		}
+	}
+	warnx("This operation is not persistent.  To persistently add");
+	warnx("untrusted certificates to the system store, copy them to");
+	warnx("one of these directories, then run `certctl rehash`:");
+	for (i = 0; untrusted_paths[i] != NULL; i++)
+		warnx("    %s", untrusted_paths[i]);
 
 	/* save everything */
 	ret = save_all();
@@ -925,6 +1014,14 @@ set_defaults(void)
 	if (destdir == NULL &&
 	    (destdir = getenv("DESTDIR")) == NULL)
 		destdir = "";
+	destdir = normalize_path(destdir);
+
+	if (distbase == NULL &&
+	    (distbase = getenv("DISTBASE")) == NULL)
+		distbase = "";
+	if (*distbase != '\0' && *distbase != '/')
+		errx(1, "DISTBASE=%s does not begin with a slash", distbase);
+	distbase = normalize_path(distbase);
 
 	if (unprivileged && metalog == NULL &&
 	    (metalog = getenv("METALOG")) == NULL)
@@ -950,22 +1047,23 @@ set_defaults(void)
 
 	if ((value = getenv("TRUSTDESTDIR")) != NULL ||
 	    (value = getenv("CERTDESTDIR")) != NULL)
-		trusted_dest = xstrdup(value);
+		trusted_dest = normalize_path(value);
 	else
 		trusted_dest = expand_path(TRUSTED_PATH);
 
 	if ((value = getenv("UNTRUSTDESTDIR")) != NULL)
-		untrusted_dest = xstrdup(value);
+		untrusted_dest = normalize_path(value);
 	else
 		untrusted_dest = expand_path(UNTRUSTED_PATH);
 
 	if ((value = getenv("BUNDLE")) != NULL)
-		bundle_dest = xstrdup(value);
+		bundle_dest = normalize_path(value);
 	else
 		bundle_dest = expand_path(BUNDLE_PATH);
 
 	info("localbase:\t%s", localbase);
 	info("destdir:\t%s", destdir);
+	info("distbase:\t%s", distbase);
 	info("unprivileged:\t%s", unprivileged ? "true" : "false");
 	info("verbose:\t%s", verbose ? "true" : "false");
 }
@@ -987,11 +1085,11 @@ static struct {
 static void
 usage(void)
 {
-	fprintf(stderr, "usage: certctl [-lv] [-D destdir] list\n"
-	    "       certctl [-lv] [-D destdir] untrusted\n"
-	    "       certctl [-BnUv] [-D destdir] [-M metalog] rehash\n"
-	    "       certctl [-nv] [-D destdir] untrust <file>\n"
-	    "       certctl [-nv] [-D destdir] trust <file>\n");
+	fprintf(stderr, "usage: certctl [-lv] [-D destdir] [-d distbase] list\n"
+	    "       certctl [-lv] [-D destdir] [-d distbase] untrusted\n"
+	    "       certctl [-BnUv] [-D destdir] [-d distbase] [-M metalog] rehash\n"
+	    "       certctl [-nv] [-D destdir] [-d distbase] untrust <file>\n"
+	    "       certctl [-nv] [-D destdir] [-d distbase] trust <file>\n");
 	exit(1);
 }
 
@@ -999,9 +1097,10 @@ int
 main(int argc, char *argv[])
 {
 	const char *command;
+	unsigned int i;
 	int opt;
 
-	while ((opt = getopt(argc, argv, "BcD:g:lL:M:no:Uv")) != -1)
+	while ((opt = getopt(argc, argv, "BcD:d:g:lL:M:no:Uv")) != -1)
 		switch (opt) {
 		case 'B':
 			nobundle = true;
@@ -1011,6 +1110,9 @@ main(int argc, char *argv[])
 			break;
 		case 'D':
 			destdir = optarg;
+			break;
+		case 'd':
+			distbase = optarg;
 			break;
 		case 'g':
 			gname = optarg;
@@ -1058,8 +1160,8 @@ main(int argc, char *argv[])
 
 	set_defaults();
 
-	for (unsigned i = 0; commands[i].name != NULL; i++)
+	for (i = 0; commands[i].name != NULL; i++)
 		if (strcmp(command, commands[i].name) == 0)
-			exit(!!commands[i].func(argc, argv));
+			exit(commands[i].func(argc, argv) == 0 ? 0 : 1);
 	usage();
 }

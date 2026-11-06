@@ -123,8 +123,7 @@ struct sysentvec elf32_freebsd_sysvec = {
 	.sv_fixlimit	= NULL,
 #endif
 	.sv_maxssiz	= NULL,
-	.sv_flags	= SV_ABI_FREEBSD | SV_ILP32 | SV_SHP | SV_ASLR |
-			    SV_TIMEKEEP | SV_RNG_SEED_VER | SV_SIGSYS,
+	.sv_flags	= SV_ABI_FREEBSD_FLAGS | SV_ILP32,
 	.sv_set_syscall_retval = cpu_set_syscall_retval,
 	.sv_fetch_syscall_args = cpu_fetch_syscall_args,
 	.sv_shared_page_base = FREEBSD32_SHAREDPAGE,
@@ -143,7 +142,7 @@ struct sysentvec elf32_freebsd_sysvec = {
 };
 INIT_SYSENTVEC(elf32_sysvec, &elf32_freebsd_sysvec);
 
-static Elf32_Brandinfo freebsd_brand_info = {
+static const Elf32_Brandinfo freebsd_brand_info = {
 	.brand		= ELFOSABI_FREEBSD,
 	.machine	= EM_PPC,
 	.compat_3_brand	= "FreeBSD",
@@ -158,11 +157,11 @@ static Elf32_Brandinfo freebsd_brand_info = {
 	.flags		= BI_CAN_EXEC_DYN | BI_BRAND_NOTE
 };
 
-SYSINIT(elf32, SI_SUB_EXEC, SI_ORDER_FIRST,
+C_SYSINIT(elf32, SI_SUB_EXEC, SI_ORDER_FIRST,
     (sysinit_cfunc_t) elf32_insert_brand_entry,
     &freebsd_brand_info);
 
-static Elf32_Brandinfo freebsd_brand_oinfo = {
+static const Elf32_Brandinfo freebsd_brand_oinfo = {
 	.brand		= ELFOSABI_FREEBSD,
 	.machine	= EM_PPC,
 	.compat_3_brand	= "FreeBSD",
@@ -173,7 +172,7 @@ static Elf32_Brandinfo freebsd_brand_oinfo = {
 	.flags		= BI_CAN_EXEC_DYN | BI_BRAND_NOTE
 };
 
-SYSINIT(oelf32, SI_SUB_EXEC, SI_ORDER_ANY,
+C_SYSINIT(oelf32, SI_SUB_EXEC, SI_ORDER_ANY,
 	(sysinit_cfunc_t) elf32_insert_brand_entry,
 	&freebsd_brand_oinfo);
 

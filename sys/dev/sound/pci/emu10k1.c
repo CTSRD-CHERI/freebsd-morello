@@ -50,8 +50,8 @@
 #define	EMUPAGESIZE	4096	/* don't change */
 #define	EMUMAXPAGES	(WAVEOUT_MAXBUFSIZE * NUM_G / EMUPAGESIZE)
 #define	EMU10K1_PCI_ID	0x00021102	/* 1102 => Creative Labs Vendor ID */
-#define	EMU10K2_PCI_ID	0x00041102	
-#define	EMU10K3_PCI_ID	0x00081102	
+#define	EMU10K2_PCI_ID	0x00041102
+#define	EMU10K3_PCI_ID	0x00081102
 #define	EMU_DEFAULT_BUFSZ	4096
 #define EMU_MAX_CHANS	8
 #define	EMU_CHANS	4
@@ -159,13 +159,13 @@ struct emu_memblk {
 	SLIST_ENTRY(emu_memblk) link;
 	void *buf;
 	bus_addr_t buf_addr;
-	u_int32_t pte_start, pte_size;
+	uint32_t pte_start, pte_size;
 	bus_dmamap_t buf_map;
 };
 
 struct emu_mem {
-	u_int8_t bmap[EMUMAXPAGES / 8];
-	u_int32_t *ptb_pages;
+	uint8_t bmap[EMUMAXPAGES / 8];
+	uint32_t *ptb_pages;
 	void *silent_page;
 	bus_addr_t silent_page_addr;
 	bus_addr_t ptb_pages_addr;
@@ -181,7 +181,7 @@ struct emu_voice {
 	int start, end, vol;
 	int fxrt1;	/* FX routing */
 	int fxrt2;	/* FX routing (only for audigy) */
-	u_int32_t buf;
+	uint32_t buf;
 	struct emu_voice *slave;
 	struct pcm_channel *channel;
 };
@@ -199,7 +199,7 @@ struct sc_pchinfo {
 
 struct sc_rchinfo {
 	int spd, fmt, run, blksz, num;
-	u_int32_t idxreg, basereg, sizereg, setupreg, irqmask;
+	uint32_t idxreg, basereg, sizereg, setupreg, irqmask;
 	struct snd_dbuf *buffer;
 	struct pcm_channel *channel;
 	struct sc_info *parent;
@@ -208,9 +208,9 @@ struct sc_rchinfo {
 /* device private data */
 struct sc_info {
 	device_t	dev;
-	u_int32_t	type, rev;
-	u_int32_t	tos_link:1, APS:1, audigy:1, audigy2:1;
-	u_int32_t	addrmask;	/* wider if audigy */
+	uint32_t	type, rev;
+	uint32_t	tos_link:1, APS:1, audigy:1, audigy2:1;
+	uint32_t	addrmask;	/* wider if audigy */
 
 	bus_space_tag_t st;
 	bus_space_handle_t sh;
@@ -218,7 +218,7 @@ struct sc_info {
 
 	struct resource *reg, *irq;
 	void		*ih;
-	struct mtx	*lock;
+	struct mtx	lock;
 
 	unsigned int bufsz;
 	int timer, timerinterval;
@@ -242,8 +242,8 @@ struct sc_info {
 /* stuff */
 static int emu_init(struct sc_info *);
 static void emu_intr(void *);
-static void *emu_malloc(struct sc_info *sc, u_int32_t sz, bus_addr_t *addr, bus_dmamap_t *map);
-static void *emu_memalloc(struct sc_info *sc, u_int32_t sz, bus_addr_t *addr);
+static void *emu_malloc(struct sc_info *sc, uint32_t sz, bus_addr_t *addr, bus_dmamap_t *map);
+static void *emu_memalloc(struct sc_info *sc, uint32_t sz, bus_addr_t *addr);
 static int emu_memfree(struct sc_info *sc, void *buf);
 static int emu_memstart(struct sc_info *sc, void *buf);
 #ifdef EMUDEBUG
@@ -251,23 +251,23 @@ static void emu_vdump(struct sc_info *sc, struct emu_voice *v);
 #endif
 
 /* talk to the card */
-static u_int32_t emu_rd(struct sc_info *, int, int);
-static void emu_wr(struct sc_info *, int, u_int32_t, int);
+static uint32_t emu_rd(struct sc_info *, int, int);
+static void emu_wr(struct sc_info *, int, uint32_t, int);
 
 /* -------------------------------------------------------------------- */
 
-static u_int32_t emu_rfmt_ac97[] = {
+static uint32_t emu_rfmt_ac97[] = {
 	SND_FORMAT(AFMT_S16_LE, 1, 0),
 	SND_FORMAT(AFMT_S16_LE, 2, 0),
 	0
 };
 
-static u_int32_t emu_rfmt_mic[] = {
+static uint32_t emu_rfmt_mic[] = {
 	SND_FORMAT(AFMT_U8, 1, 0),
 	0
 };
 
-static u_int32_t emu_rfmt_efx[] = {
+static uint32_t emu_rfmt_efx[] = {
 	SND_FORMAT(AFMT_S16_LE, 2, 0),
 	0
 };
@@ -278,7 +278,7 @@ static struct pcmchan_caps emu_reccaps[3] = {
 	{48000, 48000, emu_rfmt_efx, 0},
 };
 
-static u_int32_t emu_pfmt[] = {
+static uint32_t emu_pfmt[] = {
 	SND_FORMAT(AFMT_U8, 1, 0),
 	SND_FORMAT(AFMT_U8, 2, 0),
 	SND_FORMAT(AFMT_S16_LE, 1, 0),
@@ -296,7 +296,7 @@ static int audigy_adcspeed[9] = {
 
 /* -------------------------------------------------------------------- */
 /* Hardware */
-static u_int32_t
+static uint32_t
 emu_rd(struct sc_info *sc, int regno, int size)
 {
 	switch (size) {
@@ -312,7 +312,7 @@ emu_rd(struct sc_info *sc, int regno, int size)
 }
 
 static void
-emu_wr(struct sc_info *sc, int regno, u_int32_t data, int size)
+emu_wr(struct sc_info *sc, int regno, uint32_t data, int size)
 {
 	switch (size) {
 	case 1:
@@ -327,10 +327,10 @@ emu_wr(struct sc_info *sc, int regno, u_int32_t data, int size)
 	}
 }
 
-static u_int32_t
+static uint32_t
 emu_rdptr(struct sc_info *sc, int chn, int reg)
 {
-	u_int32_t ptr, val, mask, size, offset;
+	uint32_t ptr, val, mask, size, offset;
 
 	ptr = ((reg << 16) & sc->addrmask) | (chn & EMU_PTR_CHNO_MASK);
 	emu_wr(sc, EMU_PTR, ptr, 4);
@@ -346,9 +346,9 @@ emu_rdptr(struct sc_info *sc, int chn, int reg)
 }
 
 static void
-emu_wrptr(struct sc_info *sc, int chn, int reg, u_int32_t data)
+emu_wrptr(struct sc_info *sc, int chn, int reg, uint32_t data)
 {
-	u_int32_t ptr, mask, size, offset;
+	uint32_t ptr, mask, size, offset;
 
 	ptr = ((reg << 16) & sc->addrmask) | (chn & EMU_PTR_CHNO_MASK);
 	emu_wr(sc, EMU_PTR, ptr, 4);
@@ -384,7 +384,7 @@ emu_rdcd(kobj_t obj, void *devinfo, int regno)
 }
 
 static int
-emu_wrcd(kobj_t obj, void *devinfo, int regno, u_int32_t data)
+emu_wrcd(kobj_t obj, void *devinfo, int regno, uint32_t data)
 {
 	struct sc_info *sc = (struct sc_info *)devinfo;
 
@@ -413,7 +413,7 @@ emu_settimer(struct sc_info *sc)
 	for (i = 0; i < sc->nchans; i++) {
 		pch = &sc->pch[i];
 		if (pch->buffer) {
-			tmp = (pch->spd * sndbuf_getalign(pch->buffer))
+			tmp = (pch->spd * pch->buffer->align)
 			    / pch->blksz;
 			if (tmp > rate)
 				rate = tmp;
@@ -423,7 +423,7 @@ emu_settimer(struct sc_info *sc)
 	for (i = 0; i < 3; i++) {
 		rch = &sc->rch[i];
 		if (rch->buffer) {
-			tmp = (rch->spd * sndbuf_getalign(rch->buffer))
+			tmp = (rch->spd * rch->buffer->align)
 			    / rch->blksz;
 			if (tmp > rate)
 				rate = tmp;
@@ -439,7 +439,7 @@ emu_settimer(struct sc_info *sc)
 static int
 emu_enatimer(struct sc_info *sc, int go)
 {
-	u_int32_t x;
+	uint32_t x;
 	if (go) {
 		if (sc->timer++ == 0) {
 			x = emu_rd(sc, EMU_INTE, 4);
@@ -485,10 +485,10 @@ audigy_recval(int speed) {
 	return val;
 }
 
-static u_int32_t
-emu_rate_to_pitch(u_int32_t rate)
+static uint32_t
+emu_rate_to_pitch(uint32_t rate)
 {
-	static u_int32_t logMagTable[128] = {
+	static uint32_t logMagTable[128] = {
 		0x00000, 0x02dfc, 0x05b9e, 0x088e6, 0x0b5d6, 0x0e26f, 0x10eb3, 0x13aa2,
 		0x1663f, 0x1918a, 0x1bc84, 0x1e72e, 0x2118b, 0x23b9a, 0x2655d, 0x28ed5,
 		0x2b803, 0x2e0e8, 0x30985, 0x331db, 0x359eb, 0x381b6, 0x3a93d, 0x3d081,
@@ -531,7 +531,7 @@ emu_rate_to_pitch(u_int32_t rate)
 	rate *= 11185;	/* Scale 48000 to 0x20002380 */
 	for (i = 31; i > 0; i--) {
 		if (rate & 0x80000000) {	/* Detect leading "1" */
-			return (((u_int32_t) (i - 15) << 20) +
+			return (((uint32_t) (i - 15) << 20) +
 			    logMagTable[0x7f & (rate >> 24)] +
 			    (0x7f & (rate >> 17)) *
 			    logSlopeTable[0x7f & (rate >> 24)]);
@@ -542,8 +542,8 @@ emu_rate_to_pitch(u_int32_t rate)
 	return 0;		/* Should never reach this point */
 }
 
-static u_int32_t
-emu_rate_to_linearpitch(u_int32_t rate)
+static uint32_t
+emu_rate_to_linearpitch(uint32_t rate)
 {
 	rate = (rate << 8) / 375;
 	return (rate >> 1) + (rate & 1);
@@ -566,7 +566,7 @@ emu_valloc(struct sc_info *sc)
 
 static int
 emu_vinit(struct sc_info *sc, struct emu_voice *m, struct emu_voice *s,
-	  u_int32_t sz, struct snd_dbuf *b)
+	  uint32_t sz, struct snd_dbuf *b)
 {
 	void *buf;
 	bus_addr_t tmp_addr;
@@ -640,7 +640,7 @@ emu_vwrite(struct sc_info *sc, struct emu_voice *v)
 {
 	int s;
 	int l, r, x, y;
-	u_int32_t sa, ea, start, val, silent_page;
+	uint32_t sa, ea, start, val, silent_page;
 
 	s = (v->stereo ? 1 : 0) + (v->b16 ? 1 : 0);
 
@@ -674,7 +674,7 @@ emu_vwrite(struct sc_info *sc, struct emu_voice *v)
 	emu_wrptr(sc, v->vnum, EMU_CHAN_Z1, 0);
 	emu_wrptr(sc, v->vnum, EMU_CHAN_Z2, 0);
 
-	silent_page = ((u_int32_t)(sc->mem.silent_page_addr) << 1)
+	silent_page = ((uint32_t)(sc->mem.silent_page_addr) << 1)
 	    | EMU_CHAN_MAP_PTI_MASK;
 	emu_wrptr(sc, v->vnum, EMU_CHAN_MAPA, silent_page);
 	emu_wrptr(sc, v->vnum, EMU_CHAN_MAPB, silent_page);
@@ -704,9 +704,9 @@ emu_vwrite(struct sc_info *sc, struct emu_voice *v)
 static void
 emu_vtrigger(struct sc_info *sc, struct emu_voice *v, int go)
 {
-	u_int32_t pitch_target, initial_pitch;
-	u_int32_t cra, cs, ccis;
-	u_int32_t sample, i;
+	uint32_t pitch_target, initial_pitch;
+	uint32_t cra, cs, ccis;
+	uint32_t sample, i;
 
 	if (go) {
 		cra = 64;
@@ -820,10 +820,10 @@ emupchan_init(kobj_t obj, void *devinfo, struct snd_dbuf *b,
 	ch->blksz = sc->bufsz / 2;
 	ch->fmt = SND_FORMAT(AFMT_U8, 1, 0);
 	ch->spd = 8000;
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	ch->master = emu_valloc(sc);
 	ch->slave = emu_valloc(sc);
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 	r = (emu_vinit(sc, ch->master, ch->slave, sc->bufsz, ch->buffer))
 	    ? NULL : ch;
 
@@ -837,15 +837,15 @@ emupchan_free(kobj_t obj, void *data)
 	struct sc_info *sc = ch->parent;
 	int r;
 
-	snd_mtxlock(sc->lock);
-	r = emu_memfree(sc, sndbuf_getbuf(ch->buffer));
-	snd_mtxunlock(sc->lock);
+	mtx_lock(&sc->lock);
+	r = emu_memfree(sc, ch->buffer->buf);
+	mtx_unlock(&sc->lock);
 
 	return r;
 }
 
 static int
-emupchan_setformat(kobj_t obj, void *data, u_int32_t format)
+emupchan_setformat(kobj_t obj, void *data, uint32_t format)
 {
 	struct sc_pchinfo *ch = data;
 
@@ -853,8 +853,8 @@ emupchan_setformat(kobj_t obj, void *data, u_int32_t format)
 	return 0;
 }
 
-static u_int32_t
-emupchan_setspeed(kobj_t obj, void *data, u_int32_t speed)
+static uint32_t
+emupchan_setspeed(kobj_t obj, void *data, uint32_t speed)
 {
 	struct sc_pchinfo *ch = data;
 
@@ -862,16 +862,16 @@ emupchan_setspeed(kobj_t obj, void *data, u_int32_t speed)
 	return ch->spd;
 }
 
-static u_int32_t
-emupchan_setblocksize(kobj_t obj, void *data, u_int32_t blocksize)
+static uint32_t
+emupchan_setblocksize(kobj_t obj, void *data, uint32_t blocksize)
 {
 	struct sc_pchinfo *ch = data;
 	struct sc_info *sc = ch->parent;
 
 	ch->blksz = blocksize;
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	emu_settimer(sc);
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 	return blocksize;
 }
 
@@ -884,7 +884,7 @@ emupchan_trigger(kobj_t obj, void *data, int go)
 	if (!PCMTRIG_COMMON(go))
 		return 0;
 
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	if (go == PCMTRIG_START) {
 		emu_vsetup(ch);
 		emu_vwrite(sc, ch->master);
@@ -901,20 +901,20 @@ emupchan_trigger(kobj_t obj, void *data, int go)
 	}
 	ch->run = (go == PCMTRIG_START) ? 1 : 0;
 	emu_vtrigger(sc, ch->master, ch->run);
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 	return 0;
 }
 
-static u_int32_t
+static uint32_t
 emupchan_getptr(kobj_t obj, void *data)
 {
 	struct sc_pchinfo *ch = data;
 	struct sc_info *sc = ch->parent;
 	int r;
 
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	r = emu_vpos(sc, ch->master);
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 
 	return r;
 }
@@ -984,16 +984,16 @@ emurchan_init(kobj_t obj, void *devinfo, struct snd_dbuf *b,
 	if (sndbuf_alloc(ch->buffer, sc->parent_dmat, 0, sc->bufsz) != 0)
 		return NULL;
 	else {
-		snd_mtxlock(sc->lock);
-		emu_wrptr(sc, 0, ch->basereg, sndbuf_getbufaddr(ch->buffer));
+		mtx_lock(&sc->lock);
+		emu_wrptr(sc, 0, ch->basereg, ch->buffer->buf_addr);
 		emu_wrptr(sc, 0, ch->sizereg, 0); /* off */
-		snd_mtxunlock(sc->lock);
+		mtx_unlock(&sc->lock);
 		return ch;
 	}
 }
 
 static int
-emurchan_setformat(kobj_t obj, void *data, u_int32_t format)
+emurchan_setformat(kobj_t obj, void *data, uint32_t format)
 {
 	struct sc_rchinfo *ch = data;
 
@@ -1001,8 +1001,8 @@ emurchan_setformat(kobj_t obj, void *data, u_int32_t format)
 	return 0;
 }
 
-static u_int32_t
-emurchan_setspeed(kobj_t obj, void *data, u_int32_t speed)
+static uint32_t
+emurchan_setspeed(kobj_t obj, void *data, uint32_t speed)
 {
 	struct sc_rchinfo *ch = data;
 
@@ -1020,16 +1020,16 @@ emurchan_setspeed(kobj_t obj, void *data, u_int32_t speed)
 	return ch->spd;
 }
 
-static u_int32_t
-emurchan_setblocksize(kobj_t obj, void *data, u_int32_t blocksize)
+static uint32_t
+emurchan_setblocksize(kobj_t obj, void *data, uint32_t blocksize)
 {
 	struct sc_rchinfo *ch = data;
 	struct sc_info *sc = ch->parent;
 
 	ch->blksz = blocksize;
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	emu_settimer(sc);
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 	return blocksize;
 }
 
@@ -1039,7 +1039,7 @@ emurchan_trigger(kobj_t obj, void *data, int go)
 {
 	struct sc_rchinfo *ch = data;
 	struct sc_info *sc = ch->parent;
-	u_int32_t val, sz;
+	uint32_t val, sz;
 
 	if (!PCMTRIG_COMMON(go))
 		return 0;
@@ -1069,7 +1069,7 @@ emurchan_trigger(kobj_t obj, void *data, int go)
 		sz = EMU_RECBS_BUFSIZE_4096;
 	}
 
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	switch(go) {
 	case PCMTRIG_START:
 		ch->run = 1;
@@ -1111,21 +1111,21 @@ emurchan_trigger(kobj_t obj, void *data, int go)
 	default:
 		break;
 	}
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 
 	return 0;
 }
 
-static u_int32_t
+static uint32_t
 emurchan_getptr(kobj_t obj, void *data)
 {
 	struct sc_rchinfo *ch = data;
 	struct sc_info *sc = ch->parent;
 	int r;
 
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	r = emu_rdptr(sc, 0, ch->idxreg) & 0x0000ffff;
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 
 	return r;
 }
@@ -1152,10 +1152,10 @@ CHANNEL_DECLARE(emurchan);
 
 static unsigned char
 emu_mread(struct mpu401 *arg, void *sc, int reg)
-{	
+{
 	unsigned int d;
 
-	d = emu_rd((struct sc_info *)sc, 0x18 + reg, 1); 
+	d = emu_rd((struct sc_info *)sc, 0x18 + reg, 1);
 	return d;
 }
 
@@ -1171,17 +1171,17 @@ emu_muninit(struct mpu401 *arg, void *cookie)
 {
 	struct sc_info *sc = cookie;
 
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	sc->mpu_intr = NULL;
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 
 	return 0;
 }
 
 static kobj_method_t emu_mpu_methods[] = {
-    	KOBJMETHOD(mpufoi_read,		emu_mread),
-    	KOBJMETHOD(mpufoi_write,	emu_mwrite),
-    	KOBJMETHOD(mpufoi_uninit,	emu_muninit),
+	KOBJMETHOD(mpufoi_read,		emu_mread),
+	KOBJMETHOD(mpufoi_write,	emu_mwrite),
+	KOBJMETHOD(mpufoi_uninit,	emu_muninit),
 	KOBJMETHOD_END
 };
 
@@ -1214,9 +1214,9 @@ static void
 emu_intr(void *data)
 {
 	struct sc_info *sc = data;
-	u_int32_t stat, ack, i, x;
+	uint32_t stat, ack, i, x;
 
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	while (1) {
 		stat = emu_rd(sc, EMU_IPR, 4);
 		if (stat == 0)
@@ -1262,7 +1262,7 @@ emu_intr(void *data)
 		emu_wr(sc, EMU_IPR, stat, 4);
 
 		if (ack) {
-			snd_mtxunlock(sc->lock);
+			mtx_unlock(&sc->lock);
 
 			if (ack & EMU_IPR_INTERVALTIMER) {
 				x = 0;
@@ -1289,10 +1289,10 @@ emu_intr(void *data)
 					chn_intr(sc->rch[2].channel);
 			}
 
-			snd_mtxlock(sc->lock);
+			mtx_lock(&sc->lock);
 		}
 	}
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 }
 
 /* -------------------------------------------------------------------- */
@@ -1312,7 +1312,7 @@ emu_setmap(void *arg, bus_dma_segment_t *segs, int nseg, int error)
 }
 
 static void *
-emu_malloc(struct sc_info *sc, u_int32_t sz, bus_addr_t *addr,
+emu_malloc(struct sc_info *sc, uint32_t sz, bus_addr_t *addr,
     bus_dmamap_t *map)
 {
 	void *buf;
@@ -1336,9 +1336,9 @@ emu_free(struct sc_info *sc, void *buf, bus_dmamap_t map)
 }
 
 static void *
-emu_memalloc(struct sc_info *sc, u_int32_t sz, bus_addr_t *addr)
+emu_memalloc(struct sc_info *sc, uint32_t sz, bus_addr_t *addr)
 {
-	u_int32_t blksz, start, idx, ofs, tmp, found;
+	uint32_t blksz, start, idx, ofs, tmp, found;
 	struct emu_mem *mem = &sc->mem;
 	struct emu_memblk *blk;
 	void *buf;
@@ -1381,7 +1381,7 @@ emu_memalloc(struct sc_info *sc, u_int32_t sz, bus_addr_t *addr)
 		tmp = (uint32_t)(blk->buf_addr + ofs);
 #ifdef EMUDEBUG
 		printf("pte[%d] -> %x phys, %x virt\n", idx, tmp,
-		    ((u_int32_t)buf) + ofs);
+		    ((uint32_t)buf) + ofs);
 #endif
 		mem->ptb_pages[idx] = (tmp << 1) | idx;
 		ofs += EMUPAGESIZE;
@@ -1393,7 +1393,7 @@ emu_memalloc(struct sc_info *sc, u_int32_t sz, bus_addr_t *addr)
 static int
 emu_memfree(struct sc_info *sc, void *buf)
 {
-	u_int32_t idx, tmp;
+	uint32_t idx, tmp;
 	struct emu_mem *mem = &sc->mem;
 	struct emu_memblk *blk, *i;
 
@@ -1406,7 +1406,7 @@ emu_memfree(struct sc_info *sc, void *buf)
 		return EINVAL;
 	SLIST_REMOVE(&mem->blocks, blk, emu_memblk, link);
 	emu_free(sc, buf, blk->buf_map);
-	tmp = (u_int32_t)(sc->mem.silent_page_addr) << 1;
+	tmp = (uint32_t)(sc->mem.silent_page_addr) << 1;
 	for (idx = blk->pte_start; idx < blk->pte_start + blk->pte_size; idx++) {
 		mem->bmap[idx >> 3] &= ~(1 << (idx & 7));
 		mem->ptb_pages[idx] = tmp | idx;
@@ -1433,7 +1433,7 @@ emu_memstart(struct sc_info *sc, void *buf)
 
 static void
 emu_addefxop(struct sc_info *sc, int op, int z, int w, int x, int y,
-    u_int32_t *pc)
+    uint32_t *pc)
 {
 	emu_wrefx(sc, (*pc) * 2, (x << 10) | y);
 	emu_wrefx(sc, (*pc) * 2 + 1, (op << 20) | (z << 10) | w);
@@ -1442,7 +1442,7 @@ emu_addefxop(struct sc_info *sc, int op, int z, int w, int x, int y,
 
 static void
 audigy_addefxop(struct sc_info *sc, int op, int z, int w, int x, int y,
-    u_int32_t *pc)
+    uint32_t *pc)
 {
 	emu_wrefx(sc, (*pc) * 2, (x << 12) | y);
 	emu_wrefx(sc, (*pc) * 2 + 1, (op << 24) | (z << 12) | w);
@@ -1453,7 +1453,7 @@ static void
 audigy_initefx(struct sc_info *sc)
 {
 	int i;
-	u_int32_t pc = 0;
+	uint32_t pc = 0;
 
 	/* skip 0, 0, -1, 0 - NOPs */
 	for (i = 0; i < 512; i++)
@@ -1607,7 +1607,7 @@ static void
 emu_initefx(struct sc_info *sc)
 {
 	int i;
-	u_int32_t pc = 16;
+	uint32_t pc = 16;
 
 	/* acc3 0,0,0,0 - NOPs */
 	for (i = 0; i < 512; i++) {
@@ -1743,7 +1743,7 @@ emu_initefx(struct sc_info *sc)
 static int
 emu_init(struct sc_info *sc)
 {
-	u_int32_t spcs, ch, tmp, i;
+	uint32_t spcs, ch, tmp, i;
 
 	if (sc->audigy) {
 		/* enable additional AC97 slots */
@@ -1865,7 +1865,7 @@ emu_init(struct sc_info *sc)
 		/* from ALSA initialization code: */
 
 		/* Hack for Alice3 to work independent of haP16V driver */
-		u_int32_t tmp;
+		uint32_t tmp;
 
 		/* Setup SRCMulti_I2S SamplingRate */
 		tmp = emu_rdptr(sc, 0, EMU_A_SPDIF_SAMPLERATE) & 0xfffff1ff;
@@ -1881,7 +1881,7 @@ emu_init(struct sc_info *sc)
 	}
 
 	SLIST_INIT(&sc->mem.blocks);
-	sc->mem.ptb_pages = emu_malloc(sc, EMUMAXPAGES * sizeof(u_int32_t),
+	sc->mem.ptb_pages = emu_malloc(sc, EMUMAXPAGES * sizeof(uint32_t),
 	    &sc->mem.ptb_pages_addr, &sc->mem.ptb_map);
 	if (sc->mem.ptb_pages == NULL)
 		return -1;
@@ -1894,7 +1894,7 @@ emu_init(struct sc_info *sc)
 	}
 	/* Clear page with silence & setup all pointers to this page */
 	bzero(sc->mem.silent_page, EMUPAGESIZE);
-	tmp = (u_int32_t)(sc->mem.silent_page_addr) << 1;
+	tmp = (uint32_t)(sc->mem.silent_page_addr) << 1;
 	for (i = 0; i < EMUMAXPAGES; i++)
 		sc->mem.ptb_pages[i] = tmp | i;
 
@@ -1957,7 +1957,7 @@ emu_init(struct sc_info *sc)
 		}
 	} else {
 		/* EMU10K1 initialization code */
-		tmp = EMU_HCFG_AUDIOENABLE | EMU_HCFG_LOCKTANKCACHE_MASK 
+		tmp = EMU_HCFG_AUDIOENABLE | EMU_HCFG_LOCKTANKCACHE_MASK
 		    | EMU_HCFG_AUTOMUTE;
 		if (sc->rev >= 6)
 			tmp |= EMU_HCFG_JOYENABLE;
@@ -1983,7 +1983,7 @@ emu_init(struct sc_info *sc)
 static int
 emu_uninit(struct sc_info *sc)
 {
-	u_int32_t ch;
+	uint32_t ch;
 
 	emu_wr(sc, EMU_INTE, 0, 4);
 	for (ch = 0; ch < NUM_G; ch++)
@@ -2071,7 +2071,8 @@ emu_pci_attach(device_t dev)
 	char status[SND_STATUSLEN];
 
 	sc = malloc(sizeof(*sc), M_DEVBUF, M_WAITOK | M_ZERO);
-	sc->lock = snd_mtxcreate(device_get_nameunit(dev), "snd_emu10k1 softc");
+	mtx_init(&sc->lock, device_get_nameunit(dev), "snd_emu10k1 softc",
+	    MTX_DEF);
 	sc->dev = dev;
 	sc->type = pci_get_devid(dev);
 	sc->rev = pci_get_revid(dev);
@@ -2113,6 +2114,7 @@ emu_pci_attach(device_t dev)
 	codec = AC97_CREATE(dev, sc, emu_ac97);
 	if (codec == NULL) goto bad;
 	gotmic = (ac97_getcaps(codec) & AC97_CAP_MICCHANNEL) ? 1 : 0;
+	pcm_init(dev, sc);
 	if (mixer_init(dev, ac97_getmixerclass(), codec) == -1) goto bad;
 
 	emu_midiattach(sc);
@@ -2130,7 +2132,6 @@ emu_pci_attach(device_t dev)
 	    rman_get_start(sc->reg), rman_get_start(sc->irq),
 	    device_get_nameunit(device_get_parent(dev)));
 
-	pcm_init(dev, sc);
 	for (i = 0; i < sc->nchans; i++)
 		pcm_addchan(dev, PCMDIR_PLAY, &emupchan_class, sc);
 	for (i = 0; i < (gotmic ? 3 : 2); i++)
@@ -2147,7 +2148,7 @@ bad:
 	if (sc->ih) bus_teardown_intr(dev, sc->irq, sc->ih);
 	if (sc->irq) bus_release_resource(dev, SYS_RES_IRQ, 0, sc->irq);
 	if (sc->parent_dmat) bus_dma_tag_destroy(sc->parent_dmat);
-	if (sc->lock) snd_mtxfree(sc->lock);
+	mtx_destroy(&sc->lock);
 	free(sc, M_DEVBUF);
 	return ENXIO;
 }
@@ -2170,7 +2171,7 @@ emu_pci_detach(device_t dev)
 	bus_teardown_intr(dev, sc->irq, sc->ih);
 	bus_release_resource(dev, SYS_RES_IRQ, 0, sc->irq);
 	bus_dma_tag_destroy(sc->parent_dmat);
-	snd_mtxfree(sc->lock);
+	mtx_destroy(&sc->lock);
 	free(sc, M_DEVBUF);
 
 	return 0;
@@ -2193,7 +2194,7 @@ static driver_t emu_driver = {
 };
 
 DRIVER_MODULE(snd_emu10k1, pci, emu_driver, NULL, NULL);
-MODULE_DEPEND(snd_emu10k1, sound, SOUND_MINVER, SOUND_PREFVER, SOUND_MAXVER);
+MODULE_DEPEND(snd_emu10k1, sound, 1, 1, 1);
 MODULE_VERSION(snd_emu10k1, 1);
 MODULE_DEPEND(snd_emu10k1, midi, 1, 1, 1);
 

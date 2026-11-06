@@ -1,6 +1,6 @@
 /*-
- * Copyright (c) 2020-2025 The FreeBSD Foundation
- * Copyright (c) 2021-2022 Bjoern A. Zeeb
+ * Copyright (c) 2020-2026 The FreeBSD Foundation
+ * Copyright (c) 2021-2026 Bjoern A. Zeeb
  *
  * This software was developed by Björn Zeeb under sponsorship from
  * the FreeBSD Foundation.
@@ -36,6 +36,7 @@
 #include <linux/mutex.h>
 #include <linux/if_ether.h>
 #include <linux/ethtool.h>
+#include <linux/debugfs.h>
 #include <linux/device.h>
 #include <linux/netdevice.h>
 #include <linux/random.h>
@@ -54,10 +55,17 @@ extern int linuxkpi_debug_80211;
 #ifndef	D80211_IMPROVE
 #define	D80211_IMPROVE		0x2
 #endif
+#ifndef TODO
 #define	TODO(fmt, ...)		if (linuxkpi_debug_80211 & D80211_TODO)	\
-    printf("%s:%d: XXX LKPI80211 TODO " fmt "\n",  __func__, __LINE__, ##__VA_ARGS__)
-#define	IMPROVE(...)	if (linuxkpi_debug_80211 & D80211_IMPROVE)	\
-    printf("%s:%d: XXX LKPI80211 IMPROVE\n", __func__, __LINE__)
+    printf("%s:%d: XXX LKPI80211 TODO " fmt "\n", __func__, __LINE__, ##__VA_ARGS__)
+#endif
+#ifndef IMPROVE
+#define	IMPROVE(fmt, ...)	if (linuxkpi_debug_80211 & D80211_IMPROVE)	\
+    printf("%s:%d: XXX LKPI80211 IMPROVE " fmt "\n", __func__, __LINE__, ##__VA_ARGS__)
+#endif
+
+#define	wiphy_dbg(_wiphy, _fmt, ...)						\
+    dev_dbg(&(_wiphy)->dev, _fmt, ##__VA_ARGS__)
 
 enum rfkill_hard_block_reasons {
 	RFKILL_HARD_BLOCK_NOT_OWNER		= BIT(0),
@@ -119,6 +127,7 @@ enum ieee80211_channel_flags {
 	IEEE80211_CHAN_PSD			= BIT(12),
 	IEEE80211_CHAN_ALLOW_6GHZ_VLP_AP	= BIT(13),
 	IEEE80211_CHAN_CAN_MONITOR		= BIT(14),
+	IEEE80211_CHAN_NO_EHT			= BIT(15),
 };
 #define	IEEE80211_CHAN_NO_HT40	(IEEE80211_CHAN_NO_HT40MINUS|IEEE80211_CHAN_NO_HT40PLUS)
 
@@ -127,20 +136,27 @@ struct ieee80211_txrx_stypes {
 	uint16_t	rx;
 };
 
-/* XXX net80211 has an ieee80211_channel as well. */
+/*
+ * net80211 has an ieee80211_channel as well; we use the linuxkpi_ version
+ * interally in LinuxKPI and re-define ieee80211_channel for the drivers
+ * at the end of the file.
+ */
 struct linuxkpi_ieee80211_channel {
-	/* TODO FIXME */
-	uint32_t				hw_value;	/* ic_ieee */
-	uint32_t				center_freq;	/* ic_freq */
-	enum ieee80211_channel_flags		flags;		/* ic_flags */
+	uint32_t				center_freq;
+	uint16_t				hw_value;
+	enum ieee80211_channel_flags		flags;
 	enum nl80211_band			band;
-	int8_t					max_power;	/* ic_maxpower */
 	bool					beacon_found;
-	int     max_antenna_gain, max_reg_power;
-	int     orig_flags;
-	int	dfs_cac_ms, dfs_state;
-	int	orig_mpwr;
+	enum nl80211_dfs_state			dfs_state;
+	unsigned int				dfs_cac_ms;
+	int					max_antenna_gain;
+	int					max_power;
+	int					max_reg_power;
+	uint32_t				orig_flags;
+	int					orig_mpwr;
 };
+
+#define	NL80211_EHT_NSS_MAX			16
 
 struct cfg80211_bitrate_mask {
 	/* TODO FIXME */
@@ -149,9 +165,12 @@ struct cfg80211_bitrate_mask {
 		uint8_t				ht_mcs[IEEE80211_HT_MCS_MASK_LEN];
 		uint16_t			vht_mcs[8];
 		uint16_t			he_mcs[8];
+		uint16_t			eht_mcs[NL80211_EHT_NSS_MAX];
 		enum nl80211_txrate_gi		gi;
 		enum nl80211_he_gi		he_gi;
-		uint8_t				he_ltf;		/* XXX enum? */
+		enum nl80211_he_ltf		he_ltf;
+		enum nl80211_eht_gi		eht_gi;
+		uint8_t				eht_ltf;	/* XXX enum? */
 	} control[NUM_NL80211_BANDS];
 };
 
@@ -254,6 +273,19 @@ enum ieee80211_vht_opmode {
 	IEEE80211_OPMODE_NOTIF_RX_NSS_SHIFT	= 4,
 };
 
+struct cfg80211_bss_ies {
+	uint8_t				*data;
+	size_t				len;
+};
+
+struct cfg80211_bss {
+		/* XXX TODO */
+	struct cfg80211_bss_ies		*ies;
+	struct cfg80211_bss_ies		*beacon_ies;
+	uint64_t			ts_boottime;
+	int32_t				signal;
+};
+
 struct cfg80211_connect_resp_params {
 		/* XXX TODO */
 	uint8_t				*bssid;
@@ -261,7 +293,13 @@ struct cfg80211_connect_resp_params {
 	const uint8_t			*resp_ie;
 	uint32_t			req_ie_len;
 	uint32_t			resp_ie_len;
-	int	status;
+	int				status;
+	struct {
+		const uint8_t			*addr;
+		const uint8_t			*bssid;
+		struct cfg80211_bss		*bss;
+		uint16_t			status;
+	} links[IEEE80211_MLD_MAX_NUM_LINKS];
 };
 
 struct cfg80211_inform_bss {
@@ -278,19 +316,12 @@ struct cfg80211_roam_info {
 	uint32_t			req_ie_len;
 	uint32_t			resp_ie_len;
 	struct linuxkpi_ieee80211_channel	*channel;
-};
-
-struct cfg80211_bss_ies {
-	uint8_t				*data;
-	size_t				len;
-};
-
-struct cfg80211_bss {
-		/* XXX TODO */
-	struct cfg80211_bss_ies		*ies;
-	struct cfg80211_bss_ies		*beacon_ies;
-
-	int32_t				signal;
+	struct {
+		const uint8_t			*addr;
+		const uint8_t			*bssid;
+		struct cfg80211_bss		*bss;
+		struct linuxkpi_ieee80211_channel *channel;
+	} links[IEEE80211_MLD_MAX_NUM_LINKS];
 };
 
 struct cfg80211_chan_def {
@@ -300,6 +331,53 @@ struct cfg80211_chan_def {
 	uint32_t			center_freq1;
 	uint32_t			center_freq2;
 	uint16_t			punctured;
+};
+
+struct cfg80211_nan_band_config {
+		/* XXX TODO */
+	struct linuxkpi_ieee80211_channel	*chan;
+	uint8_t				rssi_middle;
+	uint8_t				rssi_close;
+	uint8_t				awake_dw_interval;
+};
+
+struct cfg80211_nan_conf {
+	uint8_t				bands;
+	uint8_t				discovery_beacon_interval;
+	uint8_t				master_pref;
+	bool				enable_dw_notification;
+
+	uint16_t			scan_dwell_time;
+	uint16_t			scan_period;
+	uint16_t			extra_nan_attrs_len;
+	uint16_t			vendor_elems_len;
+
+	uint8_t				*cluster_id;
+	struct cfg80211_nan_band_config	band_cfgs[NUM_NL80211_BANDS];
+	uint8_t				*extra_nan_attrs;
+	uint8_t				*vendor_elems;
+};
+
+enum wiphy_nan_flags {
+	WIPHY_NAN_FLAGS_CONFIGURABLE_SYNC	= BIT(0),
+	WIPHY_NAN_FLAGS_USERSPACE_DE		= BIT(1),
+};
+
+/* Wi-Fi Aware (TM) specification, 9.5.15 Device Capability attribute. */
+/* Misplaced here for the moment. */
+#define	NAN_OP_MODE_PHY_MODE_MASK	0x11	/* b0 0=HT, 1=VHT, b4=1 HE supported */
+#define	NAN_OP_MODE_80P80MHZ		0x2	/* b1 */
+#define	NAN_OP_MODE_160MHZ		0x4	/* b2 */
+
+#define	NAN_DEV_CAPA_EXT_KEY_ID_SUPPORTED	0x2	/* b1 */
+#define	NAN_DEV_CAPA_NDPE_SUPPORTED		0x8	/* b3 */
+
+struct wiphy_nan_capa {
+	uint32_t			flags;				/* enum wiphy_nan_flags */
+	uint8_t				op_mode;
+	uint8_t				dev_capabilities;
+	uint8_t				n_antennas;			/* Tx/Rx bitmask, e.g., 0x22 */
+	uint16_t			max_channel_switch_time;
 };
 
 struct cfg80211_ftm_responder_stats {
@@ -398,6 +476,7 @@ struct cfg80211_scan_request {
 	bool					no_cck;
 	bool					scan_6ghz;
 	bool					duration_mandatory;
+	bool					first_part;
 	int8_t					tsf_report_link_id;
 	uint16_t				duration;
 	uint32_t				flags;
@@ -457,6 +536,24 @@ struct cfg80211_beacon_data {
 	uint32_t				assocresp_ies_len;
 };
 
+struct cfg80211_ap_update {
+	/* XXX TODO */
+	struct cfg80211_beacon_data		beacon;
+};
+
+struct cfg80211_crypto_settings {
+	/* XXX TODO */
+	enum nl80211_wpa_versions		wpa_versions;
+	uint32_t				cipher_group;	/* WLAN_CIPHER_SUITE_* */
+	uint32_t				*akm_suites;
+	uint32_t				*ciphers_pairwise;
+	const uint8_t				*sae_pwd;
+	const uint8_t				*psk;
+	int					n_akm_suites;
+	int					n_ciphers_pairwise;
+	int					sae_pwd_len;
+};
+
 struct cfg80211_ap_settings {
 	/* XXX TODO */
 	int     auth_type, beacon_interval, dtim_period, hidden_ssid, inactivity_timeout;
@@ -464,6 +561,7 @@ struct cfg80211_ap_settings {
 	size_t					ssid_len;
 	struct cfg80211_beacon_data		beacon;
 	struct cfg80211_chan_def		chandef;
+	struct cfg80211_crypto_settings		crypto;
 };
 
 struct cfg80211_bss_selection {
@@ -478,23 +576,12 @@ struct cfg80211_bss_selection {
 	} param;
 };
 
-struct cfg80211_crypto {		/* XXX made up name */
-	/* XXX TODO */
-	enum nl80211_wpa_versions		wpa_versions;
-	uint32_t				cipher_group;	/* WLAN_CIPHER_SUITE_* */
-	uint32_t				*akm_suites;
-	uint32_t				*ciphers_pairwise;
-	const uint8_t				*sae_pwd;
-	const uint8_t				*psk;
-	int					n_akm_suites;
-	int					n_ciphers_pairwise;
-	int					sae_pwd_len;
-};
-
 struct cfg80211_connect_params {
 	/* XXX TODO */
 	struct linuxkpi_ieee80211_channel	*channel;
+	struct linuxkpi_ieee80211_channel	*channel_hint;
 	uint8_t					*bssid;
+	uint8_t					*bssid_hint;
 	const uint8_t				*ie;
 	const uint8_t				*ssid;
 	uint32_t				ie_len;
@@ -503,7 +590,7 @@ struct cfg80211_connect_params {
 	uint32_t				key_len;
 	int     auth_type, key_idx, privacy, want_1x;
 	struct cfg80211_bss_selection		bss_select;
-	struct cfg80211_crypto			crypto;
+	struct cfg80211_crypto_settings		crypto;
 };
 
 enum bss_param_flags {		/* Used as bitflags. XXX FIXME values? */
@@ -532,6 +619,14 @@ struct cfg80211_mgmt_tx_params {
 	int	wait;
 };
 
+struct cfg80211_external_auth_params {
+	uint8_t					bssid[ETH_ALEN];
+        uint16_t				status;
+        enum nl80211_external_auth_action	action;
+        unsigned int				key_mgmt_suite;
+        struct cfg80211_ssid			ssid;
+};
+
 struct cfg80211_pmk_conf {
 	/* XXX TODO */
 	const uint8_t			*pmk;
@@ -542,6 +637,8 @@ struct cfg80211_pmksa {
 	/* XXX TODO */
 	const uint8_t			*bssid;
 	const uint8_t			*pmkid;
+	const uint8_t			*ssid;
+	size_t				ssid_len;
 };
 
 struct station_del_parameters {
@@ -722,8 +819,10 @@ struct linuxkpi_ieee80211_regdomain {
 #define	IEEE80211_EML_CAP_TRANSITION_TIMEOUT_128TU		0x04
 #define	IEEE80211_EML_CAP_EMLSR_PADDING_DELAY			0x08
 #define	IEEE80211_EML_CAP_EMLSR_PADDING_DELAY_32US		0x10
+#define	IEEE80211_EML_CAP_EMLSR_PADDING_DELAY_256US		0x10
 #define	IEEE80211_EML_CAP_EMLSR_TRANSITION_DELAY		0x20
 #define	IEEE80211_EML_CAP_EMLSR_TRANSITION_DELAY_64US		0x40
+#define	IEEE80211_EML_CAP_EMLSR_TRANSITION_DELAY_256US		0x40
 
 #define	VENDOR_CMD_RAW_DATA	(void *)(uintptr_t)(-ENOENT)
 
@@ -927,12 +1026,14 @@ struct ieee80211_iface_limit {
 };
 
 struct ieee80211_iface_combination {
-	/* TODO FIXME */
 	const struct ieee80211_iface_limit	*limits;
-	int					n_limits;
-	int		max_interfaces, num_different_channels;
-	int		beacon_int_infra_match, beacon_int_min_gcd;
-	int		radar_detect_widths;
+	uint32_t				num_different_channels;
+	uint32_t				beacon_int_min_gcd;
+	uint16_t				max_interfaces;
+	uint8_t					n_limits;
+	uint8_t					radar_detect_widths;
+	uint8_t					radar_detect_regions;
+	bool					beacon_int_infra_match;
 };
 
 struct iface_combination_params {
@@ -951,6 +1052,35 @@ struct regulatory_request {
 struct cfg80211_set_hw_timestamp {
 	const uint8_t				*macaddr;
 	bool					enable;
+};
+
+struct survey_info {		/* net80211::struct ieee80211_channel_survey */
+	/* TODO FIXME */
+	uint32_t			filled;
+#define	SURVEY_INFO_TIME		0x0001
+#define	SURVEY_INFO_TIME_RX		0x0002
+#define	SURVEY_INFO_TIME_SCAN		0x0004
+#define	SURVEY_INFO_TIME_TX		0x0008
+#define	SURVEY_INFO_TIME_BSS_RX		0x0010
+#define	SURVEY_INFO_TIME_BUSY		0x0020
+#define	SURVEY_INFO_IN_USE		0x0040
+#define	SURVEY_INFO_NOISE_DBM		0x0080
+	uint32_t			noise;
+	uint64_t			time;
+	uint64_t			time_bss_rx;
+	uint64_t			time_busy;
+	uint64_t			time_rx;
+	uint64_t			time_scan;
+	uint64_t			time_tx;
+	struct linuxkpi_ieee80211_channel *channel;
+};
+
+enum wiphy_bss_param_flags {
+	WIPHY_BSS_PARAM_AP_ISOLATE		= BIT(0),
+};
+
+struct bss_parameters {
+	int					ap_isolate;
 };
 
 enum wiphy_vendor_cmd_need_flags {
@@ -1074,6 +1204,13 @@ struct wiphy {
 	int					n_radio;
 	const struct wiphy_radio		*radio;
 
+	uint32_t				bss_param_support;	/* enum wiphy_bss_param_flags */
+
+	uint8_t					nan_supported_bands;
+	struct wiphy_nan_capa			nan_capa;
+
+	struct list_head			wdev_list;
+
 	int	features, hw_version;
 	int	interface_modes, max_match_sets, max_remain_on_channel_duration, max_scan_ssids, max_sched_scan_ie_len, max_sched_scan_plan_interval, max_sched_scan_plan_iterations, max_sched_scan_plans, max_sched_scan_reqs, max_sched_scan_ssids;
 	int	num_iftype_ext_capab;
@@ -1100,59 +1237,65 @@ struct wiphy {
 
 struct wireless_dev {
 		/* XXX TODO, like ic? */
-	enum nl80211_iftype			iftype;
-	uint32_t				radio_mask;
-	uint8_t					address[ETH_ALEN];
-	struct net_device			*netdev;
 	struct wiphy				*wiphy;
+	enum nl80211_iftype			iftype;
+
+	struct net_device			*netdev;
+	struct list_head			list;
+	uint8_t					address[ETH_ALEN];
+	uint32_t				radio_mask;
 };
 
 struct cfg80211_ops {
 	/* XXX TODO */
 	struct wireless_dev *(*add_virtual_intf)(struct wiphy *, const char *, unsigned char, enum nl80211_iftype, struct vif_params *);
-	int (*del_virtual_intf)(struct wiphy *,  struct wireless_dev *);
-	s32 (*change_virtual_intf)(struct wiphy *,  struct net_device *, enum nl80211_iftype, struct vif_params *);
-	s32 (*scan)(struct wiphy *,  struct cfg80211_scan_request *);
-	s32 (*set_wiphy_params)(struct wiphy *,  u32);
-	s32 (*join_ibss)(struct wiphy *,  struct net_device *, struct cfg80211_ibss_params *);
-	s32 (*leave_ibss)(struct wiphy *,  struct net_device *);
-	s32 (*get_station)(struct wiphy *, struct net_device *, const u8 *, struct station_info *);
-	int (*dump_station)(struct wiphy *,  struct net_device *, int,  u8 *,  struct station_info *);
-	s32 (*set_tx_power)(struct wiphy *,  struct wireless_dev *, enum nl80211_tx_power_setting,  s32);
-	s32 (*get_tx_power)(struct wiphy *,  struct wireless_dev *, s32 *);
-	s32 (*add_key)(struct wiphy *,  struct net_device *, u8,  bool,  const u8 *, struct key_params *);
-	s32 (*del_key)(struct wiphy *,  struct net_device *, u8,  bool,  const u8 *);
-	s32 (*get_key)(struct wiphy *,  struct net_device *,  u8, bool,  const u8 *,  void *, void(*)(void *, struct key_params *));
-	s32 (*set_default_key)(struct wiphy *,  struct net_device *, u8,  bool,  bool);
-	s32 (*set_default_mgmt_key)(struct wiphy *, struct net_device *,  u8);
-	s32 (*set_power_mgmt)(struct wiphy *,  struct net_device *, bool,  s32);
-	s32 (*connect)(struct wiphy *,  struct net_device *, struct cfg80211_connect_params *);
-	s32 (*disconnect)(struct wiphy *,  struct net_device *, u16);
-	s32 (*suspend)(struct wiphy *, struct cfg80211_wowlan *);
-	s32 (*resume)(struct wiphy *);
-	s32 (*set_pmksa)(struct wiphy *, struct net_device *, struct cfg80211_pmksa *);
-	s32 (*del_pmksa)(struct wiphy *, struct net_device *, struct cfg80211_pmksa *);
-	s32 (*flush_pmksa)(struct wiphy *,  struct net_device *);
-	s32 (*start_ap)(struct wiphy *,  struct net_device *, struct cfg80211_ap_settings *);
-	int (*stop_ap)(struct wiphy *,  struct net_device *);
-	s32 (*change_beacon)(struct wiphy *,  struct net_device *, struct cfg80211_beacon_data *);
-	int (*del_station)(struct wiphy *,  struct net_device *, struct station_del_parameters *);
-	int (*change_station)(struct wiphy *,  struct net_device *, const u8 *,  struct station_parameters *);
+	int (*del_virtual_intf)(struct wiphy *, struct wireless_dev *);
+	int (*change_virtual_intf)(struct wiphy *, struct net_device *, enum nl80211_iftype, struct vif_params *);
+	int (*scan)(struct wiphy *, struct cfg80211_scan_request *);
+	int (*set_wiphy_params)(struct wiphy *, int, uint32_t);
+	int (*join_ibss)(struct wiphy *, struct net_device *, struct cfg80211_ibss_params *);
+	int (*leave_ibss)(struct wiphy *, struct net_device *);
+	int (*get_station)(struct wiphy *, struct net_device *, const uint8_t *, struct station_info *);
+	int (*dump_station)(struct wiphy *, struct net_device *, int, uint8_t *, struct station_info *);
+	int (*set_tx_power)(struct wiphy *, struct wireless_dev *, int, enum nl80211_tx_power_setting, int);
+	int (*get_tx_power)(struct wiphy *, struct wireless_dev *, int, unsigned int, int *);
+	int (*add_key)(struct wiphy *, struct net_device *, int, uint8_t, bool, const uint8_t *, struct key_params *);
+	int (*del_key)(struct wiphy *, struct net_device *, int, uint8_t, bool, const uint8_t *);
+	int (*get_key)(struct wiphy *, struct net_device *, int, uint8_t, bool, const uint8_t *, void *, void(*)(void *, struct key_params *));
+	int (*set_default_key)(struct wiphy *, struct net_device *, int, uint8_t, bool, bool);
+	int (*set_default_mgmt_key)(struct wiphy *, struct net_device *, int, uint8_t);
+	int (*set_power_mgmt)(struct wiphy *, struct net_device *, bool, int);
+	int (*connect)(struct wiphy *, struct net_device *, struct cfg80211_connect_params *);
+	int (*disconnect)(struct wiphy *, struct net_device *, uint16_t);
+	int (*suspend)(struct wiphy *, struct cfg80211_wowlan *);
+	int (*resume)(struct wiphy *);
+	int (*set_pmksa)(struct wiphy *, struct net_device *, struct cfg80211_pmksa *);
+	int (*del_pmksa)(struct wiphy *, struct net_device *, struct cfg80211_pmksa *);
+	int (*flush_pmksa)(struct wiphy *, struct net_device *);
+	int (*start_ap)(struct wiphy *, struct net_device *, struct cfg80211_ap_settings *);
+	int (*stop_ap)(struct wiphy *, struct net_device *, unsigned int);
+	int (*change_beacon)(struct wiphy *, struct net_device *, struct cfg80211_ap_update *);
+	int (*del_station)(struct wiphy *, struct net_device *, struct station_del_parameters *);
+	int (*change_station)(struct wiphy *, struct net_device *, const uint8_t *, struct station_parameters *);
 	int (*sched_scan_start)(struct wiphy *, struct net_device *, struct cfg80211_sched_scan_request *);
-	int (*sched_scan_stop)(struct wiphy *, struct net_device *,  u64);
+	int (*sched_scan_stop)(struct wiphy *, struct net_device *, uint64_t);
 	void (*update_mgmt_frame_registrations)(struct wiphy *, struct wireless_dev *, struct mgmt_frame_regs *);
-	int (*mgmt_tx)(struct wiphy *,  struct wireless_dev *, struct cfg80211_mgmt_tx_params *,  u64 *);
-	int (*cancel_remain_on_channel)(struct wiphy *, struct wireless_dev *, u64);
-	int (*get_channel)(struct wiphy *, struct wireless_dev *, struct cfg80211_chan_def *);
-	int (*crit_proto_start)(struct wiphy *, struct wireless_dev *, enum nl80211_crit_proto_id, u16);
+	int (*mgmt_tx)(struct wiphy *, struct wireless_dev *, struct cfg80211_mgmt_tx_params *, uint64_t *);
+	int (*cancel_remain_on_channel)(struct wiphy *, struct wireless_dev *, uint64_t);
+	int (*get_channel)(struct wiphy *, struct wireless_dev *, unsigned int, struct cfg80211_chan_def *);
+	int (*crit_proto_start)(struct wiphy *, struct wireless_dev *, enum nl80211_crit_proto_id, uint16_t);
 	void (*crit_proto_stop)(struct wiphy *, struct wireless_dev *);
-	int (*tdls_oper)(struct wiphy *, struct net_device *,  const u8 *, enum nl80211_tdls_operation);
-	int (*update_connect_params)(struct wiphy *, struct net_device *, struct cfg80211_connect_params *, u32);
-	int (*set_pmk)(struct wiphy *,  struct net_device *, const struct cfg80211_pmk_conf *);
-	int (*del_pmk)(struct wiphy *,  struct net_device *, const u8 *);
-	int (*remain_on_channel)(struct wiphy *,  struct wireless_dev *, struct linuxkpi_ieee80211_channel *, unsigned int,  u64 *);
-	int (*start_p2p_device)(struct wiphy *,  struct wireless_dev *);
-	void (*stop_p2p_device)(struct wiphy *,  struct wireless_dev *);
+	int (*tdls_oper)(struct wiphy *, struct net_device *, const uint8_t *, enum nl80211_tdls_operation);
+	int (*update_connect_params)(struct wiphy *, struct net_device *, struct cfg80211_connect_params *, uint32_t);
+	int (*set_pmk)(struct wiphy *, struct net_device *, const struct cfg80211_pmk_conf *);
+	int (*del_pmk)(struct wiphy *, struct net_device *, const uint8_t *);
+	int (*remain_on_channel)(struct wiphy *, struct wireless_dev *, struct linuxkpi_ieee80211_channel *, unsigned int, uint64_t *);
+	int (*start_p2p_device)(struct wiphy *, struct wireless_dev *);
+	void (*stop_p2p_device)(struct wiphy *, struct wireless_dev *);
+	int (*dump_survey)(struct wiphy *, struct net_device *, int, struct survey_info *);
+	int (*external_auth)(struct wiphy *, struct net_device *, struct cfg80211_external_auth_params *);
+        int (*set_cqm_rssi_range_config)(struct wiphy *, struct net_device *, int, int);
+	int (*change_bss)(struct wiphy *, struct net_device *, struct bss_parameters *);
 };
 
 
@@ -1162,6 +1305,7 @@ struct cfg80211_ops {
 
 struct wiphy *linuxkpi_wiphy_new(const struct cfg80211_ops *, size_t);
 void linuxkpi_wiphy_free(struct wiphy *wiphy);
+int linuxkpi_80211_wiphy_register(struct wiphy *);
 
 void linuxkpi_wiphy_work_queue(struct wiphy *, struct wiphy_work *);
 void linuxkpi_wiphy_work_cancel(struct wiphy *, struct wiphy_work *);
@@ -1170,6 +1314,8 @@ void lkpi_wiphy_delayed_work_timer(struct timer_list *);
 void linuxkpi_wiphy_delayed_work_queue(struct wiphy *,
     struct wiphy_delayed_work *, unsigned long);
 void linuxkpi_wiphy_delayed_work_cancel(struct wiphy *,
+    struct wiphy_delayed_work *);
+void linuxkpi_wiphy_delayed_work_flush(struct wiphy *,
     struct wiphy_delayed_work *);
 
 int linuxkpi_regulatory_set_wiphy_regd_sync(struct wiphy *wiphy,
@@ -1224,8 +1370,11 @@ wiphy_dev(struct wiphy *wiphy)
 	return (wiphy->dev);
 }
 
-#define	wiphy_dereference(_w, p)					\
-    rcu_dereference_check(p, lockdep_is_held(&(_w)->mtx))
+#define	wiphy_dereference(_w, _p)					\
+    rcu_dereference_protected(_p, lockdep_is_held(&(_w)->mtx))
+
+#define	rcu_dereference_wiphy(_w, _p)					\
+    rcu_dereference_check(_p, lockdep_is_held(&(_w)->mtx))
 
 #define	wiphy_lock(_w)		mutex_lock(&(_w)->mtx)
 #define	wiphy_unlock(_w)	mutex_unlock(&(_w)->mtx)
@@ -1233,6 +1382,21 @@ wiphy_dev(struct wiphy *wiphy)
 static __inline void
 wiphy_rfkill_set_hw_state_reason(struct wiphy *wiphy, bool blocked,
     enum rfkill_hard_block_reasons reason)
+{
+	TODO();
+}
+
+/* -------------------------------------------------------------------------- */
+
+static inline int
+cfg80211_register_netdevice(struct net_device *ndev)
+{
+	TODO();
+	return (-ENXIO);
+}
+
+static inline void
+cfg80211_unregister_netdevice(struct net_device *ndev)
 {
 	TODO();
 }
@@ -1296,21 +1460,20 @@ reg_query_regdb_wmm(uint8_t *alpha2, uint32_t center_freq,
     struct ieee80211_reg_rule *rule)
 {
 
-	/* ETSI has special rules. FreeBSD regdb needs to learn about them. */
-	TODO();
+	IMPROVE("regdomain.xml needs to grow wmm information for at least ETSI");
 
-	return (-ENXIO);
+	return (-ENODATA);
 }
 
-static __inline const u8 *
-cfg80211_find_ie_match(uint32_t f, const u8 *ies, size_t ies_len,
-    const u8 *match, int x, int y)
+static __inline const uint8_t *
+cfg80211_find_ie_match(uint32_t f, const uint8_t *ies, size_t ies_len,
+    const uint8_t *match, int x, int y)
 {
 	TODO();
 	return (NULL);
 }
 
-static __inline const u8 *
+static __inline const uint8_t *
 cfg80211_find_ie(uint8_t eid, const uint8_t *ie, uint32_t ielen)
 {
 	TODO();
@@ -1332,6 +1495,36 @@ cfg80211_pmsr_report(struct wireless_dev *wdev,
 	TODO();
 }
 
+static inline int
+nl80211_chan_width_to_mhz(enum nl80211_chan_width width)
+{
+	switch (width) {
+	case NL80211_CHAN_WIDTH_5:
+		return (5);
+		break;
+	case NL80211_CHAN_WIDTH_10:
+		return (10);
+		break;
+	case NL80211_CHAN_WIDTH_20_NOHT:
+	case NL80211_CHAN_WIDTH_20:
+		return (20);
+		break;
+	case NL80211_CHAN_WIDTH_40:
+		return (40);
+		break;
+	case NL80211_CHAN_WIDTH_80:
+	case NL80211_CHAN_WIDTH_80P80:
+		return (80);
+		break;
+	case NL80211_CHAN_WIDTH_160:
+		return (160);
+		break;
+	case NL80211_CHAN_WIDTH_320:
+		return (320);
+		break;
+	}
+}
+
 static inline void
 cfg80211_chandef_create(struct cfg80211_chan_def *chandef,
     struct linuxkpi_ieee80211_channel *chan, enum nl80211_channel_type chan_type)
@@ -1340,7 +1533,7 @@ cfg80211_chandef_create(struct cfg80211_chan_def *chandef,
 	KASSERT(chandef != NULL, ("%s: chandef is NULL\n", __func__));
 	KASSERT(chan != NULL, ("%s: chan is NULL\n", __func__));
 
-	/* memset(chandef, 0, sizeof(*chandef)); */
+	memset(chandef, 0, sizeof(*chandef));
 	chandef->chan = chan;
 	chandef->center_freq1 = chan->center_freq;
 	/* chandef->width, center_freq2, punctured */
@@ -1370,6 +1563,32 @@ cfg80211_chandef_valid(const struct cfg80211_chan_def *chandef)
 	return (false);
 }
 
+static inline enum nl80211_channel_type
+cfg80211_get_chandef_type(const struct cfg80211_chan_def *chandef)
+{
+
+	switch (chandef->width) {
+	case NL80211_CHAN_WIDTH_20_NOHT:
+		return (NL80211_CHAN_NO_HT);
+	case NL80211_CHAN_WIDTH_20:
+		return (NL80211_CHAN_HT20);
+	case NL80211_CHAN_WIDTH_40:
+		if (chandef->center_freq1 < chandef->chan->center_freq)
+			return (NL80211_CHAN_HT40MINUS);
+		return (NL80211_CHAN_HT40PLUS);
+	default:
+		WARN_ONCE(1, "%s: invalid chandef width %d\n",
+		    __func__, chandef->width);
+		return (NL80211_CHAN_NO_HT);
+	}
+}
+
+static inline int
+cfg80211_chandef_get_width(const struct cfg80211_chan_def *chandef)
+{
+	return (nl80211_chan_width_to_mhz(chandef->width));
+}
+
 static __inline bool
 cfg80211_chandef_dfs_usable(struct wiphy *wiphy, const struct cfg80211_chan_def *chandef)
 {
@@ -1382,6 +1601,13 @@ cfg80211_chandef_dfs_cac_time(struct wiphy *wiphy, const struct cfg80211_chan_de
 {
 	TODO();
 	return (0);
+}
+
+static inline void
+cfg80211_cac_event(struct net_device *netdev, const struct cfg80211_chan_def *chandef,
+    enum nl80211_radar_event re, gfp_t gfp, unsigned int link_id)
+{
+	TODO();
 }
 
 static __inline bool
@@ -1629,8 +1855,7 @@ wiphy_net(struct wiphy *wiphy)
 static __inline int
 wiphy_register(struct wiphy *wiphy)
 {
-	TODO();
-	return (0);
+	return (linuxkpi_80211_wiphy_register(wiphy));
 }
 
 static __inline void
@@ -1681,8 +1906,8 @@ cfg80211_disconnected(struct net_device *ndev, uint16_t reason,
 }
 
 static __inline int
-cfg80211_get_p2p_attr(const u8 *ie, u32 ie_len,
-    enum ieee80211_p2p_attr_ids attr, u8 *p, size_t p_len)
+cfg80211_get_p2p_attr(const uint8_t *ie, uint32_t ie_len,
+    enum ieee80211_p2p_attr_ids attr, uint8_t *p, size_t p_len)
 {
 	TODO();
 	return (-1);
@@ -1718,13 +1943,13 @@ cfg80211_inform_bss_data(struct wiphy *wiphy,
 
 static __inline void
 cfg80211_mgmt_tx_status(struct wireless_dev *wdev, uint64_t cookie,
-    const u8 *buf, size_t len, bool ack, gfp_t gfp)
+    const uint8_t *buf, size_t len, bool ack, gfp_t gfp)
 {
 	TODO();
 }
 
 static __inline void
-cfg80211_michael_mic_failure(struct net_device *ndev, const uint8_t *addr,
+cfg80211_michael_mic_failure(struct net_device *ndev, const uint8_t addr[ETH_ALEN],
     enum nl80211_key_type key_type, int _x, void *p, gfp_t gfp)
 {
 	TODO();
@@ -1744,8 +1969,8 @@ cfg80211_del_sta(struct net_device *ndev, const uint8_t *addr, gfp_t gfp)
 }
 
 static __inline void
-cfg80211_port_authorized(struct net_device *ndev, const uint8_t *bssid,
-    gfp_t gfp)
+cfg80211_port_authorized(struct net_device *ndev, const uint8_t *addr,
+    const uint8_t *bitmap, uint8_t len, gfp_t gfp)
 {
 	TODO();
 }
@@ -1928,7 +2153,7 @@ cfg80211_background_radar_event(struct wiphy *wiphy,
 	TODO();
 }
 
-static __inline const u8 *
+static __inline const uint8_t *
 cfg80211_find_ext_ie(uint8_t eid, const uint8_t *p, size_t len)
 {
 	TODO();
@@ -2026,6 +2251,14 @@ cfg80211_get_iftype_ext_capa(struct wiphy *wiphy, enum nl80211_iftype iftype)
 	return (NULL);
 }
 
+static inline int
+cfg80211_external_auth_request(struct net_device *ndev,
+    struct cfg80211_external_auth_params *params, gfp_t gfp)
+{
+	TODO();
+	return (-ENXIO);
+}
+
 static inline uint16_t
 ieee80211_get_he_6ghz_capa(const struct ieee80211_supported_band *sband,
     enum nl80211_iftype iftype)
@@ -2034,35 +2267,17 @@ ieee80211_get_he_6ghz_capa(const struct ieee80211_supported_band *sband,
 	return (0);
 }
 
-static inline int
-nl80211_chan_width_to_mhz(enum nl80211_chan_width width)
+static __inline ssize_t
+wiphy_locked_debugfs_read(struct wiphy *wiphy, struct file *file,
+    char *buf, size_t bufsize, const char __user *userbuf, size_t count,
+    loff_t *ppos,
+    ssize_t (*handler)(struct wiphy *, struct file *, char *, size_t, void *),
+    void *data)
 {
-	switch (width) {
-	case NL80211_CHAN_WIDTH_5:
-		return (5);
-		break;
-	case NL80211_CHAN_WIDTH_10:
-		return (10);
-		break;
-	case NL80211_CHAN_WIDTH_20_NOHT:
-	case NL80211_CHAN_WIDTH_20:
-		return (20);
-		break;
-	case NL80211_CHAN_WIDTH_40:
-		return (40);
-		break;
-	case NL80211_CHAN_WIDTH_80:
-	case NL80211_CHAN_WIDTH_80P80:
-		return (80);
-		break;
-	case NL80211_CHAN_WIDTH_160:
-		return (160);
-		break;
-	case NL80211_CHAN_WIDTH_320:
-		return (320);
-		break;
-	}
+	TODO();
+	return (-ENXIO);
 }
+
 
 static __inline ssize_t
 wiphy_locked_debugfs_write(struct wiphy *wiphy, struct file *file,
@@ -2072,6 +2287,29 @@ wiphy_locked_debugfs_write(struct wiphy *wiphy, struct file *file,
 {
 	TODO();
 	return (-ENXIO);
+}
+
+static inline void
+cfg80211_cqm_rssi_notify(struct net_device *dev,
+    enum nl80211_cqm_rssi_threshold_event rssi_te, int32_t rssi, gfp_t gfp)
+{
+	TODO();
+}
+
+/* -------------------------------------------------------------------------- */
+
+static inline void
+cfg80211_nan_cluster_joined(struct wireless_dev *wdev, const uint8_t *cluster_id,
+    bool new_cluster, gfp_t gfp)
+{
+	TODO("NAN");
+}
+
+static inline void
+cfg80211_next_nan_dw_notif(struct wireless_dev *wdev,
+    struct linuxkpi_ieee80211_channel *chan, gfp_t gfp)
+{
+	TODO("NAN");
 }
 
 /* -------------------------------------------------------------------------- */
@@ -2119,6 +2357,12 @@ static inline void
 wiphy_delayed_work_cancel(struct wiphy *wiphy, struct wiphy_delayed_work *wdwk)
 {
 	linuxkpi_wiphy_delayed_work_cancel(wiphy, wdwk);
+}
+
+static inline void
+wiphy_delayed_work_flush(struct wiphy *wiphy, struct wiphy_delayed_work *wdwk)
+{
+	linuxkpi_wiphy_delayed_work_flush(wiphy, wdwk);
 }
 
 /* -------------------------------------------------------------------------- */

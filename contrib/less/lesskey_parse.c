@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 1984-2025  Mark Nudelman
+ * Copyright (C) 1984-2026  Mark Nudelman
  *
  * You may distribute under the terms of either the GNU General Public
  * License or the Less License, as specified in the README file.
@@ -7,21 +7,21 @@
  * For more information, see the README file.
  */
 
-#include "defines.h"
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
+#include "less.h"
 #include "lesskey.h"
 #include "cmd.h"
-#include "xbuf.h"
+
+#if USERFILE
 
 #define CONTROL(c)      ((c)&037)
 #define ESC             CONTROL('[')
 
-extern void lesskey_parse_error(char *msg);
-extern char *homefile(char *filename);
-extern void *ecalloc(size_t count, size_t size);
-extern int lstrtoi(char *str, char **end, int radix);
+struct lesskey_cmdname
+{
+	constant char *cn_name;
+	int cn_action;
+};
+
 extern char version[];
 
 static int linenum;
@@ -53,6 +53,7 @@ static constant struct lesskey_cmdname cmdnames[] =
 	{ "first-cmd",            A_FIRSTCMD },
 	{ "firstcmd",             A_FIRSTCMD },
 	{ "flush-repaint",        A_FREPAINT },
+	{ "forw-bell-hilite",     A_F_FOREVER_BELL },
 	{ "forw-bracket",         A_F_BRACKET },
 	{ "forw-forever",         A_F_FOREVER },
 	{ "forw-line",            A_F_LINE },
@@ -68,6 +69,7 @@ static constant struct lesskey_cmdname cmdnames[] =
 	{ "goto-end-buffered",    A_GOEND_BUF },
 	{ "goto-line",            A_GOLINE },
 	{ "goto-mark",            A_GOMARK },
+	{ "goto-pos",             A_GOPOS },
 	{ "help",                 A_HELP },
 	{ "index-file",           A_INDEX_FILE },
 	{ "invalid",              A_UINVALID },
@@ -80,6 +82,7 @@ static constant struct lesskey_cmdname cmdnames[] =
 	{ "noaction",             A_NOACTION },
 	{ "osc8-forw-search",     A_OSC8_F_SEARCH },
 	{ "osc8-back-search",     A_OSC8_B_SEARCH },
+	{ "osc8-jump",            A_OSC8_JUMP },
 	{ "osc8-open",            A_OSC8_OPEN },
 	{ "percent",              A_PERCENT },
 	{ "pipe",                 A_PIPE },
@@ -95,6 +98,7 @@ static constant struct lesskey_cmdname cmdnames[] =
 	{ "reverse-search",       A_REVERSE_SEARCH },
 	{ "reverse-search-all",   A_T_REVERSE_SEARCH },
 	{ "right-scroll",         A_RSHIFT },
+	{ "right-limit-scroll",   A_RSHIFT_LIMIT },
 	{ "set-mark",             A_SETMARK },
 	{ "set-mark-bottom",      A_SETMARKBOT },
 	{ "shell",                A_SHELL },
@@ -125,6 +129,7 @@ static constant struct lesskey_cmdname editnames[] =
 	{ "literal",            EC_LITERAL },
 	{ "mouse",              EC_X11MOUSE },
 	{ "mouse6",             EC_X116MOUSE },
+	{ "noaction",           A_NOACTION },
 	{ "right",              EC_RIGHT },
 	{ "up",                 EC_UP },
 	{ "word-backspace",     EC_W_BACKSPACE },
@@ -247,6 +252,8 @@ static constant char * tstr(char **pp, int xlate)
 		case 'k':
 			if (xlate)
 			{
+				char *seq = p-1;
+				ch = 0;
 				switch (*++p)
 				{
 				case 'b': ch = SK_BACKSPACE; break;
@@ -254,20 +261,83 @@ static constant char * tstr(char **pp, int xlate)
 				case 'd': ch = SK_DOWN_ARROW; break;
 				case 'D': ch = SK_PAGE_DOWN; break;
 				case 'e': ch = SK_END; break;
+				case 'E': ch = SK_CTL_END; break;
+				case 'F': ch = SK_SHIFT_END; break;
 				case 'h': ch = SK_HOME; break;
+				case 'H': ch = SK_CTL_HOME; break;
+				case 'I': ch = SK_SHIFT_HOME; break;
 				case 'i': ch = SK_INSERT; break;
 				case 'l': ch = SK_LEFT_ARROW; break;
 				case 'L': ch = SK_CTL_LEFT_ARROW; break;
+				case 'M': ch = SK_SHIFT_LEFT_ARROW; break;
 				case 'r': ch = SK_RIGHT_ARROW; break;
 				case 'R': ch = SK_CTL_RIGHT_ARROW; break;
+				case 'S': ch = SK_SHIFT_RIGHT_ARROW; break;
 				case 't': ch = SK_BACKTAB; break;
 				case 'u': ch = SK_UP_ARROW; break;
 				case 'U': ch = SK_PAGE_UP; break;
 				case 'x': ch = SK_DELETE; break;
 				case 'X': ch = SK_CTL_DELETE; break;
 				case '1': ch = SK_F1; break;
-				default:
-					parse_error("invalid escape sequence \"\\k%s\"", char_string(buf, *p, 0));
+				case '^':
+					switch (*++p)
+					{
+					case 'b': ch = SK_CTL_BACKSPACE; break;
+					case 'd': ch = SK_CTL_DOWN_ARROW; break;
+					case 'D': ch = SK_CTL_PAGE_DOWN; break;
+					case 'e': ch = SK_CTL_END; break;
+					case 'h': ch = SK_CTL_HOME; break;
+					case 'l': ch = SK_CTL_LEFT_ARROW; break;
+					case 'r': ch = SK_CTL_RIGHT_ARROW; break;
+					case 'u': ch = SK_CTL_UP_ARROW; break;
+					case 'U': ch = SK_CTL_PAGE_UP; break;
+					case 'x': ch = SK_CTL_DELETE; break;
+					}
+					break;
+				case '+':
+					switch (*++p)
+					{
+					case 'd': ch = SK_SHIFT_DOWN_ARROW; break;
+					case 'D': ch = SK_SHIFT_PAGE_DOWN; break;
+					case 'e': ch = SK_SHIFT_END; break;
+					case 'h': ch = SK_SHIFT_HOME; break;
+					case 'l': ch = SK_SHIFT_LEFT_ARROW; break;
+					case 'r': ch = SK_SHIFT_RIGHT_ARROW; break;
+					case 'u': ch = SK_SHIFT_UP_ARROW; break;
+					case 'U': ch = SK_SHIFT_PAGE_UP; break;
+					case 'x': ch = SK_SHIFT_DELETE; break;
+					}
+					break;
+				case 'p':
+					switch (*++p)
+					{
+						case '1': ch = SK_PAD_DL; break;
+						case '2': ch = SK_PAD_D; break;
+						case '3': ch = SK_PAD_DR; break;
+						case '4': ch = SK_PAD_L; break;
+						case '5': ch = SK_PAD_CENTER; break;
+						case '6': ch = SK_PAD_R; break;
+						case '7': ch = SK_PAD_UL; break;
+						case '8': ch = SK_PAD_U; break;
+						case '9': ch = SK_PAD_UR; break;
+						case '0': ch = SK_PAD_ZERO; break;
+						case '*': ch = SK_PAD_STAR; break;
+						case '/': ch = SK_PAD_SLASH; break;
+						case '-': ch = SK_PAD_DASH; break;
+						case '+': ch = SK_PAD_PLUS; break;
+						case '.': ch = SK_PAD_DOT; break;
+						case ',': ch = SK_PAD_COMMA; break;
+						case 'e': ch = SK_PAD_ENTER; break;
+					}
+					break;
+				}
+				if (ch == 0)
+				{
+					char seq_buf[8];
+					size_t len = p - seq + 1;
+					strncpy(seq_buf, seq, len);
+					seq_buf[len] = '\0';
+					parse_error(LM(invalid_escape_sequence), seq_buf);
 					*pp = increment_pointer(p);
 					return ("");
 				}
@@ -313,16 +383,6 @@ static constant char * tstr(char **pp, int xlate)
 static int issp(char ch)
 {
 	return (ch == ' ' || ch == '\t');
-}
-
-/*
- * Skip leading spaces in a string.
- */
-static char * skipsp(char *s)
-{
-	while (issp(*s))
-		s++;
-	return (s);
 }
 
 /*
@@ -414,14 +474,14 @@ static char * version_line(char *s)
 	case '=': if (*s == '=') { s++; } break;
 	case '!': if (*s == '=') { s++; } break;
 	default: 
-		parse_error("invalid operator '%s' in #version line", char_string(buf, op, 0));
+		parse_error(LM(invalid_operator_X_in_version_line), char_string(buf, op, 0));
 		return (NULL);
 	}
 	s = skipsp(s);
 	ver = lstrtoi(s, &e, 10);
 	if (e == s)
 	{
-		parse_error("non-numeric version number in #version line", "");
+		parse_error(LM(non_numeric_version_number_in_version_line), "");
 		return (NULL);
 	}
 	if (!match_version(op, ver))
@@ -474,7 +534,7 @@ static int findaction(char *actname, struct lesskey_tables *tables)
 	for (i = 0;  tables->currtable->names[i].cn_name != NULL;  i++)
 		if (strcmp(tables->currtable->names[i].cn_name, actname) == 0)
 			return (tables->currtable->names[i].cn_action);
-	parse_error("unknown action: \"%s\"", actname);
+	parse_error(LM(unknown_action_X), actname);
 	return (A_INVALID);
 }
 
@@ -513,7 +573,7 @@ static void parse_cmdline(char *p, struct lesskey_tables *tables)
 	p = skipsp(p);
 	if (*p == '\0')
 	{
-		parse_error("missing action", "");
+		parse_error(LM(missing_action), "");
 		return;
 	}
 	actname = p;
@@ -581,7 +641,7 @@ static void parse_varline(char *line, struct lesskey_tables *tables)
 		p = skipsp(p);
 		if (*p++ != '=')
 		{
-			parse_error("missing = in variable definition", "");
+			parse_error(LM(missing_eq_in_variable_definition), "");
 			return;
 		}
 		add_cmd_char(EV_OK|A_EXTRA, tables);
@@ -626,7 +686,7 @@ static void parse_line(char *line, struct lesskey_tables *tables)
 /*
  * Parse a lesskey source file and store result in tables.
  */
-int parse_lesskey(constant char *infile, struct lesskey_tables *tables)
+public int parse_lesskey(constant char *infile, struct lesskey_tables *tables)
 {
 	FILE *desc;
 	char line[1024];
@@ -648,7 +708,7 @@ int parse_lesskey(constant char *infile, struct lesskey_tables *tables)
 		desc = stdin;
 	else if ((desc = fopen(lesskey_file, "r")) == NULL)
 	{
-		/* parse_error("cannot open lesskey file %s", lesskey_file); */
+		/* No error message since we try several possible files. */
 		errors = -1;
 	}
 
@@ -673,7 +733,7 @@ int parse_lesskey(constant char *infile, struct lesskey_tables *tables)
 /*
  * Parse a lesskey source content and store result in tables.
  */
-int parse_lesskey_content(constant char *content, struct lesskey_tables *tables)
+public int parse_lesskey_content(constant char *content, struct lesskey_tables *tables)
 {
 	size_t cx = 0;
 
@@ -704,3 +764,5 @@ int parse_lesskey_content(constant char *content, struct lesskey_tables *tables)
 	lesskey_file = NULL;
 	return (errors);
 }
+
+#endif /* USERFILE */

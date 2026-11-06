@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -140,12 +130,6 @@ extern "C" {
 struct dmu_buf_impl;
 struct objset;
 struct zio;
-
-enum dnode_dirtycontext {
-	DN_UNDIRTIED,
-	DN_DIRTY_OPEN,
-	DN_DIRTY_SYNC
-};
 
 /* Is dn_used in bytes?  if not, it's in multiples of SPA_MINBLOCKSIZE */
 #define	DNODE_FLAG_USED_BYTES			(1 << 0)
@@ -340,11 +324,9 @@ struct dnode {
 	uint64_t dn_allocated_txg;
 	uint64_t dn_free_txg;
 	uint64_t dn_assigned_txg;
-	uint64_t dn_dirty_txg;			/* txg dnode was last dirtied */
+	uint8_t dn_dirtycnt;
 	kcondvar_t dn_notxholds;
 	kcondvar_t dn_nodnholds;
-	enum dnode_dirtycontext dn_dirtyctx;
-	const void *dn_dirtyctx_firstset;	/* dbg: contents meaningless */
 
 	/* protected by own devices */
 	zfs_refcount_t dn_tx_holds;
@@ -440,7 +422,6 @@ void dnode_rele_and_unlock(dnode_t *dn, const void *tag, boolean_t evicting);
 int dnode_try_claim(objset_t *os, uint64_t object, int slots);
 boolean_t dnode_is_dirty(dnode_t *dn);
 void dnode_setdirty(dnode_t *dn, dmu_tx_t *tx);
-void dnode_set_dirtyctx(dnode_t *dn, dmu_tx_t *tx, const void *tag);
 void dnode_sync(dnode_t *dn, dmu_tx_t *tx);
 void dnode_allocate(dnode_t *dn, dmu_object_type_t ot, int blocksize, int ibs,
     dmu_object_type_t bonustype, int bonuslen, int dn_slots, dmu_tx_t *tx);
@@ -458,6 +439,8 @@ void dnode_diduse_space(dnode_t *dn, int64_t space);
 void dnode_new_blkid(dnode_t *dn, uint64_t blkid, dmu_tx_t *tx,
     boolean_t have_read, boolean_t force);
 uint64_t dnode_block_freed(dnode_t *dn, uint64_t blkid);
+uint64_t dnode_block_freed_after(dnode_t *dn, uint64_t blkid,
+    uint64_t override_txg);
 void dnode_init(void);
 void dnode_fini(void);
 int dnode_next_offset(dnode_t *dn, int flags, uint64_t *off,
@@ -467,9 +450,6 @@ void dnode_evict_bonus(dnode_t *dn);
 void dnode_free_interior_slots(dnode_t *dn);
 
 void dnode_set_storage_type(dnode_t *dn, dmu_object_type_t type);
-
-#define	DNODE_IS_DIRTY(_dn)						\
-	((_dn)->dn_dirty_txg >= spa_syncing_txg((_dn)->dn_objset->os_spa))
 
 #define	DNODE_LEVEL_IS_CACHEABLE(_dn, _level)				\
 	((_dn)->dn_objset->os_primary_cache == ZFS_CACHE_ALL ||		\
@@ -663,6 +643,19 @@ extern dnode_sums_t dnode_sums;
 #define	FREE_VERIFY(db, start, end, tx)
 
 #endif
+
+/*
+ * Assert that we are not modifying the range tree for the syncing TXG from
+ * a non-syncing thread. We verify that either the transaction group is
+ * strictly newer than the one currently syncing (meaning it's being modified
+ * in open context), OR the current thread is the sync thread itself. If this
+ * triggers, it indicates a race where dn_free_ranges is being modified while
+ * dnode_sync() may be iterating over it.
+ */
+#define	FREE_RANGE_VERIFY(tx, dn) \
+	ASSERT((tx)->tx_txg > spa_syncing_txg((dn)->dn_objset->os_spa) || \
+	    dmu_objset_pool((dn)->dn_objset)->dp_tx.tx_sync_thread == \
+	    curthread)
 
 #ifdef	__cplusplus
 }

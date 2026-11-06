@@ -32,6 +32,8 @@
 #include <stdbool.h>
 #include <sys/queue.h>
 
+#include <Protocol/BlockIo.h>
+
 extern EFI_HANDLE		IH;
 extern EFI_SYSTEM_TABLE		*ST;
 extern EFI_BOOT_SERVICES	*BS;
@@ -66,6 +68,7 @@ pdinfo_list_t *efiblk_get_pdinfo_list(struct devsw *dev);
 pdinfo_t *efiblk_get_pdinfo(struct devdesc *dev);
 pdinfo_t *efiblk_get_pdinfo_by_handle(EFI_HANDLE h);
 pdinfo_t *efiblk_get_pdinfo_by_device_path(EFI_DEVICE_PATH *path);
+void efiblk_memdisk_preload(void);
 
 /* libefi.c */
 void *efi_get_table(EFI_GUID *tbl);
@@ -102,6 +105,7 @@ bool efi_devpath_is_prefix(EFI_DEVICE_PATH *, EFI_DEVICE_PATH *);
 CHAR16 *efi_devpath_name(EFI_DEVICE_PATH *);
 void efi_free_devpath_name(CHAR16 *);
 bool efi_devpath_same_disk(EFI_DEVICE_PATH *, EFI_DEVICE_PATH *);
+bool efi_devpath_get_mac(EFI_DEVICE_PATH *, uint8_t[6]);
 EFI_DEVICE_PATH *efi_devpath_to_media_path(EFI_DEVICE_PATH *);
 UINTN efi_devpath_length(EFI_DEVICE_PATH *);
 EFI_DEVICE_PATH *efi_name_to_devpath(const char *path);
@@ -119,7 +123,7 @@ int parse_uefi_con_out(void);
 EFI_STATUS efi_main(EFI_HANDLE Ximage, EFI_SYSTEM_TABLE* Xsystab);
 
 EFI_STATUS main(int argc, CHAR16 *argv[]);
-void efi_exit(EFI_STATUS status) __dead2;
+void efi_exit(EFI_STATUS status);
 
 /* EFI environment initialization. */
 void efi_init_environment(void);

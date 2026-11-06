@@ -294,24 +294,30 @@ trap(struct trapframe *frame)
 		case EXC_FPU:
 			KASSERT((td->td_pcb->pcb_flags & PCB_FPU) != PCB_FPU,
 			    ("FPU already enabled for thread"));
+			critical_enter();
 			enable_fpu(td);
+			critical_exit();
 			break;
 
 		case EXC_VEC:
 			KASSERT((td->td_pcb->pcb_flags & PCB_VEC) != PCB_VEC,
 			    ("Altivec already enabled for thread"));
+			critical_enter();
 			enable_vec(td);
+			critical_exit();
 			break;
 
 		case EXC_VSX:
 			KASSERT((td->td_pcb->pcb_flags & PCB_VSX) != PCB_VSX,
 			    ("VSX already enabled for thread"));
+			critical_enter();
 			if (!(td->td_pcb->pcb_flags & PCB_VEC))
 				enable_vec(td);
 			if (td->td_pcb->pcb_flags & PCB_FPU)
 				save_fpu(td);
 			td->td_pcb->pcb_flags |= PCB_VSX;
 			enable_fpu(td);
+			critical_exit();
 			break;
 
 		case EXC_FAC:
@@ -861,41 +867,6 @@ fix_unaligned(struct thread *td, struct trapframe *frame)
 	int		indicator, reg;
 	double		*fpr;
 
-#ifdef __SPE__
-	indicator = (frame->cpu.booke.esr & (ESR_ST|ESR_SPE));
-	if (indicator & ESR_SPE) {
-		if (copyin((void *)frame->srr0, &inst, sizeof(inst)) != 0)
-			return (-1);
-		reg = EXC_ALI_INST_RST(inst);
-		fpr = (double *)td->td_pcb->pcb_vec.vr[reg];
-		fputhread = PCPU_GET(vecthread);
-
-		/* Juggle the SPE to ensure that we've initialized
-		 * the registers, and that their current state is in
-		 * the PCB.
-		 */
-		if (fputhread != td) {
-			if (fputhread)
-				save_vec(fputhread);
-			enable_vec(td);
-		}
-		save_vec(td);
-
-		if (!(indicator & ESR_ST)) {
-			if (copyin((void *)frame->dar, fpr,
-			    sizeof(double)) != 0)
-				return (-1);
-			frame->fixreg[reg] = td->td_pcb->pcb_vec.vr[reg][1];
-			enable_vec(td);
-		} else {
-			td->td_pcb->pcb_vec.vr[reg][1] = frame->fixreg[reg];
-			if (copyout(fpr, (void *)frame->dar,
-			    sizeof(double)) != 0)
-				return (-1);
-		}
-		return (0);
-	}
-#else
 #ifdef BOOKE
 	indicator = (frame->cpu.booke.esr & ESR_ST) ? EXC_ALI_STFD : EXC_ALI_LFD;
 #else
@@ -939,7 +910,6 @@ fix_unaligned(struct thread *td, struct trapframe *frame)
 		return (0);
 		break;
 	}
-#endif
 
 	return (-1);
 }

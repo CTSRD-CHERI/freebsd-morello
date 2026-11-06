@@ -35,6 +35,7 @@
 
 dir=$RUNDIR
 nfiles=10000
+mkdir -p $dir && chmod 777 $dir
 [ `df -i $dir | tail -1 | awk '{print $7}'` -lt $nfiles ] && exit 0
 
 odir=`pwd`
@@ -43,8 +44,6 @@ sed '1,/^EOF/d' < $odir/$0 > fdatasync2.c
 rm -f /tmp/fdatasync2
 mycc -o fdatasync2 -Wall -Wextra -O2 -g fdatasync2.c -lpthread || exit 1
 rm -f fdatasync2.c
-
-mkdir -p $dir && chmod 777 $dir
 
 cd $dir
 jot $nfiles | xargs touch
@@ -177,7 +176,7 @@ main(int argc, char **argv)
 
 	if ((pw = getpwnam("nobody")) == NULL)
 		err(1, "failed to resolve nobody");
-	if (setgroups(1, &pw->pw_gid) ||
+	if (setgroups(0, NULL) ||
 	    setegid(pw->pw_gid) || setgid(pw->pw_gid) ||
 	    seteuid(pw->pw_uid) || setuid(pw->pw_uid))
 		err(1, "Can't drop privileges to \"nobody\"");

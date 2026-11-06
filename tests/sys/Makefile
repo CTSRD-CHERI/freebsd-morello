@@ -4,6 +4,7 @@ TESTSDIR=		${TESTSBASE}/sys
 
 TESTS_SUBDIRS+=		acl
 TESTS_SUBDIRS+=		aio
+TESTS_SUBDIRS+=		arch
 TESTS_SUBDIRS+=		${_audit}
 TESTS_SUBDIRS+=		auditpipe
 TESTS_SUBDIRS+=		cam
@@ -11,6 +12,7 @@ TESTS_SUBDIRS+=		capsicum
 TESTS_SUBDIRS+=		${_cddl}
 # XXX: Currently broken in CI
 #TESTS_SUBDIRS+=		compat32
+TESTS_SUBDIRS+=		${_cpuctl}
 TESTS_SUBDIRS+=		devrandom
 TESTS_SUBDIRS+=		fifo
 TESTS_SUBDIRS+=		file
@@ -29,6 +31,7 @@ TESTS_SUBDIRS+=		netlink
 TESTS_SUBDIRS+=		netmap
 TESTS_SUBDIRS+=		netpfil
 TESTS_SUBDIRS+=		opencrypto
+TESTS_SUBDIRS+=		${_pmc}
 TESTS_SUBDIRS+=		posixshm
 TESTS_SUBDIRS+=		ses
 TESTS_SUBDIRS+=		sound
@@ -45,8 +48,16 @@ _audit=	audit
 _cddl=	cddl
 .endif
 
+.if ${MACHINE_CPUARCH} == "amd64" || ${MACHINE_CPUARCH} == "i386"
+_cpuctl=	cpuctl
+.endif
+
 .if ${MK_NETGRAPH} != "no"
 _netgraph= netgraph
+.endif
+
+.if ${MK_PMC} != "no"
+_pmc=	pmc
 .endif
 
 # Items not integrated into kyua runs by default

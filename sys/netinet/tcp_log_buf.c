@@ -27,7 +27,6 @@
  *
  */
 
-#include <sys/cdefs.h>
 #include "opt_inet.h"
 #include "opt_ddb.h"
 #include <sys/param.h>
@@ -61,6 +60,9 @@
 #include <net/vnet.h>
 
 #include <netinet/in.h>
+#ifdef DDB
+#include <netinet/in_kdtrace.h>
+#endif
 #include <netinet/in_pcb.h>
 #include <netinet/in_var.h>
 #include <netinet/tcp_var.h>
@@ -515,12 +517,12 @@ tcp_log_remove_id_node(struct inpcb *inp, struct tcpcb *tp,
 }
 
 #define	RECHECK_INP_CLEAN(cleanup)	do {			\
-	if (inp->inp_flags & INP_DROPPED) {			\
+	tp = intotcpcb(inp);					\
+	if (tp->t_flags & TF_DISCONNECTED) {			\
 		rv = ECONNRESET;				\
 		cleanup;					\
 		goto done;					\
 	}							\
-	tp = intotcpcb(inp);					\
 } while (0)
 
 #define	RECHECK_INP()	RECHECK_INP_CLEAN(/* noop */)
@@ -1447,6 +1449,7 @@ tcp_log_tcpcbfini(struct tcpcb *tp)
 		int i;
 
 		memset(&log, 0, sizeof(log));
+		microuptime(&tv);
 		if (tp->t_flags2 & TF2_TCP_ACCOUNTING) {
 			for (i = 0; i < TCP_NUM_CNT_COUNTERS; i++) {
 				log.u_raw.u64_flex[i] = tp->tcp_cnt_counters[i];
@@ -2252,10 +2255,9 @@ tcp_log_getlogbuf(struct sockopt *sopt, struct tcpcb *tp)
 
 	if (error) {
 		/* Restore list */
+		tp = intotcpcb(inp);
 		INP_WLOCK(inp);
-		if ((inp->inp_flags & INP_DROPPED) == 0) {
-			tp = intotcpcb(inp);
-
+		if ((tp->t_flags & TF_DISCONNECTED) == 0) {
 			/* Merge the two lists. */
 			STAILQ_CONCAT(&log_tailq, &tp->t_logs);
 			tp->t_logs = log_tailq;
@@ -2264,10 +2266,10 @@ tcp_log_getlogbuf(struct sockopt *sopt, struct tcpcb *tp)
 		INP_WUNLOCK(inp);
 	} else {
 		/* Sanity check entries */
-		KASSERT(((caddr_t)out_entry - (caddr_t)sopt->sopt_val)  ==
+		KASSERT(((char *)out_entry - (char *)sopt->sopt_val)  ==
 		    outsize, ("%s: Actual output size (%zu) != "
 			"calculated output size (%zu)", __func__,
-			(size_t)((caddr_t)out_entry - (caddr_t)sopt->sopt_val),
+			(size_t)((char *)out_entry - (char *)sopt->sopt_val),
 			outsize));
 
 		/* Free the entries we just copied out. */
@@ -2277,8 +2279,8 @@ tcp_log_getlogbuf(struct sockopt *sopt, struct tcpcb *tp)
 		}
 	}
 
-	sopt->sopt_valsize = (size_t)((caddr_t)out_entry -
-	    (caddr_t)sopt->sopt_val);
+	sopt->sopt_valsize = (size_t)((char *)out_entry -
+	    (char *)sopt->sopt_val);
 	return (error);
 }
 
@@ -2426,14 +2428,14 @@ tcp_log_dump_tp_logbuf(struct tcpcb *tp, char *reason, int how, bool force)
 		 * may end up dropping some entries. That seems like a
 		 * small price to pay for safety.
 		 */
-		if (inp->inp_flags & INP_DROPPED) {
+		tp = intotcpcb(inp);
+		if (tp->t_flags & TF_DISCONNECTED) {
 			free(entry, M_TCPLOGDEV);
 #ifdef TCPLOG_DEBUG_COUNTERS
 			counter_u64_add(tcp_log_que_fail2, 1);
 #endif
 			return (ECONNRESET);
 		}
-		tp = intotcpcb(inp);
 		if (tp->t_lognum == 0) {
 			free(entry, M_TCPLOGDEV);
 			return (0);
@@ -2869,14 +2871,14 @@ tcp_log_sendfile(struct socket *so, off_t offset, size_t nbytes, int flags)
 
 	/* quick check to see if logging is enabled for this connection */
 	tp = intotcpcb(inp);
-	if ((inp->inp_flags & INP_DROPPED) ||
+	if ((tp->t_flags & TF_DISCONNECTED) ||
 	    (tp->_t_logstate == TCP_LOG_STATE_OFF)) {
 		return;
 	}
 
 	INP_WLOCK(inp);
 	/* double check log state now that we have the lock */
-	if (inp->inp_flags & INP_DROPPED)
+	if (tp->t_flags & TF_DISCONNECTED)
 		goto done;
 	if (tcp_bblogging_on(tp)) {
 		struct timeval tv;

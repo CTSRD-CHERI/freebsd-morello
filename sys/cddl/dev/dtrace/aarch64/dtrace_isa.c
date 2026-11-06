@@ -228,10 +228,22 @@ zero:
 int
 dtrace_getustackdepth(void)
 {
+	proc_t *p = curproc;
+	struct trapframe *tf;
+	uintptr_t pc, fp;
+	int n = 0;
 
-	printf("IMPLEMENT ME: %s\n", __func__);
+	if (p == NULL || (tf = curthread->td_frame) == NULL)
+		return (0);
 
-	return (0);
+	if (DTRACE_CPUFLAG_ISSET(CPU_DTRACE_FAULT))
+		return (-1);
+
+	pc = tf->tf_elr;
+	fp = tf->tf_x[29];
+	n += dtrace_getustack_common(NULL, 0, pc, fp);
+
+	return (n);
 }
 
 void
@@ -339,7 +351,7 @@ dtrace_copyin(uintptr_t uaddr, uintptr_t kaddr, size_t size,
 {
 
 	if (dtrace_copycheck(uaddr, kaddr, size))
-		dtrace_copy(uaddr, kaddr, size);
+		dtrace_copyin_pan(uaddr, kaddr, size);
 }
 
 void
@@ -348,7 +360,7 @@ dtrace_copyout(uintptr_t kaddr, uintptr_t uaddr, size_t size,
 {
 
 	if (dtrace_copycheck(uaddr, kaddr, size))
-		dtrace_copy(kaddr, uaddr, size);
+		dtrace_copyout_pan(kaddr, uaddr, size, flags);
 }
 
 void
@@ -357,7 +369,7 @@ dtrace_copyinstr(uintptr_t uaddr, uintptr_t kaddr, size_t size,
 {
 
 	if (dtrace_copycheck(uaddr, kaddr, size))
-		dtrace_copystr(uaddr, kaddr, size, flags);
+		dtrace_copyinstr_pan(uaddr, kaddr, size);
 }
 
 void
@@ -366,7 +378,7 @@ dtrace_copyoutstr(uintptr_t kaddr, uintptr_t uaddr, size_t size,
 {
 
 	if (dtrace_copycheck(uaddr, kaddr, size))
-		dtrace_copystr(kaddr, uaddr, size, flags);
+		dtrace_copyoutstr_pan(kaddr, uaddr, size, flags);
 }
 
 uint8_t

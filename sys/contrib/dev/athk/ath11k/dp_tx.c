@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 /*
  * Copyright (c) 2018-2019 The Linux Foundation. All rights reserved.
- * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #include "core.h"
@@ -88,12 +89,13 @@ int ath11k_dp_tx(struct ath11k *ar, struct ath11k_vif *arvif,
 {
 	struct ath11k_base *ab = ar->ab;
 	struct ath11k_dp *dp = &ab->dp;
-	struct hal_tx_info ti = {0};
+	struct hal_tx_info ti = {};
 	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
 	struct ath11k_skb_cb *skb_cb = ATH11K_SKB_CB(skb);
 	struct hal_srng *tcl_ring;
 	struct ieee80211_hdr *hdr = (void *)skb->data;
 	struct dp_tx_ring *tx_ring;
+	size_t num_tx_rings = ab->hw_params.hal_params->num_tx_rings;
 #if defined(__linux__)
 	void *hal_tcl_desc;
 #elif defined(__FreeBSD__)
@@ -111,7 +113,7 @@ int ath11k_dp_tx(struct ath11k *ar, struct ath11k_vif *arvif,
 
 	if (unlikely(!(info->flags & IEEE80211_TX_CTL_HW_80211_ENCAP) &&
 		     !ieee80211_is_data(hdr->frame_control)))
-		return -ENOTSUPP;
+		return -EOPNOTSUPP;
 
 	pool_id = skb_get_queue_mapping(skb) & (ATH11K_HW_MAX_QUEUES - 1);
 
@@ -120,7 +122,7 @@ int ath11k_dp_tx(struct ath11k *ar, struct ath11k_vif *arvif,
 tcl_ring_sel:
 	tcl_ring_retry = false;
 
-	ti.ring_id = ring_selector % ab->hw_params.max_tx_ring;
+	ti.ring_id = ring_selector % num_tx_rings;
 	ti.rbm_id = ab->hw_params.hal_params->tcl2wbm_rbm_map[ti.ring_id].rbm_id;
 
 	ring_map |= BIT(ti.ring_id);
@@ -133,7 +135,7 @@ tcl_ring_sel:
 	spin_unlock_bh(&tx_ring->tx_idr_lock);
 
 	if (unlikely(ret < 0)) {
-		if (ring_map == (BIT(ab->hw_params.max_tx_ring) - 1) ||
+		if (ring_map == (BIT(num_tx_rings) - 1) ||
 		    !ab->hw_params.tcl_ring_retry) {
 			atomic_inc(&ab->soc_stats.tx_err.misc_fail);
 			return -ENOSPC;
@@ -246,13 +248,13 @@ tcl_ring_sel:
 		spin_unlock_bh(&tcl_ring->lock);
 		ret = -ENOMEM;
 
-		/* Checking for available tcl descritors in another ring in
+		/* Checking for available tcl descriptors in another ring in
 		 * case of failure due to full tcl ring now, is better than
 		 * checking this ring earlier for each pkt tx.
 		 * Restart ring selection if some rings are not checked yet.
 		 */
-		if (unlikely(ring_map != (BIT(ab->hw_params.max_tx_ring)) - 1) &&
-		    ab->hw_params.tcl_ring_retry && ab->hw_params.max_tx_ring > 1) {
+		if (unlikely(ring_map != (BIT(num_tx_rings)) - 1) &&
+		    ab->hw_params.tcl_ring_retry && num_tx_rings > 1) {
 			tcl_ring_retry = true;
 			ring_selector++;
 		}
@@ -324,7 +326,7 @@ ath11k_dp_tx_htt_tx_complete_buf(struct ath11k_base *ab,
 				 struct dp_tx_ring *tx_ring,
 				 struct ath11k_dp_htt_wbm_tx_status *ts)
 {
-	struct ieee80211_tx_status status = { 0 };
+	struct ieee80211_tx_status status = {};
 	struct sk_buff *msdu;
 	struct ieee80211_tx_info *info;
 	struct ath11k_skb_cb *skb_cb;
@@ -352,7 +354,7 @@ ath11k_dp_tx_htt_tx_complete_buf(struct ath11k_base *ab,
 	dma_unmap_single(ab->dev, skb_cb->paddr, msdu->len, DMA_TO_DEVICE);
 
 	if (!skb_cb->vif) {
-		dev_kfree_skb_any(msdu);
+		ieee80211_free_txskb(ar->hw, msdu);
 		return;
 	}
 
@@ -361,8 +363,12 @@ ath11k_dp_tx_htt_tx_complete_buf(struct ath11k_base *ab,
 	if (ts->acked) {
 		if (!(info->flags & IEEE80211_TX_CTL_NO_ACK)) {
 			info->flags |= IEEE80211_TX_STAT_ACK;
-			info->status.ack_signal = ATH11K_DEFAULT_NOISE_FLOOR +
-						  ts->ack_rssi;
+			info->status.ack_signal = ts->ack_rssi;
+
+			if (!test_bit(WMI_TLV_SERVICE_HW_DB2DBM_CONVERSION_SUPPORT,
+				      ab->wmi_ab.svc_map))
+				info->status.ack_signal += ATH11K_DEFAULT_NOISE_FLOOR;
+
 			info->status.flags |=
 				IEEE80211_TX_STATUS_ACK_SIGNAL_VALID;
 		} else {
@@ -377,7 +383,7 @@ ath11k_dp_tx_htt_tx_complete_buf(struct ath11k_base *ab,
 			   "dp_tx: failed to find the peer with peer_id %d\n",
 			    ts->peer_id);
 		spin_unlock_bh(&ab->base_lock);
-		dev_kfree_skb_any(msdu);
+		ieee80211_free_txskb(ar->hw, msdu);
 		return;
 	}
 	spin_unlock_bh(&ab->base_lock);
@@ -399,7 +405,7 @@ ath11k_dp_tx_process_htt_tx_complete(struct ath11k_base *ab,
 				     u32 msdu_id, struct dp_tx_ring *tx_ring)
 {
 	struct htt_tx_wbm_completion *status_desc;
-	struct ath11k_dp_htt_wbm_tx_status ts = {0};
+	struct ath11k_dp_htt_wbm_tx_status ts = {};
 	enum hal_wbm_htt_tx_comp_status wbm_status;
 
 #if defined(__linux__)
@@ -483,7 +489,7 @@ void ath11k_dp_tx_update_txcompl(struct ath11k *ar, struct hal_tx_status *ts)
 	}
 
 	sta = peer->sta;
-	arsta = (struct ath11k_sta *)sta->drv_priv;
+	arsta = ath11k_sta_to_arsta(sta);
 
 	memset(&arsta->txrate, 0, sizeof(arsta->txrate));
 	pkt_type = FIELD_GET(HAL_TX_RATE_STATS_INFO0_PKT_TYPE,
@@ -563,8 +569,8 @@ static void ath11k_dp_tx_complete_msdu(struct ath11k *ar,
 				       struct sk_buff *msdu,
 				       struct hal_tx_status *ts)
 {
-	struct ieee80211_tx_status status = { 0 };
-	struct ieee80211_rate_status status_rate = { 0 };
+	struct ieee80211_tx_status status = {};
+	struct ieee80211_rate_status status_rate = {};
 	struct ath11k_base *ab = ar->ab;
 	struct ieee80211_tx_info *info;
 	struct ath11k_skb_cb *skb_cb;
@@ -582,12 +588,12 @@ static void ath11k_dp_tx_complete_msdu(struct ath11k *ar,
 	dma_unmap_single(ab->dev, skb_cb->paddr, msdu->len, DMA_TO_DEVICE);
 
 	if (unlikely(!rcu_access_pointer(ab->pdevs_active[ar->pdev_idx]))) {
-		dev_kfree_skb_any(msdu);
+		ieee80211_free_txskb(ar->hw, msdu);
 		return;
 	}
 
 	if (unlikely(!skb_cb->vif)) {
-		dev_kfree_skb_any(msdu);
+		ieee80211_free_txskb(ar->hw, msdu);
 		return;
 	}
 
@@ -600,8 +606,12 @@ static void ath11k_dp_tx_complete_msdu(struct ath11k *ar,
 	if (ts->status == HAL_WBM_TQM_REL_REASON_FRAME_ACKED &&
 	    !(info->flags & IEEE80211_TX_CTL_NO_ACK)) {
 		info->flags |= IEEE80211_TX_STAT_ACK;
-		info->status.ack_signal = ATH11K_DEFAULT_NOISE_FLOOR +
-					  ts->ack_rssi;
+		info->status.ack_signal = ts->ack_rssi;
+
+		if (!test_bit(WMI_TLV_SERVICE_HW_DB2DBM_CONVERSION_SUPPORT,
+			      ab->wmi_ab.svc_map))
+			info->status.ack_signal += ATH11K_DEFAULT_NOISE_FLOOR;
+
 		info->status.flags |= IEEE80211_TX_STATUS_ACK_SIGNAL_VALID;
 	}
 
@@ -640,10 +650,10 @@ static void ath11k_dp_tx_complete_msdu(struct ath11k *ar,
 			   "dp_tx: failed to find the peer with peer_id %d\n",
 			    ts->peer_id);
 		spin_unlock_bh(&ab->base_lock);
-		dev_kfree_skb_any(msdu);
+		ieee80211_free_txskb(ar->hw, msdu);
 		return;
 	}
-	arsta = (struct ath11k_sta *)peer->sta->drv_priv;
+	arsta = ath11k_sta_to_arsta(peer->sta);
 	status.sta = peer->sta;
 	status.skb = msdu;
 	status.info = info;
@@ -698,7 +708,7 @@ void ath11k_dp_tx_completion_handler(struct ath11k_base *ab, int ring_id)
 	int hal_ring_id = dp->tx_ring[ring_id].tcl_comp_ring.ring_id;
 	struct hal_srng *status_ring = &ab->hal.srng_list[hal_ring_id];
 	struct sk_buff *msdu;
-	struct hal_tx_status ts = { 0 };
+	struct hal_tx_status ts = {};
 	struct dp_tx_ring *tx_ring = &dp->tx_ring[ring_id];
 	u32 *desc;
 	u32 msdu_id;
@@ -802,7 +812,7 @@ int ath11k_dp_tx_send_reo_cmd(struct ath11k_base *ab, struct dp_rx_tid *rx_tid,
 	 * for tid delete command to free up the resource on the command status
 	 * indication?
 	 */
-	dp_cmd = kzalloc(sizeof(*dp_cmd), GFP_ATOMIC);
+	dp_cmd = kzalloc_obj(*dp_cmd, GFP_ATOMIC);
 
 	if (!dp_cmd)
 		return -ENOMEM;
@@ -1034,7 +1044,7 @@ int ath11k_dp_tx_htt_h2t_ver_req_msg(struct ath11k_base *ab)
 	if (dp->htt_tgt_ver_major != HTT_TARGET_VERSION_MAJOR) {
 		ath11k_err(ab, "unsupported htt major version %d supported version is %d\n",
 			   dp->htt_tgt_ver_major, HTT_TARGET_VERSION_MAJOR);
-		return -ENOTSUPP;
+		return -EOPNOTSUPP;
 	}
 
 	return 0;
@@ -1051,7 +1061,7 @@ int ath11k_dp_tx_htt_h2t_ppdu_stats_req(struct ath11k *ar, u32 mask)
 	int ret;
 	int i;
 
-	for (i = 0; i < ab->hw_params.num_rxmda_per_pdev; i++) {
+	for (i = 0; i < ab->hw_params.num_rxdma_per_pdev; i++) {
 		skb = ath11k_htc_alloc_skb(ab, len);
 		if (!skb)
 			return -ENOMEM;
@@ -1195,7 +1205,7 @@ int ath11k_dp_tx_htt_monitor_mode_ring_config(struct ath11k *ar, bool reset)
 {
 	struct ath11k_pdev_dp *dp = &ar->dp;
 	struct ath11k_base *ab = ar->ab;
-	struct htt_rx_ring_tlv_filter tlv_filter = {0};
+	struct htt_rx_ring_tlv_filter tlv_filter = {};
 	int ret = 0, ring_id = 0, i;
 
 	if (ab->hw_params.full_monitor_mode) {
@@ -1234,7 +1244,7 @@ int ath11k_dp_tx_htt_monitor_mode_ring_config(struct ath11k *ar, bool reset)
 						       &tlv_filter);
 	} else if (!reset) {
 		/* set in monitor mode only */
-		for (i = 0; i < ab->hw_params.num_rxmda_per_pdev; i++) {
+		for (i = 0; i < ab->hw_params.num_rxdma_per_pdev; i++) {
 			ring_id = dp->rx_mac_buf_ring[i].ring_id;
 			ret = ath11k_dp_tx_htt_rx_filter_setup(ar->ab, ring_id,
 							       dp->mac_id + i,
@@ -1247,7 +1257,7 @@ int ath11k_dp_tx_htt_monitor_mode_ring_config(struct ath11k *ar, bool reset)
 	if (ret)
 		return ret;
 
-	for (i = 0; i < ab->hw_params.num_rxmda_per_pdev; i++) {
+	for (i = 0; i < ab->hw_params.num_rxdma_per_pdev; i++) {
 		ring_id = dp->rx_mon_status_refill_ring[i].refill_buf_ring.ring_id;
 		if (!reset) {
 			tlv_filter.rx_filter =

@@ -33,6 +33,7 @@
 #include <sys/lock.h>
 #include <sys/ktr.h>
 #include <sys/mutex.h>
+#include <sys/power.h>
 #include <sys/queue.h>
 
 #ifdef VIMAGE
@@ -45,7 +46,7 @@ struct eventhandler_entry_vimage {
 
 struct eventhandler_list {
 	char				*el_name;
-	int				el_flags;	/* Unused. */
+	u_int				el_deadcount;
 	u_int				el_runcount;
 	struct mtx			el_lock;
 	TAILQ_ENTRY(eventhandler_list)	el_link;
@@ -81,7 +82,7 @@ struct eventhandler_list {
 	KASSERT((list)->el_runcount > 0,				\
 	    ("eventhandler_invoke: runcount underflow"));		\
 	(list)->el_runcount--;						\
-	if ((list)->el_runcount == 0)					\
+	if ((list)->el_runcount == 0 && (list)->el_deadcount != 0)	\
 		eventhandler_prune_list(list);				\
 	EHL_UNLOCK((list));						\
 } while (0)
@@ -199,12 +200,6 @@ typedef void (*shutdown_fn)(void *, int);
 EVENTHANDLER_DECLARE(shutdown_pre_sync, shutdown_fn);	/* before fs sync */
 EVENTHANDLER_DECLARE(shutdown_post_sync, shutdown_fn);	/* after fs sync */
 EVENTHANDLER_DECLARE(shutdown_final, shutdown_fn);
-
-/* Power state change events */
-typedef void (*power_change_fn)(void *);
-EVENTHANDLER_DECLARE(power_resume, power_change_fn);
-EVENTHANDLER_DECLARE(power_suspend, power_change_fn);
-EVENTHANDLER_DECLARE(power_suspend_early, power_change_fn);
 
 /* Low memory event */
 typedef void (*vm_lowmem_handler_t)(void *, int);

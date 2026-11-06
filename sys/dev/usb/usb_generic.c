@@ -143,6 +143,38 @@ SYSCTL_INT(_hw_usb_ugen, OID_AUTO, debug, CTLFLAG_RWTUN, &ugen_debug,
     0, "Debug level");
 #endif
 
+static const int usb_error_to_errno[USB_ERR_MAX] = {
+	[USB_ERR_NORMAL_COMPLETION] = 0,
+	[USB_ERR_PENDING_REQUESTS] = EALREADY,
+	[USB_ERR_NOT_STARTED] = EINVAL,
+	[USB_ERR_INVAL] = EINVAL,
+	[USB_ERR_NOMEM] = ENOMEM,
+	[USB_ERR_CANCELLED] = ECANCELED,
+	[USB_ERR_BAD_ADDRESS] = EFAULT,
+	[USB_ERR_BAD_BUFSIZE] = ENOBUFS,
+	[USB_ERR_BAD_FLAG] = EINVAL,
+	[USB_ERR_NO_CALLBACK] = EINVAL,
+	[USB_ERR_IN_USE] = EADDRINUSE,
+	[USB_ERR_NO_ADDR] = EADDRNOTAVAIL,
+	[USB_ERR_NO_PIPE] = ENOENT,
+	[USB_ERR_ZERO_NFRAMES] = EINVAL,
+	[USB_ERR_ZERO_MAXP] = EINVAL,
+	[USB_ERR_SET_ADDR_FAILED] = EADDRNOTAVAIL,
+	[USB_ERR_NO_POWER] = ENXIO,
+	[USB_ERR_TOO_DEEP] = EINVAL,
+	[USB_ERR_IOERROR] = EIO,
+	[USB_ERR_NOT_CONFIGURED] = ENXIO,
+	[USB_ERR_TIMEOUT] = ETIMEDOUT,
+	[USB_ERR_SHORT_XFER] = ERANGE,
+	[USB_ERR_STALLED] = EPIPE,
+	[USB_ERR_INTERRUPTED] = EINTR,
+	[USB_ERR_DMA_LOAD_FAILED] = EIO,
+	[USB_ERR_BAD_CONTEXT] = EBADMSG,
+	[USB_ERR_NO_ROOT_HUB] = EINVAL,
+	[USB_ERR_NO_INTR_THREAD] = EIO,
+	[USB_ERR_NOT_LOCKED] = EINVAL,
+};
+
 /* prototypes */
 
 static int
@@ -831,42 +863,7 @@ ugen_get_iface_driver(struct usb_fifo *f, struct usb_gen_descriptor *ugd)
 int
 ugen_fill_deviceinfo(struct usb_fifo *f, struct usb_device_info *di)
 {
-	struct usb_device *udev;
-	struct usb_device *hub;
-
-	udev = f->udev;
-
-	bzero(di, sizeof(di[0]));
-
-	di->udi_bus = device_get_unit(udev->bus->bdev);
-	di->udi_addr = udev->address;
-	di->udi_index = udev->device_index;
-	strlcpy(di->udi_serial, usb_get_serial(udev), sizeof(di->udi_serial));
-	strlcpy(di->udi_vendor, usb_get_manufacturer(udev), sizeof(di->udi_vendor));
-	strlcpy(di->udi_product, usb_get_product(udev), sizeof(di->udi_product));
-	usb_printbcd(di->udi_release, sizeof(di->udi_release),
-	    UGETW(udev->ddesc.bcdDevice));
-	di->udi_vendorNo = UGETW(udev->ddesc.idVendor);
-	di->udi_productNo = UGETW(udev->ddesc.idProduct);
-	di->udi_releaseNo = UGETW(udev->ddesc.bcdDevice);
-	di->udi_class = udev->ddesc.bDeviceClass;
-	di->udi_subclass = udev->ddesc.bDeviceSubClass;
-	di->udi_protocol = udev->ddesc.bDeviceProtocol;
-	di->udi_config_no = udev->curr_config_no;
-	di->udi_config_index = udev->curr_config_index;
-	di->udi_power = udev->flags.self_powered ? 0 : udev->power;
-	di->udi_speed = udev->speed;
-	di->udi_mode = udev->flags.usb_mode;
-	di->udi_power_mode = udev->power_mode;
-	di->udi_suspended = udev->flags.peer_suspended;
-
-	hub = udev->parent_hub;
-	if (hub) {
-		di->udi_hubaddr = hub->address;
-		di->udi_hubindex = hub->device_index;
-		di->udi_hubport = udev->port_no;
-	}
-	return (0);
+	return (usbd_fill_deviceinfo(f->udev, di));
 }
 
 int
@@ -896,10 +893,16 @@ ugen_do_request(struct usb_fifo *f, struct usb_ctl_request *ur)
 
 	ur->ucr_actlen = actlen;
 
-	if (error) {
-		error = EIO;
-	}
-	return (error);
+	/*
+	 * Fall back to EIO for USB errors without a table entry, so
+	 * that an unmapped error cannot be reported as success.
+	 */
+	if (error < 0 || error >= USB_ERR_MAX ||
+	    (error != USB_ERR_NORMAL_COMPLETION &&
+	    usb_error_to_errno[error] == 0))
+		return (EIO);
+
+	return (usb_error_to_errno[error]);
 }
 
 #ifdef COMPAT_FREEBSD32
@@ -2410,6 +2413,28 @@ ugen_ioctl_post(struct usb_fifo *f, u_long cmd, void *addr, int fflags)
 		 * until the next set configuration event.
 		 */
 		usbd_set_parent_iface(f->udev, n, n);
+		break;
+	case USB_IFACE_DRIVER_ATTACH:
+
+		error = priv_check(curthread, PRIV_DRIVER);
+
+		if (error)
+			break;
+
+		n = *u.pint & 0xFF;
+
+		if (n == USB_IFACE_INDEX_ANY) {
+			error = EINVAL;
+			break;
+		}
+
+		/*
+		 * Attach the currently detached driver.
+		 */
+		usbd_set_parent_iface(f->udev, n, USB_IFACE_INDEX_ANY);
+
+		usb_probe_and_attach(f->udev, n);
+
 		break;
 
 	case USB_SET_POWER_MODE:

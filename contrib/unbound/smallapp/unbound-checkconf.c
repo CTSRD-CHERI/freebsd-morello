@@ -44,6 +44,7 @@
 
 #include "config.h"
 #include <ctype.h>
+#include "util/as112.h"
 #include "util/log.h"
 #include "util/config_file.h"
 #include "util/module.h"
@@ -71,6 +72,9 @@
 #endif
 #ifdef HAVE_GLOB_H
 #include <glob.h>
+#endif
+#ifdef HAVE_FNMATCH_H
+#include <fnmatch.h>
 #endif
 #ifdef WITH_PYTHONMODULE
 #include "pythonmod/pythonmod.h"
@@ -188,11 +192,56 @@ donotquerylocalhostcheck(struct config_file* cfg)
 	}
 }
 
+static void
+nodefaultzonescheck(struct config_file* cfg)
+{
+	struct config_strlist* d;
+	const char** zstr;
+	size_t len;
+
+#define COMPARE_ZONE_NAME(confname, builtname, len)		\
+	(strncasecmp(confname, builtname, (len)) == 0 &&	\
+	(strlen(confname) == (len) ||				\
+	(strlen(confname) == (len) + 1				\
+	&& confname[(len)] == '.')))
+
+	for(d = cfg->local_zones_nodefault; d; d = d->next) {
+		if(!cfg->unblock_lan_zones) {
+			for(zstr = as112_zones; *zstr; zstr++) {
+				len = strlen(*zstr) - 1; /* trailing '.' */
+				if(COMPARE_ZONE_NAME(d->str, *zstr, len))
+					goto default_continue;
+			}
+		}
+		for(zstr = local_zones_default_special; *zstr; zstr++) {
+			len = strlen(*zstr) - 1; /* trailing '.' */
+			if(COMPARE_ZONE_NAME(d->str, *zstr, len))
+				goto default_continue;
+		}
+		for(zstr = local_zones_default_reverse; *zstr; zstr++) {
+			len = strlen(*zstr) - 1; /* trailing '.' */
+			if(COMPARE_ZONE_NAME(d->str, *zstr, len))
+				goto default_continue;
+		}
+		if(COMPARE_ZONE_NAME(d->str, "localhost.", 10 - 1))
+			goto default_continue;
+		fprintf(stderr, "unbound-checkconf: warning: local-zone: '%s' "
+			"is configured as 'nodefault' but there is no such "
+			"default local-zone. Check the unbound.conf "
+			"documentation for default configured local-zones.\n",
+			d->str);
+default_continue:
+		; /* statement to jump to, for older gcc. */
+	}
+#undef COMPARE_ZONE_NAME
+}
+
 /** check localzones */
 static void
 localzonechecks(struct config_file* cfg)
 {
 	struct local_zones* zs;
+	nodefaultzonescheck(cfg);
 	if(!(zs = local_zones_create()))
 		fatal_exit("out of memory");
 	if(!local_zones_apply_cfg(zs, cfg))
@@ -294,7 +343,8 @@ view_and_respipchecks(struct config_file* cfg)
 {
 	struct views* views = NULL;
 	struct respip_set* respip = NULL;
-	int ignored = 0;
+	int have_view_respip_cfg = 0;
+	int use_response_ip = 0;
 	if(!(views = views_create()))
 		fatal_exit("Could not create views: out of memory");
 	if(!(respip = respip_set_create()))
@@ -303,8 +353,11 @@ view_and_respipchecks(struct config_file* cfg)
 		fatal_exit("Could not set up views");
 	if(!respip_global_apply_cfg(respip, cfg))
 		fatal_exit("Could not setup respip set");
-	if(!respip_views_apply_cfg(views, cfg, &ignored))
+	if(!respip_views_apply_cfg(views, cfg, &have_view_respip_cfg))
 		fatal_exit("Could not setup per-view respip sets");
+	use_response_ip = !respip_set_is_empty(respip) || have_view_respip_cfg;
+	if(use_response_ip && !strstr(cfg->module_conf, "respip"))
+		fatal_exit("response-ip options require respip module");
 	acl_view_tag_checks(cfg, views);
 	views_delete(views);
 	respip_set_delete(respip);
@@ -447,6 +500,39 @@ ifautomaticportschecks(char* ifautomaticports)
 		if(extraport == 0 && now == after)
 			fatal_exit("interface-automatic-ports: parse error at position %d in '%s'", (int)(now-ifautomaticports)+1, ifautomaticports);
 		now = after;
+	}
+}
+
+/** check control interface strings */
+static void
+controlinterfacechecks(struct config_file* cfg)
+{
+	struct config_strlist* p;
+	for(p = cfg->control_ifs.first; p; p = p->next) {
+		struct sockaddr_storage a;
+		socklen_t alen;
+		char** rcif = NULL;
+		int i, num_rcif = 0;
+		/* See if it is a local socket, starts with a '/'. */
+		if(p->str && p->str[0] == '/')
+			continue;
+		if(!resolve_interface_names(&p->str, 1, NULL, &rcif,
+			&num_rcif)) {
+			fatal_exit("could not resolve interface names, for control-interface: %s",
+				p->str);
+		}
+		for(i=0; i<num_rcif; i++) {
+			if(!extstrtoaddr(rcif[i], &a, &alen,
+				cfg->control_port)) {
+				if(strcmp(p->str, rcif[i])!=0)
+					fatal_exit("cannot parse control-interface address '%s' from the control-interface specified as '%s'",
+						rcif[i], p->str);
+				else
+					fatal_exit("cannot parse control-interface specified as '%s'",
+						p->str);
+			}
+		}
+		config_del_strarray(rcif, num_rcif);
 	}
 }
 
@@ -636,10 +722,128 @@ check_modules_exist(const char* module_conf)
 				}
 				n[j] = s[j];
 			}
-			fatal_exit("module_conf lists module '%s' but that "
-				"module is not available.", n);
+			fatal_exit("Unknown value in module-config, module: "
+				"'%s'. This module is not present (not "
+				"compiled in); see the list of linked modules "
+				"with unbound -V", n);
 		}
 		s += strlen(names[i]);
+	}
+}
+
+#ifdef USE_IPSECMOD
+/** Compare filename with string, true if it matches the name. */
+static int
+file_string_matches(char* str, char* fname, struct config_file* cfg)
+{
+	char* f;
+	if(!str || str[0] == 0)
+		return 0;
+	/* compare name after chroot and working dir are applied */
+	f = fname_after_chroot(str, cfg, 1);
+	if(!f) fatal_exit("out of memory");
+	if(strcmp(fname, f) == 0) {
+		free(f);
+		return 1;
+	}
+	free(f);
+	return 0;
+}
+#endif /* USE_IPSECMOD */
+
+/** Compare filename with list of files, true if list contains the name. */
+static int
+file_list_contains(struct config_strlist* list, char* fname,
+	struct config_file* cfg)
+{
+	struct config_strlist* s;
+	char* f;
+	for(s = list; s; s = s->next) {
+		if(!s->str || s->str[0] == 0)
+			continue; /* skip if no file name */
+		/* compare names after chroot and working dir are applied */
+		f = fname_after_chroot(s->str, cfg, 1);
+		if(!f) fatal_exit("out of memory");
+		if(strcmp(fname, f) == 0) {
+			free(f);
+			return 1;
+		}
+		free(f);
+	}
+	return 0;
+}
+
+/** Compare filename with list of files, true if list contains the name,
+ * with glob compare. */
+static int
+file_list_contains_wild(struct config_strlist* list, char* fname,
+	struct config_file* cfg)
+{
+	struct config_strlist* s;
+	char* f;
+	for(s = list; s; s = s->next) {
+		if(!s->str || s->str[0] == 0)
+			continue; /* skip if no file name */
+		/* compare names after chroot and working dir are applied */
+		f = fname_after_chroot(s->str, cfg, 1);
+		if(!f) fatal_exit("out of memory");
+		if(strcmp(fname, f) == 0) {
+			free(f);
+			return 1;
+		}
+#ifdef HAVE_FNMATCH
+		if(fnmatch(f, fname, 0) == 0) {
+			log_err("trusted-keys-file: \"%s\" matches zonefile '%s'",
+				s->str, fname);
+			free(f);
+			return 1;
+		}
+#endif
+		free(f);
+	}
+	return 0;
+}
+
+/** Check if the auth-zone/rpz zonefile: conflicts with other files,
+ * so it would overwrite that file. Refuse it aliasing any read-side bootstrap
+ * file. */
+static void
+check_file_clobber(struct config_file* cfg)
+{
+	struct config_auth* p;
+	char* zfile, *sourceopt = NULL;
+	for(p = cfg->auths; p; p = p->next) {
+		if(!p->name || p->name[0] == 0)
+			continue; /* skip if no name */
+		if(!p->zonefile || p->zonefile[0]==0)
+			continue; /* no zone file */
+		zfile = fname_after_chroot(p->zonefile, cfg, 1);
+		if(!zfile) fatal_exit("out of memory");
+		if(file_list_contains(cfg->auto_trust_anchor_file_list, zfile,
+			cfg))
+			sourceopt = "auto-trust-anchor-file";
+		else if(file_list_contains(cfg->trust_anchor_file_list, zfile,
+			cfg))
+			sourceopt = "trust-anchor-file";
+		else if(file_list_contains_wild(cfg->trusted_keys_file_list,
+			zfile, cfg))
+			sourceopt = "trusted-keys-file";
+		else if(file_list_contains(cfg->root_hints, zfile, cfg))
+			sourceopt = "root-hints";
+		else if(file_list_contains(cfg->tls_session_ticket_keys.first,
+			zfile, cfg))
+			sourceopt = "tls-session-ticket-keys";
+#ifdef USE_IPSECMOD
+		if(cfg->ipsecmod_enabled &&
+			file_string_matches(cfg->ipsecmod_hook, zfile, cfg))
+			sourceopt = "ipsecmod-hook";
+#endif
+		if(sourceopt)
+			fatal_exit("auth-zone '%s': zonefile \"%s\" "
+				"is the same path as a %s option. "
+				"The auth-zone transfer would overwrite it.",
+				p->name, p->zonefile, sourceopt);
+		free(zfile);
 	}
 }
 
@@ -737,6 +941,7 @@ morechecks(struct config_file* cfg)
 			cfg->chrootdir, cfg);
 	}
 #endif
+	check_file_clobber(cfg);
 	/* remove chroot setting so that modules are not stripping pathnames */
 	free(cfg->chrootdir);
 	cfg->chrootdir = NULL;
@@ -744,7 +949,6 @@ morechecks(struct config_file* cfg)
 	/* check that the modules listed in module_conf exist */
 	check_modules_exist(cfg->module_conf);
 
-	/* Respip is known to *not* work with dns64. */
 	if(strcmp(cfg->module_conf, "iterator") != 0
 		&& strcmp(cfg->module_conf, "validator iterator") != 0
 		&& strcmp(cfg->module_conf, "dns64 validator iterator") != 0
@@ -830,6 +1034,7 @@ morechecks(struct config_file* cfg)
 		&& strcmp(cfg->module_conf, "respip cachedb iterator") != 0
 		&& strcmp(cfg->module_conf, "dns64 validator cachedb iterator") != 0
 		&& strcmp(cfg->module_conf, "dns64 cachedb iterator") != 0
+		&& strcmp(cfg->module_conf, "respip dns64 validator cachedb iterator") != 0
 #endif
 #if defined(WITH_PYTHONMODULE) && defined(USE_CACHEDB)
 		&& strcmp(cfg->module_conf, "python dns64 cachedb iterator") != 0
@@ -926,6 +1131,8 @@ morechecks(struct config_file* cfg)
 			fatal_exit("control-cert-file: \"%s\" does not exist",
 				cfg->control_cert_file);
 	}
+	if(cfg->remote_control_enable)
+		controlinterfacechecks(cfg);
 
 	donotquerylocalhostcheck(cfg);
 	localzonechecks(cfg);
@@ -966,6 +1173,8 @@ check_auth(struct config_file* cfg)
 	if(!az || !auth_zones_apply_cfg(az, cfg, 0, &is_rpz, NULL, NULL)) {
 		fatal_exit("Could not setup authority zones");
 	}
+	if(is_rpz && !strstr(cfg->module_conf, "respip"))
+		fatal_exit("RPZ requires the respip module");
 	auth_zones_delete(az);
 }
 

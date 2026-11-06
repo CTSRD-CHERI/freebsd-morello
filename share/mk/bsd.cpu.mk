@@ -6,7 +6,7 @@
 .if !defined(CPUTYPE) || empty(CPUTYPE)
 _CPUCFLAGS =
 . if ${MACHINE_CPUARCH} == "aarch64"
-MACHINE_CPU = arm64
+MACHINE_CPU = arm64 cortexa53
 . elif ${MACHINE_CPUARCH} == "amd64"
 MACHINE_CPU = amd64 sse2 sse mmx
 . elif ${MACHINE_CPUARCH} == "arm"
@@ -124,6 +124,14 @@ _CPUCFLAGS = -mcpu=${CPUTYPE}
 . elif ${MACHINE_ARCH:Mpowerpc64*} != ""
 _CPUCFLAGS = -mcpu=${CPUTYPE}
 . elif ${MACHINE_CPUARCH} == "aarch64"
+MACHINE_CPU = arm64
+.  if ${CPUTYPE} == "generic"
+MACHINE_CPU += cortexa53
+.  elif ${CPUTYPE} == "armv8-a"
+MACHINE_CPU += cortexa53
+.  elif ${CPUTYPE:M*cortex-a53*} != ""
+MACHINE_CPU += cortexa53
+.  endif
 .  if ${CPUTYPE:Marmv*} != ""
 # Use -march when the CPU type is an architecture value, e.g. armv8.1-a
 _CPUCFLAGS = -march=${CPUTYPE}
@@ -277,34 +285,36 @@ MACHINE_CPU = sse3
 .  endif
 MACHINE_CPU += amd64 sse2 sse mmx
 ########## powerpc
-. elif ${MACHINE_ARCH} == "powerpc"
-.  if ${CPUTYPE} == "e500"
-MACHINE_CPU = booke softfp
-.  elif ${CPUTYPE} == "g4"
-MACHINE_CPU = aim altivec
-.  else
-MACHINE_CPU= aim
-.  endif
 . elif ${MACHINE_ARCH} == "powerpc64"
 .  if ${CPUTYPE} == "e5500"
 MACHINE_CPU = booke
-.  elif ${CPUTYPE} == power7
+.  elif ${CPUTYPE} == "power7"
 MACHINE_CPU = altivec vsx
-.  elif ${CPUTYPE} == power8
+.  elif ${CPUTYPE} == "power8"
 MACHINE_CPU = altivec vsx vsx2
-.  elif ${CPUTYPE} == power9
+.  elif ${CPUTYPE} == "power9" || ${CPUTYPE} == "power10" || \
+    ${CPUTYPE} == "power11"
 MACHINE_CPU = altivec vsx vsx2 vsx3
 .  else
 MACHINE_CPU = aim altivec
 .  endif
 . elif ${MACHINE_ARCH} == "powerpc64le"
 MACHINE_CPU = aim altivec vsx vsx2
-.  if ${CPUTYPE} == power9
+.  if ${CPUTYPE} == "power9" || ${CPUTYPE} == "power10" || \
+    ${CPUTYPE} == "power11"
 MACHINE_CPU += vsx3
 .  endif
 ########## riscv
 . elif ${MACHINE_CPUARCH} == "riscv"
 MACHINE_CPU = riscv
+. endif
+.endif
+
+########## arm64/aarch64
+.if ${MACHINE_CPUARCH} == "aarch64"
+# Add the Cortex-A53 erratum 843419 workaround if we are targeting it.
+. if ${MACHINE_CPU:Mcortexa53} != ""
+LDFLAGS += -Wl,--fix-cortex-a53-843419
 . endif
 .endif
 
@@ -329,13 +339,8 @@ CFLAGS += -mfloat-abi=softfp
 . endif
 .endif
 
-.if ${MACHINE_ARCH} == "powerpc" || ${MACHINE_ARCH} == "powerpcspe"
+.if ${MACHINE_ARCH} == "powerpc"
 LDFLAGS.bfd+= -Wl,--secure-plt
-.endif
-
-.if ${MACHINE_ARCH} == "powerpcspe"
-CFLAGS += -mcpu=8548 -mspe
-CFLAGS.gcc+= -mabi=spe -mfloat-gprs=double -Wa,-me500
 .endif
 
 .if ${MACHINE_CPUARCH} == "riscv"
@@ -391,21 +396,24 @@ MACHINE_ABI+=	soft-float
 .else
 MACHINE_ABI+=	hard-float
 .endif
-# Currently all 64-bit architectures include 64 in their name (see arch(7)).
-.if ${MACHINE_ARCH:M*64*}
-MACHINE_ABI+=  long64
+# Currently all 64-bit FreeBSD architectures include 64 in their name
+# (see arch(7)).  We need a special case for cross-building from macOS
+# (which uses arm64/arm).
+.if ${MACHINE_ARCH:M*64*} || \
+    (defined(BOOTSTRAPPING) && ${.MAKE.OS} == "Darwin" && ${MACHINE} == "arm64")
+MACHINE_ABI+=	long64
 .else
-MACHINE_ABI+=  long32
+MACHINE_ABI+=	long32
 .endif
 .if ${MACHINE_ABI:Mlong64}
-MACHINE_ABI+=  ptr64
+MACHINE_ABI+=	ptr64
 .else
-MACHINE_ABI+=  ptr32
+MACHINE_ABI+=	ptr32
 .endif
 .if ${MACHINE_ARCH} == "i386"
-MACHINE_ABI+=  time32
+MACHINE_ABI+=	time32
 .else
-MACHINE_ABI+=  time64
+MACHINE_ABI+=	time64
 .endif
 .if ${MACHINE_ARCH:Mpowerpc*} && !${MACHINE_ARCH:M*le}
 MACHINE_ABI+=	big-endian

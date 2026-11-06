@@ -70,7 +70,10 @@
 
 #include <dev/dwc/if_dwcvar.h>
 #include <dev/dwc/dwc1000_core.h>
+#include <dev/dwc/dwc1000_reg.h>
 #include <dev/dwc/dwc1000_dma.h>
+#include <dev/dwc/dwc4_dma.h>
+#include <dev/dwc/dwc4_reg.h>
 
 #include "if_dwc_if.h"
 #include "gpio_if.h"
@@ -145,7 +148,7 @@ dwc_txstart_locked(struct dwc_softc *sc)
 	if ((if_getdrvflags(ifp) & (IFF_DRV_RUNNING|IFF_DRV_OACTIVE)) !=
 	    IFF_DRV_RUNNING)
 		return;
-	dma1000_txstart(sc);
+	sc->ops->dma_txstart(sc);
 }
 
 static void
@@ -169,16 +172,16 @@ dwc_init_locked(struct dwc_softc *sc)
 		return;
 
 	/*
-	 * Call mii_mediachg() which will call back into dwc1000_miibus_statchg()
+	 * Call mii_mediachg() which will call back into dwc*_miibus_statchg()
 	 * to set up the remaining config registers based on current media.
 	 */
 	mii_mediachg(sc->mii_softc);
 
-	dwc1000_setup_rxfilter(sc);
-	dwc1000_core_setup(sc);
-	dwc1000_enable_mac(sc, true);
-	dwc1000_enable_csum_offload(sc);
-	dma1000_start(sc);
+	sc->ops->core_setup_rxfilter(sc);
+	sc->ops->core_setup(sc);
+	sc->ops->core_enable_mac(sc, true);
+	sc->ops->core_enable_csum_offload(sc);
+	sc->ops->dma_start(sc);
 
 	if_setdrvflagbits(ifp, IFF_DRV_RUNNING, IFF_DRV_OACTIVE);
 
@@ -209,8 +212,8 @@ dwc_stop_locked(struct dwc_softc *sc)
 
 	callout_stop(&sc->dwc_callout);
 
-	dma1000_stop(sc);
-	dwc1000_enable_mac(sc, false);
+	sc->ops->dma_stop(sc);
+	sc->ops->core_enable_mac(sc, false);
 }
 
 static int
@@ -232,7 +235,7 @@ dwc_ioctl(if_t ifp, u_long cmd, caddr_t data)
 			if (if_getdrvflags(ifp) & IFF_DRV_RUNNING) {
 				flags = if_getflags(ifp) ^ sc->if_flags;
 				if ((flags & (IFF_PROMISC|IFF_ALLMULTI)) != 0)
-					dwc1000_setup_rxfilter(sc);
+					sc->ops->core_setup_rxfilter(sc);
 			} else {
 				if (!sc->is_detaching)
 					dwc_init_locked(sc);
@@ -248,7 +251,7 @@ dwc_ioctl(if_t ifp, u_long cmd, caddr_t data)
 	case SIOCDELMULTI:
 		if (if_getdrvflags(ifp) & IFF_DRV_RUNNING) {
 			DWC_LOCK(sc);
-			dwc1000_setup_rxfilter(sc);
+			sc->ops->core_setup_rxfilter(sc);
 			DWC_UNLOCK(sc);
 		}
 		break;
@@ -263,18 +266,20 @@ dwc_ioctl(if_t ifp, u_long cmd, caddr_t data)
 			/* No work to do except acknowledge the change took */
 			if_togglecapenable(ifp, IFCAP_VLAN_MTU);
 		}
-		if (mask & IFCAP_RXCSUM)
-			if_togglecapenable(ifp, IFCAP_RXCSUM);
-		if (mask & IFCAP_TXCSUM)
+		if (mask & (IFCAP_RXCSUM | IFCAP_RXCSUM_IPV6))
+			if_togglecapenable(ifp, IFCAP_RXCSUM | IFCAP_RXCSUM_IPV6);
+		if (mask & IFCAP_TXCSUM) {
 			if_togglecapenable(ifp, IFCAP_TXCSUM);
-		if ((if_getcapenable(ifp) & IFCAP_TXCSUM) != 0)
-			if_sethwassistbits(ifp, CSUM_IP | CSUM_UDP | CSUM_TCP, 0);
-		else
-			if_sethwassistbits(ifp, 0, CSUM_IP | CSUM_UDP | CSUM_TCP);
+			if_togglehwassist(ifp, CSUM_IP | CSUM_DELAY_DATA);
+		}
+		if (mask & IFCAP_TXCSUM_IPV6) {
+			if_togglecapenable(ifp, IFCAP_TXCSUM_IPV6);
+			if_togglehwassist(ifp, CSUM_DELAY_DATA_IPV6);
+		}
 
 		if (if_getdrvflags(ifp) & IFF_DRV_RUNNING) {
 			DWC_LOCK(sc);
-			dwc1000_enable_csum_offload(sc);
+			sc->ops->core_enable_csum_offload(sc);
 			DWC_UNLOCK(sc);
 		}
 		break;
@@ -300,8 +305,8 @@ dwc_intr(void *arg)
 
 	sc = arg;
 	DWC_LOCK(sc);
-	dwc1000_intr(sc);
-	rv = dma1000_intr(sc);
+	sc->ops->core_intr(sc);
+	rv = sc->ops->dma_intr(sc);
 	if (rv == EIO) {
 		device_printf(sc->dev,
 		  "Ethernet DMA error, restarting controller.\n");
@@ -334,12 +339,12 @@ dwc_tick(void *arg)
 	 */
 	if (sc->tx_watchdog_count > 0) {
 		if (--sc->tx_watchdog_count == 0) {
-			dma1000_txfinish_locked(sc);
+			sc->ops->dma_txfinish_locked(sc);
 		}
 	}
 
 	/* Gather stats from hardware counters. */
-	dwc1000_harvest_stats(sc);
+	sc->ops->core_harvest_stats(sc);
 
 	/* Check the media status. */
 	link_was_up = sc->link_is_up;
@@ -471,6 +476,52 @@ dwc_reset_deassert(struct dwc_softc *sc)
 	return (0);
 }
 
+static struct dwc_ops dwc_ops_3 = {
+	.dma_init = dma1000_init,
+	.dma_free = dma1000_free,
+	.dma_start = dma1000_start,
+	.dma_stop = dma1000_stop,
+	.dma_reset = dma1000_reset,
+	.dma_txfinish_locked = dma1000_txfinish_locked,
+	.dma_txstart = dma1000_txstart,
+	.dma_intr = dma1000_intr,
+
+	.core_miibus_read_reg = dwc1000_miibus_read_reg,
+	.core_miibus_write_reg = dwc1000_miibus_write_reg,
+	.core_miibus_statchg = dwc1000_miibus_statchg,
+	.core_setup = dwc1000_core_setup,
+	.core_enable_mac = dwc1000_enable_mac,
+	.core_enable_csum_offload = dwc1000_enable_csum_offload,
+	.core_setup_rxfilter = dwc1000_setup_rxfilter,
+	.core_get_hwaddr = dwc1000_get_hwaddr,
+	.core_harvest_stats = dwc1000_harvest_stats,
+	.core_intr = dwc1000_intr,
+	.core_intr_disable = dwc1000_intr_disable,
+};
+
+static struct dwc_ops dwc_ops_4 = {
+	.dma_init = dma4_init,
+	.dma_free = dma4_free,
+	.dma_start = dma4_start,
+	.dma_stop = dma4_stop,
+	.dma_reset = dma4_reset,
+	.dma_txfinish_locked = dma4_txfinish_locked,
+	.dma_txstart = dma4_txstart,
+	.dma_intr = dma4_intr,
+
+	.core_miibus_read_reg = dwc4_miibus_read_reg,
+	.core_miibus_write_reg = dwc4_miibus_write_reg,
+	.core_miibus_statchg = dwc4_miibus_statchg,
+	.core_setup = dwc4_core_setup,
+	.core_enable_mac = dwc4_enable_mac,
+	.core_enable_csum_offload = dwc4_enable_csum_offload,
+	.core_setup_rxfilter = dwc4_setup_rxfilter,
+	.core_get_hwaddr = dwc4_get_hwaddr,
+	.core_harvest_stats = dwc4_harvest_stats,
+	.core_intr = dwc4_intr,
+	.core_intr_disable = dwc4_intr_disable,
+};
+
 /*
  * Probe/Attach functions
  */
@@ -525,13 +576,13 @@ dwc_attach(device_t dev)
 		sc->txpbl = pbl;
 	if (OF_getencprop(sc->node, "snps,rxpbl", &sc->rxpbl, sizeof(uint32_t)) <= 0)
 		sc->rxpbl = pbl;
-	if (OF_hasprop(sc->node, "snps,no-pbl-x8") == 1)
+	if (OF_hasprop(sc->node, "snps,no-pbl-x8"))
 		sc->nopblx8 = true;
-	if (OF_hasprop(sc->node, "snps,fixed-burst") == 1)
+	if (OF_hasprop(sc->node, "snps,fixed-burst"))
 		sc->fixed_burst = true;
-	if (OF_hasprop(sc->node, "snps,mixed-burst") == 1)
+	if (OF_hasprop(sc->node, "snps,mixed-burst"))
 		sc->mixed_burst = true;
-	if (OF_hasprop(sc->node, "snps,aal") == 1)
+	if (OF_hasprop(sc->node, "snps,aal"))
 		sc->aal = true;
 
 	error = clk_set_assigned(dev, ofw_bus_get_node(dev));
@@ -560,8 +611,16 @@ dwc_attach(device_t dev)
 		return (ENXIO);
 	}
 
+	if (sc->flags & DWC_HAS_GMAC5 || sc->flags & DWC_HAS_GMAC4) {
+		device_printf(dev, "gmac version %x\n", READ4(sc, ETH_MACVR));
+		sc->ops = &dwc_ops_4;
+	} else {
+		device_printf(dev, "gmac version %x\n", READ4(sc, VERSION));
+		sc->ops = &dwc_ops_3;
+	}
+
 	/* Read MAC before reset */
-	dwc1000_get_hwaddr(sc, macaddr);
+	sc->ops->core_get_hwaddr(sc, macaddr);
 
 	/* Reset the PHY if needed */
 	if (dwc_reset_phy(sc) != 0) {
@@ -571,13 +630,13 @@ dwc_attach(device_t dev)
 	}
 
 	/* Reset */
-	if ((error = dma1000_reset(sc)) != 0) {
+	if ((error = sc->ops->dma_reset(sc)) != 0) {
 		device_printf(sc->dev, "Can't reset DMA controller.\n");
 		bus_release_resources(sc->dev, dwc_spec, sc->res);
 		return (error);
 	}
 
-	if (dma1000_init(sc)) {
+	if (sc->ops->dma_init(sc)) {
 		bus_release_resources(dev, dwc_spec, sc->res);
 		return (ENXIO);
 	}
@@ -607,8 +666,8 @@ dwc_attach(device_t dev)
 	if_setinitfn(ifp, dwc_init);
 	if_setsendqlen(ifp, TX_MAP_COUNT - 1);
 	if_setsendqready(sc->ifp);
-	if_sethwassist(sc->ifp, CSUM_IP | CSUM_UDP | CSUM_TCP);
-	if_setcapabilities(sc->ifp, IFCAP_VLAN_MTU | IFCAP_HWCSUM);
+	if_sethwassist(sc->ifp, CSUM_IP | CSUM_DELAY_DATA | CSUM_DELAY_DATA_IPV6);
+	if_setcapabilities(sc->ifp, IFCAP_VLAN_MTU | IFCAP_HWCSUM | IFCAP_HWCSUM_IPV6);
 	if_setcapenable(sc->ifp, if_getcapabilities(sc->ifp));
 
 	/* Attach the mii driver. */
@@ -642,7 +701,7 @@ dwc_detach(device_t dev)
 	 * Disable and tear down interrupts before anything else, so we don't
 	 * race with the handler.
 	 */
-	dwc1000_intr_disable(sc);
+	sc->ops->core_intr_disable(sc);
 	if (sc->intr_cookie != NULL) {
 		bus_teardown_intr(dev, sc->res[1], sc->intr_cookie);
 	}
@@ -659,7 +718,7 @@ dwc_detach(device_t dev)
 	bus_generic_detach(dev);
 
 	/* Free DMA descriptors */
-	dma1000_free(sc);
+	sc->ops->dma_free(sc);
 
 	if (sc->ifp != NULL) {
 		if_free(sc->ifp);
@@ -672,17 +731,44 @@ dwc_detach(device_t dev)
 	return (0);
 }
 
+static int
+dwc_miibus_read_reg(device_t dev, int phy, int reg)
+{
+	struct dwc_softc *sc;
+
+	sc = device_get_softc(dev);
+	return (sc->ops->core_miibus_read_reg(dev, phy, reg));
+}
+
+static int
+dwc_miibus_write_reg(device_t dev, int phy, int reg, int val)
+{
+	struct dwc_softc *sc;
+
+	sc = device_get_softc(dev);
+	return (sc->ops->core_miibus_write_reg(dev, phy, reg, val));
+}
+
+static void
+dwc_miibus_statchg(device_t dev)
+{
+	struct dwc_softc *sc;
+
+	sc = device_get_softc(dev);
+	sc->ops->core_miibus_statchg(dev);
+}
+
 static device_method_t dwc_methods[] = {
 	DEVMETHOD(device_probe,		dwc_probe),
 	DEVMETHOD(device_attach,	dwc_attach),
 	DEVMETHOD(device_detach,	dwc_detach),
 
 	/* MII Interface */
-	DEVMETHOD(miibus_readreg,	dwc1000_miibus_read_reg),
-	DEVMETHOD(miibus_writereg,	dwc1000_miibus_write_reg),
-	DEVMETHOD(miibus_statchg,	dwc1000_miibus_statchg),
+	DEVMETHOD(miibus_readreg,	dwc_miibus_read_reg),
+	DEVMETHOD(miibus_writereg,	dwc_miibus_write_reg),
+	DEVMETHOD(miibus_statchg,	dwc_miibus_statchg),
 
-	{ 0, 0 }
+	DEVMETHOD_END
 };
 
 driver_t dwc_driver = {

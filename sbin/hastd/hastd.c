@@ -78,8 +78,10 @@ static bool foreground;
 static void
 usage(void)
 {
-
-	errx(EX_USAGE, "[-dFh] [-c config] [-P pidfile]");
+	fprintf(stderr,
+	    "usage: %s [-dFh] [-c config] [-n nodename] [-P pidfile]\n",
+	    getprogname());
+	exit(1);
 }
 
 static void
@@ -724,7 +726,6 @@ terminate_workers(void)
 {
 	struct hast_resource *res;
 
-	pjdlog_info("Termination signal received, exiting.");
 	TAILQ_FOREACH(res, &cfg->hc_resources, hr_next) {
 		if (res->hr_workerpid == 0)
 			continue;
@@ -1044,10 +1045,8 @@ check_signals(void)
 		switch (signo) {
 		case SIGINT:
 		case SIGTERM:
+			pjdlog_info("Termination signal received.");
 			sigexit_received = true;
-			terminate_workers();
-			proto_close(cfg->hc_controlconn);
-			exit(EX_OK);
 			break;
 		case SIGCHLD:
 			child_exit();
@@ -1077,6 +1076,8 @@ main_loop(void)
 
 	for (;;) {
 		check_signals();
+		if (sigexit_received)
+			break;
 
 		/* Setup descriptors for select(2). */
 		FD_ZERO(&rfds);
@@ -1135,6 +1136,8 @@ main_loop(void)
 		 * info about terminated workers in the meantime.
 		 */
 		check_signals();
+		if (sigexit_received)
+			break;
 
 		if (FD_ISSET(proto_descriptor(cfg->hc_controlconn), &rfds))
 			control_handle(cfg);
@@ -1170,6 +1173,10 @@ main_loop(void)
 			}
 		}
 	}
+	terminate_workers();
+	proto_close(cfg->hc_controlconn);
+	(void)pidfile_remove(pfh);
+	exit(EX_OK);
 }
 
 static void
@@ -1192,7 +1199,7 @@ main(int argc, char *argv[])
 	for (;;) {
 		int ch;
 
-		ch = getopt(argc, argv, "c:dFhP:");
+		ch = getopt(argc, argv, "c:dFhn:P:");
 		if (ch == -1)
 			break;
 		switch (ch) {
@@ -1201,6 +1208,9 @@ main(int argc, char *argv[])
 			break;
 		case 'd':
 			debuglevel++;
+			break;
+		case 'n':
+			nodename = optarg;
 			break;
 		case 'F':
 			foreground = true;

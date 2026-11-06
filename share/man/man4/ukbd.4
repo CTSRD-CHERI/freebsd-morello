@@ -1,3 +1,6 @@
+.\"
+.\" SPDX-License-Identifier: BSD-2-Clause
+.\"
 .\" Copyright (c) 1997, 1998
 .\"	Nick Hibma <n_hibma@FreeBSD.org>. All rights reserved.
 .\"
@@ -22,28 +25,35 @@
 .\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 .\" SUCH DAMAGE.
 .\"
-.Dd April 24, 2018
+.Dd April 23, 2026
 .Dt UKBD 4
 .Os
 .Sh NAME
 .Nm ukbd
 .Nd USB keyboard driver
 .Sh SYNOPSIS
-To compile this driver into the kernel,
-place the following line in your
-kernel configuration file:
-.Bd -ragged -offset indent
-.Cd "device ukbd"
-.Cd "device hid"
-.Cd "device usb"
-.Ed
+.Cd device hid
+.Cd device usb
+.Cd device ukbd
+.Cd options KBD_DELAY1
+.Cd options KBD_DELAY2
+.Cd options KBD_DISABLE_KEYMAP_LOADING
+.Cd options KBD_INSTALL_CDEV
+.Cd options UKBD_DFLT_KEYMAP
 .Pp
-Alternatively, to load the driver as a
-module at boot time, place the following line in
+In
 .Xr loader.conf 5 :
-.Bd -literal -offset indent
-ukbd_load="YES"
-.Ed
+.Cd ukbd_load="YES"
+.Pp
+In
+.Xr loader.conf 5
+or
+.Xr sysctl.conf 5 :
+.Cd hw.usb.ukbd.apple_fn_mode
+.Cd hw.usb.ukbd.apple_swap_cmd_ctl
+.Cd hw.usb.ukbd.apple_swap_cmd_opt
+.Cd hw.usb.ukbd.debug
+.Cd hw.usb.ukbd.no_leds
 .Sh DESCRIPTION
 The
 .Nm
@@ -59,7 +69,7 @@ By default, the keyboard subsystem does not create the appropriate devices yet.
 Make sure you reconfigure your kernel with the following option in the kernel
 config file:
 .Pp
-.Dl "options KBD_INSTALL_CDEV"
+.Dl Cd options KBD_INSTALL_CDEV
 .Pp
 If both an AT keyboard USB keyboards are used at the same time, the
 AT keyboard will appear as
@@ -155,6 +165,18 @@ tunables:
 .It Va hw.usb.ukbd.debug
 Debug output level, where 0 is debugging disabled and larger values increase
 debug message verbosity.
+Default is 0.
+.It Va hw.usb.ukbd.apple_swap_cmd_opt
+Swap the Command & Option keys on Apple keyboards if set to 1.
+Default is 0.
+.It Va hw.usb.ukbd.apple_swap_cmd_ctl
+Swap the Command & Control keys on Apple keyboards if set to 1.
+Default is 0.
+.It Va hw.usb.ukbd.apple_fn_mode
+Direct access to media keys without holding Fn if set to 1.
+Default is 0.
+.It Va hw.usb.ukbd.no_leds
+Disables setting of keyboard LEDs if set to 1.
 Default is 0.
 .El
 .Sh FILES

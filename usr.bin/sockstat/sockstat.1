@@ -25,7 +25,7 @@
 .\" (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 .\" THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 .\"
-.Dd July 17, 2025
+.Dd August 26, 2026
 .Dt SOCKSTAT 1
 .Os
 .Sh NAME
@@ -34,7 +34,8 @@
 .Sh SYNOPSIS
 .Nm
 .Op Fl -libxo
-.Op Fl 46ACcfIiLlnqSsUuvw
+.Op Fl 46AbCcfIiLlnqSsUuvw
+.Op Fl F Ar user
 .Op Fl j Ar jail
 .Op Fl p Ar ports
 .Op Fl P Ar protocols
@@ -65,11 +66,18 @@ Show
 .It Fl A
 Show the address of a protocol control block (PCB) associated with a socket;
 used for debugging.
+.It Fl b
+Show BBLog related information for the socket.
+This is currently only implemented for TCP.
 .It Fl C
 Display the congestion control module, if applicable.
 This is currently only implemented for TCP.
 .It Fl c
 Show connected sockets.
+.It Fl F Ar user
+Show sockets for specified
+.Ar user
+(user name or UID) only.
 .It Fl f
 Show the FIB number of each socket.
 .It Fl I
@@ -106,9 +114,17 @@ Only show sockets of the specified
 .Ar protocols .
 The
 .Ar protocols
-argument is a comma-separated list of protocol names,
-as they are defined in
-.Xr protocols 5 .
+argument is a comma-separated list of protocol names.
+Recognized protocols are
+.Qq tcp ,
+.Qq sctp ,
+.Qq udp ,
+.Qq udplite ,
+.Qq unix/stream ,
+.Qq unix/dgram ,
+.Qq unix/seqpack ,
+and
+.Qq divert .
 .It Fl q
 Quiet mode, do not print the header line.
 .It Fl S
@@ -202,10 +218,29 @@ is specified (only for SCTP or TCP).
 The path state if
 .Fl s
 is specified (only for SCTP).
+When using traditional text output, this column is only shown when there is at
+least one path state to show.
 .It Li CONN STATE
 The connection state if
 .Fl s
 is specified (only for SCTP or TCP).
+.It Li BBLOG STATE
+The BBLog state if
+.Fl b
+is specified (only for TCP).
+.It Li BBLOG NUM
+The number of BBLog entries currently being stored at the endpoint if
+.Fl b
+is specified (only for TCP).
+.It Li BBLOG LIM
+The maximum number of BBLog entries which can be stored at the endpoint
+if
+.Fl b
+is specified (only for TCP).
+.It Li BBLOG SN
+The next BBLog sequence number to be assigned if
+.Fl b
+is specified (only for TCP).
 .It Li STACK
 The protocol stack if
 .Fl S
@@ -238,6 +273,13 @@ Show TCP IPv6 sockets which are listening and connected (default):
 $ sockstat -6 -P tcp
 .Ed
 .Pp
+Show all listening
+.Xr unix 4
+datagram sockets:
+.Bd -literal -offset indent
+$ sockstat -P unix/dgram -l
+.Ed
+.Pp
 Show all sockets in JSON format with neat alignment:
 .Bd -literal -offset indent
 $ sockstat --libxo json,pretty
@@ -247,10 +289,14 @@ $ sockstat --libxo json,pretty
 .Xr netstat 1 ,
 .Xr procstat 1 ,
 .Xr setfib 1 ,
+.Xr libxo 3 ,
+.Xr divert 4 ,
 .Xr inet 4 ,
 .Xr inet6 4 ,
-.Xr protocols 5
-.Xr libxo 3 ,
+.Xr sctp 4 ,
+.Xr tcp 4 ,
+.Xr udp 4 ,
+.Xr unix 4 ,
 .Xr xo_options 7
 .Sh HISTORY
 The

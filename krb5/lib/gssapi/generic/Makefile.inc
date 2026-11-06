@@ -1,5 +1,5 @@
 #
-# SPDX-License-Idendifier: BSD-2-Clause
+# SPDX-License-Identifier: BSD-2-Clause
 #
 # Copyright (c) 2025 FreeBSD Foundation
 #
@@ -42,7 +42,6 @@ CLEANFILES+=	gssapi.h ${GGEN} ${GGENI}
 INCLUDE_XOM=	echo "/* no xom.h */"
 
 gssapi.h:	gssapi.hin
-	echo "Creating gssapi.h" ; \
 	h=gss$$$$; rm -f $$h; \
 	(echo "/* This is the gssapi.h prologue. */"; \
 	${INCLUDE_XOM} && \

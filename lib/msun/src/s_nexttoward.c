@@ -33,15 +33,14 @@ nexttoward(double x, long double y)
 	int32_t hx,ix;
 	u_int32_t lx;
 
+	if(isnan(x) || isnan(y))
+	   return x+y;	/* x or y is nan */
+	if(x==y) return (double)y;		/* x=y, return y */
+
 	EXTRACT_WORDS(hx,lx,x);
 	ix = hx&0x7fffffff;		/* |x| */
 	uy.e = y;
 
-	if(((ix>=0x7ff00000)&&((ix-0x7ff00000)|lx)!=0) ||
-	    (uy.bits.exp == 0x7fff &&
-	     ((uy.bits.manh&~LDBL_NBIT)|uy.bits.manl) != 0))
-	   return x+y;	/* x or y is nan */
-	if(x==y) return (double)y;		/* x=y, return y */
 	if(x==0.0) {
 	    INSERT_WORDS(x,uy.bits.sign<<31,1);	/* return +-minsubnormal */
 	    t = x*x;
@@ -55,7 +54,7 @@ nexttoward(double x, long double y)
 	    if(lx==0) hx += 1;
 	}
 	ix = hx&0x7ff00000;
-	if(ix>=0x7ff00000) return x+x;	/* overflow  */
+	if(ix>=0x7ff00000) t = x+x;	/* overflow  */
 	if(ix<0x00100000) {		/* underflow */
 	    t = x*x;
 	    if(t!=x) {		/* raise underflow flag */

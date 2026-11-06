@@ -103,9 +103,13 @@ LINUXKPI_GENSRCS+= \
 	pci_iov_if.h \
 	pcib_if.h \
 	vnode_if.h \
-	usb_if.h \
-	opt_usb.h \
 	opt_stack.h
+
+.if ${MK_USB} != "no"
+LINUXKPI_GENSRCS+= \
+	usb_if.h \
+	opt_usb.h
+.endif
 
 LINUXKPI_INCLUDES+= \
 	-I${SYSDIR}/compat/linuxkpi/common/include \
@@ -135,7 +139,6 @@ CFLAGS+=	-include ${.OBJDIR}/opt_global.h
 CFLAGS+=	-I. -I${SYSDIR} -I${SYSDIR}/contrib/ck/include
 
 CFLAGS.gcc+=	-finline-limit=${INLINE_LIMIT}
-CFLAGS.gcc+=	-fms-extensions
 CFLAGS.gcc+= --param inline-unit-growth=100
 CFLAGS.gcc+= --param large-function-growth=1000
 
@@ -155,9 +158,7 @@ LDFLAGS+=	-d
 .endif
 LDFLAGS+=	-warn-common
 
-.if defined(LINKER_FEATURES) && ${LINKER_FEATURES:Mbuild-id}
 LDFLAGS+=	--build-id=sha1
-.endif
 
 CFLAGS+=	${DEBUG_FLAGS}
 .if ${MACHINE_CPUARCH} == aarch64 || ${MACHINE_CPUARCH} == amd64 || \
@@ -303,6 +304,25 @@ all: ${PROG}
 beforedepend: ${_ILINKS}
 beforebuild: ${_ILINKS}
 
+.if ${MK_REPRODUCIBLE_PATHS} != "no"
+PREFIX_SYSDIR=/usr/src/sys
+CFLAGS+= -ffile-prefix-map=${SYSDIR}=${PREFIX_SYSDIR}
+.if defined(KERNBUILDDIR)
+PREFIX_KERNBUILDDIR=/usr/obj/usr/src/${MACHINE}.${MACHINE_CPUARCH}/sys/${KERNBUILDDIR:T}
+PREFIX_OBJDIR=${PREFIX_KERNBUILDDIR}/modules/usr/src/sys/modules/${.OBJDIR:T}
+CFLAGS+= -ffile-prefix-map=${KERNBUILDDIR}=${PREFIX_KERNBUILDDIR}
+.else
+PREFIX_OBJDIR=/usr/obj/usr/src/${MACHINE}.${MACHINE_CPUARCH}/sys/modules/${.OBJDIR:T}
+.endif
+CFLAGS+= -ffile-prefix-map=${.OBJDIR}=${PREFIX_OBJDIR}
+.if defined(SYSROOT)
+CFLAGS+= -ffile-prefix-map=${SYSROOT}=/sysroot
+.endif
+.else
+PREFIX_SYSDIR=${SYSDIR}
+PREFIX_OBJDIR=${.OBJDIR}
+.endif
+
 # Ensure that the links exist without depending on it when it exists which
 # causes all the modules to be rebuilt when the directory pointed to changes.
 # Ensure that debug info references the path in the source tree.
@@ -311,9 +331,9 @@ beforebuild: ${_ILINKS}
 OBJS_DEPEND_GUESS+=	${_link}
 .endif
 .if ${_link} == "machine"
-CFLAGS+= -fdebug-prefix-map=./machine=${SYSDIR}/${MACHINE}/include
+CFLAGS+= -fdebug-prefix-map=./machine=${PREFIX_SYSDIR}/${MACHINE}/include
 .else
-CFLAGS+= -fdebug-prefix-map=./${_link}=${SYSDIR}/${_link}/include
+CFLAGS+= -fdebug-prefix-map=./${_link}=${PREFIX_SYSDIR}/${_link}/include
 .endif
 .endfor
 
@@ -364,7 +384,7 @@ afterinstall: _kldxref
 _kldxref: .PHONY
 	${KLDXREF_CMD} ${DESTDIR}${KMODDIR}
 .if defined(NO_ROOT) && defined(METALOG)
-	echo ".${DISTBASE}${KMODDIR}/linker.hints type=file mode=0644 uname=root gname=wheel" | \
+	echo ".${DISTBASE}${KMODDIR}/linker.hints type=file uname=root gname=wheel mode=0644" | \
 	    cat -l >> ${METALOG}
 .endif
 .endif
@@ -453,7 +473,7 @@ CLEANFILES+=	${_i}
 .m.h:	${SYSDIR}/tools/makeobjops.awk
 	${AWK} -f ${SYSDIR}/tools/makeobjops.awk ${.IMPSRC} -h
 
-.for _i in mii pccard
+.for _i in mii
 .if !empty(SRCS:M${_i}devs.h)
 CLEANFILES+=	${_i}devs.h
 ${_i}devs.h: ${SYSDIR}/tools/${_i}devs2h.awk ${SYSDIR}/dev/${_i}/${_i}devs

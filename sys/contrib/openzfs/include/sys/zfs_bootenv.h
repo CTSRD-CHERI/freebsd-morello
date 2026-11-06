@@ -7,7 +7,7 @@
  *
  * A full copy of the text of the CDDL should have accompanied this
  * source.  A copy of the CDDL is also available via the Internet at
- * http://www.illumos.org/license/CDDL.
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -31,6 +31,7 @@ extern "C" {
 #define	BE_FREEBSD_VENDOR	"freebsd"
 #define	BE_GRUB_VENDOR		"grub"
 #define	BE_LINUX_VENDOR		"linux"
+#define	BE_POSIX_VENDOR		"posix"
 
 #include <sys/zfs_bootenv_os.h>
 

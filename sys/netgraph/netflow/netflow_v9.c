@@ -28,7 +28,6 @@
 
 #include <sys/cdefs.h>
 #include "opt_inet6.h"
-#include "opt_route.h"
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/counter.h>
@@ -227,6 +226,7 @@ export9_send(priv_p priv, fib_export_p fe, item_p item, struct netflow_v9_packet
 	else
 		NG_FREE_ITEM(item);
 
+	fe->sent_packets++;
 	free(t, M_NETFLOW_GENERAL);
 
 	return (error);

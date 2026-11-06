@@ -51,13 +51,13 @@
 #include <netinet/tcp_fsm.h>
 #include <netinet/tcp_seq.h>
 #include <netinet/tcp_var.h>
+#include <netinet/tcp_log_buf.h>
 #include <arpa/inet.h>
 
 #include <capsicum_helpers.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <jail.h>
-#include <netdb.h>
 #include <pwd.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -84,8 +84,10 @@
 static bool	 opt_4;		/* Show IPv4 sockets */
 static bool	 opt_6;		/* Show IPv6 sockets */
 static bool	 opt_A;		/* Show kernel address of pcb */
+static bool	 opt_b;		/* Show BBLog state */
 static bool	 opt_C;		/* Show congestion control */
 static bool	 opt_c;		/* Show connected sockets */
+static bool	 opt_F;		/* Show sockets for selected user only */
 static bool	 opt_f;		/* Show FIB numbers */
 static bool	 opt_I;		/* Show spliced socket addresses */
 static bool	 opt_i;		/* Show inp_gencnt */
@@ -101,15 +103,70 @@ static bool	 opt_u;		/* Show Unix domain sockets */
 static u_int	 opt_v;		/* Verbose mode */
 static bool	 opt_w;		/* Automatically size the columns */
 static bool	 is_xo_style_encoding;
+static bool	 show_path_state = false;
 
 /*
- * Default protocols to use if no -P was defined.
+ * Protocols that we support.
  */
-static const char *default_protos[] = {"sctp", "tcp", "udp", "divert" };
-static size_t	   default_numprotos = nitems(default_protos);
+enum sockstatproto {
+	SCTP = 0, TCP, UDP, UDPLITE, DIVERT, STREAM, DGRAM, SEQPACK
+};
+struct proto;
+typedef void gather_func_t(struct proto *);
+static gather_func_t gather_sctp, gather_inet, gather_unix;
+static struct proto {
+	gather_func_t	*gather;
+	const char	*name;
+	const char	*pcblist;
+	bool disabled;
+} protos[] = {
+	[SCTP] = {
+		.name = "sctp",
+		.gather = gather_sctp,
+		.pcblist = "net.inet.sctp.assoclist",
+	},
+	[TCP] = {
+		.name = "tcp",
+		.gather = gather_inet,
+		.pcblist = "net.inet.tcp.pcblist",
+	},
+	[UDP] = {
+		.name = "udp",
+		.gather = gather_inet,
+		.pcblist = "net.inet.udp.pcblist",
+	},
+	[UDPLITE] = {
+		.name = "udplite",
+		.gather = gather_inet,
+		.pcblist = "net.inet.udplite.pcblist",
+	},
+	[DIVERT] = {
+		.name = "divert",
+		.gather = gather_inet,
+		.pcblist = "net.inet.divert.pcblist",
+	},
+	[STREAM] = {
+		.name = "unix/stream",
+		.gather = gather_unix,
+		.pcblist = "net.local.stream.pcblist",
+	},
+	[DGRAM] = {
+		.name = "unix/dgram",
+		.gather = gather_unix,
+		.pcblist = "net.local.dgram.pcblist",
+	},
+	[SEQPACK] = {
+		.name = "unix/seqpack",
+		.gather = gather_unix,
+		.pcblist = "net.local.seqpacket.pcblist",
+	},
+};
 
-static int	*protos;	/* protocols to use */
-static size_t	 numprotos;	/* allocated size of protos[] */
+/*
+ * Show sockets for user username or UID specified
+ */
+static char	*filter_user_optarg = NULL;	/* saved optarg for username/UID resolving */
+static uid_t	filter_user_uid;		/* UID to show sockets for */
 
 struct addr {
 	union {
@@ -138,9 +195,13 @@ struct sock {
 	int shown;
 	int vflag;
 	int family;
-	int proto;
 	int state;
 	int fibnum;
+	int bblog_state;
+	int bblog_num;
+	int bblog_limit;
+	unsigned int bblog_sn;
+	const struct proto *proto;
 	const char *protoname;
 	char stack[TCP_FUNCTION_NAME_LEN_MAX];
 	char cc[TCP_CA_NAME_MAX];
@@ -212,63 +273,38 @@ _enforce_ksize(size_t received_size, size_t expected_size, const char *struct_na
 }
 #define enforce_ksize(_sz, _struct)	(_enforce_ksize(_sz, sizeof(_struct), #_struct))
 
-static int
-get_proto_type(const char *proto)
+static inline bool
+filtered_uid(uid_t i_uid)
 {
-	struct protoent *pent;
+	return ((i_uid) == filter_user_uid);
+}
 
-	if (strlen(proto) == 0)
-		return (0);
-	if (capnetdb != NULL)
-		pent = cap_getprotobyname(capnetdb, proto);
-	else
-		pent = getprotobyname(proto);
-	if (pent == NULL) {
-		xo_warn("cap_getprotobyname");
-		return (-1);
-	}
-	return (pent->p_proto);
+static inline bool
+need_nosocks(void)
+{
+	return !(opt_F || (opt_j >= 0));
 }
 
 static void
-init_protos(int num)
-{
-	int proto_count = 0;
-
-	if (num > 0) {
-		proto_count = num;
-	} else {
-		/* Find the maximum number of possible protocols. */
-		while (getprotoent() != NULL)
-			proto_count++;
-		endprotoent();
-	}
-
-	if ((protos = malloc(sizeof(int) * proto_count)) == NULL)
-		xo_err(1, "malloc");
-	numprotos = proto_count;
-}
-
-static int
 parse_protos(char *protospec)
 {
 	char *prot;
-	int proto_type, proto_index;
+	u_int i;
 
-	if (protospec == NULL)
-		return (-1);
+	for (i = 0; i < nitems(protos); i++)
+		protos[i].disabled = true;
 
-	init_protos(0);
-	proto_index = 0;
 	while ((prot = strsep(&protospec, ",")) != NULL) {
 		if (strlen(prot) == 0)
 			continue;
-		proto_type = get_proto_type(prot);
-		if (proto_type != -1)
-			protos[proto_index++] = proto_type;
+		for (i = 0; i < nitems(protos); i++)
+			if (strcmp(prot, protos[i].name) == 0) {
+				protos[i].disabled = false;
+				break;
+			}
+		if (i == nitems(protos))
+			xo_errx(1, "protocol %s not supported", prot);
 	}
-	numprotos = proto_index;
-	return (proto_index);
 }
 
 static void
@@ -325,7 +361,7 @@ free_socket(struct sock *sock)
 }
 
 static void
-gather_sctp(void)
+gather_sctp(struct proto *proto)
 {
 	struct sock *sock;
 	struct addr *laddr, *prev_laddr, *faddr, *prev_faddr;
@@ -333,7 +369,6 @@ gather_sctp(void)
 	struct xsctp_tcb *xstcb;
 	struct xsctp_raddr *xraddr;
 	struct xsctp_laddr *xladdr;
-	const char *varname;
 	size_t len, offset;
 	char *buf;
 	int vflag;
@@ -345,8 +380,7 @@ gather_sctp(void)
 	if (opt_6)
 		vflag |= INP_IPV6;
 
-	varname = "net.inet.sctp.assoclist";
-	if (cap_sysctlbyname(capsysctl, varname, 0, &len, 0, 0) < 0) {
+	if (cap_sysctlbyname(capsysctl, proto->pcblist, 0, &len, 0, 0) < 0) {
 		if (errno != ENOENT)
 			xo_err(1, "cap_sysctlbyname()");
 		return;
@@ -355,7 +389,7 @@ gather_sctp(void)
 		xo_err(1, "malloc()");
 		return;
 	}
-	if (cap_sysctlbyname(capsysctl, varname, buf, &len, 0, 0) < 0) {
+	if (cap_sysctlbyname(capsysctl, proto->pcblist, buf, &len, 0, 0) < 0) {
 		xo_err(1, "cap_sysctlbyname()");
 		free(buf);
 		return;
@@ -366,8 +400,8 @@ gather_sctp(void)
 		if ((sock = calloc(1, sizeof *sock)) == NULL)
 			xo_err(1, "malloc()");
 		sock->socket = xinpcb->socket;
-		sock->proto = IPPROTO_SCTP;
-		sock->protoname = "sctp";
+		sock->proto = proto;
+		sock->protoname = proto->name;
 		if (xinpcb->maxqlen == 0)
 			sock->state = SCTP_CLOSED;
 		else
@@ -467,8 +501,8 @@ gather_sctp(void)
 				if ((sock = calloc(1, sizeof *sock)) == NULL)
 					xo_err(1, "malloc()");
 				sock->socket = xinpcb->socket;
-				sock->proto = IPPROTO_SCTP;
-				sock->protoname = "sctp";
+				sock->proto = proto;
+				sock->protoname = proto->name;
 				sock->state = (int)xstcb->state;
 				if (xinpcb->flags & SCTP_PCB_FLAGS_BOUND_V6) {
 					sock->family = AF_INET6;
@@ -581,6 +615,7 @@ gather_sctp(void)
 				     !(local_all_loopback ||
 				     foreign_all_loopback))) {
 					RB_INSERT(socks_t, &socks, sock);
+					show_path_state = true;
 				} else {
 					free_socket(sock);
 				}
@@ -593,7 +628,7 @@ gather_sctp(void)
 }
 
 static void
-gather_inet(int proto)
+gather_inet(struct proto *proto)
 {
 	struct xinpgen *xig, *exig;
 	struct xinpcb *xip;
@@ -601,7 +636,7 @@ gather_inet(int proto)
 	struct xsocket *so;
 	struct sock *sock;
 	struct addr *laddr, *faddr;
-	const char *varname, *protoname;
+	const char *protoname = proto->name;
 	size_t len, bufsize;
 	void *buf;
 	int retry, vflag;
@@ -612,23 +647,6 @@ gather_inet(int proto)
 	if (opt_6)
 		vflag |= INP_IPV6;
 
-	switch (proto) {
-	case IPPROTO_TCP:
-		varname = "net.inet.tcp.pcblist";
-		protoname = "tcp";
-		break;
-	case IPPROTO_UDP:
-		varname = "net.inet.udp.pcblist";
-		protoname = "udp";
-		break;
-	case IPPROTO_DIVERT:
-		varname = "net.inet.divert.pcblist";
-		protoname = "div";
-		break;
-	default:
-		xo_errx(1, "protocol %d not supported", proto);
-	}
-
 	buf = NULL;
 	bufsize = 8192;
 	retry = 5;
@@ -637,8 +655,8 @@ gather_inet(int proto)
 			if ((buf = realloc(buf, bufsize)) == NULL)
 				xo_err(1, "realloc()");
 			len = bufsize;
-			if (cap_sysctlbyname(capsysctl, varname, buf, &len,
-			    NULL, 0) == 0)
+			if (cap_sysctlbyname(capsysctl, proto->pcblist, buf,
+			    &len, NULL, 0) == 0)
 				break;
 			if (errno == ENOENT)
 				goto out;
@@ -660,22 +678,17 @@ gather_inet(int proto)
 		xig = (struct xinpgen *)(void *)((char *)xig + xig->xig_len);
 		if (xig >= exig)
 			break;
-		switch (proto) {
-		case IPPROTO_TCP:
+		if (proto == &protos[TCP]) {
 			xtp = (struct xtcpcb *)xig;
 			xip = &xtp->xt_inp;
 			if (!check_ksize(xtp->xt_len, struct xtcpcb))
 				goto out;
-			protoname = xtp->t_flags & TF_TOE ? "toe" : "tcp";
-			break;
-		case IPPROTO_UDP:
-		case IPPROTO_DIVERT:
+			if (xtp->t_flags & TF_TOE)
+				protoname = "toe";
+		} else {
 			xip = (struct xinpcb *)xig;
 			if (!check_ksize(xip->xi_len, struct xinpcb))
 				goto out;
-			break;
-		default:
-			xo_errx(1, "protocol %d not supported", proto);
 		}
 		so = &xip->xi_socket;
 		if ((xip->inp_vflag & vflag) == 0)
@@ -729,15 +742,19 @@ gather_inet(int proto)
 			sockaddr(&faddr->address, sock->family,
 			    &xip->in6p_faddr, xip->inp_fport);
 		}
-		if (proto == IPPROTO_TCP)
+		if (proto == &protos[TCP])
 			faddr->encaps_port = xtp->xt_encaps_port;
 		laddr->next = NULL;
 		faddr->next = NULL;
 		sock->laddr = laddr;
 		sock->faddr = faddr;
 		sock->vflag = xip->inp_vflag;
-		if (proto == IPPROTO_TCP) {
+		if (proto == &protos[TCP]) {
 			sock->state = xtp->t_state;
+			sock->bblog_state = xtp->t_logstate;
+			sock->bblog_num = xtp->t_lognum;
+			sock->bblog_limit = xtp->t_loglimit;
+			sock->bblog_sn = xtp->t_logsn;
 			memcpy(sock->stack, xtp->xt_stack,
 			    TCP_FUNCTION_NAME_LEN_MAX);
 			memcpy(sock->cc, xtp->xt_cc, TCP_CA_NAME_MAX);
@@ -746,40 +763,30 @@ gather_inet(int proto)
 		if (sock->socket != 0)
 			RB_INSERT(socks_t, &socks, sock);
 		else
-			SLIST_INSERT_HEAD(&nosocks, sock, socket_list);
+			if (need_nosocks())
+				SLIST_INSERT_HEAD(&nosocks, sock, socket_list);
 	}
 out:
 	free(buf);
 }
 
 static void
-gather_unix(int proto)
+gather_unix(struct proto *proto)
 {
 	struct xunpgen *xug, *exug;
 	struct xunpcb *xup;
 	struct sock *sock;
 	struct addr *laddr, *faddr;
-	const char *varname, *protoname;
+	const char *protoname;
 	size_t len, bufsize;
 	void *buf;
 	int retry;
 
-	switch (proto) {
-	case SOCK_STREAM:
-		varname = "net.local.stream.pcblist";
-		protoname = "stream";
-		break;
-	case SOCK_DGRAM:
-		varname = "net.local.dgram.pcblist";
-		protoname = "dgram";
-		break;
-	case SOCK_SEQPACKET:
-		varname = "net.local.seqpacket.pcblist";
-		protoname = is_xo_style_encoding ? "seqpacket" : "seqpack";
-		break;
-	default:
-		abort();
-	}
+	if (proto == &protos[SEQPACK] && is_xo_style_encoding)
+		protoname = "seqpacket";
+	else
+		protoname = strchr(proto->name, '/') + 1;
+
 	buf = NULL;
 	bufsize = 8192;
 	retry = 5;
@@ -788,8 +795,8 @@ gather_unix(int proto)
 			if ((buf = realloc(buf, bufsize)) == NULL)
 				xo_err(1, "realloc()");
 			len = bufsize;
-			if (cap_sysctlbyname(capsysctl, varname, buf, &len,
-			    NULL, 0) == 0)
+			if (cap_sysctlbyname(capsysctl, proto->pcblist, buf,
+			    &len, NULL, 0) == 0)
 				break;
 			if (errno != ENOMEM || len != bufsize)
 				xo_err(1, "cap_sysctlbyname()");
@@ -850,6 +857,8 @@ getfiles(void)
 	struct xfile *xfiles;
 	size_t len, olen;
 
+	int filenum = 0;
+
 	olen = len = sizeof(*xfiles);
 	if ((xfiles = malloc(len)) == NULL)
 		xo_err(1, "malloc()");
@@ -868,13 +877,22 @@ getfiles(void)
 	if ((files = malloc(nfiles * sizeof(struct file))) == NULL)
 		xo_err(1, "malloc()");
 
+	/* Fill files structure, optionally for specified user */
 	for (int i = 0; i < nfiles; i++) {
-		files[i].xf_data = xfiles[i].xf_data;
-		files[i].xf_pid = xfiles[i].xf_pid;
-		files[i].xf_uid = xfiles[i].xf_uid;
-		files[i].xf_fd = xfiles[i].xf_fd;
-		RB_INSERT(files_t, &ftree, &files[i]);
+		if (opt_F && !filtered_uid(xfiles[i].xf_uid))
+				continue;
+		files[filenum].xf_data = xfiles[i].xf_data;
+		files[filenum].xf_pid = xfiles[i].xf_pid;
+		files[filenum].xf_uid = xfiles[i].xf_uid;
+		files[filenum].xf_fd = xfiles[i].xf_fd;
+		RB_INSERT(files_t, &ftree, &files[filenum]);
+		filenum++;
 	}
+
+	/* Adjust global nfiles to match the number of files we
+	 * actually filled into files[] array
+	 */
+	nfiles = filenum;
 
 	free(xfiles);
 }
@@ -883,8 +901,9 @@ static int
 formataddr(struct sockaddr_storage *ss, char *buf, size_t bufsize)
 {
 	struct sockaddr_un *sun;
-	char addrstr[NI_MAXHOST] = { '\0', '\0' };
 	int error, off, port = 0;
+	char addrstr[NI_MAXHOST] = "";
+	bool needs_ipv6_brackets = false;
 
 	switch (ss->ss_family) {
 	case AF_INET:
@@ -895,6 +914,8 @@ formataddr(struct sockaddr_storage *ss, char *buf, size_t bufsize)
 	case AF_INET6:
 		if (IN6_IS_ADDR_UNSPECIFIED(&sstosin6(ss)->sin6_addr))
 			addrstr[0] = '*';
+		else
+			needs_ipv6_brackets = true;
 		port = ntohs(sstosin6(ss)->sin6_port);
 		break;
 	case AF_UNIX:
@@ -903,7 +924,7 @@ formataddr(struct sockaddr_storage *ss, char *buf, size_t bufsize)
 		if (is_xo_style_encoding) {
 			xo_emit("{:path/%.*s}", sun->sun_len - off,
 				sun->sun_path);
-			return 0;
+			return (0);
 		}
 		return snprintf(buf, bufsize, "%.*s",
 				sun->sun_len - off, sun->sun_path);
@@ -917,11 +938,16 @@ formataddr(struct sockaddr_storage *ss, char *buf, size_t bufsize)
 	if (is_xo_style_encoding) {
 		xo_emit("{:address/%s}", addrstr);
 		xo_emit("{:port/%d}", port);
-		return 0;
+		return (0);
+	}
+	if (needs_ipv6_brackets) {
+		if (port == 0)
+			return (snprintf(buf, bufsize, "[%s]:*", addrstr));
+		return (snprintf(buf, bufsize, "[%s]:%d", addrstr, port));
 	}
 	if (port == 0)
-		return snprintf(buf, bufsize, "%s:*", addrstr);
-	return snprintf(buf, bufsize, "%s:%d", addrstr, port);
+		return (snprintf(buf, bufsize, "%s:*", addrstr));
+	return (snprintf(buf, bufsize, "%s:%d", addrstr, port));
 }
 
 static const char *
@@ -1056,6 +1082,37 @@ sctp_path_state(int state)
 	}
 }
 
+static const char *
+bblog_state(int state)
+{
+	switch (state) {
+	case TCP_LOG_STATE_OFF:
+		return "OFF";
+		break;
+	case TCP_LOG_STATE_TAIL:
+		return "TAIL";
+		break;
+	case TCP_LOG_STATE_HEAD:
+		return "HEAD";
+		break;
+	case TCP_LOG_STATE_HEAD_AUTO:
+		return "HEAD_AUTO";
+		break;
+	case TCP_LOG_STATE_CONTINUAL:
+		return "CONTINUAL";
+		break;
+	case TCP_LOG_STATE_TAIL_AUTO:
+		return "TAIL_AUTO";
+		break;
+	case TCP_LOG_VIA_BBPOINTS:
+		return "BBPOINTS";
+		break;
+	default:
+		return "UNKNOWN";
+		break;
+	}
+}
+
 static int
 format_unix_faddr(struct addr *faddr, char *buf, size_t bufsize) {
 	#define SAFEBUF  (buf == NULL ? NULL : buf + pos)
@@ -1143,6 +1200,10 @@ struct col_widths {
 	int encaps;
 	int path_state;
 	int conn_state;
+	int bblog_state;
+	int bblog_num;
+	int bblog_limit;
+	int bblog_sn;
 	int stack;
 	int cc;
 };
@@ -1158,7 +1219,9 @@ calculate_sock_column_widths(struct col_widths *cw, struct sock *s)
 	first = true;
 
 	len = strlen(s->protoname);
-	if (s->vflag & (INP_IPV4 | INP_IPV6))
+	if (s->vflag & INP_IPV4)
+		len += 1;
+	if (s->vflag & INP_IPV6)
 		len += 1;
 	cw->proto = MAX(cw->proto, len);
 
@@ -1194,81 +1257,86 @@ calculate_sock_column_widths(struct col_widths *cw, struct sock *s)
 					{ .socket = s->splice_socket });
 				if (sp != NULL) {
 					len = formataddr(&sp->laddr->address,
-						 NULL, 0);
+					    NULL, 0);
 					cw->splice_address = MAX(
-						cw->splice_address, len);
+					    cw->splice_address, len);
 				}
 			}
 		}
 		if (opt_i) {
-			if (s->proto == IPPROTO_TCP || s->proto == IPPROTO_UDP)
-			{
+			if (s->proto == &protos[TCP] ||
+			    s->proto == &protos[UDP]) {
 				len = snprintf(NULL, 0,
-					"%" PRIu64, s->inp_gencnt);
+				    "%" PRIu64, s->inp_gencnt);
 				cw->inp_gencnt = MAX(cw->inp_gencnt, len);
 			}
 		}
 		if (opt_U) {
 			if (faddr != NULL &&
-				((s->proto == IPPROTO_SCTP &&
-					s->state != SCTP_CLOSED &&
-					s->state != SCTP_BOUND &&
-					s->state != SCTP_LISTEN) ||
-					(s->proto == IPPROTO_TCP &&
-					s->state != TCPS_CLOSED &&
-					s->state != TCPS_LISTEN))) {
+			    ((s->proto == &protos[SCTP] &&
+			      s->state != SCTP_CLOSED &&
+			      s->state != SCTP_BOUND &&
+			      s->state != SCTP_LISTEN) ||
+			    (s->proto == &protos[TCP] &&
+			     s->state != TCPS_CLOSED &&
+			     s->state != TCPS_LISTEN))) {
 				len = snprintf(NULL, 0, "%u",
-					ntohs(faddr->encaps_port));
+				    ntohs(faddr->encaps_port));
 				cw->encaps = MAX(cw->encaps, len);
 			}
 		}
 		if (opt_s) {
 			if (faddr != NULL &&
-				s->proto == IPPROTO_SCTP &&
-				s->state != SCTP_CLOSED &&
-				s->state != SCTP_BOUND &&
-				s->state != SCTP_LISTEN) {
+			    s->proto == &protos[SCTP] &&
+			    s->state != SCTP_CLOSED &&
+			    s->state != SCTP_BOUND &&
+			    s->state != SCTP_LISTEN) {
 				len = strlen(sctp_path_state(faddr->state));
 				cw->path_state = MAX(cw->path_state, len);
 			}
 		}
 		if (first) {
 			if (opt_s) {
-				if (s->proto == IPPROTO_SCTP ||
-					s->proto == IPPROTO_TCP) {
-					switch (s->proto) {
-					case IPPROTO_SCTP:
+				if (s->proto == &protos[SCTP]) {
+					len = strlen(sctp_conn_state(s->state));
+					cw->conn_state = MAX(cw->conn_state,
+					    len);
+				}
+				if (s->proto == &protos[TCP]) {
+					if (s->state >= 0 &&
+					    s->state < TCP_NSTATES) {
 						len = strlen(
-						    sctp_conn_state(s->state));
+						    tcpstates[s->state]);
 						cw->conn_state = MAX(
-							cw->conn_state, len);
-						break;
-					case IPPROTO_TCP:
-						if (s->state >= 0 &&
-						    s->state < TCP_NSTATES) {
-						    len = strlen(
-							tcpstates[s->state]);
-						    cw->conn_state = MAX(
-							cw->conn_state, len);
-						}
-						break;
+						    cw->conn_state,
+						    len);
 					}
 				}
 			}
-			if (opt_S && s->proto == IPPROTO_TCP) {
+			if (opt_S && s->proto == &protos[TCP]) {
 				len = strlen(s->stack);
 				cw->stack = MAX(cw->stack, len);
 			}
-			if (opt_C && s->proto == IPPROTO_TCP) {
+			if (opt_C && s->proto == &protos[TCP]) {
 				len = strlen(s->cc);
 				cw->cc = MAX(cw->cc, len);
 			}
+			if (opt_b && s->proto == &protos[TCP]) {
+				len = strlen(bblog_state(s->bblog_state));
+				cw->bblog_state = MAX(cw->bblog_state, len);
+				len = snprintf(NULL, 0, "%d", s->bblog_num);
+				cw->bblog_num = MAX(cw->bblog_num, len);
+				len = snprintf(NULL, 0, "%d", s->bblog_limit);
+				cw->bblog_limit = MAX(cw->bblog_limit, len);
+				len = snprintf(NULL, 0, "%u", s->bblog_sn);
+				cw->bblog_sn = MAX(cw->bblog_sn, len);
+			}
+			first = false;
 		}
 		if (laddr != NULL)
 			laddr = laddr->next;
 		if (faddr != NULL)
 			faddr = faddr->next;
-		first = false;
 	}
 }
 
@@ -1426,8 +1494,8 @@ display_sock(struct sock *s, struct col_widths *cw, char *buf, size_t bufsize)
 					cw->splice_address, buf);
 		}
 		if (opt_i) {
-			if (s->proto == IPPROTO_TCP || s->proto == IPPROTO_UDP)
-			{
+			if (s->proto == &protos[TCP] ||
+			    s->proto == &protos[UDP]) {
 				snprintf(buf, bufsize, "%" PRIu64,
 					s->inp_gencnt);
 				xo_emit(" {:id/%*s}", cw->inp_gencnt, buf);
@@ -1436,86 +1504,141 @@ display_sock(struct sock *s, struct col_widths *cw, char *buf, size_t bufsize)
 		}
 		if (opt_U) {
 			if (faddr != NULL &&
-				((s->proto == IPPROTO_SCTP &&
-					s->state != SCTP_CLOSED &&
-					s->state != SCTP_BOUND &&
-					s->state != SCTP_LISTEN) ||
-					(s->proto == IPPROTO_TCP &&
-					s->state != TCPS_CLOSED &&
-					s->state != TCPS_LISTEN))) {
+			    ((s->proto == &protos[SCTP] &&
+			      s->state != SCTP_CLOSED &&
+			      s->state != SCTP_BOUND &&
+			      s->state != SCTP_LISTEN) ||
+			     (s->proto == &protos[TCP] &&
+			      s->state != TCPS_CLOSED &&
+			      s->state != TCPS_LISTEN))) {
 				xo_emit(" {:encaps/%*u}", cw->encaps,
-					ntohs(faddr->encaps_port));
+				    ntohs(faddr->encaps_port));
 			} else if (!is_xo_style_encoding)
 				xo_emit(" {:encaps/%*s}", cw->encaps, "??");
 		}
-		if (opt_s) {
+		if (opt_s && show_path_state) {
 			if (faddr != NULL &&
-				s->proto == IPPROTO_SCTP &&
-				s->state != SCTP_CLOSED &&
-				s->state != SCTP_BOUND &&
-				s->state != SCTP_LISTEN) {
+			    s->proto == &protos[SCTP] &&
+			    s->state != SCTP_CLOSED &&
+			    s->state != SCTP_BOUND &&
+			    s->state != SCTP_LISTEN) {
 				xo_emit(" {:path-state/%-*s}", cw->path_state,
-					sctp_path_state(faddr->state));
+				    sctp_path_state(faddr->state));
 			} else if (!is_xo_style_encoding)
 				xo_emit(" {:path-state/%-*s}", cw->path_state,
-					"??");
+				    "??");
 		}
 		if (first) {
 			if (opt_s) {
-				if (s->proto == IPPROTO_SCTP ||
-				    s->proto == IPPROTO_TCP) {
-					switch (s->proto) {
-					case IPPROTO_SCTP:
+				if (s->proto == &protos[SCTP]) {
+					xo_emit(" {:conn-state/%-*s}",
+					    cw->conn_state,
+					    sctp_conn_state(s->state));
+				} else if (s->proto == &protos[TCP]) {
+					if (s->state >= 0 &&
+					    s->state < TCP_NSTATES)
 						xo_emit(" {:conn-state/%-*s}",
-							cw->conn_state,
-							sctp_conn_state(s->state));
-						break;
-					case IPPROTO_TCP:
-						if (s->state >= 0 &&
-							s->state < TCP_NSTATES)
-							xo_emit(" {:conn-state/%-*s}",
-								cw->conn_state,
-								tcpstates[s->state]);
-						else if (!is_xo_style_encoding)
-							xo_emit(" {:conn-state/%-*s}",
-								cw->conn_state, "??");
-						break;
-					}
+						    cw->conn_state,
+						    tcpstates[s->state]);
+					else if (!is_xo_style_encoding)
+						xo_emit(" {:conn-state/%-*s}",
+						    cw->conn_state, "??");
 				} else if (!is_xo_style_encoding)
 					xo_emit(" {:conn-state/%-*s}",
-						cw->conn_state, "??");
+					    cw->conn_state, "??");
+			}
+			if (opt_b) {
+				if (s->proto == &protos[TCP]) {
+					xo_emit(" {:bblog-state/%-*s}",
+					    cw->bblog_state,
+					    bblog_state(s->bblog_state));
+					snprintf(buf, bufsize, "%d",
+					    s->bblog_num);
+					xo_emit(" {:bblog-number/%*s}",
+					    cw->bblog_num, buf);
+					snprintf(buf, bufsize, "%d",
+					    s->bblog_limit);
+					xo_emit(" {:bblog-limit/%*s}",
+					    cw->bblog_limit, buf);
+					snprintf(buf, bufsize, "%u",
+					    s->bblog_sn);
+					xo_emit(" {:bblog-serial-number/%*s}",
+					    cw->bblog_sn, buf);
+				} else if (!is_xo_style_encoding) {
+					xo_emit(" {:bblog-state/%-*s}",
+					    cw->bblog_state, "??");
+					xo_emit(" {:bblog-number/%*s}",
+					    cw->bblog_num, "??");
+					xo_emit(" {:bblog-limit/%*s}",
+					    cw->bblog_limit, "??");
+					xo_emit(" {:bblog-serial-number/%*s}",
+					    cw->bblog_sn, "??");
+				}
 			}
 			if (opt_S) {
-				if (s->proto == IPPROTO_TCP)
+				if (s->proto == &protos[TCP])
 					xo_emit(" {:stack/%-*s}",
-						cw->stack, s->stack);
+					    cw->stack, s->stack);
 				else if (!is_xo_style_encoding)
 					xo_emit(" {:stack/%-*s}",
-						cw->stack, "??");
+					    cw->stack, "??");
 			}
 			if (opt_C) {
-				if (s->proto == IPPROTO_TCP)
+				if (s->proto == &protos[TCP])
 					xo_emit(" {:cc/%-*s}", cw->cc, s->cc);
 				else if (!is_xo_style_encoding)
 					xo_emit(" {:cc/%-*s}", cw->cc, "??");
 			}
+		} else if (!is_xo_style_encoding) {
+			if (opt_s)
+				xo_emit(" {:conn-state/%-*s}", cw->conn_state,
+				    "??");
+			if (opt_b)
+				xo_emit(" {:bblog-state/%-*s}", cw->bblog_state,
+				    "??");
+			if (opt_S)
+				xo_emit(" {:stack/%-*s}", cw->stack, "??");
+			if (opt_C)
+				xo_emit(" {:cc/%-*s}", cw->cc, "??");
 		}
 		if (laddr != NULL)
 			laddr = laddr->next;
 		if (faddr != NULL)
 			faddr = faddr->next;
+		xo_emit("\n");
 		if (!is_xo_style_encoding && (laddr != NULL || faddr != NULL))
 			xo_emit("{:user/%-*s} {:command/%-*s} {:pid/%*s}"
-				" {:fd/%*s}", cw->user, "??", cw->command, "??",
-				cw->pid, "??", cw->fd, "??");
+			    " {:fd/%*s} {:proto/%-*s}", cw->user, "??",
+			    cw->command, "??", cw->pid, "??", cw->fd, "??",
+			    cw->proto, "??");
 		first = false;
 	}
-	xo_emit("\n");
 }
 
 static void
 display(void)
 {
+	static const char *__HDR_USER="USER",
+			  *__HDR_COMMAND="COMMAND",
+			  *__HDR_PID="PID",
+			  *__HDR_FD="FD",
+			  *__HDR_PROTO="PROTO",
+			  *__HDR_LOCAL_ADDRESS="LOCAL ADDRESS",
+			  *__HDR_FOREIGN_ADDRESS="FOREIGN ADDRESS",
+			  *__HDR_PCB_KVA="PCB KVA",
+			  *__HDR_FIB="FIB",
+			  *__HDR_SPLICE_ADDRESS="SPLICE ADDRESS",
+			  *__HDR_ID="ID",
+			  *__HDR_ENCAPS="ENCAPS",
+			  *__HDR_PATH_STATE="PATH STATE",
+			  *__HDR_CONN_STATE="CONN STATE",
+			  *__HDR_BBLOG_STATE="BBLOG STATE",
+			  *__HDR_BBLOG_NUM="BBLOG NUM",
+			  *__HDR_BBLOG_LIMIT="BBLOG LIM",
+			  *__HDR_BBLOG_SN="BBLOG SN",
+			  *__HDR_STACK="STACK",
+			  *__HDR_CC="CC";
+
 	struct passwd *pwd;
 	struct file *xf;
 	struct sock *s;
@@ -1530,22 +1653,26 @@ display(void)
 
 	if (!is_xo_style_encoding) {
 		cw = (struct col_widths) {
-			.user = strlen("USER"),
+			.user = strlen(__HDR_USER),
 			.command = 10,
-			.pid = strlen("PID"),
-			.fd = strlen("FD"),
-			.proto = strlen("PROTO"),
-			.local_addr = opt_w ? strlen("LOCAL ADDRESS") : 21,
-			.foreign_addr = opt_w ? strlen("FOREIGN ADDRESS") : 21,
+			.pid = strlen(__HDR_PID),
+			.fd = strlen(__HDR_FD),
+			.proto = strlen(__HDR_PROTO),
+			.local_addr = opt_w ? strlen(__HDR_LOCAL_ADDRESS) : 21,
+			.foreign_addr = opt_w ? strlen(__HDR_FOREIGN_ADDRESS) : 21,
 			.pcb_kva = 18,
-			.fib = strlen("FIB"),
-			.splice_address = strlen("SPLICE ADDRESS"),
-			.inp_gencnt = strlen("ID"),
-			.encaps = strlen("ENCAPS"),
-			.path_state = strlen("PATH STATE"),
-			.conn_state = strlen("CONN STATE"),
-			.stack = strlen("STACK"),
-			.cc = strlen("CC"),
+			.fib = strlen(__HDR_FIB),
+			.splice_address = strlen(__HDR_SPLICE_ADDRESS),
+			.inp_gencnt = strlen(__HDR_ID),
+			.encaps = strlen(__HDR_ENCAPS),
+			.path_state = strlen(__HDR_PATH_STATE),
+			.conn_state = strlen(__HDR_CONN_STATE),
+			.bblog_state = strlen(__HDR_BBLOG_STATE),
+			.bblog_num = strlen(__HDR_BBLOG_NUM),
+			.bblog_limit = strlen(__HDR_BBLOG_LIMIT),
+			.bblog_sn = strlen(__HDR_BBLOG_SN),
+			.stack = strlen(__HDR_STACK),
+			.cc = strlen(__HDR_CC),
 		};
 		calculate_column_widths(&cw);
 	} else
@@ -1556,30 +1683,38 @@ display(void)
 	xo_open_list("socket");
 	if (!opt_q) {
 		xo_emit("{T:/%-*s} {T:/%-*s} {T:/%*s} {T:/%*s} {T:/%-*s} "
-			"{T:/%-*s} {T:/%-*s}", cw.user, "USER", cw.command,
-			"COMMAND", cw.pid, "PID", cw.fd, "FD", cw.proto,
-			"PROTO", cw.local_addr, "LOCAL ADDRESS",
-			cw.foreign_addr, "FOREIGN ADDRESS");
+			"{T:/%-*s} {T:/%-*s}", cw.user, __HDR_USER, cw.command,
+			__HDR_COMMAND, cw.pid, __HDR_PID, cw.fd, __HDR_FD, cw.proto,
+			__HDR_PROTO, cw.local_addr, __HDR_LOCAL_ADDRESS,
+			cw.foreign_addr, __HDR_FOREIGN_ADDRESS);
 		if (opt_A)
-			xo_emit(" {T:/%-*s}", cw.pcb_kva, "PCB KVA");
+			xo_emit(" {T:/%-*s}", cw.pcb_kva, __HDR_PCB_KVA);
 		if (opt_f)
 			/* RT_MAXFIBS is 65535. */
-			xo_emit(" {T:/%*s}", cw.fib, "FIB");
+			xo_emit(" {T:/%*s}", cw.fib, __HDR_FIB);
 		if (opt_I)
 			xo_emit(" {T:/%-*s}", cw.splice_address,
-				"SPLICE ADDRESS");
+			    __HDR_SPLICE_ADDRESS);
 		if (opt_i)
-			xo_emit(" {T:/%*s}", cw.inp_gencnt, "ID");
+			xo_emit(" {T:/%*s}", cw.inp_gencnt, __HDR_ID);
 		if (opt_U)
-			xo_emit(" {T:/%*s}", cw.encaps, "ENCAPS");
+			xo_emit(" {T:/%*s}", cw.encaps, __HDR_ENCAPS);
 		if (opt_s) {
-			xo_emit(" {T:/%-*s}", cw.path_state, "PATH STATE");
-			xo_emit(" {T:/%-*s}", cw.conn_state, "CONN STATE");
+			if (show_path_state)
+				xo_emit(" {T:/%-*s}", cw.path_state,
+				    __HDR_PATH_STATE);
+			xo_emit(" {T:/%-*s}", cw.conn_state, __HDR_CONN_STATE);
+		}
+		if (opt_b) {
+			xo_emit(" {T:/%-*s}", cw.bblog_state, __HDR_BBLOG_STATE);
+			xo_emit(" {T:/%*s}", cw.bblog_num, __HDR_BBLOG_NUM);
+			xo_emit(" {T:/%*s}", cw.bblog_limit, __HDR_BBLOG_LIMIT);
+			xo_emit(" {T:/%*s}", cw.bblog_sn, __HDR_BBLOG_SN);
 		}
 		if (opt_S)
-			xo_emit(" {T:/%-*s}", cw.stack, "STACK");
+			xo_emit(" {T:/%-*s}", cw.stack, __HDR_STACK);
 		if (opt_C)
-			xo_emit(" {T:/%-*s}", cw.cc, "CC");
+			xo_emit(" {T:/%-*s}", cw.cc, __HDR_CC);
 		xo_emit("\n");
 	}
 	cap_setpassent(cappwd, 1);
@@ -1596,31 +1731,31 @@ display(void)
 			if (opt_n ||
 			    (pwd = cap_getpwuid(cappwd, xf->xf_uid)) == NULL)
 				xo_emit("{:user/%-*lu}", cw.user,
-					(u_long)xf->xf_uid);
+				    (u_long)xf->xf_uid);
 			else
 				xo_emit("{:user/%-*s}", cw.user, pwd->pw_name);
 			if (!is_xo_style_encoding)
 				xo_emit(" {:command/%-*.10s}", cw.command,
-					getprocname(xf->xf_pid));
+				    getprocname(xf->xf_pid));
 			else
 				xo_emit(" {:command/%-*s}", cw.command,
-					getprocname(xf->xf_pid));
+				    getprocname(xf->xf_pid));
 			xo_emit(" {:pid/%*lu}", cw.pid, (u_long)xf->xf_pid);
 			xo_emit(" {:fd/%*d}", cw.fd, xf->xf_fd);
 			display_sock(s, &cw, buf, bufsize);
 			xo_close_instance("socket");
 		}
 	}
-	if (opt_j >= 0)
-		return;
+	if (!need_nosocks())
+		goto out;
 	SLIST_FOREACH(s, &nosocks, socket_list) {
 		if (!check_ports(s))
 			continue;
 		xo_open_instance("socket");
 		if (!is_xo_style_encoding)
 			xo_emit("{:user/%-*s} {:command/%-*s} {:pid/%*s}"
-				" {:fd/%*s}", cw.user, "??", cw.command, "??",
-				cw.pid, "??", cw.fd, "??");
+			    " {:fd/%*s}", cw.user, "??", cw.command, "??",
+			    cw.pid, "??", cw.fd, "??");
 		display_sock(s, &cw, buf, bufsize);
 		xo_close_instance("socket");
 	}
@@ -1632,37 +1767,18 @@ display(void)
 		xo_open_instance("socket");
 		if (!is_xo_style_encoding)
 			xo_emit("{:user/%-*s} {:command/%-*s} {:pid/%*s}"
-				" {:fd/%*s}", cw.user, "??", cw.command, "??",
-				cw.pid, "??", cw.fd, "??");
+			    " {:fd/%*s}", cw.user, "??", cw.command, "??",
+			    cw.pid, "??", cw.fd, "??");
 		display_sock(s, &cw, buf, bufsize);
 		xo_close_instance("socket");
 	}
+out:
 	xo_close_list("socket");
 	xo_close_container("sockstat");
 	if (xo_finish() < 0)
 		xo_err(1, "stdout");
 	free(buf);
 	cap_endpwent(cappwd);
-}
-
-static int
-set_default_protos(void)
-{
-	struct protoent *prot;
-	const char *pname;
-	size_t pindex;
-
-	init_protos(default_numprotos);
-
-	for (pindex = 0; pindex < default_numprotos; pindex++) {
-		pname = default_protos[pindex];
-		prot = cap_getprotobyname(capnetdb, pname);
-		if (prot == NULL)
-			xo_err(1, "cap_getprotobyname: %s", pname);
-		protos[pindex] = prot->p_proto;
-	}
-	numprotos = pindex;
-	return (pindex);
 }
 
 /*
@@ -1701,11 +1817,44 @@ jail_getvnet(int jid)
 	return (vnet);
 }
 
+/*
+ * Parse username and/or UID
+ */
+static bool
+parse_filter_user(void)
+{
+	struct passwd *pwd;
+	char *ep;
+	uid_t uid;
+	bool rv = false;
+
+	uid = (uid_t)strtol(filter_user_optarg, &ep, 10);
+
+	/* Open and/or rewind capsicumized password file */
+	cap_setpassent(cappwd, 1);
+
+	if (*ep == '\0') {
+		/* We have an UID specified, check if it's valid */
+		if ((pwd = cap_getpwuid(cappwd, uid)) == NULL) 
+			goto out;
+		filter_user_uid = uid;
+	} else {
+		/* Check if we have a valid username */
+		if ((pwd = cap_getpwnam(cappwd, filter_user_optarg)) == NULL) 
+			goto out;
+		filter_user_uid = pwd->pw_uid;
+	}
+
+	rv = true;
+out:
+	return (rv);
+}
+
 static void
 usage(void)
 {
 	xo_error(
-"usage: sockstat [--libxo ...] [-46ACcfIiLlnqSsUuvw] [-j jid] [-p ports]\n"
+"usage: sockstat [--libxo ...] [-46AbCcfIiLlnqSsUuvw] [-F uid/username] [-j jid] [-p ports]\n"
 "                [-P protocols]\n");
 	exit(1);
 }
@@ -1715,19 +1864,21 @@ main(int argc, char *argv[])
 {
 	cap_channel_t *capcas;
 	cap_net_limit_t *limit;
-	const char *pwdcmds[] = { "setpassent", "getpwuid" };
-	const char *pwdfields[] = { "pw_name" };
-	int protos_defined = -1;
-	int o, i, err;
+	const char *pwdcmds[] = { "setpassent", "getpwuid", "getpwnam" };
+	const char *pwdfields[] = { "pw_name", "pw_uid" };
+	bool protos_defined = false;
+	int o, err;
 
 	argc = xo_parse_args(argc, argv);
 	if (argc < 0)
 		exit(1);
-	if (xo_get_style(NULL) != XO_STYLE_TEXT &&
-		xo_get_style(NULL) != XO_STYLE_HTML)
-		is_xo_style_encoding = true;
+	if (xo_get_style(NULL) != XO_STYLE_TEXT) {
+		show_path_state = true;
+		if (xo_get_style(NULL) != XO_STYLE_HTML)
+			is_xo_style_encoding = true;
+	}
 	opt_j = -1;
-	while ((o = getopt(argc, argv, "46ACcfIij:Llnp:P:qSsUuvw")) != -1)
+	while ((o = getopt(argc, argv, "46AbCcF:fIij:Llnp:P:qSsUuvw")) != -1)
 		switch (o) {
 		case '4':
 			opt_4 = true;
@@ -1738,11 +1889,19 @@ main(int argc, char *argv[])
 		case 'A':
 			opt_A = true;
 			break;
+		case 'b':
+			opt_b = true;
+			break;
 		case 'C':
 			opt_C = true;
 			break;
 		case 'c':
 			opt_c = true;
+			break;
+		case 'F':
+			/* Save optarg for later use when we enter capabilities mode */
+			filter_user_optarg = optarg;
+			opt_F = true;
 			break;
 		case 'f':
 			opt_f = true;
@@ -1779,7 +1938,8 @@ main(int argc, char *argv[])
 			}
 			break;
 		case 'P':
-			protos_defined = parse_protos(optarg);
+			parse_protos(optarg);
+			protos_defined = true;
 			break;
 		case 'q':
 			opt_q = true;
@@ -1855,28 +2015,45 @@ main(int argc, char *argv[])
 	if (cap_pwd_limit_fields(cappwd, pwdfields, nitems(pwdfields)) < 0)
 		xo_err(1, "Unable to apply pwd commands limits");
 
-	if ((!opt_4 && !opt_6) && protos_defined != -1)
-		opt_4 = opt_6 = true;
-	if (!opt_4 && !opt_6 && !opt_u)
-		opt_4 = opt_6 = opt_u = true;
-	if ((opt_4 || opt_6) && protos_defined == -1)
-		protos_defined = set_default_protos();
+	if (opt_F && !parse_filter_user())
+		xo_errx(1, "Invalid username or UID specified");
+
 	if (!opt_c && !opt_l)
 		opt_c = opt_l = true;
 
-	if (opt_4 || opt_6) {
-		for (i = 0; i < protos_defined; i++)
-			if (protos[i] == IPPROTO_SCTP)
-				gather_sctp();
-			else
-				gather_inet(protos[i]);
+	/*
+	 * By default all protocols are gathered.
+	 *
+	 * With -u and without -[46] disables all but unix(4).
+	 * With -[46] and without -u disables unix(4).
+	 * With -P only specified are gathered and -4 and -6 are ignored,
+	 * however -u is not ignored (historical bug).
+	 *
+	 * divert(4) is controlled by -4 (historical bug).
+	 *
+	 * NB: opt_4 and opt_6 are used outside this function, thus need to
+	 * be set to true if both are false.
+	 */
+	if (protos_defined) {
+		if (opt_u)
+			protos[STREAM].disabled = protos[DGRAM].disabled =
+			    protos[SEQPACK].disabled = false;
+	} else {
+		if (!opt_u && (opt_4 || opt_6))
+			protos[STREAM].disabled = protos[DGRAM].disabled =
+			    protos[SEQPACK].disabled = true;
+		if (opt_u && !(opt_4 || opt_6))
+			protos[SCTP].disabled = protos[TCP].disabled =
+			    protos[UDP].disabled = protos[UDPLITE].disabled =
+			    true;
 	}
+	if (!opt_4 && !opt_6)
+		opt_4 = opt_6 = true;
 
-	if (opt_u || (protos_defined == -1 && !opt_4 && !opt_6)) {
-		gather_unix(SOCK_STREAM);
-		gather_unix(SOCK_DGRAM);
-		gather_unix(SOCK_SEQPACKET);
-	}
+	for (u_int i = 0; i < nitems(protos); i++)
+		if (!protos[i].disabled)
+			protos[i].gather(&protos[i]);
+
 	getfiles();
 	display();
 	exit(0);

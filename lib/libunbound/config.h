@@ -20,7 +20,7 @@
 /* #undef COMPAT_SHA512 */
 
 /* Command line arguments used with configure */
-#define CONFCMDLINE "--with-ssl=/usr --with-libexpat=/usr --disable-dnscrypt --disable-dnstap --enable-ecdsa --disable-event-api --enable-gost --with-libevent --disable-subnet --disable-tfo-client --disable-tfo-server --with-pthreads--prefix=/usr --localstatedir=/var/unbound --mandir=/usr/share/man --build=freebsd"
+#define CONFCMDLINE "--prefix= --exec-prefix=/usr --with-conf-file=/var/unbound/unbound.conf --with-run-dir=/var/unbound --with-username=unbound"
 
 /* Pathname to the Unbound configuration file */
 #define CONFIGFILE "/var/unbound/unbound.conf"
@@ -31,6 +31,9 @@
 
 /* Whether daemon is deprecated */
 /* #undef DEPRECATED_DAEMON */
+
+/* Whether X509_NAME_get_text_by_NID is deprecated */
+/* #undef DEPRECATED_X509_NAME_GET_TEXT_BY_NID */
 
 /* Deprecate RSA 1024 bit length, makes that an unsupported key */
 /* #undef DEPRECATE_RSA_1024 */
@@ -61,11 +64,17 @@
 /* Define to 1 if you have the <arpa/inet.h> header file. */
 #define HAVE_ARPA_INET_H 1
 
+/* Define to 1 if you have the `ASN1_STRING_get0_data' function. */
+#define HAVE_ASN1_STRING_GET0_DATA 1
+
 /* Whether the C compiler accepts the "fallthrough" attribute */
 #define HAVE_ATTR_FALLTHROUGH 1
 
 /* Whether the C compiler accepts the "format" attribute */
 #define HAVE_ATTR_FORMAT 1
+
+/* Whether the C compiler accepts the "nonstring" attribute */
+#define HAVE_ATTR_NONSTRING 1
 
 /* Whether the C compiler accepts the "noreturn" attribute */
 #define HAVE_ATTR_NORETURN 1
@@ -77,13 +86,10 @@
 #define HAVE_ATTR_WEAK 1
 
 /* If we have be64toh */
-/* #undef HAVE_BE64TOH */
+#define HAVE_BE64TOH 1
 
 /* Define to 1 if you have the `BIO_set_callback_ex' function. */
-/* #undef HAVE_BIO_SET_CALLBACK_EX */
-
-/* Define to 1 if you have the `BIO_set_callback_ex' function. */
-/* #undef HAVE_BIO_SET_CALLBACK_EX */
+#define HAVE_BIO_SET_CALLBACK_EX 1
 
 /* Define to 1 if you have the <bsd/stdlib.h> header file. */
 /* #undef HAVE_BSD_STDLIB_H */
@@ -133,6 +139,18 @@
    and to 0 if you don't. */
 /* #undef HAVE_DECL_NGHTTP2_SESSION_SERVER_NEW */
 
+/* Define to 1 if you have the declaration of `ngtcp2_conn_server_new', and to
+   0 if you don't. */
+/* #undef HAVE_DECL_NGTCP2_CONN_SERVER_NEW */
+
+/* Define to 1 if you have the declaration of `ngtcp2_crypto_encrypt_cb', and
+   to 0 if you don't. */
+/* #undef HAVE_DECL_NGTCP2_CRYPTO_ENCRYPT_CB */
+
+/* Define to 1 if you have the declaration of `ngtcp2_crypto_ossl_ctx_new',
+   and to 0 if you don't. */
+/* #undef HAVE_DECL_NGTCP2_CRYPTO_OSSL_CTX_NEW */
+
 /* Define to 1 if you have the declaration of `NID_ED25519', and to 0 if you
    don't. */
 #define HAVE_DECL_NID_ED25519 1
@@ -167,7 +185,11 @@
 
 /* Define to 1 if you have the declaration of `SSL_CTX_set_ecdh_auto', and to
    0 if you don't. */
-/* #undef HAVE_DECL_SSL_CTX_SET_ECDH_AUTO */
+#define HAVE_DECL_SSL_CTX_SET_ECDH_AUTO 1
+
+/* Define to 1 if you have the declaration of `SSL_CTX_set_tmp_ecdh', and to 0
+   if you don't. */
+#define HAVE_DECL_SSL_CTX_SET_TMP_ECDH 1
 
 /* Define to 1 if you have the declaration of `strlcat', and to 0 if you
    don't. */
@@ -188,7 +210,7 @@
 #define HAVE_DSA_SIG_SET0 1
 
 /* Define to 1 if you have the <endian.h> header file. */
-/* #undef HAVE_ENDIAN_H */
+#define HAVE_ENDIAN_H 1
 
 /* Define to 1 if you have the `endprotoent' function. */
 #define HAVE_ENDPROTOENT 1
@@ -234,12 +256,7 @@
 
 /* Define to 1 if you have the `EVP_default_properties_is_fips_enabled'
    function. */
-/* #undef HAVE_EVP_DEFAULT_PROPERTIES_IS_FIPS_ENABLED */
-
-
-/* Define to 1 if you have the `EVP_default_properties_is_fips_enabled'
-   function. */
-/* #undef HAVE_EVP_DEFAULT_PROPERTIES_IS_FIPS_ENABLED */
+#define HAVE_EVP_DEFAULT_PROPERTIES_IS_FIPS_ENABLED 1
 
 /* Define to 1 if you have the `EVP_DigestVerify' function. */
 #define HAVE_EVP_DIGESTVERIFY 1
@@ -251,7 +268,7 @@
 #define HAVE_EVP_ENCRYPTINIT_EX 1
 
 /* Define to 1 if you have the `EVP_MAC_CTX_set_params' function. */
-/* #undef HAVE_EVP_MAC_CTX_SET_PARAMS */
+#define HAVE_EVP_MAC_CTX_SET_PARAMS 1
 
 /* Define to 1 if you have the `EVP_MD_CTX_new' function. */
 #define HAVE_EVP_MD_CTX_NEW 1
@@ -281,7 +298,13 @@
 #define HAVE_FCNTL 1
 
 /* Define to 1 if you have the `FIPS_mode' function. */
-#define HAVE_FIPS_MODE 1
+/* #undef HAVE_FIPS_MODE */
+
+/* Define to 1 if you have the `fnmatch' function. */
+#define HAVE_FNMATCH 1
+
+/* Define to 1 if you have the <fnmatch.h> header file. */
+#define HAVE_FNMATCH_H 1
 
 /* Define to 1 if you have the `fork' function. */
 #define HAVE_FORK 1
@@ -316,9 +339,6 @@
 /* Define to 1 if you have the `gettid' function. */
 /* #undef HAVE_GETTID */
 
-/* Define to 1 if you have the `gettid' function. */
-/* #undef HAVE_GETTID */
-
 /* Define to 1 if you have the `glob' function. */
 #define HAVE_GLOB 1
 
@@ -338,13 +358,10 @@
 #define HAVE_HMAC_INIT_EX 1
 
 /* If we have htobe64 */
-/* #undef HAVE_HTOBE64 */
+#define HAVE_HTOBE64 1
 
 /* Define to 1 if you have the <ifaddrs.h> header file. */
 #define HAVE_IFADDRS_H 1
-
-/* Define to 1 if you have the `if_nametoindex' function. */
-#define HAVE_IF_NAMETOINDEX 1
 
 /* Define to 1 if you have the `if_nametoindex' function. */
 #define HAVE_IF_NAMETOINDEX 1
@@ -385,6 +402,12 @@
 /* Define if we have LibreSSL */
 /* #undef HAVE_LIBRESSL */
 
+/* If we have atomic_store */
+#define HAVE_LINK_ATOMIC_STORE 1
+
+/* Define to 1 if you have the <linux/net_tstamp.h> header file. */
+/* #undef HAVE_LINUX_NET_TSTAMP_H */
+
 /* Define to 1 if you have the `localtime_r' function. */
 #define HAVE_LOCALTIME_R 1
 
@@ -424,11 +447,79 @@
 /* Define to 1 if you have the <net/if.h> header file. */
 #define HAVE_NET_IF_H 1
 
+/* Define to 1 if you have the <net/pfvar.h> header file. */
+/* #undef HAVE_NET_PFVAR_H */
+
 /* Define this to use nghttp2 client. */
 /* #undef HAVE_NGHTTP2 */
 
 /* Define to 1 if you have the <nghttp2/nghttp2.h> header file. */
 /* #undef HAVE_NGHTTP2_NGHTTP2_H */
+
+/* Define this to use ngtcp2. */
+/* #undef HAVE_NGTCP2 */
+
+/* Define to 1 if you have the `ngtcp2_ccerr_default' function. */
+/* #undef HAVE_NGTCP2_CCERR_DEFAULT */
+
+/* Define to 1 if you have the `ngtcp2_conn_encode_0rtt_transport_params'
+   function. */
+/* #undef HAVE_NGTCP2_CONN_ENCODE_0RTT_TRANSPORT_PARAMS */
+
+/* Define to 1 if you have the `ngtcp2_conn_get_max_local_streams_uni'
+   function. */
+/* #undef HAVE_NGTCP2_CONN_GET_MAX_LOCAL_STREAMS_UNI */
+
+/* Define to 1 if you have the `ngtcp2_conn_get_num_scid' function. */
+/* #undef HAVE_NGTCP2_CONN_GET_NUM_SCID */
+
+/* Define to 1 if you have the `ngtcp2_conn_in_closing_period' function. */
+/* #undef HAVE_NGTCP2_CONN_IN_CLOSING_PERIOD */
+
+/* Define to 1 if you have the `ngtcp2_conn_in_draining_period' function. */
+/* #undef HAVE_NGTCP2_CONN_IN_DRAINING_PERIOD */
+
+/* Define if ngtcp2_conn_shutdown_stream has 4 arguments. */
+/* #undef HAVE_NGTCP2_CONN_SHUTDOWN_STREAM4 */
+
+/* Define to 1 if you have the `ngtcp2_conn_tls_early_data_rejected' function.
+   */
+/* #undef HAVE_NGTCP2_CONN_TLS_EARLY_DATA_REJECTED */
+
+/* Define to 1 if you have the `ngtcp2_crypto_encrypt_cb' function. */
+/* #undef HAVE_NGTCP2_CRYPTO_ENCRYPT_CB */
+
+/* Define to 1 if you have the
+   `ngtcp2_crypto_quictls_configure_client_context' function. */
+/* #undef HAVE_NGTCP2_CRYPTO_QUICTLS_CONFIGURE_CLIENT_CONTEXT */
+
+/* Define to 1 if you have the
+   `ngtcp2_crypto_quictls_configure_server_context' function. */
+/* #undef HAVE_NGTCP2_CRYPTO_QUICTLS_CONFIGURE_SERVER_CONTEXT */
+
+/* Define to 1 if you have the
+   `ngtcp2_crypto_quictls_from_ossl_encryption_level' function. */
+/* #undef HAVE_NGTCP2_CRYPTO_QUICTLS_FROM_OSSL_ENCRYPTION_LEVEL */
+
+/* Define to 1 if you have the `ngtcp2_crypto_quictls_init' function. */
+/* #undef HAVE_NGTCP2_CRYPTO_QUICTLS_INIT */
+
+/* Define to 1 if the system has the type `ngtcp2_encryption_level'. */
+/* #undef HAVE_NGTCP2_ENCRYPTION_LEVEL */
+
+/* Define to 1 if you have the <ngtcp2/ngtcp2_crypto_openssl.h> header file.
+   */
+/* #undef HAVE_NGTCP2_NGTCP2_CRYPTO_OPENSSL_H */
+
+/* Define to 1 if you have the <ngtcp2/ngtcp2_crypto_ossl.h> header file. */
+/* #undef HAVE_NGTCP2_NGTCP2_CRYPTO_OSSL_H */
+
+/* Define to 1 if you have the <ngtcp2/ngtcp2_crypto_quictls.h> header file.
+   */
+/* #undef HAVE_NGTCP2_NGTCP2_CRYPTO_QUICTLS_H */
+
+/* Define to 1 if you have the <ngtcp2/ngtcp2.h> header file. */
+/* #undef HAVE_NGTCP2_NGTCP2_H */
 
 /* Use libnss for crypto */
 /* #undef HAVE_NSS */
@@ -439,6 +530,9 @@
 /* Define to 1 if you have the <openssl/bn.h> header file. */
 #define HAVE_OPENSSL_BN_H 1
 
+/* Define to 1 if you have the `OPENSSL_cleanup' function. */
+#define HAVE_OPENSSL_CLEANUP 1
+
 /* Define to 1 if you have the `OPENSSL_config' function. */
 #define HAVE_OPENSSL_CONFIG 1
 
@@ -446,7 +540,7 @@
 #define HAVE_OPENSSL_CONF_H 1
 
 /* Define to 1 if you have the <openssl/core_names.h> header file. */
-/* #undef HAVE_OPENSSL_CORE_NAMES_H */
+#define HAVE_OPENSSL_CORE_NAMES_H 1
 
 /* Define to 1 if you have the <openssl/dh.h> header file. */
 #define HAVE_OPENSSL_DH_H 1
@@ -467,7 +561,7 @@
 #define HAVE_OPENSSL_INIT_SSL 1
 
 /* Define to 1 if you have the <openssl/param_build.h> header file. */
-/* #undef HAVE_OPENSSL_PARAM_BUILD_H */
+#define HAVE_OPENSSL_PARAM_BUILD_H 1
 
 /* Define to 1 if you have the <openssl/rand.h> header file. */
 #define HAVE_OPENSSL_RAND_H 1
@@ -479,7 +573,7 @@
 #define HAVE_OPENSSL_SSL_H 1
 
 /* Define to 1 if you have the `OSSL_PARAM_BLD_new' function. */
-/* #undef HAVE_OSSL_PARAM_BLD_NEW */
+#define HAVE_OSSL_PARAM_BLD_NEW 1
 
 /* Define to 1 if you have the `poll' function. */
 #define HAVE_POLL 1
@@ -490,11 +584,26 @@
 /* Define if you have POSIX threads libraries and header files. */
 #define HAVE_PTHREAD 1
 
+/* Define to 1 if you have the <pthread_np.h> header file. */
+#define HAVE_PTHREAD_NP_H 1
+
 /* Have PTHREAD_PRIO_INHERIT. */
 #define HAVE_PTHREAD_PRIO_INHERIT 1
 
 /* Define to 1 if the system has the type `pthread_rwlock_t'. */
 #define HAVE_PTHREAD_RWLOCK_T 1
+
+/* Define if pthread_setname_np has the common 2 arguments. */
+#define HAVE_PTHREAD_SETNAME_NP 1
+
+/* Define if pthread_setname_np has only 1 argument. */
+/* #undef HAVE_PTHREAD_SETNAME_NP1 */
+
+/* Define if pthread_setname_np has 3 arguments. */
+/* #undef HAVE_PTHREAD_SETNAME_NP3 */
+
+/* Define if pthread_setname_np exists as pthread_set_name_np instead. */
+#define HAVE_PTHREAD_SET_NAME_NP 1
 
 /* Define to 1 if the system has the type `pthread_spinlock_t'. */
 #define HAVE_PTHREAD_SPINLOCK_T 1
@@ -582,7 +691,7 @@
 
 /* Define to 1 if you have the `SSL_CTX_set_tlsext_ticket_key_evp_cb'
    function. */
-/* #undef HAVE_SSL_CTX_SET_TLSEXT_TICKET_KEY_EVP_CB */
+#define HAVE_SSL_CTX_SET_TLSEXT_TICKET_KEY_EVP_CB 1
 
 /* Define to 1 if you have the `SSL_get0_alpn_selected' function. */
 #define HAVE_SSL_GET0_ALPN_SELECTED 1
@@ -591,13 +700,26 @@
 #define HAVE_SSL_GET0_PEERNAME 1
 
 /* Define to 1 if you have the `SSL_get1_peer_certificate' function. */
-/* #undef HAVE_SSL_GET1_PEER_CERTIFICATE */
+#define HAVE_SSL_GET1_PEER_CERTIFICATE 1
+
+/* Define to 1 if you have the `SSL_is_quic' function. */
+/* #undef HAVE_SSL_IS_QUIC */
+
+/* Define to 1 if you have the `SSL_set1_dnsname' function. */
+/* #undef HAVE_SSL_SET1_DNSNAME */
 
 /* Define to 1 if you have the `SSL_set1_host' function. */
 #define HAVE_SSL_SET1_HOST 1
 
+/* Define to 1 if you have the `SSL_set_quic_tls_early_data_enabled' function.
+   */
+/* #undef HAVE_SSL_SET_QUIC_TLS_EARLY_DATA_ENABLED */
+
 /* Define to 1 if you have the <stdarg.h> header file. */
 #define HAVE_STDARG_H 1
+
+/* Define to 1 if you have the <stdatomic.h> header file. */
+#define HAVE_STDATOMIC_H 1
 
 /* Define to 1 if you have the <stdbool.h> header file. */
 #define HAVE_STDBOOL_H 1
@@ -635,8 +757,31 @@
 /* Define to 1 if `ipi_spec_dst' is a member of `struct in_pktinfo'. */
 /* #undef HAVE_STRUCT_IN_PKTINFO_IPI_SPEC_DST */
 
+/* Define to 1 if `tokenlen' is a member of `struct ngtcp2_pkt_hd'. */
+/* #undef HAVE_STRUCT_NGTCP2_PKT_HD_TOKENLEN */
+
+/* Define to 1 if `max_tx_udp_payload_size' is a member of `struct
+   ngtcp2_settings'. */
+/* #undef HAVE_STRUCT_NGTCP2_SETTINGS_MAX_TX_UDP_PAYLOAD_SIZE */
+
+/* Define to 1 if `tokenlen' is a member of `struct ngtcp2_settings'. */
+/* #undef HAVE_STRUCT_NGTCP2_SETTINGS_TOKENLEN */
+
+/* Define to 1 if `original_dcid_present' is a member of `struct
+   ngtcp2_transport_params'. */
+/* #undef HAVE_STRUCT_NGTCP2_TRANSPORT_PARAMS_ORIGINAL_DCID_PRESENT */
+
+/* Define to 1 if the system has the type `struct ngtcp2_version_cid'. */
+/* #undef HAVE_STRUCT_NGTCP2_VERSION_CID */
+
 /* Define to 1 if `sun_len' is a member of `struct sockaddr_un'. */
 #define HAVE_STRUCT_SOCKADDR_UN_SUN_LEN 1
+
+/* Define to 1 if `st_mtimensec' is a member of `struct stat'. */
+#define HAVE_STRUCT_STAT_ST_MTIMENSEC 1
+
+/* Define to 1 if `st_mtim.tv_nsec' is a member of `struct stat'. */
+#define HAVE_STRUCT_STAT_ST_MTIM_TV_NSEC 1
 
 /* Define if you have Swig libraries and header files. */
 /* #undef HAVE_SWIG */
@@ -734,6 +879,12 @@
 /* Define to 1 if you have the <ws2tcpip.h> header file. */
 /* #undef HAVE_WS2TCPIP_H */
 
+/* Define to 1 if you have the `X509_get_key_usage' function. */
+#define HAVE_X509_GET_KEY_USAGE 1
+
+/* Define to 1 if you have the `X509_NAME_get_text_by_NID' function. */
+#define HAVE_X509_NAME_GET_TEXT_BY_NID 1
+
 /* Define to 1 if you have the `X509_VERIFY_PARAM_set1_host' function. */
 #define HAVE_X509_VERIFY_PARAM_SET1_HOST 1
 
@@ -796,7 +947,7 @@
 #define PACKAGE_NAME "unbound"
 
 /* Define to the full name and version of this package. */
-#define PACKAGE_STRING "unbound 1.23.0"
+#define PACKAGE_STRING "unbound 1.26.2"
 
 /* Define to the one symbol short name of this package. */
 #define PACKAGE_TARNAME "unbound"
@@ -805,7 +956,7 @@
 #define PACKAGE_URL ""
 
 /* Define to the version of this package. */
-#define PACKAGE_VERSION "1.23.0"
+#define PACKAGE_VERSION "1.26.2"
 
 /* default pidfile location */
 #define PIDFILE "/var/unbound/unbound.pid"
@@ -828,7 +979,7 @@
 #define ROOT_CERT_FILE "/var/unbound/icannbundle.pem"
 
 /* version number for resource files */
-#define RSRC_PACKAGE_VERSION 1,23,0,0
+#define RSRC_PACKAGE_VERSION 1,26,2,0
 
 /* Directory to chdir to */
 #define RUN_DIR "/var/unbound"
@@ -836,32 +987,17 @@
 /* Shared data */
 #define SHARE_DIR "/var/unbound"
 
-#ifdef  __LP64__
-/* The size of `size_t', as computed by sizeof. */
-#define SIZEOF_SIZE_T 8
-/* The size of `size_t'. */
 /* The size of `pthread_t', as computed by sizeof. */
 #define SIZEOF_PTHREAD_T 8
-#else
-#define SIZEOF_SIZE_T 4
-/* The size of `size_t'. */
-/* The size of `pthread_t', as computed by sizeof. */
-#define SIZEOF_PTHREAD_T 4
-#endif
+
+/* The size of `size_t', as computed by sizeof. */
+#define SIZEOF_SIZE_T 8
 
 /* The size of `time_t', as computed by sizeof. */
-#ifdef  __i386__
-#define SIZEOF_TIME_T 4
-#else
 #define SIZEOF_TIME_T 8
-#endif
 
 /* The size of `unsigned long', as computed by sizeof. */
-#ifdef  __LP64__
 #define SIZEOF_UNSIGNED_LONG 8
-#else
-#define SIZEOF_UNSIGNED_LONG 4
-#endif
 
 /* define if (v)snprintf does not return length needed, (but length used) */
 /* #undef SNPRINTF_RET_BROKEN */
@@ -911,7 +1047,7 @@
 /* #undef USE_DNSTAP */
 
 /* Define this to enable DSA support. */
-#define USE_DSA 1
+/* #undef USE_DSA */
 
 /* Define this to enable ECDSA support. */
 #define USE_ECDSA 1
@@ -935,7 +1071,7 @@
 /* #undef USE_IPSET */
 
 /* Define if you enable libevent */
-#define USE_LIBEVENT 1
+/* #undef USE_LIBEVENT */
 
 /* Define this to enable use of /proc/sys/net/ipv4/ip_local_port_range as a
    default outgoing port range. This is only for the libunbound on Linux and
@@ -950,6 +1086,9 @@
 
 /* Define this to enable client TCP Fast Open. */
 /* #undef USE_MSG_FASTOPEN */
+
+/* Define this to use ngtcp2_crypto_ossl. */
+/* #undef USE_NGTCP2_CRYPTO_OSSL */
 
 /* Define this to enable client TCP Fast Open. */
 /* #undef USE_OSX_MSG_FASTOPEN */
@@ -1163,39 +1302,39 @@
 
 #if defined(OMITTED__D_GNU_SOURCE) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE 1
-#endif 
+#endif
 
 #if defined(OMITTED__D_BSD_SOURCE) && !defined(_BSD_SOURCE)
 #define _BSD_SOURCE 1
-#endif 
+#endif
 
 #if defined(OMITTED__D_DEFAULT_SOURCE) && !defined(_DEFAULT_SOURCE)
 #define _DEFAULT_SOURCE 1
-#endif 
+#endif
 
 #if defined(OMITTED__D__EXTENSIONS__) && !defined(__EXTENSIONS__)
 #define __EXTENSIONS__ 1
-#endif 
+#endif
 
 #if defined(OMITTED__D_POSIX_C_SOURCE_200112) && !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200112
-#endif 
+#endif
 
 #if defined(OMITTED__D_XOPEN_SOURCE_600) && !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 600
-#endif 
+#endif
 
 #if defined(OMITTED__D_XOPEN_SOURCE_EXTENDED_1) && !defined(_XOPEN_SOURCE_EXTENDED)
 #define _XOPEN_SOURCE_EXTENDED 1
-#endif 
+#endif
 
 #if defined(OMITTED__D_ALL_SOURCE) && !defined(_ALL_SOURCE)
 #define _ALL_SOURCE 1
-#endif 
+#endif
 
 #if defined(OMITTED__D_LARGEFILE_SOURCE_1) && !defined(_LARGEFILE_SOURCE)
 #define _LARGEFILE_SOURCE 1
-#endif 
+#endif
 
 
 
@@ -1279,7 +1418,7 @@
 #endif
 
 
- 
+
 #ifdef HAVE_ATTR_FORMAT
 #  define ATTR_FORMAT(archetype, string_index, first_to_check) \
     __attribute__ ((format (archetype, string_index, first_to_check)))
@@ -1297,6 +1436,17 @@
 #else /* !HAVE_ATTR_UNUSED */
 #  define ATTR_UNUSED(x)  x
 #endif /* !HAVE_ATTR_UNUSED */
+
+
+#if defined(DOXYGEN)
+#  define ATTR_NONSTRING(x)  x
+#elif defined(__cplusplus)
+#  define ATTR_NONSTRING(x)  __attribute__((nonstring)) x
+#elif defined(HAVE_ATTR_NONSTRING)
+#  define ATTR_NONSTRING(x)  __attribute__((nonstring)) x
+#else /* !HAVE_ATTR_NONSTRING */
+#  define ATTR_NONSTRING(x)  x
+#endif /* !HAVE_ATTR_NONSTRING */
 
 
 #ifndef HAVE_FSEEKO
@@ -1389,7 +1539,7 @@ void* reallocarray(void *ptr, size_t nmemb, size_t size);
 #ifdef HAVE_WINSOCK2_H
 #define FD_SET_T (u_int)
 #else
-#define FD_SET_T 
+#define FD_SET_T
 #endif
 
 
@@ -1517,6 +1667,10 @@ struct sockaddr_storage;
 #  define calloc(n,s) unbound_stat_calloc_log(n, s, __FILE__, __LINE__, __func__)
 #  define free(p) unbound_stat_free_log(p, __FILE__, __LINE__, __func__)
 #  define realloc(p,s) unbound_stat_realloc_log(p, s, __FILE__, __LINE__, __func__)
+#  define strdup(s) unbound_stat_strdup_log(s, __FILE__, __LINE__, __func__)
+#ifdef HAVE_REALLOCARRAY
+#  define reallocarray(p,n,s) unbound_stat_reallocarray_log(p, n, s, __FILE__, __LINE__, __func__)
+#endif
 void *unbound_stat_malloc(size_t size);
 void *unbound_stat_calloc(size_t nmemb, size_t size);
 void unbound_stat_free(void *ptr);
@@ -1529,6 +1683,10 @@ void unbound_stat_free_log(void *ptr, const char* file, int line,
 	const char* func);
 void *unbound_stat_realloc_log(void *ptr, size_t size, const char* file,
 	int line, const char* func);
+void *unbound_stat_reallocarray_log(void *ptr, size_t nmemb, size_t size,
+	const char* file, int line, const char* func);
+char *unbound_stat_strdup_log(const char *s, const char* file, int line,
+	const char* func);
 #elif defined(UNBOUND_ALLOC_LITE)
 #  include "util/alloc.h"
 #endif /* UNBOUND_ALLOC_LITE and UNBOUND_ALLOC_STATS */

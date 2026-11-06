@@ -194,8 +194,6 @@ struct fuse_data {
 	 */
 	u_long				ticketer;
 
-	struct sx			rename_lock;
-
 	uint32_t			fuse_libabi_major;
 	uint32_t			fuse_libabi_minor;
 
@@ -240,9 +238,12 @@ struct fuse_data {
 #define FSESS_WARN_READLINK_EMBEDDED_NUL 0x1000000 /* corrupt READLINK output */
 #define FSESS_WARN_DOT_LOOKUP	  0x2000000 /* Inconsistent . LOOKUP response */
 #define FSESS_WARN_INODE_MISMATCH 0x4000000 /* ino != nodeid */
+#define	FSESS_SETXATTR_EXT	  0x8000000 /* extended fuse_setxattr_in */
+#define FSESS_AUTO_UNMOUNT	  0x10000000 /* perform unmount when server dies */
+#define FSESS_WARN_LSEXTATTR_NUL 0x20000000 /* Non nul-terminated xattr list */
 #define FSESS_MNTOPTS_MASK	( \
 	FSESS_DAEMON_CAN_SPY | FSESS_PUSH_SYMLINKS_IN | \
-	FSESS_DEFAULT_PERMISSIONS | FSESS_INTR)
+	FSESS_DEFAULT_PERMISSIONS | FSESS_INTR | FSESS_AUTO_UNMOUNT)
 
 extern int fuse_data_cache_mode;
 
@@ -388,7 +389,6 @@ fuse_aw_pop(struct fuse_data *data)
 	return (ftick);
 }
 
-struct fuse_ticket *fuse_ticket_fetch(struct fuse_data *data);
 int fuse_ticket_drop(struct fuse_ticket *ftick);
 void fuse_insert_callback(struct fuse_ticket *ftick, fuse_handler_t *handler);
 void fuse_insert_message(struct fuse_ticket *ftick, bool irq);

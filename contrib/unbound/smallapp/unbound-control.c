@@ -143,6 +143,8 @@ usage(void)
 	printf("  load_cache			load cache from stdin\n");
 	printf("				(not supported in remote unbounds in\n");
 	printf("				multi-process operation)\n");
+	printf("  cache_lookup [+t] <names>	print rrsets and msgs at or under the names\n");
+	printf("		+t		allow tld and root names.\n");
 	printf("  lookup <name>			print nameservers for name\n");
 	printf("  flush [+c] <name>			flushes common types for name from cache\n");
 	printf("  				types:  A, AAAA, MX, PTR, NS,\n");
@@ -234,6 +236,8 @@ static void pr_stats(const char* nm, struct ub_stats_info* s)
 		s->svr.num_queries_cookie_invalid);
 	PR_UL_NM("num.queries_discard_timeout",
 		s->svr.num_queries_discard_timeout);
+	PR_UL_NM("num.queries_replyaddr_limit",
+		s->svr.num_queries_replyaddr_limit);
 	PR_UL_NM("num.queries_wait_limit", s->svr.num_queries_wait_limit);
 	PR_UL_NM("num.cachehits",
 		s->svr.num_queries - s->svr.num_queries_missed_cache);
@@ -261,6 +265,7 @@ static void pr_stats(const char* nm, struct ub_stats_info* s)
 	PR_UL_NM("requestlist.exceeded", s->mesh_dropped);
 	PR_UL_NM("requestlist.current.all", s->mesh_num_states);
 	PR_UL_NM("requestlist.current.user", s->mesh_num_reply_states);
+	PR_UL_NM("requestlist.current.replies", s->mesh_num_reply_addrs);
 #ifndef S_SPLINT_S
 	sumwait.tv_sec = s->mesh_replies_sum_wait_sec;
 	sumwait.tv_usec = s->mesh_replies_sum_wait_usec;
@@ -409,6 +414,7 @@ static void print_extended(struct ub_stats_info* s, int inhibit_zero)
 	PR_UL("num.answer.secure", s->svr.ans_secure);
 	PR_UL("num.answer.bogus", s->svr.ans_bogus);
 	PR_UL("num.rrset.bogus", s->svr.rrset_bogus);
+	PR_UL("num.valops", s->svr.val_ops);
 	PR_UL("num.query.aggressive.NOERROR", s->svr.num_neg_cache_noerror);
 	PR_UL("num.query.aggressive.NXDOMAIN", s->svr.num_neg_cache_nxdomain);
 	/* threat detection */
@@ -1046,12 +1052,20 @@ int main(int argc, char* argv[])
 #else
 	OPENSSL_init_crypto(OPENSSL_INIT_ADD_ALL_CIPHERS
 		| OPENSSL_INIT_ADD_ALL_DIGESTS
-		| OPENSSL_INIT_LOAD_CRYPTO_STRINGS, NULL);
+		| OPENSSL_INIT_LOAD_CRYPTO_STRINGS
+#  if defined(OPENSSL_INIT_NO_LOAD_CONFIG) && defined(UB_ON_WINDOWS)
+		| OPENSSL_INIT_NO_LOAD_CONFIG
+#  endif
+		, NULL);
 #endif
 #if OPENSSL_VERSION_NUMBER < 0x10100000 || !defined(HAVE_OPENSSL_INIT_SSL)
 	(void)SSL_library_init();
 #else
-	(void)OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS, NULL);
+	(void)OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS
+#  if defined(OPENSSL_INIT_NO_LOAD_CONFIG) && defined(UB_ON_WINDOWS)
+		| OPENSSL_INIT_NO_LOAD_CONFIG
+#  endif
+		, NULL);
 #endif
 
 	if(!RAND_status()) {

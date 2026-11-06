@@ -385,8 +385,8 @@ restart:
 	while ((sc->rx_buf[sc->rx_dma_slot].control >> 7) == sc->rx_valid_val) {
 		rx = (struct llan_xfer *)sc->rx_buf[sc->rx_dma_slot].handle;
 		m = rx->rx_mbuf;
-		m_adj(m, sc->rx_buf[sc->rx_dma_slot].offset - 8);
-		m->m_len = sc->rx_buf[sc->rx_dma_slot].length;
+		m_adj(m, be16toh(sc->rx_buf[sc->rx_dma_slot].offset) - 8);
+		m->m_len = be32toh(sc->rx_buf[sc->rx_dma_slot].length);
 
 		/* llan_add_rxbuf does DMA sync and unload as well as requeue */
 		if (llan_add_rxbuf(sc, rx) != 0) {
@@ -395,8 +395,8 @@ restart:
 		}
 
 		if_inc_counter(sc->ifp, IFCOUNTER_IPACKETS, 1);
-		m_adj(m, sc->rx_buf[sc->rx_dma_slot].offset);
-		m->m_len = sc->rx_buf[sc->rx_dma_slot].length;
+		m_adj(m, be16toh(sc->rx_buf[sc->rx_dma_slot].offset));
+		m->m_len = be32toh(sc->rx_buf[sc->rx_dma_slot].length);
 		m->m_pkthdr.rcvif = sc->ifp;
 		m->m_pkthdr.len = m->m_len;
 		sc->rx_dma_slot++;
@@ -547,6 +547,10 @@ llan_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 		err = ifmedia_ioctl(ifp, (struct ifreq *)data, &sc->media, cmd);
 		break;
 	case SIOCSIFFLAGS:
+		if ((if_getflags(ifp) & IFF_UP) &&
+		    !(if_getdrvflags(ifp) & IFF_DRV_RUNNING))
+			llan_init(sc);
+		break;
 	default:
 		err = ether_ioctl(ifp, cmd, data);
 		break;

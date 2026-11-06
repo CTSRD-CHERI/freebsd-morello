@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause) AND ISC
  */
 
-/*	$OpenBSD: if_iwx.c,v 1.175 2023/07/05 15:07:28 stsp Exp $	*/
+/*	$OpenBSD: if_iwx.c,v 1.184 2024/05/08 14:03:54 stsp Exp $	*/
 
 /*
  *
@@ -155,6 +155,7 @@
 #include <sys/epoch.h>
 #include <sys/kdb.h>
 
+#include <machine/_inttypes.h>
 #include <machine/bus.h>
 #include <machine/endian.h>
 #include <machine/resource.h>
@@ -432,7 +433,7 @@ static int 	iwx_rx_addbuf(struct iwx_softc *, int, int);
 static int	iwx_rxmq_get_signal_strength(struct iwx_softc *, struct iwx_rx_mpdu_desc *);
 static void	iwx_rx_rx_phy_cmd(struct iwx_softc *, struct iwx_rx_packet *,
     struct iwx_rx_data *);
-static int	iwx_get_noise(const struct iwx_statistics_rx_non_phy *);
+static int	iwx_get_noise(struct iwx_softc *, const struct iwx_statistics_rx_non_phy *);
 static int	iwx_rx_hwdecrypt(struct iwx_softc *, struct mbuf *, uint32_t);
 #if 0
 int	iwx_ccmp_decap(struct iwx_softc *, struct mbuf *,
@@ -910,7 +911,7 @@ iwx_alloc_fw_monitor(struct iwx_softc *sc, uint8_t max_power)
 	}
 
 	if (max_power > 26) {
-		 IWX_DPRINTF(sc, IWX_DEBUG_FIRMWARE_TLV,
+		IWX_DPRINTF(sc, IWX_DEBUG_FIRMWARE_TLV,
 		     "%s: External buffer size for monitor is too big %d, "
 		     "check the FW TLV\n", DEVNAME(sc), max_power);
 		return 0;
@@ -3429,6 +3430,14 @@ iwx_sta_rx_agg(struct iwx_softc *sc, struct ieee80211_node *ni, uint8_t tid,
 		sc->sc_rx_ba_sessions--;
 }
 
+/**
+ * @brief Allocate an A-MPDU / aggregation session for the given node and TID.
+ *
+ * This allocates a TX queue specifically for that TID.
+ *
+ * Note that this routine currently doesn't return any status/errors,
+ * so the caller can't know if the aggregation session was setup or not.
+ */
 static void
 iwx_sta_tx_agg_start(struct iwx_softc *sc, struct ieee80211_node *ni,
     uint8_t tid)
@@ -3502,6 +3511,14 @@ iwx_ba_rx_task(void *arg, int npending __unused)
 	IWX_UNLOCK(sc);
 }
 
+/**
+ * @brief Task called to setup a deferred block-ack session.
+ *
+ * This sets up any/all pending blockack sessions as defined
+ * in sc->ba_tx.start_tidmask.
+ *
+ * Note: the call to iwx_sta_tx_agg_start() isn't being error checked.
+ */
 static void
 iwx_ba_tx_task(void *arg, int npending __unused)
 {
@@ -3509,22 +3526,38 @@ iwx_ba_tx_task(void *arg, int npending __unused)
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct ieee80211vap *vap = TAILQ_FIRST(&ic->ic_vaps);
 	struct ieee80211_node *ni = vap->iv_bss;
+	uint32_t started_mask = 0;
 	int tid;
 
 	IWX_LOCK(sc);
 	for (tid = 0; tid < IWX_MAX_TID_COUNT; tid++) {
+		const struct ieee80211_tx_ampdu *tap;
+
 		if (sc->sc_flags & IWX_FLAG_SHUTDOWN)
 			break;
+		tap = &ni->ni_tx_ampdu[tid];
+		if (IEEE80211_AMPDU_RUNNING(tap))
+			break;
 		if (sc->ba_tx.start_tidmask & (1 << tid)) {
-			DPRINTF(("%s: ampdu tx start for tid %i\n", __func__,
-			    tid));
+			IWX_DPRINTF(sc, IWX_DEBUG_AMPDU_MGMT,
+			    "%s: ampdu tx start for tid %i\n", __func__, tid);
 			iwx_sta_tx_agg_start(sc, ni, tid);
 			sc->ba_tx.start_tidmask &= ~(1 << tid);
-			sc->sc_flags |= IWX_FLAG_AMPDUTX;
+			started_mask |= (1 << tid);
 		}
 	}
 
 	IWX_UNLOCK(sc);
+
+	/* Iterate over the sessions we started; mark them as active */
+	for (tid = 0; tid < IWX_MAX_TID_COUNT; tid++) {
+		if (started_mask & (1 << tid)) {
+			IWX_DPRINTF(sc, IWX_DEBUG_AMPDU_MGMT,
+			    "%s: informing net80211 to start ampdu on tid %i\n",
+			    __func__, tid);
+			ieee80211_ampdu_tx_request_active_ext(ni, tid, 1);
+		}
+	}
 }
 
 static void
@@ -4176,6 +4209,17 @@ iwx_rx_addbuf(struct iwx_softc *sc, int size, int idx)
 	return 0;
 }
 
+/*
+ * @brief Return a single signal strength for the given frame.
+ *
+ * The firmware communicates up an energy field which is the negative of
+ * the dBm value.  Ie, the number is positive and it increases as the
+ * signal level decreases.
+ *
+ * Fetch the two values, map 0 (inactive antenna) to -256 dBm which is a
+ * very small number, negate a non-zero value so it's mapped into a dBm
+ * value, then choose the maximum value to return.
+ */
 static int
 iwx_rxmq_get_signal_strength(struct iwx_softc *sc,
     struct iwx_rx_mpdu_desc *desc)
@@ -4192,6 +4236,26 @@ iwx_rxmq_get_signal_strength(struct iwx_softc *sc,
 	energy_a = energy_a ? -energy_a : -256;
 	energy_b = energy_b ? -energy_b : -256;
 	return MAX(energy_a, energy_b);
+}
+
+/**
+ * @brief Calculate an RSSI from the given signal level and noise floor.
+ *
+ * This calculates an RSSI and clamps it at IWX_RSSI_MINIMUM at the lower level
+ * and IWX_RSSI_MAXIMUM at the upper level.
+ *
+ * All units are in dBm.
+ */
+static int
+iwx_calculate_rssi(struct iwx_softc *sc, int ss, int nf)
+{
+	int rssi = (ss - nf);
+	if (rssi < IWX_RSSI_MINIMUM)
+		rssi = IWX_RSSI_MINIMUM;
+	else if (rssi > IWX_RSSI_MAXIMUM)
+		rssi = IWX_RSSI_MAXIMUM;
+
+	return (rssi);
 }
 
 static int
@@ -4221,12 +4285,18 @@ iwx_rx_rx_phy_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
 }
 
 /*
- * Retrieve the average noise (in dBm) among receivers.
+ * @brief Retrieve the average noise (in dBm) among receivers.
+ *
+ * Note: This routine calculates the noise floor sum incorrectly, as
+ * you can't just linearly add the logarithm based dB units together.
+ *
+ * If no noise floor is available then this routine will return -127.
  */
 static int
-iwx_get_noise(const struct iwx_statistics_rx_non_phy *stats)
+iwx_get_noise(struct iwx_softc *sc,
+    const struct iwx_statistics_rx_non_phy *stats)
 {
-	int i, total, nbant, noise;
+	int i, total, nbant, noise, ret;
 
 	total = nbant = noise = 0;
 	for (i = 0; i < 3; i++) {
@@ -4238,7 +4308,14 @@ iwx_get_noise(const struct iwx_statistics_rx_non_phy *stats)
 	}
 
 	/* There should be at least one antenna but check anyway. */
-	return (nbant == 0) ? -127 : (total / nbant) - 107;
+	if (nbant == 0)
+		ret = -127;
+	else if (total == 0)
+		ret = -127;
+	else
+		ret = (total / nbant) - 127;
+
+	return (ret);
 }
 
 #if 0
@@ -4575,37 +4652,39 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, struct mbuf *m, void *pktdata,
 		pad = 1;
 	}
 
-//	/*
-//	 * Hardware de-aggregates A-MSDUs and copies the same MAC header
-//	 * in place for each subframe. But it leaves the 'A-MSDU present'
-//	 * bit set in the frame header. We need to clear this bit ourselves.
-//	 * (XXX This workaround is not required on AX200/AX201 devices that
-//	 * have been tested by me, but it's unclear when this problem was
-//	 * fixed in the hardware. It definitely affects the 9k generation.
-//	 * Leaving this in place for now since some 9k/AX200 hybrids seem
-//	 * to exist that we may eventually add support for.)
-//	 *
-//	 * And we must allow the same CCMP PN for subframes following the
-//	 * first subframe. Otherwise they would be discarded as replays.
-//	 */
+	/* If it's a HT node then perform re-order processing */
+	if (ni->ni_flags & IEEE80211_NODE_HT)
+		m->m_flags |= M_AMPDU;
+
+	/*
+	 * Hardware de-aggregates A-MSDUs and copies the same MAC header
+	 * in place for each subframe. But it leaves the 'A-MSDU present'
+	 * bit set in the frame header. We need to clear this bit ourselves.
+	 * (XXX This workaround is not required on AX200/AX201 devices that
+	 * have been tested by me, but it's unclear when this problem was
+	 * fixed in the hardware. It definitely affects the 9k generation.
+	 * Leaving this in place for now since some 9k/AX200 hybrids seem
+	 * to exist that we may eventually add support for.)
+	 *
+	 * And we must allow the same CCMP PN for subframes following the
+	 * first subframe. Otherwise they would be discarded as replays.
+	 */
 	if (desc->mac_flags2 & IWX_RX_MPDU_MFLG2_AMSDU) {
-		DPRINTF(("%s: === IWX_RX_MPDU_MFLG2_AMSDU\n", __func__));
-//		struct ieee80211_frame *wh = mtod(m, struct ieee80211_frame *);
-//		uint8_t subframe_idx = (desc->amsdu_info &
-//		    IWX_RX_MPDU_AMSDU_SUBFRAME_IDX_MASK);
-//		if (subframe_idx > 0)
-//			rxi.rxi_flags |= IEEE80211_RXI_HWDEC_SAME_PN;
-//		if (ieee80211_has_qos(wh) && ieee80211_has_addr4(wh) &&
-//		    m->m_len >= sizeof(struct ieee80211_qosframe_addr4)) {
-//			struct ieee80211_qosframe_addr4 *qwh4 = mtod(m,
-//			    struct ieee80211_qosframe_addr4 *);
-//			qwh4->i_qos[0] &= htole16(~IEEE80211_QOS_AMSDU);
-//		} else if (ieee80211_has_qos(wh) &&
-//		    m->m_len >= sizeof(struct ieee80211_qosframe)) {
-//			struct ieee80211_qosframe *qwh = mtod(m,
-//			    struct ieee80211_qosframe *);
-//			qwh->i_qos[0] &= htole16(~IEEE80211_QOS_AMSDU);
-//		}
+		struct ieee80211_frame *wh = mtod(m, struct ieee80211_frame *);
+		uint8_t subframe_idx = (desc->amsdu_info &
+		    IWX_RX_MPDU_AMSDU_SUBFRAME_IDX_MASK);
+		uint8_t *qos;
+
+		rxs.c_pktflags |= IEEE80211_RX_F_AMSDU;
+		if (subframe_idx > 0)
+			rxs.c_pktflags |= IEEE80211_RX_F_AMSDU_MORE;
+
+		/* XXX should keep driver statistics about this */
+		IWX_DPRINTF(sc, IWX_DEBUG_AMPDU_MGMT,
+		    "%s: === IWX_RX_MPDU_MFLG2_AMSDU\n", __func__);
+
+		qos = ieee80211_getqos(wh);
+		qos[0] &= ~IEEE80211_QOS_AMSDU;
 	}
 
 	/*
@@ -4634,9 +4713,8 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, struct mbuf *m, void *pktdata,
 
 	phy_info = le16toh(desc->phy_info);
 
+	/* note: RSSI here is absolute signal strength, not relative */
 	rssi = iwx_rxmq_get_signal_strength(sc, desc);
-	rssi = (0 - IWX_MIN_DBM) + rssi;		/* normalize */
-	rssi = MIN(rssi, (IWX_MAX_DBM - IWX_MIN_DBM));	/* clip to max. 100% */
 
 	memset(&rxs, 0, sizeof(rxs));
 	rxs.r_flags |= IEEE80211_R_IEEE | IEEE80211_R_FREQ;
@@ -4653,9 +4731,19 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, struct mbuf *m, void *pktdata,
 	if (rxs.c_chain != 0)
 		rxs.r_flags |= IEEE80211_R_C_CHAIN;
 
-	/* rssi is in 1/2db units */
-	rxs.c_rssi = rssi * 2;
-	rxs.c_nf = sc->sc_noise;
+	/* noise floor is in 1dB units */
+	if (sc->sc_noise < IWX_DEFAULT_NF)
+		/*
+		 * For now choose /a/ default, net80211 expects nf to be passed
+		 * in various places and older drivers fake NF values where
+		 * needed.
+		 */
+		rxs.c_nf = IWX_DEFAULT_NF;
+	else
+		rxs.c_nf = sc->sc_noise;
+
+	/* rssi is in 1/2db units relative to the noise floor */
+	rxs.c_rssi = iwx_calculate_rssi(sc, rssi, rxs.c_nf) * 2;
 
 	if (pad) {
 		rxs.c_pktflags |= IEEE80211_RX_F_DECRYPTED;
@@ -4805,6 +4893,8 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
 static void
 iwx_clear_oactive(struct iwx_softc *sc, struct iwx_tx_ring *ring)
 {
+	IWX_ASSERT_LOCKED(sc);
+
 	if (ring->queued < iwx_lomark) {
 		sc->qfullmsk &= ~(1 << ring->qid);
 		if (sc->qfullmsk == 0 /* && ifq_is_oactive(&ifp->if_snd) */) {
@@ -4890,11 +4980,19 @@ iwx_rx_bmiss(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
 	bus_dmamap_sync(sc->rxq.data_dmat, data->map,
 	    BUS_DMASYNC_POSTREAD);
 
+	IWX_DPRINTF(sc, IWX_DEBUG_BEACON,
+	    "%s: mac_id=%u, cmslrx=%u, cmb=%u, neb=%d, nrb=%u\n",
+	    __func__,
+	    le32toh(mbn->mac_id),
+	    le32toh(mbn->consec_missed_beacons_since_last_rx),
+	    le32toh(mbn->consec_missed_beacons),
+	    le32toh(mbn->num_expected_beacons),
+	    le32toh(mbn->num_recvd_beacons));
+
 	missed = le32toh(mbn->consec_missed_beacons_since_last_rx);
 	if (missed > vap->iv_bmissthreshold) {
 		ieee80211_beacon_miss(ic);
 	}
-
 }
 
 static int
@@ -5491,6 +5589,9 @@ iwx_tx_fill_cmd(struct iwx_softc *sc, struct iwx_node *in,
 		/* for non-data, use the lowest supported rate */
 		ridx = min_ridx;
 		*flags |= IWX_TX_FLAGS_CMD_RATE;
+	} else if (ni->ni_flags & IEEE80211_NODE_VHT) {
+		/* TODO: VHT - the ridx / rate array doesn't have VHT rates yet */
+		ridx = iwx_min_basic_rate(ic);
 	} else if (ni->ni_flags & IEEE80211_NODE_HT) {
 		ridx = iwx_mcs2ridx[ieee80211_node_get_txrate_dot11rate(ni)
 		    & ~IEEE80211_RATE_MCS];
@@ -5532,17 +5633,15 @@ iwx_tx_fill_cmd(struct iwx_softc *sc, struct iwx_node *in,
 	} else if (sc->sc_rate_n_flags_version >= 2)
 		rate_flags |= IWX_RATE_MCS_LEGACY_OFDM_MSK;
 
-	rval = (rs->rs_rates[ieee80211_node_get_txrate_dot11rate(ni)]
-	    & IEEE80211_RATE_VAL);
-	IWX_DPRINTF(sc, IWX_DEBUG_TXRATE, "%s:%d: rval=%i dot11 %d\n", __func__, __LINE__,
-	    rval, rs->rs_rates[ieee80211_node_get_txrate_dot11rate(ni)]);
+	IWX_DPRINTF(sc, IWX_DEBUG_TXRATE, "%s:%d: rinfo->rate=%i dot11 %d\n", __func__, __LINE__,
+	    rinfo->rate, rs->rs_rates[ieee80211_node_get_txrate_dot11rate(ni)]);
 
 	if (sc->sc_rate_n_flags_version >= 2) {
 		if (rate_flags & IWX_RATE_MCS_LEGACY_OFDM_MSK) {
-			rate_flags |= (iwx_fw_rateidx_ofdm(rval) &
+			rate_flags |= (iwx_fw_rateidx_ofdm(rinfo->rate) &
 			    IWX_RATE_LEGACY_RATE_MSK);
 		} else {
-			rate_flags |= (iwx_fw_rateidx_cck(rval) &
+			rate_flags |= (iwx_fw_rateidx_cck(rinfo->rate) &
 			    IWX_RATE_LEGACY_RATE_MSK);
 		}
 	} else
@@ -5614,7 +5713,6 @@ iwx_tx(struct iwx_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 	u_int hdrlen;
 	uint32_t rate_n_flags;
 	uint16_t num_tbs, flags, offload_assist = 0;
-	uint8_t type, subtype;
 	int i, totlen, err, pad, qid;
 #define IWM_MAX_SCATTER 20
 	bus_dma_segment_t *seg, segs[IWM_MAX_SCATTER];
@@ -5622,39 +5720,35 @@ iwx_tx(struct iwx_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 	struct mbuf *m1;
 	size_t txcmd_size;
 
+	IWX_ASSERT_LOCKED(sc);
+
 	wh = mtod(m, struct ieee80211_frame *);
-	type = wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK;
-	subtype = wh->i_fc[0] & IEEE80211_FC0_SUBTYPE_MASK;
 	hdrlen = ieee80211_anyhdrsize(wh);
 
 	qid = sc->first_data_qid;
 
 	/* Put QoS frames on the data queue which maps to their TID. */
-	if (IEEE80211_QOS_HAS_SEQ(wh) && (sc->sc_flags & IWX_FLAG_AMPDUTX)) {
+	if (IEEE80211_QOS_HAS_SEQ(wh)) {
 		uint16_t qos = ieee80211_gettid(wh);
 		uint8_t tid = qos & IEEE80211_QOS_TID;
-#if 0
-		/*
-		 * XXX-THJ: TODO when we enable ba we need to manage the
-		 * mappings
-		 */
-		struct ieee80211_tx_ba *ba;
-		ba = &ni->ni_tx_ba[tid];
+		struct ieee80211_tx_ampdu *tap = &ni->ni_tx_ampdu[tid];
 
-		if (!IEEE80211_IS_MULTICAST(wh->i_addr1) &&
-		    type == IEEE80211_FC0_TYPE_DATA &&
-		    subtype != IEEE80211_FC0_SUBTYPE_NODATA &&
-		    subtype != IEEE80211_FC0_SUBTYPE_BAR &&
-		    sc->aggqid[tid] != 0  /*&&
-		    ba->ba_state == IEEE80211_BA_AGREED*/) {
-			qid = sc->aggqid[tid];
-#else
-		if (!IEEE80211_IS_MULTICAST(wh->i_addr1) &&
-		    type == IEEE80211_FC0_TYPE_DATA &&
-		    subtype != IEEE80211_FC0_SUBTYPE_NODATA &&
+		/*
+		 * Note: we're currently putting all frames into one queue
+		 * except for A-MPDU queues.  We should be able to choose
+		 * other WME queues but first we need to verify they've been
+		 * correctly setup for data.
+		 */
+
+		/*
+		 * Only QoS data goes into an A-MPDU queue;
+		 * don't add QoS null, the other data types, etc.
+		 */
+		if (IEEE80211_AMPDU_RUNNING(tap) &&
+		    IEEE80211_IS_QOSDATA(wh) &&
+		    !IEEE80211_IS_MULTICAST(wh->i_addr1) &&
 		    sc->aggqid[tid] != 0) {
 			qid = sc->aggqid[tid];
-#endif
 		}
 	}
 
@@ -5673,6 +5767,11 @@ iwx_tx(struct iwx_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 	if (rinfo == NULL)
 		return EINVAL;
 
+	/* Offloaded sequence number assignment; non-AMPDU case */
+	if ((m->m_flags & M_AMPDU_MPDU) == 0)
+		ieee80211_output_seqno_assign(ni, -1, m);
+
+	/* Radiotap */
 	if (ieee80211_radiotap_active_vap(vap)) {
 		struct iwx_tx_radiotap_header *tap = &sc->sc_txtap;
 
@@ -5685,6 +5784,7 @@ iwx_tx(struct iwx_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 		ieee80211_radiotap_tx(vap, m);
 	}
 
+	/* Encrypt - CCMP via direct HW path, TKIP/WEP indirected openbsd-style for now */
 	if (wh->i_fc[1] & IEEE80211_FC1_PROTECTED) {
 		k = ieee80211_crypto_get_txkey(ni, m);
 		if (k == NULL) {
@@ -5770,15 +5870,21 @@ iwx_tx(struct iwx_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 	desc->tbs[0].tb_len = htole16(IWX_FIRST_TB_SIZE);
 	paddr = htole64(data->cmd_paddr);
 	memcpy(&desc->tbs[0].addr, &paddr, sizeof(paddr));
-	if (data->cmd_paddr >> 32 != (data->cmd_paddr + le32toh(desc->tbs[0].tb_len)) >> 32)
+#if __SIZEOF_SIZE_T__ > 4
+	if (data->cmd_paddr >> 32 != (data->cmd_paddr +
+	    le32toh(desc->tbs[0].tb_len)) >> 32)
 		DPRINTF(("%s: TB0 crosses 32bit boundary\n", __func__));
+#endif
 	desc->tbs[1].tb_len = htole16(sizeof(struct iwx_cmd_header) +
 	    txcmd_size + hdrlen + pad - IWX_FIRST_TB_SIZE);
 	paddr = htole64(data->cmd_paddr + IWX_FIRST_TB_SIZE);
 	memcpy(&desc->tbs[1].addr, &paddr, sizeof(paddr));
 
-	if (data->cmd_paddr >> 32 != (data->cmd_paddr + le32toh(desc->tbs[1].tb_len)) >> 32)
+#if __SIZEOF_SIZE_T__ > 4
+	if (data->cmd_paddr >> 32 != (data->cmd_paddr +
+	    le32toh(desc->tbs[1].tb_len)) >> 32)
 		DPRINTF(("%s: TB1 crosses 32bit boundary\n", __func__));
+#endif
 
 	/* Other DMA segments are for data payload. */
 	for (i = 0; i < nsegs; i++) {
@@ -5786,8 +5892,12 @@ iwx_tx(struct iwx_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 		desc->tbs[i + 2].tb_len = htole16(seg->ds_len);
 		paddr = htole64(seg->ds_addr);
 		memcpy(&desc->tbs[i + 2].addr, &paddr, sizeof(paddr));
-		if (data->cmd_paddr >> 32 != (data->cmd_paddr + le32toh(desc->tbs[i + 2].tb_len)) >> 32)
-			DPRINTF(("%s: TB%d crosses 32bit boundary\n", __func__, i + 2));
+#if __SIZEOF_SIZE_T__ > 4
+		if (data->cmd_paddr >> 32 != (data->cmd_paddr +
+		    le32toh(desc->tbs[i + 2].tb_len)) >> 32)
+			DPRINTF(("%s: TB%d crosses 32bit boundary\n", __func__,
+			    i + 2));
+#endif
 	}
 
 	bus_dmamap_sync(ring->data_dmat, data->map, BUS_DMASYNC_PREWRITE);
@@ -5843,9 +5953,7 @@ iwx_flush_sta_tids(struct iwx_softc *sc, int sta_id, uint16_t tids)
 
 	resp_len = iwx_rx_packet_payload_len(pkt);
 	/* Some firmware versions don't provide a response. */
-	if (resp_len == 0)
-		goto out;
-	else if (resp_len != sizeof(*resp)) {
+	if (resp_len != sizeof(*resp)) {
 		err = EIO;
 		goto out;
 	}
@@ -5942,11 +6050,6 @@ iwx_flush_sta(struct iwx_softc *sc, struct iwx_node *in)
 		    DEVNAME(sc), err);
 		goto done;
 	}
-
-	/*
-	 * XXX-THJ: iwx_wait_tx_queues_empty was here, but it was a nope in the
-	 * fc drive rand has has been replaced in OpenBSD.
-	 */
 
 	err = iwx_drain_sta(sc, in, 0);
 done:
@@ -6687,7 +6790,7 @@ iwx_rval2ridx(int rval)
 			break;
 	}
 
-       return ridx;
+	return ridx;
 }
 
 static void
@@ -7302,97 +7405,107 @@ iwx_rs_init(struct iwx_softc *sc, struct iwx_node *in)
 		return iwx_rs_init_v3(sc, in);
 }
 
-static void
-iwx_rs_update(struct iwx_softc *sc, struct iwx_tlc_update_notif *notif)
+
+/**
+ * @brief Turn the given TX rate control notification into an ieee80211_node_txrate
+ *
+ * This populates the given txrate node with the TX rate control notification.
+ *
+ * @param sc driver softc
+ * @param notif firmware notification
+ * @param ni ieee80211_node update
+ * @returns true if updated, false if not
+ */
+static bool
+iwx_rs_update_node_txrate(struct iwx_softc *sc,
+    const struct iwx_tlc_update_notif *notif, struct ieee80211_node *ni)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
-	struct ieee80211vap *vap = TAILQ_FIRST(&ic->ic_vaps);
-	struct ieee80211_node *ni = (void *)vap->iv_bss;
+	/* XXX TODO: create an inline function in if_iwxreg.h? */
+	static int cck_idx_to_rate[] = { 2, 4, 11, 22, 2, 2, 2, 2 };
+	static int ofdm_idx_to_rate[] = { 12, 18, 24, 36, 48, 72, 96, 108 };
 
-	struct ieee80211_rateset *rs = &ni->ni_rates;
 	uint32_t rate_n_flags;
-	uint8_t plcp, rval;
-	int i, cmd_ver, rate_n_flags_ver2 = 0;
+	uint32_t type;
 
-	if (notif->sta_id != IWX_STATION_ID ||
-	    (le32toh(notif->flags) & IWX_TLC_NOTIF_FLAG_RATE) == 0)
-		return;
-
+	/* Extract the rate and command version */
 	rate_n_flags = le32toh(notif->rate);
+
+	if (sc->sc_rate_n_flags_version != 2) {
+		net80211_ic_printf(ic,
+		    "%s: unsupported rate_n_flags version (%d)\n",
+		    __func__,
+		    sc->sc_rate_n_flags_version);
+		return (false);
+	}
 
 	if (sc->sc_debug & IWX_DEBUG_TXRATE)
 		print_ratenflags(__func__, __LINE__,
 		    rate_n_flags, sc->sc_rate_n_flags_version);
 
-	cmd_ver = iwx_lookup_notif_ver(sc, IWX_DATA_PATH_GROUP,
-	    IWX_TLC_MNG_UPDATE_NOTIF);
-	if (cmd_ver != IWX_FW_CMD_VER_UNKNOWN && cmd_ver >= 3)
-		rate_n_flags_ver2 = 1;
-
-	if (rate_n_flags_ver2) {
-		uint32_t mod_type = (rate_n_flags & IWX_RATE_MCS_MOD_TYPE_MSK);
-		if (mod_type == IWX_RATE_MCS_HT_MSK) {
-
-			ieee80211_node_set_txrate_dot11rate(ni,
-				IWX_RATE_HT_MCS_INDEX(rate_n_flags) |
-				IEEE80211_RATE_MCS);
-			IWX_DPRINTF(sc, IWX_DEBUG_TXRATE,
-			    "%s:%d new MCS: %d rate_n_flags: %x\n",
-			    __func__, __LINE__,
-			    ieee80211_node_get_txrate_dot11rate(ni) & ~IEEE80211_RATE_MCS,
-			    rate_n_flags);
-			return;
-		}
-	} else {
-		if (rate_n_flags & IWX_RATE_MCS_HT_MSK_V1) {
-			ieee80211_node_set_txrate_dot11rate(ni,
-			    rate_n_flags & (IWX_RATE_HT_MCS_RATE_CODE_MSK_V1 |
-			    IWX_RATE_HT_MCS_NSS_MSK_V1));
-
-			IWX_DPRINTF(sc, IWX_DEBUG_TXRATE,
-			    "%s:%d new MCS idx: %d rate_n_flags: %x\n",
-			    __func__, __LINE__,
-			    ieee80211_node_get_txrate_dot11rate(ni), rate_n_flags);
-			return;
-		}
+	type = (rate_n_flags & IWX_RATE_MCS_MOD_TYPE_MSK);
+	switch (type) {
+	case IWX_RATE_MCS_CCK_MSK:
+		ieee80211_node_set_txrate_dot11rate(ni,
+		    cck_idx_to_rate[rate_n_flags & IWX_RATE_LEGACY_RATE_MSK]);
+		return (true);
+	case IWX_RATE_MCS_LEGACY_OFDM_MSK:
+		ieee80211_node_set_txrate_dot11rate(ni,
+		    ofdm_idx_to_rate[rate_n_flags & IWX_RATE_LEGACY_RATE_MSK]);
+		return (true);
+	case IWX_RATE_MCS_HT_MSK:
+		/*
+		 * TODO: the current API doesn't include channel width
+		 * and other flags, so we can't accurately store them yet!
+		 *
+		 * channel width: (flags & IWX_RATE_MCS_CHAN_WIDTH_MSK)
+		 *    >> IWX_RATE_MCS_CHAN_WIDTH_POS)
+		 * LDPC: (flags & (1 << 16))
+		 */
+		ieee80211_node_set_txrate_ht_mcsrate(ni,
+		    IWX_RATE_HT_MCS_INDEX(rate_n_flags));
+		return (true);
+	case IWX_RATE_MCS_VHT_MSK:
+		/* TODO: same comment on channel width, etc above */
+		ieee80211_node_set_txrate_vht_rate(ni,
+		    IWX_RATE_VHT_MCS_CODE(rate_n_flags),
+		    IWX_RATE_VHT_MCS_NSS(rate_n_flags));
+		return (true);
+	default:
+		net80211_ic_printf(ic,
+		    "%s: unsupported chosen rate type in "
+		    "IWX_RATE_MCS_MOD_TYPE (%d)\n", __func__,
+		    type >> IWX_RATE_MCS_MOD_TYPE_POS);
+		return (false);
 	}
 
-	if (rate_n_flags_ver2) {
-		const struct ieee80211_rateset *rs;
-		uint32_t ridx = (rate_n_flags & IWX_RATE_LEGACY_RATE_MSK);
-		if (rate_n_flags & IWX_RATE_MCS_LEGACY_OFDM_MSK)
-			rs = &ieee80211_std_rateset_11a;
-		else
-			rs = &ieee80211_std_rateset_11b;
-		if (ridx < rs->rs_nrates)
-			rval = (rs->rs_rates[ridx] & IEEE80211_RATE_VAL);
-		else
-			rval = 0;
-	} else {
-		plcp = (rate_n_flags & IWX_RATE_LEGACY_RATE_MSK_V1);
+	/* Default: if we get here, we didn't successfully update anything */
+	return (false);
+}
 
-		rval = 0;
-		for (i = IWX_RATE_1M_INDEX; i < nitems(iwx_rates); i++) {
-			if (iwx_rates[i].plcp == plcp) {
-				rval = iwx_rates[i].rate;
-				break;
-			}
-		}
-	}
+/**
+ * @brief Process a firmware rate control update and update net80211.
+ *
+ * Since firmware is doing rate control, this just needs to update
+ * the txrate in the ieee80211_node entry.
+ */
+static void
+iwx_rs_update(struct iwx_softc *sc, struct iwx_tlc_update_notif *notif)
+{
+	struct ieee80211com *ic = &sc->sc_ic;
+	struct ieee80211vap *vap = TAILQ_FIRST(&ic->ic_vaps);
+	/* XXX TODO: get a node ref! */
+	struct ieee80211_node *ni = (void *)vap->iv_bss;
 
-	if (rval) {
-		uint8_t rv;
-		for (i = 0; i < rs->rs_nrates; i++) {
-			rv = rs->rs_rates[i] & IEEE80211_RATE_VAL;
-			if (rv == rval) {
-				ieee80211_node_set_txrate_dot11rate(ni, i);
-				break;
-			}
-		}
-		IWX_DPRINTF(sc, IWX_DEBUG_TXRATE,
-		    "%s:%d new rate %d\n", __func__, __LINE__,
-		    ieee80211_node_get_txrate_dot11rate(ni));
-	}
+	/*
+	 * For now the iwx driver only supports a single vdev with a single
+	 * node; it doesn't yet support ibss/hostap/multiple vdevs.
+	 */
+	if (notif->sta_id != IWX_STATION_ID ||
+	    (le32toh(notif->flags) & IWX_TLC_NOTIF_FLAG_RATE) == 0)
+		return;
+
+	iwx_rs_update_node_txrate(sc, notif, ni);
 }
 
 static int
@@ -7718,15 +7831,15 @@ iwx_run(struct ieee80211vap *vap, struct iwx_softc *sc)
 		return err;
 	}
 #endif
+	if (ic->ic_opmode == IEEE80211_M_MONITOR)
+		return 0;
+
 	err = iwx_power_mac_update_mode(sc, in);
 	if (err) {
 		printf("%s: could not update MAC power (error %d)\n",
 		    DEVNAME(sc), err);
 		return err;
 	}
-
-	if (ic->ic_opmode == IEEE80211_M_MONITOR)
-		return 0;
 
 	err = iwx_rs_init(sc, in);
 	if (err) {
@@ -7963,6 +8076,9 @@ iwx_newstate_sub(struct ieee80211vap *vap, enum ieee80211_state nstate)
 	int err = 0;
 
 	IWX_LOCK(sc);
+	if (sc->sc_flags & IWX_FLAG_SHUTDOWN) {
+		goto out;
+	}
 
 	if (nstate <= ostate || nstate > IEEE80211_S_RUN) {
 		switch (ostate) {
@@ -8520,6 +8636,8 @@ iwx_start(struct iwx_softc *sc)
         struct ieee80211_node *ni;
         struct mbuf *m;
 
+        IWX_ASSERT_LOCKED(sc);
+
         while (sc->qfullmsk == 0 && (m = mbufq_dequeue(&sc->sc_snd)) != NULL) {
                 ni = (struct ieee80211_node *)m->m_pkthdr.rcvif;
                 if (iwx_tx(sc, m, ni) != 0) {
@@ -8979,10 +9097,10 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf *ml)
 			break;
 
 		case IWX_MISSED_BEACONS_NOTIFICATION:
+			IWX_DPRINTF(sc, IWX_DEBUG_BEACON,
+			    "%s: IWX_MISSED_BEACONS_NOTIFICATION\n",
+			    __func__);
 			iwx_rx_bmiss(sc, pkt, data);
-			DPRINTF(("%s: IWX_MISSED_BEACONS_NOTIFICATION\n",
-			    __func__));
-			ieee80211_beacon_miss(ic);
 			break;
 
 		case IWX_MFUART_LOAD_NOTIFICATION:
@@ -9000,7 +9118,7 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf *ml)
 			 * For v5 and above, we can check the version, for older
 			 * versions we need to check the size.
 			 */
-			 if (iwx_lookup_notif_ver(sc, IWX_LEGACY_GROUP,
+			if (iwx_lookup_notif_ver(sc, IWX_LEGACY_GROUP,
 			    IWX_ALIVE) == 6) {
 				SYNC_RESP_STRUCT(resp6, pkt);
 				if (iwx_rx_packet_payload_len(pkt) !=
@@ -9071,11 +9189,16 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf *ml)
 			break;
 		}
 
+		/*
+		 * TODO: is this the right struct to use? Look at what
+		 * mvm is doing for statistics notification (eg
+		 * iwl_mvm_handle_rx_statistics() .
+		 */
 		case IWX_STATISTICS_NOTIFICATION: {
 			struct iwx_notif_statistics *stats;
 			SYNC_RESP_STRUCT(stats, pkt);
 			memcpy(&sc->sc_stats, stats, sizeof(sc->sc_stats));
-			sc->sc_noise = iwx_get_noise(&stats->rx.general);
+			sc->sc_noise = iwx_get_noise(sc, &stats->rx.general);
 			break;
 		}
 
@@ -9271,6 +9394,16 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf *ml)
 		}
 
 		case IWX_WIDE_ID(IWX_DATA_PATH_GROUP, IWX_RLC_CONFIG_CMD):
+			break;
+
+		/*
+		 * Ignore for now. The Linux driver only acts on this request
+		 * with 160Mhz channels in 11ax mode.
+		 */
+		case IWX_WIDE_ID(IWX_DATA_PATH_GROUP,
+		    IWX_THERMAL_DUAL_CHAIN_REQUEST):
+			DPRINTF(("%s: thermal dual-chain request received\n",
+			    DEVNAME(sc)));
 			break;
 
 		/* undocumented notification from iwx-ty-a0-gf-a0-77 image */
@@ -9840,7 +9973,7 @@ static const struct iwx_dev_info iwx_dev_info_table[] = {
 	_IWX_DEV_INFO(IWX_CFG_ANY, IWX_CFG_ANY,
 		      IWX_CFG_MAC_TYPE_SO, IWX_CFG_ANY,
 		      IWX_CFG_RF_TYPE_HR1, IWX_CFG_ANY,
-		      IWX_CFG_160, IWX_CFG_ANY, IWX_CFG_NO_CDB, IWX_CFG_ANY,
+		      IWX_CFG_NO_160, IWX_CFG_ANY, IWX_CFG_NO_CDB, IWX_CFG_ANY,
 		      iwx_cfg_so_a0_hr_b0), /* ax101 */
 	_IWX_DEV_INFO(IWX_CFG_ANY, IWX_CFG_ANY,
 		      IWX_CFG_MAC_TYPE_SO, IWX_CFG_ANY,
@@ -9857,7 +9990,7 @@ static const struct iwx_dev_info iwx_dev_info_table[] = {
 	_IWX_DEV_INFO(IWX_CFG_ANY, IWX_CFG_ANY,
 		      IWX_CFG_MAC_TYPE_SOF, IWX_CFG_ANY,
 		      IWX_CFG_RF_TYPE_HR1, IWX_CFG_ANY,
-		      IWX_CFG_160, IWX_CFG_ANY, IWX_CFG_NO_CDB, IWX_CFG_ANY,
+		      IWX_CFG_NO_160, IWX_CFG_ANY, IWX_CFG_NO_CDB, IWX_CFG_ANY,
 		      iwx_cfg_so_a0_hr_b0), /* AX101 */
 	_IWX_DEV_INFO(IWX_CFG_ANY, IWX_CFG_ANY,
 		      IWX_CFG_MAC_TYPE_SOF, IWX_CFG_ANY,
@@ -10043,7 +10176,7 @@ iwx_find_device_cfg(struct iwx_softc *sc)
 	cores = IWX_SUBDEVICE_CORES(sdev_id);
 
 	for (i = nitems(iwx_dev_info_table) - 1; i >= 0; i--) {
-		 const struct iwx_dev_info *dev_info = &iwx_dev_info_table[i];
+		const struct iwx_dev_info *dev_info = &iwx_dev_info_table[i];
 
 		if (dev_info->device != (uint16_t)IWX_CFG_ANY &&
 		    dev_info->device != sc->sc_pid)
@@ -10467,6 +10600,10 @@ iwx_attach(device_t dev)
 	    IEEE80211_C_BGSCAN		/* capable of bg scanning */
 	    ;
 	ic->ic_flags_ext = IEEE80211_FEXT_SCAN_OFFLOAD;
+	/* Enable seqno offload */
+	ic->ic_flags_ext |= IEEE80211_FEXT_SEQNO_OFFLOAD;
+	/* Don't send null data frames; let firmware do it */
+	ic->ic_flags_ext |= IEEE80211_FEXT_NO_NULLDATA;
 
 	ic->ic_txstream = 2;
 	ic->ic_rxstream = 2;
@@ -10512,6 +10649,9 @@ iwx_attach(device_t dev)
 			mbufq_init(&rxba->entries[j].frames, ifqmaxlen);
 	}
 
+	/* Initialize to something to have a chance to get S:N values. */
+	sc->sc_noise = IWX_DEFAULT_NF;
+
 	sc->sc_preinit_hook.ich_func = iwx_attach_hook;
 	sc->sc_preinit_hook.ich_arg = sc;
 	if (config_intrhook_establish(&sc->sc_preinit_hook) != 0) {
@@ -10543,6 +10683,7 @@ iwx_detach(device_t dev)
 	int txq_i;
 
 	iwx_stop_device(sc);
+	sc->sc_flags |= IWX_FLAG_SHUTDOWN;
 
 	taskqueue_drain_all(sc->sc_tq);
 	taskqueue_free(sc->sc_tq);
@@ -10674,9 +10815,13 @@ iwx_suspend(device_t dev)
 	struct iwx_softc *sc = device_get_softc(dev);
 	struct ieee80211com *ic = &sc->sc_ic;
 
-	if (sc->sc_flags & IWX_FLAG_HW_INITED) {
-		ieee80211_suspend_all(ic);
+	/*
+	 * Suspend everything first, then shutdown hardware if it's
+	 * still up.
+	 */
+	ieee80211_suspend_all(ic);
 
+	if (sc->sc_flags & IWX_FLAG_HW_INITED) {
 		iwx_stop(sc);
 		sc->sc_flags &= ~IWX_FLAG_HW_INITED;
 	}
@@ -10688,7 +10833,6 @@ iwx_resume(device_t dev)
 {
 	struct iwx_softc *sc = device_get_softc(dev);
 	struct ieee80211com *ic = &sc->sc_ic;
-	int err;
 
 	/*
 	 * We disable the RETRY_TIMEOUT register (0x41) to keep
@@ -10698,15 +10842,15 @@ iwx_resume(device_t dev)
 
 	IWX_LOCK(sc);
 
-	err = iwx_init(sc);
-	if (err) {
-		iwx_stop_device(sc);
-		IWX_UNLOCK(sc);
-		return err;
+	/* Stop the hardware here if it's still thought of as "up" */
+	if (sc->sc_flags & IWX_FLAG_HW_INITED) {
+		iwx_stop(sc);
+		sc->sc_flags &= ~IWX_FLAG_HW_INITED;
 	}
 
 	IWX_UNLOCK(sc);
 
+	/* Start the VAPs, which will bring the hardware back up again */
 	ieee80211_resume_all(ic);
 	return (0);
 }
@@ -10863,6 +11007,26 @@ iwx_ampdu_rx_stop(struct ieee80211_node *ni, struct ieee80211_rx_ampdu *rap)
 	return;
 }
 
+/**
+ * @brief Called by net80211 to request an A-MPDU session be established.
+ *
+ * This is called by net80211 to see if an A-MPDU session can be established.
+ * However, the iwx(4) firmware will take care of establishing the BA
+ * session for us.  net80211 doesn't have to send any action frames here;
+ * it just needs to plumb up the ampdu session once the BA has been sent.
+ *
+ * If we return 0 here then the firmware will set up the state but net80211
+ * will not; so it's on us to actually complete it via a call to
+ * ieee80211_ampdu_tx_request_active_ext() .
+ *
+ * @param ni	ieee80211_node to establish A-MPDU session for
+ * @param tap	pointer to the per-TID state struct
+ * @param dialogtoken	dialogtoken field from the BA request
+ * @param baparamset	baparamset field from the BA request
+ * @param batimeout	batimeout field from the BA request
+ *
+ * @returns 0 so net80211 doesn't send the BA action frame to establish A-MPDU.
+ */
 static int
 iwx_addba_request(struct ieee80211_node *ni, struct ieee80211_tx_ampdu *tap,
     int dialogtoken, int baparamset, int batimeout)
@@ -10871,10 +11035,22 @@ iwx_addba_request(struct ieee80211_node *ni, struct ieee80211_tx_ampdu *tap,
 	int tid;
 
 	tid = _IEEE80211_MASKSHIFT(le16toh(baparamset), IEEE80211_BAPS_TID);
-	DPRINTF(("%s: tid=%i\n", __func__, tid));
+	IWX_DPRINTF(sc, IWX_DEBUG_AMPDU_MGMT,
+	    "%s: queuing AMPDU start on tid %i\n", __func__, tid);
+
+	/* There's no nice way right now to tell net80211 that we're in the
+	 * middle of an asynchronous ADDBA setup session.  So, bump the timeout
+	 * to hz ticks, hopefully we'll get a response by then.
+	 */
+	tap->txa_nextrequest = ticks + hz;
+
+	IWX_LOCK(sc);
 	sc->ba_tx.start_tidmask |= (1 << tid);
+	IWX_UNLOCK(sc);
+
 	taskqueue_enqueue(sc->sc_tq, &sc->ba_tx_task);
-	return 0;
+
+	return (0);
 }
 
 
@@ -10903,28 +11079,20 @@ iwx_key_alloc(struct ieee80211vap *vap, struct ieee80211_key *k,
 {
 
 	if (k->wk_cipher->ic_cipher == IEEE80211_CIPHER_AES_CCM) {
-		return 1;
+		return (1);
 	}
-	if (!(&vap->iv_nw_keys[0] <= k &&
-	     k < &vap->iv_nw_keys[IEEE80211_WEP_NKID])) {
-		/*
-		 * Not in the global key table, the driver should handle this
-		 * by allocating a slot in the h/w key table/cache.  In
-		 * lieu of that return key slot 0 for any unicast key
-		 * request.  We disallow the request if this is a group key.
-		 * This default policy does the right thing for legacy hardware
-		 * with a 4 key table.  It also handles devices that pass
-		 * packets through untouched when marked with the WEP bit
-		 * and key index 0.
-		 */
-		if (k->wk_flags & IEEE80211_KEY_GROUP)
-			return 0;
+
+	if (ieee80211_is_key_unicast(vap, k)) {
 		*keyix = 0;	/* NB: use key index 0 for ucast key */
-	} else {
+	} else if (ieee80211_is_key_global(vap, k)) {
 		*keyix = ieee80211_crypto_get_key_wepidx(vap, k);
+	} else {
+		net80211_vap_printf(vap, "%s: invalid crypto key type\n",
+		    __func__);
+		return (0);
 	}
 	*rxkeyix = IEEE80211_KEYIX_NONE;	/* XXX maybe *keyix? */
-	return 1;
+	return (1);
 }
 
 static int
@@ -10941,7 +11109,6 @@ iwx_key_set(struct ieee80211vap *vap, const struct ieee80211_key *k)
 		return 1;
 	}
 
-	IWX_LOCK(sc);
 	/*
 	 * Keys are stored in 'ni' so 'k' is valid if 'ni' is valid.
 	 * Currently we only implement station mode where 'ni' is always
@@ -10950,37 +11117,47 @@ iwx_key_set(struct ieee80211vap *vap, const struct ieee80211_key *k)
 
 	memset(&cmd, 0, sizeof(cmd));
 
-	if (k->wk_flags & IEEE80211_KEY_GROUP) {
-		DPRINTF(("%s: adding group key\n", __func__));
+	if (ieee80211_is_key_global(vap, k)) {
+		id = ieee80211_crypto_get_key_wepidx(vap, k);
+		IWX_DPRINTF(sc, IWX_DEBUG_KEYMGMT, "%s: adding group key\n",
+		    __func__);
+	} else if (ieee80211_is_key_unicast(vap, k)) {
+		IWX_DPRINTF(sc, IWX_DEBUG_KEYMGMT, "%s: adding key\n",
+		    __func__);
+		id = 0; /* net80211 currently only supports unicast key 0 */
 	} else {
-		DPRINTF(("%s: adding key\n", __func__));
+		net80211_vap_printf(vap, "%s: unknown key type\n", __func__);
+		return (ENXIO);
 	}
-	if (k >= &vap->iv_nw_keys[0] &&
-	    k <  &vap->iv_nw_keys[IEEE80211_WEP_NKID])
-		id = (k - vap->iv_nw_keys);
-	else
-		id = (0);
-	DPRINTF(("%s: setting keyid=%i\n", __func__, id));
+
+	IWX_LOCK(sc);
+
 	cmd.common.key_flags = htole16(IWX_STA_KEY_FLG_CCM |
 	    IWX_STA_KEY_FLG_WEP_KEY_MAP |
 	    ((id << IWX_STA_KEY_FLG_KEYID_POS) &
 	    IWX_STA_KEY_FLG_KEYID_MSK));
-	if (k->wk_flags & IEEE80211_KEY_GROUP) {
+	if (ieee80211_is_key_global(vap, k)) {
 		cmd.common.key_offset = 1;
 		cmd.common.key_flags |= htole16(IWX_STA_KEY_MULTICAST);
-	} else {
+	} else if (ieee80211_is_key_unicast(vap, k)) {
 		cmd.common.key_offset = 0;
+	} else {
+		net80211_vap_printf(vap, "%s: unknown key type\n", __func__);
+		IWX_UNLOCK(sc);
+		return (ENXIO);
 	}
-	memcpy(cmd.common.key, k->wk_key, MIN(sizeof(cmd.common.key),
-	    k->wk_keylen));
-	DPRINTF(("%s: wk_keylen=%i\n", __func__, k->wk_keylen));
-	for (int i=0; i<k->wk_keylen; i++) {
-		DPRINTF(("%s: key[%d]=%x\n", __func__, i, k->wk_key[i]));
-	}
+	memcpy(cmd.common.key, ieee80211_crypto_get_key_data(k),
+	    MIN(sizeof(cmd.common.key), ieee80211_crypto_get_key_len(k)));
+	IWX_DPRINTF(sc, IWX_DEBUG_KEYMGMT, "%s: key: id=%d, len=%i, key=%*D\n",
+	    __func__, id,
+	    ieee80211_crypto_get_key_len(k),
+	    ieee80211_crypto_get_key_len(k),
+	    (const unsigned char *) ieee80211_crypto_get_key_data(k), "");
 	cmd.common.sta_id = IWX_STATION_ID;
 
 	cmd.transmit_seq_cnt = htole64(k->wk_keytsc);
-	DPRINTF(("%s: k->wk_keytsc=%lu\n", __func__, k->wk_keytsc));
+	IWX_DPRINTF(sc, IWX_DEBUG_KEYMGMT, "%s: k->wk_keytsc=%" PRIu64 "\n",
+	    __func__, k->wk_keytsc);
 
 	status = IWX_ADD_STA_SUCCESS;
 	err = iwx_send_cmd_pdu_status(sc, IWX_ADD_STA_KEY, sizeof(cmd), &cmd,
@@ -10988,19 +11165,28 @@ iwx_key_set(struct ieee80211vap *vap, const struct ieee80211_key *k)
 	if (!err && (status & IWX_ADD_STA_STATUS_MASK) != IWX_ADD_STA_SUCCESS)
 		err = EIO;
 	if (err) {
-		printf("%s: can't set wpa2 keys (error %d)\n", __func__, err);
+		net80211_vap_printf(vap,
+		    "%s: can't set wpa2 keys (error %d)\n", __func__, err);
 		IWX_UNLOCK(sc);
 		return err;
 	} else
-		DPRINTF(("%s: key added successfully\n", __func__));
+		IWX_DPRINTF(sc, IWX_DEBUG_KEYMGMT,
+		    "%s: key added successfully\n", __func__);
 	IWX_UNLOCK(sc);
-	return 1;
+	return (1);
 }
 
 static int
 iwx_key_delete(struct ieee80211vap *vap, const struct ieee80211_key *k)
 {
-	return 1;
+	/*
+	 * Note: since there's no key allocations to track - it's either
+	 * the 4 static WEP keys or the single unicast key - there's nothing
+	 * else to do here.
+	 *
+	 * This would need some further work to support IBSS/mesh/AP modes.
+	 */
+	return (1);
 }
 
 static device_method_t iwx_pci_methods[] = {

@@ -9736,7 +9736,14 @@ ocs_hw_io_t *
 ocs_hw_io_lookup(ocs_hw_t *hw, uint32_t xri)
 {
 	uint32_t ioindex;
-	ioindex = xri - hw->sli.config.extent[SLI_RSRC_FCOE_XRI].base[0];
+	uint32_t base = hw->sli.config.extent[SLI_RSRC_FCOE_XRI].base[0];
+
+	if (xri < base || (xri - base) >= hw->config.n_io) {
+		ocs_log_err(hw->os, "xri %#x out of range (base=%#x n_io=%u)\n",
+		    xri, base, hw->config.n_io);
+		return NULL;
+	}
+	ioindex = xri - base;
 	return hw->io[ioindex];
 }
 
@@ -11346,6 +11353,8 @@ ocs_hw_reclaim_xri(ocs_hw_t *hw, uint16_t xri_base, uint16_t xri_count)
 
 	for (i = 0; i < xri_count; i++) {
 		io = ocs_hw_io_lookup(hw, xri_base + i);
+		if (io == NULL)
+			continue;
 
 		/*
 		 * if this is an auto xfer rdy XRI, then we need to release any
@@ -12209,7 +12218,7 @@ ocs_hw_set_persistent_topology(ocs_hw_t *hw, uint32_t topology, uint32_t opts)
 
 	default:
 		ocs_log_err(hw->os, "unsupported topology %#x\n", topology);
-		return -1;
+		return OCS_HW_RTN_ERROR;
 	}
 
 	ocs_sem_init(&request.semaphore, 0, "set_persistent_topo");
@@ -12235,12 +12244,12 @@ ocs_hw_set_persistent_topology(ocs_hw_t *hw, uint32_t topology, uint32_t opts)
 
 		if (ocs_sem_p(&request.semaphore, OCS_SEM_FOREVER)) {
 			ocs_log_err(hw->os, "ocs_sem_p failed\n");
-			return -ENXIO;
+			return OCS_HW_RTN_ERROR;
 		}
 
 		if (request.status) {
 			ocs_log_err(hw->os, "set persistent topology failed; status: %d\n", request.status);
-			return -EFAULT;
+			return OCS_HW_RTN_ERROR;
 		}
 	}
 

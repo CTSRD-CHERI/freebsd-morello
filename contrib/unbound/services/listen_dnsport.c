@@ -42,7 +42,6 @@
 #ifdef HAVE_SYS_TYPES_H
 #  include <sys/types.h>
 #endif
-#include <sys/time.h>
 #include <limits.h>
 #ifdef USE_TCP_FASTOPEN
 #include <netinet/tcp.h>
@@ -90,10 +89,13 @@
 #ifdef HAVE_NGTCP2
 #include <ngtcp2/ngtcp2.h>
 #include <ngtcp2/ngtcp2_crypto.h>
-#ifdef HAVE_NGTCP2_NGTCP2_CRYPTO_QUICTLS_H
+#ifdef HAVE_NGTCP2_NGTCP2_CRYPTO_OSSL_H
+#include <ngtcp2/ngtcp2_crypto_ossl.h>
+#elif defined(HAVE_NGTCP2_NGTCP2_CRYPTO_QUICTLS_H)
 #include <ngtcp2/ngtcp2_crypto_quictls.h>
-#else
+#elif defined(HAVE_NGTCP2_NGTCP2_CRYPTO_OPENSSL_H)
 #include <ngtcp2/ngtcp2_crypto_openssl.h>
+#define MAKE_QUIC_METHOD 1
 #endif
 #endif
 
@@ -447,7 +449,7 @@ create_udp_sock(int family, int socktype, struct sockaddr* addr,
 		 * /proc/sys/net/core/wmem_max or sysctl net.core.wmem_max */
 		if(setsockopt(s, SOL_SOCKET, SO_SNDBUFFORCE, (void*)&snd,
 			(socklen_t)sizeof(snd)) < 0) {
-			if(errno != EPERM) {
+			if(errno != EPERM && errno != ENOBUFS) {
 				log_err("setsockopt(..., SO_SNDBUFFORCE, "
 					"...) failed: %s", sock_strerror(errno));
 				sock_close(s);
@@ -455,15 +457,23 @@ create_udp_sock(int family, int socktype, struct sockaddr* addr,
 				*inuse = 0;
 				return -1;
 			}
+			if(errno != EPERM) {
+				verbose(VERB_ALGO, "setsockopt(..., SO_SNDBUFFORCE, "
+					"...) was not granted: %s", sock_strerror(errno));
+			}
 #  endif /* SO_SNDBUFFORCE */
 			if(setsockopt(s, SOL_SOCKET, SO_SNDBUF, (void*)&snd,
 				(socklen_t)sizeof(snd)) < 0) {
-				log_err("setsockopt(..., SO_SNDBUF, "
-					"...) failed: %s", sock_strerror(errno));
-				sock_close(s);
-				*noproto = 0;
-				*inuse = 0;
-				return -1;
+				if(errno != ENOSYS && errno != ENOBUFS) {
+					log_err("setsockopt(..., SO_SNDBUF, "
+						"...) failed: %s", sock_strerror(errno));
+					sock_close(s);
+					*noproto = 0;
+					*inuse = 0;
+					return -1;
+				}
+				log_warn("setsockopt(..., SO_SNDBUF, "
+					"...) was not granted: %s", sock_strerror(errno));
 			}
 			/* check if we got the right thing or if system
 			 * reduced to some system max.  Warn if so */
@@ -473,7 +483,8 @@ create_udp_sock(int family, int socktype, struct sockaddr* addr,
 					"Got %u. To fix: start with "
 					"root permissions(linux) or sysctl "
 					"bigger net.core.wmem_max(linux) or "
-					"kern.ipc.maxsockbuf(bsd) values.",
+					"kern.ipc.maxsockbuf(bsd) values. or "
+					"set so-sndbuf: 0 (use system value).",
 					(unsigned)snd, (unsigned)got);
 			}
 #  ifdef SO_SNDBUFFORCE
@@ -902,7 +913,7 @@ create_tcp_accept_sock(struct addrinfo *addr, int v6only, int* noproto,
 	   against IP spoofing attacks as suggested in RFC7413 */
 #ifdef __APPLE__
 	/* OS X implementation only supports qlen of 1 via this call. Actual
-	   value is configured by the net.inet.tcp.fastopen_backlog kernel parm. */
+	   value is configured by the net.inet.tcp.fastopen_backlog kernel param. */
 	qlen = 1;
 #else
 	/* 5 is recommended on linux */
@@ -1114,7 +1125,7 @@ make_sock_port(int stype, const char* ifname, int port,
 	int use_systemd, int dscp, struct unbound_socket* ub_sock,
 	const char* additional)
 {
-	char* s = strchr(ifname, '@');
+	const char* s = strchr(ifname, '@');
 	if(s) {
 		/* override port with ifspec@port */
 		int port;
@@ -1175,6 +1186,15 @@ set_recvtimestamp(int s)
 	int opt = SOF_TIMESTAMPING_RX_SOFTWARE | SOF_TIMESTAMPING_SOFTWARE;
 	if (setsockopt(s, SOL_SOCKET, SO_TIMESTAMPNS, (void*)&opt, (socklen_t)sizeof(opt)) < 0) {
 		log_err("setsockopt(..., SO_TIMESTAMPNS, ...) failed: %s",
+			strerror(errno));
+		return 0;
+	}
+	return 1;
+#elif defined(SO_TIMESTAMP) && defined(SCM_TIMESTAMP)
+	int on = 1;
+	/* FreeBSD and also Linux. */
+	if (setsockopt(s, SOL_SOCKET, SO_TIMESTAMP, (void*)&on, (socklen_t)sizeof(on)) < 0) {
+		log_err("setsockopt(..., SO_TIMESTAMP, ...) failed: %s",
 			strerror(errno));
 		return 0;
 	}
@@ -1543,7 +1563,7 @@ listen_create(struct comm_base* base, struct listen_port* ports,
 			cp = comm_point_create_udp(base, ports->fd,
 				front->udp_buff, ports->pp2_enabled, cb,
 				cb_arg, ports->socket);
-		} else if(ports->ftype == listen_type_doq) {
+		} else if(ports->ftype == listen_type_doq && doq_table) {
 #ifndef HAVE_NGTCP2
 			log_warn("Unbound is not compiled with "
 				"ngtcp2. This is required to use DNS "
@@ -1598,7 +1618,7 @@ listen_create(struct comm_base* base, struct listen_port* ports,
 				front->udp_buff, ports->pp2_enabled, cb,
 				cb_arg, ports->socket);
 #else
-			log_warn("This system does not support UDP ancilliary data.");
+			log_warn("This system does not support UDP ancillary data.");
 #endif
 		}
 		if(!cp) {
@@ -2113,7 +2133,7 @@ void listen_start_accept(struct listen_dnsport* listen)
 }
 
 struct tcp_req_info*
-tcp_req_info_create(struct sldns_buffer* spoolbuf)
+tcp_req_info_create(struct comm_base* base, struct sldns_buffer* spoolbuf)
 {
 	struct tcp_req_info* req = (struct tcp_req_info*)malloc(sizeof(*req));
 	if(!req) {
@@ -2121,6 +2141,12 @@ tcp_req_info_create(struct sldns_buffer* spoolbuf)
 		return NULL;
 	}
 	memset(req, 0, sizeof(*req));
+	req->read_again_timer = comm_timer_create(base, tcp_read_again_cb, req);
+	if(!req->read_again_timer) {
+		log_err("malloc failure");
+		free(req);
+		return NULL;
+	}
 	req->spool_buffer = spoolbuf;
 	return req;
 }
@@ -2130,6 +2156,7 @@ tcp_req_info_delete(struct tcp_req_info* req)
 {
 	if(!req) return;
 	tcp_req_info_clear(req);
+	comm_timer_delete(req->read_again_timer);
 	/* cp is pointer back to commpoint that owns this struct and
 	 * called delete on us */
 	/* spool_buffer is shared udp buffer, not deleted here */
@@ -2146,7 +2173,8 @@ void tcp_req_info_clear(struct tcp_req_info* req)
 	open = req->open_req_list;
 	while(open) {
 		nopen = open->next;
-		mesh_state_remove_reply(open->mesh, open->mesh_state, req->cp);
+		mesh_state_remove_reply(open->mesh, open->mesh_state, req->cp,
+			NULL, NULL);
 		free(open);
 		open = nopen;
 	}
@@ -2168,6 +2196,9 @@ void tcp_req_info_clear(struct tcp_req_info* req)
 	req->done_req_list = NULL;
 	req->num_done_req = 0;
 	req->read_is_closed = 0;
+
+	if(comm_timer_is_set(req->read_again_timer))
+		comm_timer_disable(req->read_again_timer);
 }
 
 void
@@ -2279,21 +2310,8 @@ int
 tcp_req_info_handle_read_close(struct tcp_req_info* req)
 {
 	verbose(VERB_ALGO, "tcp channel read side closed %d", req->cp->fd);
-	/* reset byte count for (potential) partial read */
-	req->cp->tcp_byte_count = 0;
-	/* if we still have results to write, pick up next and write it */
-	if(req->num_done_req != 0) {
-		tcp_req_pickup_next_result(req);
-		tcp_req_info_setup_listen(req);
-		return 1;
-	}
-	/* if nothing to do, this closes the connection */
-	if(req->num_open_req == 0 && req->num_done_req == 0)
-		return 0;
-	/* otherwise, we must be waiting for dns resolve, wait with timeout */
-	req->read_is_closed = 1;
-	tcp_req_info_setup_listen(req);
-	return 1;
+	/* RFC 7766 6.2.4 says to drop pending replies when client closes. */
+	return 0; /* drop connection */
 }
 
 void
@@ -2863,6 +2881,7 @@ submit_http_error:
 	sldns_buffer_flip(h2_stream->qbuffer);
 	h2_session->postpone_drop = 1;
 	query_read_done = http2_query_read_done(h2_session, h2_stream);
+	h2_session->postpone_drop = 0;
 	if(query_read_done < 0)
 		return NGHTTP2_ERR_CALLBACK_FAILURE;
 	else if(!query_read_done) {
@@ -2872,11 +2891,9 @@ submit_http_error:
 			 * failure will result in reclaiming (and closing)
 			 * of comm point. */
 			verbose(VERB_QUERY, "http2 query dropped in worker cb");
-			h2_session->postpone_drop = 0;
 			return NGHTTP2_ERR_CALLBACK_FAILURE;
 		}
 		/* nothing to submit right now, query added to mesh. */
-		h2_session->postpone_drop = 0;
 		return 0;
 	}
 	if(!http2_submit_dns_response(h2_session)) {
@@ -3099,7 +3116,7 @@ static int http2_req_header_cb(nghttp2_session* session,
 		return 0;
 	}
 	/* Content type is a SHOULD (rfc7231#section-3.1.1.5) when using POST,
-	 * and not needed when using GET. Don't enfore.
+	 * and not needed when using GET. Don't enforce.
 	 * If set only allow lowercase "application/dns-message".
 	 *
 	 * Clients SHOULD (rfc8484#section-4.1) set an accept header, but MUST
@@ -3161,7 +3178,7 @@ static int http2_req_data_chunk_recv_cb(nghttp2_session* ATTR_UNUSED(session),
 			qlen = h2_stream->content_length;
 		} else if(len <= h2_session->c->http2_stream_max_qbuffer_size) {
 			/* setting this to msg-buffer-size can result in a lot
-			 * of memory consuption. Most queries should fit in a
+			 * of memory consumption. Most queries should fit in a
 			 * single DATA frame, and most POST queries will
 			 * contain content-length which does not impose this
 			 * limit. */
@@ -3187,7 +3204,7 @@ static int http2_req_data_chunk_recv_cb(nghttp2_session* ATTR_UNUSED(session),
 
 	if(!h2_stream->qbuffer ||
 		sldns_buffer_remaining(h2_stream->qbuffer) < len) {
-		verbose(VERB_ALGO, "http2 data_chunck_recv failed. Not enough "
+		verbose(VERB_ALGO, "http2 data_chunk_recv failed. Not enough "
 			"buffer space for POST query. Can happen on multi "
 			"frame requests without content-length header");
 		h2_stream->query_too_large = 1;
@@ -3254,9 +3271,28 @@ nghttp2_session_callbacks* http2_req_callbacks_create(void)
 struct doq_table*
 doq_table_create(struct config_file* cfg, struct ub_randstate* rnd)
 {
-	struct doq_table* table = calloc(1, sizeof(*table));
+	struct doq_table* table;
+
+	if (!cfg->quic_port)
+		return NULL;
+	table = calloc(1, sizeof(*table));
 	if(!table)
 		return NULL;
+#ifdef USE_NGTCP2_CRYPTO_OSSL
+	/* Initialize the ossl crypto, it is harmless to call twice,
+	 * and this is before use of doq connections. */
+	if(ngtcp2_crypto_ossl_init() != 0) {
+		log_err("ngtcp2_crypto_ossl_init failed");
+		free(table);
+		return NULL;
+	}
+#elif defined(HAVE_NGTCP2_CRYPTO_QUICTLS_INIT)
+	if(ngtcp2_crypto_quictls_init() != 0) {
+		log_err("ngtcp2_crypto_quictls_init failed");
+		free(table);
+		return NULL;
+	}
+#endif
 	table->idle_timeout = ((uint64_t)cfg->tcp_idle_timeout)*
 		NGTCP2_MILLISECONDS;
 	table->sv_scidlen = 16;
@@ -3318,7 +3354,7 @@ conn_tree_del(rbnode_type* node, void* arg)
 {
 	struct doq_table* table = (struct doq_table*)arg;
 	struct doq_conn* conn;
-	if(!node)
+	if(!node || !table)
 		return;
 	conn = (struct doq_conn*)node->key;
 	if(conn->timer.timer_in_list) {
@@ -3373,13 +3409,13 @@ doq_table_delete(struct doq_table* table)
 }
 
 struct doq_timer*
-doq_timer_find_time(struct doq_table* table, struct timeval* tv)
+doq_timer_find_time(struct doq_table* table, ngtcp2_tstamp ts)
 {
 	struct doq_timer key;
 	struct rbnode_type* node;
+	log_assert(table != NULL);
 	memset(&key, 0, sizeof(key));
-	key.time.tv_sec = tv->tv_sec;
-	key.time.tv_usec = tv->tv_usec;
+	key.time_mono = ts;
 	node = rbtree_search(table->timer_tree, &key);
 	if(node)
 		return (struct doq_timer*)node->key;
@@ -3427,7 +3463,7 @@ doq_timer_list_remove(struct doq_table* table, struct doq_timer* timer)
 	if(!timer->timer_in_list)
 		return;
 	/* The item in the rbtree has the list start and end. */
-	rb_timer = doq_timer_find_time(table, &timer->time);
+	rb_timer = doq_timer_find_time(table, timer->time_mono);
 	if(rb_timer) {
 		if(timer->setlist_prev)
 			timer->setlist_prev->setlist_next = timer->setlist_next;
@@ -3473,7 +3509,8 @@ doq_timer_unset(struct doq_table* table, struct doq_timer* timer)
 }
 
 void doq_timer_set(struct doq_table* table, struct doq_timer* timer,
-	struct doq_server_socket* worker_doq_socket, struct timeval* tv)
+	struct doq_server_socket* worker_doq_socket, struct timeval* tv,
+	ngtcp2_tstamp ts)
 {
 	struct doq_timer* rb_timer;
 	if(verbosity >= VERB_ALGO && timer->conn) {
@@ -3487,14 +3524,14 @@ void doq_timer_set(struct doq_table* table, struct doq_timer* timer,
 			(int)rel.tv_sec, (int)rel.tv_usec);
 	}
 	if(timer->timer_in_tree || timer->timer_in_list) {
-		if(timer->time.tv_sec == tv->tv_sec &&
-			timer->time.tv_usec == tv->tv_usec)
+		if(timer->time_mono == ts)
 			return; /* already set on that time */
 		doq_timer_unset(table, timer);
 	}
-	timer->time.tv_sec = tv->tv_sec;
-	timer->time.tv_usec = tv->tv_usec;
-	rb_timer = doq_timer_find_time(table, tv);
+	timer->time_real.tv_sec = tv->tv_sec;
+	timer->time_real.tv_usec = tv->tv_usec;
+	timer->time_mono = ts;
+	rb_timer = doq_timer_find_time(table, ts);
 	if(rb_timer) {
 		/* There is a timeout already with this value. Timer is
 		 * added to the setlist. */
@@ -3570,15 +3607,29 @@ doq_conn_create(struct comm_point* c, struct doq_pkt_addr* paddr,
 	return conn;
 }
 
+/** The arguments for doq stream tree del. */
+struct doq_stream_tree_del_args {
+	/** The doq table. */
+	struct doq_table* table;
+	/** The doq connection for the stream. */
+	struct doq_conn* conn;
+};
+
 /** delete stream tree node */
 static void
 stream_tree_del(rbnode_type* node, void* arg)
 {
-	struct doq_table* table = (struct doq_table*)arg;
+	struct doq_stream_tree_del_args* args = (struct doq_stream_tree_del_args*)arg;
+	struct doq_table* table = args->table;
 	struct doq_stream* stream;
 	if(!node)
 		return;
 	stream = (struct doq_stream*)node;
+	if(stream->mesh_state) {
+		mesh_state_remove_reply(stream->mesh, stream->mesh_state,
+			args->conn->doq_socket->cp, NULL, stream);
+		stream->mesh_state = NULL;
+	}
 	if(stream->in)
 		doq_table_quic_size_subtract(table, stream->inlen);
 	if(stream->out)
@@ -3596,12 +3647,23 @@ doq_conn_delete(struct doq_conn* conn, struct doq_table* table)
 	lock_rw_wrlock(&conn->table->conid_lock);
 	doq_conn_clear_conids(conn);
 	lock_rw_unlock(&conn->table->conid_lock);
-	ngtcp2_conn_del(conn->conn);
+	/* Remove the app data from ngtcp2 before SSL_free of conn->ssl,
+	 * because the ngtcp2 conn is deleted. */
+	if(conn->ssl)
+		SSL_set_app_data(conn->ssl, NULL);
 	if(conn->stream_tree.count != 0) {
-		traverse_postorder(&conn->stream_tree, stream_tree_del, table);
+		struct doq_stream_tree_del_args args;
+		memset(&args, 0, sizeof(args));
+		args.table = table;
+		args.conn = conn;
+		traverse_postorder(&conn->stream_tree, stream_tree_del, &args);
 	}
 	free(conn->key.dcid);
 	SSL_free(conn->ssl);
+#ifdef USE_NGTCP2_CRYPTO_OSSL
+	ngtcp2_crypto_ossl_ctx_del(conn->ossl_ctx);
+#endif
+	ngtcp2_conn_del(conn->conn);
 	free(conn->close_pkt);
 	free(conn);
 }
@@ -3667,13 +3729,9 @@ int doq_timer_cmp(const void* key1, const void* key2)
 {
 	struct doq_timer* e = (struct doq_timer*)key1;
 	struct doq_timer* f = (struct doq_timer*)key2;
-	if(e->time.tv_sec < f->time.tv_sec)
+	if(e->time_mono < f->time_mono)
 		return -1;
-	if(e->time.tv_sec > f->time.tv_sec)
-		return 1;
-	if(e->time.tv_usec < f->time.tv_usec)
-		return -1;
-	if(e->time.tv_usec > f->time.tv_usec)
+	if(e->time_mono > f->time_mono)
 		return 1;
 	return 0;
 }
@@ -3734,7 +3792,7 @@ doq_repinfo_retrieve_localaddr(struct comm_reply* repinfo,
 		memset(sa6, 0, *localaddrlen);
 		sa6->sin6_family = AF_INET6;
 		memmove(&sa6->sin6_addr, &repinfo->pktinfo.v6info.ipi6_addr,
-			*localaddrlen);
+			sizeof(struct in6_addr));
 		sa6->sin6_port = repinfo->doq_srcport;
 #endif
 	} else {
@@ -3744,7 +3802,7 @@ doq_repinfo_retrieve_localaddr(struct comm_reply* repinfo,
 		memset(sa, 0, *localaddrlen);
 		sa->sin_family = AF_INET;
 		memmove(&sa->sin_addr, &repinfo->pktinfo.v4info.ipi_addr,
-			*localaddrlen);
+			sizeof(struct in_addr));
 		sa->sin_port = repinfo->doq_srcport;
 #elif defined(IP_RECVDSTADDR)
 		struct sockaddr_in* sa = (struct sockaddr_in*)localaddr;
@@ -3907,6 +3965,11 @@ doq_stream_close(struct doq_conn* conn, struct doq_stream* stream,
 	if(stream->is_closed)
 		return 1;
 	stream->is_closed = 1;
+	if(stream->mesh_state) {
+		mesh_state_remove_reply(stream->mesh, stream->mesh_state,
+			conn->doq_socket->cp, NULL, stream);
+		stream->mesh_state = NULL;
+	}
 	doq_stream_off_write_list(conn, stream);
 	if(send_shutdown) {
 		verbose(VERB_ALGO, "doq: shutdown stream_id %d with app_error_code %d",
@@ -3936,7 +3999,8 @@ doq_stream_close(struct doq_conn* conn, struct doq_stream* stream,
 
 /** doq stream pick up answer data from buffer */
 static int
-doq_stream_pickup_answer(struct doq_stream* stream, struct sldns_buffer* buf)
+doq_stream_pickup_answer(struct doq_conn* conn, struct doq_stream* stream,
+	struct sldns_buffer* buf)
 {
 	stream->is_answer_available = 1;
 	if(stream->out) {
@@ -3946,6 +4010,11 @@ doq_stream_pickup_answer(struct doq_stream* stream, struct sldns_buffer* buf)
 	}
 	stream->nwrite = 0;
 	stream->outlen = sldns_buffer_limit(buf);
+	if(!doq_table_quic_size_available(conn->doq_socket->table,
+		conn->doq_socket->cfg, stream->outlen)) {
+		verbose(VERB_ALGO, "doq stream: no space for reply length");
+		return 0;
+	}
 	/* For quic the output bytes have to stay allocated and available,
 	 * for potential resends, until the remote end has acknowledged them.
 	 * This includes the tcplen start uint16_t, in outlen_wire. */
@@ -3972,22 +4041,54 @@ doq_stream_send_reply(struct doq_conn* conn, struct doq_stream* stream,
 	if(stream->out)
 		doq_table_quic_size_subtract(conn->doq_socket->table,
 			stream->outlen);
-	if(!doq_stream_pickup_answer(stream, buf))
+	if(!doq_stream_pickup_answer(conn, stream, buf))
 		return 0;
 	doq_table_quic_size_add(conn->doq_socket->table, stream->outlen);
 	doq_stream_on_write_list(conn, stream);
 	doq_conn_write_enable(conn);
 	return 1;
 }
+#endif /* HAVE_NGTCP2 */
 
+void
+doq_stream_add_meshstate(struct doq_stream* stream,
+	struct mesh_area* mesh, struct mesh_state* m)
+{
+#ifdef HAVE_NGTCP2
+	stream->mesh = mesh;
+	stream->mesh_state = m;
+#else
+	(void)stream; (void)mesh; (void)m;
+#endif
+}
+
+void
+doq_stream_remove_mesh_state(struct doq_stream* stream)
+{
+#ifdef HAVE_NGTCP2
+	if(!stream)
+		return;
+	stream->mesh_state = NULL;
+#else
+	(void)stream;
+#endif
+}
+
+#ifdef HAVE_NGTCP2
 /** doq stream data length has completed, allocations can be done. False on
  * allocation failure. */
 static int
-doq_stream_datalen_complete(struct doq_stream* stream, struct doq_table* table)
+doq_stream_datalen_complete(struct doq_conn* conn, struct doq_stream* stream,
+	struct doq_table* table)
 {
 	if(stream->inlen > 1024*1024) {
 		log_err("doq stream in length too large %d",
 			(int)stream->inlen);
+		return 0;
+	}
+	if(!doq_table_quic_size_available(table, conn->doq_socket->cfg,
+		stream->inlen)) {
+		verbose(VERB_ALGO, "doq stream: no space for query length");
 		return 0;
 	}
 	stream->in = calloc(1, stream->inlen);
@@ -4034,6 +4135,7 @@ doq_stream_data_complete(struct doq_conn* conn, struct doq_stream* stream)
 		return 0;
 	}
 	c->repinfo.doq_streamid = stream->stream_id;
+	c->repinfo.doq_stream = stream;
 	conn->doq_socket->current_conn = conn;
 	fptr_ok(fptr_whitelist_comm_point(c->callback));
 	if( (*c->callback)(c, c->cb_arg, NETEVENT_NOERROR, &c->repinfo)) {
@@ -4050,8 +4152,9 @@ doq_stream_data_complete(struct doq_conn* conn, struct doq_stream* stream)
 
 /** doq receive data for a stream, more bytes of the incoming data */
 static int
-doq_stream_recv_data(struct doq_stream* stream, const uint8_t* data,
-	size_t datalen, int* recv_done, struct doq_table* table)
+doq_stream_recv_data(struct doq_conn* conn, struct doq_stream* stream,
+	const uint8_t* data, size_t datalen, int* recv_done,
+	struct doq_table* table)
 {
 	int got_data = 0;
 	/* read the tcplength uint16_t at the start */
@@ -4072,7 +4175,7 @@ doq_stream_recv_data(struct doq_stream* stream, const uint8_t* data,
 		if(stream->nread == 2) {
 			/* the initial length value is completed */
 			stream->inlen = ntohs(tcplen);
-			if(!doq_stream_datalen_complete(stream, table))
+			if(!doq_stream_datalen_complete(conn, stream, table))
 				return 0;
 		} else {
 			/* store for later */
@@ -4221,12 +4324,11 @@ doq_submit_new_token(struct doq_conn* conn)
 	ngtcp2_ssize tokenlen;
 	int ret;
 	const ngtcp2_path* path = ngtcp2_conn_get_path(conn->conn);
-	ngtcp2_tstamp ts = doq_get_timestamp_nanosec();
 
 	tokenlen = ngtcp2_crypto_generate_regular_token(token,
 		conn->doq_socket->static_secret,
 		conn->doq_socket->static_secret_len, path->remote.addr,
-		path->remote.addrlen, ts);
+		path->remote.addrlen, doq_get_timestamp_nanosec());
 	if(tokenlen < 0) {
 		log_err("doq ngtcp2_crypto_generate_regular_token failed");
 		return 1;
@@ -4289,8 +4391,7 @@ doq_stream_open_cb(ngtcp2_conn* ATTR_UNUSED(conn), int64_t stream_id,
 		verbose(VERB_ALGO, "doq: stream with this id already exists");
 		return 0;
 	}
-	if(stream_id != 0 && stream_id != 4 && /* allow one stream on a new connection */
-		!doq_table_quic_size_available(doq_conn->doq_socket->table,
+	if(!doq_table_quic_size_available(doq_conn->doq_socket->table,
 		doq_conn->doq_socket->cfg, sizeof(*stream)
 		+ 100 /* estimated query in */
 		+ 512 /* estimated response out */
@@ -4348,8 +4449,8 @@ doq_recv_stream_data_cb(ngtcp2_conn* ATTR_UNUSED(conn), uint32_t flags,
 		return 0;
 	}
 	if(datalen != 0) {
-		if(!doq_stream_recv_data(stream, data, datalen, &recv_done,
-			doq_conn->doq_socket->table))
+		if(!doq_stream_recv_data(doq_conn, stream, data, datalen,
+			&recv_done, doq_conn->doq_socket->table))
 			return NGTCP2_ERR_CALLBACK_FAILURE;
 	}
 	if((flags&NGTCP2_STREAM_DATA_FLAG_FIN)!=0) {
@@ -4413,8 +4514,31 @@ doq_stream_reset_cb(ngtcp2_conn* ATTR_UNUSED(conn), int64_t stream_id,
 			"unknown stream %d", (int)stream_id);
 		return 0;
 	}
-	if(!doq_stream_close(doq_conn, stream, 0))
+	if(!doq_stream_close(doq_conn, stream, 1))
 		return NGTCP2_ERR_CALLBACK_FAILURE;
+	return 0;
+}
+
+/** ngtcp2 extend_max_stream_data function */
+int doq_extend_max_stream_data_cb(ngtcp2_conn* ATTR_UNUSED(conn),
+	int64_t stream_id, uint64_t max_data, void* user_data,
+	void* ATTR_UNUSED(stream_user_data))
+{
+	struct doq_conn* doq_conn = (struct doq_conn*)user_data;
+	struct doq_stream* stream;
+	verbose(VERB_ALGO, "doq extend_max_stream_data stream id %d "
+		"max_data %d ", (int)stream_id, (int)max_data);
+	if(max_data == 0)
+		return 0;
+	stream = doq_stream_find(doq_conn, stream_id);
+	if(!stream) {
+		verbose(VERB_ALGO, "doq: unknown stream %d", (int)stream_id);
+		return 0;
+	}
+	if(!stream->is_answer_available)
+		return 0;
+	doq_stream_on_write_list(doq_conn, stream);
+	doq_conn_write_enable(doq_conn);
 	return 0;
 }
 
@@ -4459,7 +4583,7 @@ doq_log_printf_cb(void* ATTR_UNUSED(user_data), const char* fmt, ...)
 	va_end(ap);
 }
 
-#ifndef HAVE_NGTCP2_CRYPTO_QUICTLS_CONFIGURE_SERVER_CONTEXT
+#ifdef MAKE_QUIC_METHOD
 /** the doq application tx key callback, false on failure */
 static int
 doq_application_tx_key_cb(struct doq_conn* conn)
@@ -4493,7 +4617,9 @@ doq_set_encryption_secrets(SSL *ssl, OSSL_ENCRYPTION_LEVEL ossl_level,
 	ngtcp2_crypto_level
 #endif
 		level =
-#ifdef HAVE_NGTCP2_CRYPTO_QUICTLS_FROM_OSSL_ENCRYPTION_LEVEL
+#ifdef USE_NGTCP2_CRYPTO_OSSL
+		ngtcp2_crypto_ossl_from_ossl_encryption_level(ossl_level);
+#elif defined(HAVE_NGTCP2_CRYPTO_QUICTLS_FROM_OSSL_ENCRYPTION_LEVEL)
 		ngtcp2_crypto_quictls_from_ossl_encryption_level(ossl_level);
 #else
 		ngtcp2_crypto_openssl_from_ossl_encryption_level(ossl_level);
@@ -4539,7 +4665,9 @@ doq_add_handshake_data(SSL *ssl, OSSL_ENCRYPTION_LEVEL ossl_level,
 	ngtcp2_crypto_level
 #endif
 		level =
-#ifdef HAVE_NGTCP2_CRYPTO_QUICTLS_FROM_OSSL_ENCRYPTION_LEVEL
+#ifdef USE_NGTCP2_CRYPTO_OSSL
+		ngtcp2_crypto_ossl_from_ossl_encryption_level(ossl_level);
+#elif defined(HAVE_NGTCP2_CRYPTO_QUICTLS_FROM_OSSL_ENCRYPTION_LEVEL)
 		ngtcp2_crypto_quictls_from_ossl_encryption_level(ossl_level);
 #else
 		ngtcp2_crypto_openssl_from_ossl_encryption_level(ossl_level);
@@ -4574,7 +4702,7 @@ doq_send_alert(SSL *ssl, enum ssl_encryption_level_t ATTR_UNUSED(level),
 	doq_conn->tls_alert = alert;
 	return 1;
 }
-#endif /* HAVE_NGTCP2_CRYPTO_QUICTLS_CONFIGURE_SERVER_CONTEXT */
+#endif /* MAKE_QUIC_METHOD */
 
 /** ALPN select callback for the doq SSL context */
 static int
@@ -4596,7 +4724,7 @@ void* quic_sslctx_create(char* key, char* pem, char* verifypem)
 {
 #ifdef HAVE_NGTCP2
 	char* sid_ctx = "unbound server";
-#ifndef HAVE_NGTCP2_CRYPTO_QUICTLS_CONFIGURE_SERVER_CONTEXT
+#ifdef MAKE_QUIC_METHOD
 	SSL_QUIC_METHOD* quic_method;
 #endif
 	SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
@@ -4669,7 +4797,7 @@ void* quic_sslctx_create(char* key, char* pem, char* verifypem)
 		SSL_CTX_free(ctx);
 		return NULL;
 	}
-#else /* HAVE_NGTCP2_CRYPTO_QUICTLS_CONFIGURE_SERVER_CONTEXT */
+#elif defined(MAKE_QUIC_METHOD)
 	/* The quic_method needs to remain valid during the SSL_CTX
 	 * lifetime, so we allocate it. It is freed with the
 	 * doq_server_socket. */
@@ -4704,12 +4832,29 @@ static ngtcp2_conn* doq_conn_ref_get_conn(ngtcp2_crypto_conn_ref* conn_ref)
 static SSL*
 doq_ssl_server_setup(SSL_CTX* ctx, struct doq_conn* conn)
 {
+#ifdef USE_NGTCP2_CRYPTO_OSSL
+	int ret;
+#endif
 	SSL* ssl = SSL_new(ctx);
 	if(!ssl) {
 		log_crypto_err("doq: SSL_new failed");
 		return NULL;
 	}
-#ifdef HAVE_NGTCP2_CRYPTO_QUICTLS_CONFIGURE_SERVER_CONTEXT
+#ifdef USE_NGTCP2_CRYPTO_OSSL
+	if((ret=ngtcp2_crypto_ossl_ctx_new(&conn->ossl_ctx, NULL)) != 0) {
+		log_err("doq: ngtcp2_crypto_ossl_ctx_new failed: %s",
+			ngtcp2_strerror(ret));
+		SSL_free(ssl);
+		return NULL;
+	}
+	ngtcp2_crypto_ossl_ctx_set_ssl(conn->ossl_ctx, ssl);
+	if(ngtcp2_crypto_ossl_configure_server_session(ssl) != 0) {
+		log_err("doq: ngtcp2_crypto_ossl_configure_server_session failed");
+		SSL_free(ssl);
+		return NULL;
+	}
+#endif
+#if defined(USE_NGTCP2_CRYPTO_OSSL) || defined(HAVE_NGTCP2_CRYPTO_QUICTLS_CONFIGURE_SERVER_CONTEXT)
 	conn->conn_ref.get_conn = &doq_conn_ref_get_conn;
 	conn->conn_ref.user_data = conn;
 	SSL_set_app_data(ssl, &conn->conn_ref);
@@ -4717,7 +4862,11 @@ doq_ssl_server_setup(SSL_CTX* ctx, struct doq_conn* conn)
 	SSL_set_app_data(ssl, conn);
 #endif
 	SSL_set_accept_state(ssl);
+#ifdef HAVE_SSL_SET_QUIC_TLS_EARLY_DATA_ENABLED
+	SSL_set_quic_tls_early_data_enabled(ssl, 1);
+#else
 	SSL_set_quic_early_data_enabled(ssl, 1);
+#endif
 	return ssl;
 }
 
@@ -4767,6 +4916,7 @@ doq_conn_setup(struct doq_conn* conn, uint8_t* scid, size_t scidlen,
 	callbacks.stream_open = doq_stream_open_cb;
 	callbacks.stream_close = doq_stream_close_cb;
 	callbacks.stream_reset = doq_stream_reset_cb;
+	callbacks.extend_max_stream_data = doq_extend_max_stream_data_cb;
 	callbacks.acked_stream_data_offset = doq_acked_stream_data_offset_cb;
 	callbacks.recv_stream_data = doq_recv_stream_data_cb;
 
@@ -4821,6 +4971,7 @@ doq_conn_setup(struct doq_conn* conn, uint8_t* scid, size_t scidlen,
 	rv = ngtcp2_conn_server_new(&conn->conn, &scid_cid, &sv_scid, &path,
 		conn->version, &callbacks, &settings, &params, NULL, conn);
 	if(rv != 0) {
+		conn->conn = NULL;
 		lock_rw_unlock(&conn->table->conid_lock);
 		log_err("ngtcp2_conn_server_new failed: %s",
 			ngtcp2_strerror(rv));
@@ -4838,7 +4989,11 @@ doq_conn_setup(struct doq_conn* conn, uint8_t* scid, size_t scidlen,
 		log_err("doq_ssl_server_setup failed");
 		return 0;
 	}
+#ifdef USE_NGTCP2_CRYPTO_OSSL
+	ngtcp2_conn_set_tls_native_handle(conn->conn, conn->ossl_ctx);
+#else
 	ngtcp2_conn_set_tls_native_handle(conn->conn, conn->ssl);
+#endif
 	doq_conn_write_enable(conn);
 	return 1;
 }
@@ -4851,6 +5006,7 @@ doq_conid_find(struct doq_table* table, const uint8_t* data, size_t datalen)
 	key.node.key = &key;
 	key.cid = (void*)data;
 	key.cidlen = datalen;
+	log_assert(table != NULL);
 	node = rbtree_search(table->conid_tree, &key);
 	if(node)
 		return (struct doq_conid*)node->key;
@@ -5038,23 +5194,30 @@ doq_conn_clear_conids(struct doq_conn* conn)
 
 ngtcp2_tstamp doq_get_timestamp_nanosec(void)
 {
-#ifdef CLOCK_REALTIME
 	struct timespec tp;
 	memset(&tp, 0, sizeof(tp));
-	/* Get a nanosecond time, that can be compared with the event base. */
-	if(clock_gettime(CLOCK_REALTIME, &tp) == -1) {
-		log_err("clock_gettime failed: %s", strerror(errno));
+#ifdef CLOCK_BOOTTIME
+	if(clock_gettime(CLOCK_BOOTTIME, &tp) == -1) {
+#endif
+		if(clock_gettime(CLOCK_MONOTONIC, &tp) == -1) {
+			log_err("clock_gettime failed: %s", strerror(errno));
+		}
+#ifdef CLOCK_BOOTTIME
 	}
+#endif
 	return ((uint64_t)tp.tv_sec)*((uint64_t)1000000000) +
 		((uint64_t)tp.tv_nsec);
-#else
+}
+
+static struct timeval doq_get_timevalue(void)
+{
 	struct timeval tv;
+	memset(&tv, 0, sizeof(tv));
 	if(gettimeofday(&tv, NULL) < 0) {
 		log_err("gettimeofday failed: %s", strerror(errno));
+		memset(&tv, 0, sizeof(tv));
 	}
-	return ((uint64_t)tv.tv_sec)*((uint64_t)1000000000) +
-		((uint64_t)tv.tv_usec)*((uint64_t)1000);
-#endif /* CLOCK_REALTIME */
+	return tv;
 }
 
 /** doq start the closing period for the connection. */
@@ -5177,18 +5340,17 @@ doq_conn_recv(struct comm_point* c, struct doq_pkt_addr* paddr,
 	int* err_drop)
 {
 	int ret;
-	ngtcp2_tstamp ts;
 	struct ngtcp2_path path;
 	memset(&path, 0, sizeof(path));
 	path.remote.addr = (struct sockaddr*)&paddr->addr;
 	path.remote.addrlen = paddr->addrlen;
 	path.local.addr = (struct sockaddr*)&paddr->localaddr;
 	path.local.addrlen = paddr->localaddrlen;
-	ts = doq_get_timestamp_nanosec();
 
 	ret = ngtcp2_conn_read_pkt(conn->conn, &path, pi,
 		sldns_buffer_begin(c->doq_socket->pkt_buf),
-		sldns_buffer_limit(c->doq_socket->pkt_buf), ts);
+		sldns_buffer_limit(c->doq_socket->pkt_buf),
+		doq_get_timestamp_nanosec());
 	if(ret != 0) {
 		if(err_retry)
 			*err_retry = 0;
@@ -5276,7 +5438,6 @@ doq_conn_write_streams(struct comm_point* c, struct doq_conn* conn,
 {
 	struct doq_stream* stream = conn->stream_write_first;
 	ngtcp2_path_storage ps;
-	ngtcp2_tstamp ts = doq_get_timestamp_nanosec();
 	size_t num_packets = 0, max_packets = 65535;
 	ngtcp2_path_storage_zero(&ps);
 
@@ -5329,7 +5490,8 @@ doq_conn_write_streams(struct comm_point* c, struct doq_conn* conn,
 		ret = ngtcp2_conn_writev_stream(conn->conn, &ps.path, &pi,
 			sldns_buffer_begin(c->doq_socket->pkt_buf),
 			sldns_buffer_remaining(c->doq_socket->pkt_buf),
-			&ndatalen, flags, stream_id, datav, datav_count, ts);
+			&ndatalen, flags, stream_id, datav, datav_count,
+			doq_get_timestamp_nanosec());
 		if(ret < 0) {
 			if(ret == NGTCP2_ERR_WRITE_MORE) {
 				verbose(VERB_ALGO, "doq: write more, ndatalen %d", (int)ndatalen);
@@ -5344,26 +5506,20 @@ doq_conn_write_streams(struct comm_point* c, struct doq_conn* conn,
 				continue;
 			} else if(ret == NGTCP2_ERR_STREAM_DATA_BLOCKED) {
 				verbose(VERB_ALGO, "doq: ngtcp2_conn_writev_stream returned NGTCP2_ERR_STREAM_DATA_BLOCKED");
-#ifdef HAVE_NGTCP2_CCERR_DEFAULT
-				ngtcp2_ccerr_set_application_error(
-					&conn->ccerr, -1, NULL, 0);
-#else
-				ngtcp2_connection_close_error_set_application_error(&conn->last_error, -1, NULL, 0);
-#endif
-				if(err_drop)
-					*err_drop = 0;
-				if(!doq_conn_close_error(c, conn)) {
-					if(err_drop)
-						*err_drop = 1;
+				if(stream) {
+					doq_stream_off_write_list(conn, stream);
+					stream = stream->write_next;
+					continue;
+				} else {
+					break;
 				}
-				return 0;
 			} else if(ret == NGTCP2_ERR_STREAM_SHUT_WR) {
 				verbose(VERB_ALGO, "doq: ngtcp2_conn_writev_stream returned NGTCP2_ERR_STREAM_SHUT_WR");
 #ifdef HAVE_NGTCP2_CCERR_DEFAULT
 				ngtcp2_ccerr_set_application_error(
-					&conn->ccerr, -1, NULL, 0);
+					&conn->ccerr, DOQ_APP_ERROR_CODE, NULL, 0);
 #else
-				ngtcp2_connection_close_error_set_application_error(&conn->last_error, -1, NULL, 0);
+				ngtcp2_connection_close_error_set_application_error(&conn->last_error, DOQ_APP_ERROR_CODE, NULL, 0);
 #endif
 				if(err_drop)
 					*err_drop = 0;
@@ -5401,7 +5557,8 @@ doq_conn_write_streams(struct comm_point* c, struct doq_conn* conn,
 		if(ret == 0) {
 			/* congestion limited */
 			doq_conn_write_disable(conn);
-			ngtcp2_conn_update_pkt_tx_time(conn->conn, ts);
+			ngtcp2_conn_update_pkt_tx_time(conn->conn,
+				doq_get_timestamp_nanosec());
 			return 1;
 		}
 		sldns_buffer_set_position(c->doq_socket->pkt_buf, ret);
@@ -5415,7 +5572,7 @@ doq_conn_write_streams(struct comm_point* c, struct doq_conn* conn,
 		if(stream)
 			stream = stream->write_next;
 	}
-	ngtcp2_conn_update_pkt_tx_time(conn->conn, ts);
+	ngtcp2_conn_update_pkt_tx_time(conn->conn, doq_get_timestamp_nanosec());
 	return 1;
 }
 
@@ -5492,32 +5649,35 @@ doq_table_pop_first(struct doq_table* table)
 }
 
 int
-doq_conn_check_timer(struct doq_conn* conn, struct timeval* tv)
+doq_conn_check_timer(struct doq_conn* conn, struct timeval* tv, ngtcp2_tstamp* ts)
 {
-	ngtcp2_tstamp expiry = ngtcp2_conn_get_expiry(conn->conn);
-	ngtcp2_tstamp now = doq_get_timestamp_nanosec();
+	ngtcp2_tstamp doq_expiry = ngtcp2_conn_get_expiry(conn->conn);
+	ngtcp2_tstamp doq_now = doq_get_timestamp_nanosec();
 	ngtcp2_tstamp t;
+	struct timeval now = doq_get_timevalue();
 
-	if(expiry <= now) {
+	if(doq_expiry <= doq_now || doq_expiry == UINT64_MAX) {
+		/* UINT64_MAX means there is no next expiry. */
 		/* The timer has already expired, add with zero timeout.
 		 * This should call the callback straight away. Calling it
 		 * from the event callbacks is cleaner than calling it here,
 		 * because then it is always called with the same locks and
 		 * so on. This routine only has the conn.lock. */
-		t = now;
+		t = doq_now;
+		memcpy(tv, &now, sizeof(*tv));
 	} else {
-		t = expiry;
+		t = doq_expiry;
+		memset(tv, 0, sizeof(*tv));
+		tv->tv_sec = (doq_expiry - doq_now) / NGTCP2_SECONDS;
+		tv->tv_usec = ((doq_expiry - doq_now) / NGTCP2_MICROSECONDS)%1000000;
+		timeval_add(tv, &now);
 	}
 
-	/* convert to timeval */
-	memset(tv, 0, sizeof(*tv));
-	tv->tv_sec = t / NGTCP2_SECONDS;
-	tv->tv_usec = (t / NGTCP2_MICROSECONDS)%1000000;
+	*ts = t;
 
 	/* If we already have a timer, is it the right value? */
 	if(conn->timer.timer_in_tree || conn->timer.timer_in_list) {
-		if(conn->timer.time.tv_sec == tv->tv_sec &&
-			conn->timer.time.tv_usec == tv->tv_usec)
+		if(conn->timer.time_mono == *ts)
 			return 0;
 	}
 	return 1;
@@ -5538,13 +5698,12 @@ doq_conn_log_line(struct doq_conn* conn, char* s)
 int
 doq_conn_handle_timeout(struct doq_conn* conn)
 {
-	ngtcp2_tstamp now = doq_get_timestamp_nanosec();
 	int rv;
 
 	if(verbosity >= VERB_ALGO)
 		doq_conn_log_line(conn, "timeout");
 
-	rv = ngtcp2_conn_handle_expiry(conn->conn, now);
+	rv = ngtcp2_conn_handle_expiry(conn->conn, doq_get_timestamp_nanosec());
 	if(rv != 0) {
 		verbose(VERB_ALGO, "ngtcp2_conn_handle_expiry failed: %s",
 			ngtcp2_strerror(rv));
@@ -5591,6 +5750,8 @@ doq_table_quic_size_available(struct doq_table* table,
 	struct config_file* cfg, size_t mem)
 {
 	size_t cur;
+	if (!table)
+		return 0;
 	lock_basic_lock(&table->size_lock);
 	cur = table->current_size;
 	lock_basic_unlock(&table->size_lock);

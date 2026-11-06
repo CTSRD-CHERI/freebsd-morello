@@ -214,8 +214,9 @@ vop_setattr {
 
 %% mmapped	vp	L L L
 
-vop_mmapped {
+vop_update_atime {
 	IN struct vnode *vp;
+	IN struct timespec *ts;
 };
 
 
@@ -291,7 +292,7 @@ vop_revoke {
 };
 
 
-%% fsync	vp	- - -
+%% fsync	vp	L L L
 %! fsync	pre	vop_fsync_debugpre
 %! fsync	post	vop_fsync_debugpost
 
@@ -336,6 +337,7 @@ vop_rename {
 	IN WILLRELE struct vnode *tdvp;
 	IN WILLRELE struct vnode *tvp;
 	IN struct componentname *tcnp;
+	IN u_int flags;
 };
 
 
@@ -469,7 +471,7 @@ vop_getwritemount {
 	OUT struct mount **mpp;
 };
 
-%% getwritevnode vp	= = =
+%% getlowvnode vp	= = =
 
 vop_getlowvnode {
 	IN struct vnode *vp;
@@ -845,6 +847,14 @@ vop_inotify_add_watch {
 	OUT uint32_t *wdp;
 	IN struct thread *td;
 };
+
+
+%% delayed_setsize	vp	E E E
+
+vop_delayed_setsize {
+	IN struct vnode *vp;
+};
+
 
 # The VOPs below are spares at the end of the table to allow new VOPs to be
 # added in stable branches without breaking the KBI.  New VOPs in HEAD should

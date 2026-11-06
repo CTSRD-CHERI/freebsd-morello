@@ -43,9 +43,6 @@
 #include "snd_fxdiv_gen.h"
 #endif
 
-#undef SND_FEEDER_MULTIFORMAT
-#define SND_FEEDER_MULTIFORMAT	1
-
 struct feed_mixer_info {
 	uint32_t format;
 	uint32_t channels;
@@ -78,16 +75,16 @@ feed_mixer_init(struct pcm_feeder *f)
 {
 	struct feed_mixer_info *info;
 
-	if (f->desc->in != f->desc->out)
+	if (f->desc.in != f->desc.out)
 		return (EINVAL);
 
 	info = malloc(sizeof(*info), M_DEVBUF, M_NOWAIT | M_ZERO);
 	if (info == NULL)
 		return (ENOMEM);
 
-	info->format = AFMT_ENCODING(f->desc->in);
-	info->channels = AFMT_CHANNEL(f->desc->in);
-	info->bps = AFMT_BPS(f->desc->in);
+	info->format = AFMT_ENCODING(f->desc.in);
+	info->channels = AFMT_CHANNEL(f->desc.in);
+	info->bps = AFMT_BPS(f->desc.in);
 
 	f->data = info;
 
@@ -100,8 +97,7 @@ feed_mixer_free(struct pcm_feeder *f)
 	struct feed_mixer_info *info;
 
 	info = f->data;
-	if (info != NULL)
-		free(info, M_DEVBUF);
+	free(info, M_DEVBUF);
 
 	f->data = NULL;
 
@@ -145,8 +141,8 @@ feed_mixer_rec(struct pcm_channel *c)
 	b = c->bufsoft;
 	b->rp = 0;
 	b->rl = 0;
-	cnt = sndbuf_getsize(b);
-	maxfeed = SND_FXROUND(SND_FXDIV_MAX, sndbuf_getalign(b));
+	cnt = b->bufsize;
+	maxfeed = SND_FXROUND(SND_FXDIV_MAX, b->align);
 
 	do {
 		cnt = FEEDER_FEED(c->feeder->source, c, b->tmpbuf,
@@ -158,7 +154,7 @@ feed_mixer_rec(struct pcm_channel *c)
 	} while (cnt != 0);
 
 	/* Not enough data */
-	if (b->rl < sndbuf_getalign(b)) {
+	if (b->rl < b->align) {
 		b->rl = 0;
 		return (0);
 	}
@@ -175,23 +171,15 @@ feed_mixer_rec(struct pcm_channel *c)
 			CHN_UNLOCK(ch);
 			continue;
 		}
-#ifdef SND_DEBUG
-		if ((c->flags & CHN_F_DIRTY) && VCHAN_SYNC_REQUIRED(ch)) {
-			if (vchan_sync(ch) != 0) {
-				CHN_UNLOCK(ch);
-				continue;
-			}
-		}
-#endif
 		bs = ch->bufsoft;
 		if (ch->flags & CHN_F_MMAP)
 			sndbuf_dispose(bs, NULL, sndbuf_getready(bs));
 		cnt = sndbuf_getfree(bs);
-		if (cnt < sndbuf_getalign(bs)) {
+		if (cnt < bs->align) {
 			CHN_UNLOCK(ch);
 			continue;
 		}
-		maxfeed = SND_FXROUND(SND_FXDIV_MAX, sndbuf_getalign(bs));
+		maxfeed = SND_FXROUND(SND_FXDIV_MAX, bs->align);
 		do {
 			cnt = FEEDER_FEED(ch->feeder, ch, bs->tmpbuf,
 			    min(cnt, maxfeed), b);
@@ -244,7 +232,7 @@ feed_mixer_feed(struct pcm_feeder *f, struct pcm_channel *c, uint8_t *b,
 	if (c->direction == PCMDIR_REC)
 		return (feed_mixer_rec(c));
 
-	sz = sndbuf_getsize(src);
+	sz = src->bufsize;
 	if (sz < count)
 		count = sz;
 
@@ -260,7 +248,7 @@ feed_mixer_feed(struct pcm_feeder *f, struct pcm_channel *c, uint8_t *b,
 	 * list of children and calling mixer function to mix count bytes from
 	 * each into our destination buffer, b.
 	 */
-	tmp = sndbuf_getbuf(src);
+	tmp = src->buf;
 	rcnt = 0;
 	mcnt = 0;
 	passthrough = 0;	/* 'passthrough' / 'exclusive' marker */
@@ -271,14 +259,6 @@ feed_mixer_feed(struct pcm_feeder *f, struct pcm_channel *c, uint8_t *b,
 			CHN_UNLOCK(ch);
 			continue;
 		}
-#ifdef SND_DEBUG
-		if ((c->flags & CHN_F_DIRTY) && VCHAN_SYNC_REQUIRED(ch)) {
-			if (vchan_sync(ch) != 0) {
-				CHN_UNLOCK(ch);
-				continue;
-			}
-		}
-#endif
 		if ((ch->flags & CHN_F_MMAP) && !(ch->flags & CHN_F_CLOSING))
 			sndbuf_acquire(ch->bufsoft, NULL,
 			    sndbuf_getfree(ch->bufsoft));
@@ -321,7 +301,7 @@ feed_mixer_feed(struct pcm_feeder *f, struct pcm_channel *c, uint8_t *b,
 					if (mcnt != 0) {
 						memset(b + rcnt,
 						    sndbuf_zerodata(
-						    f->desc->out), mcnt);
+						    f->desc.out), mcnt);
 						mcnt = 0;
 					}
 					switch (info->format) {
@@ -358,11 +338,6 @@ feed_mixer_feed(struct pcm_feeder *f, struct pcm_channel *c, uint8_t *b,
 	return (rcnt);
 }
 
-static struct pcm_feederdesc feeder_mixer_desc[] = {
-	{ FEEDER_MIXER, 0, 0, 0, 0 },
-	{ 0, 0, 0, 0, 0 }
-};
-
 static kobj_method_t feeder_mixer_methods[] = {
 	KOBJMETHOD(feeder_init,		feed_mixer_init),
 	KOBJMETHOD(feeder_free,		feed_mixer_free),
@@ -371,4 +346,4 @@ static kobj_method_t feeder_mixer_methods[] = {
 	KOBJMETHOD_END
 };
 
-FEEDER_DECLARE(feeder_mixer, NULL);
+FEEDER_DECLARE(feeder_mixer, FEEDER_MIXER);

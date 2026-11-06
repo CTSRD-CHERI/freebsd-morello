@@ -30,6 +30,7 @@
 #include <sys/spigenio.h>
 #include <sys/sysctl.h>
 
+#include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -129,7 +130,7 @@ usage(void)
 	fputs(" - communicate on SPI bus with slave devices\n"
 	      "Usage:\n"
 	      "        spi [-f device] [-d r|w|rw] [-m mode] [-s max-speed] [-c count]\n"
-	      "            [-C \"command bytes\"] [-A] [-b] [-L] [-v]\n"
+	      "            [-C \"command bytes\"] [-A] [-b] [-L] [-S] [-v]\n"
 	      "        spi -i [-f device] [-v]\n"
 	      "        spi -h\n"
 	      " where\n"
@@ -145,6 +146,7 @@ usage(void)
 	      "        -i query information about the device\n"
 	      "        -A uses ASCII for input/output as 2-digit hex values\n"
 	      "        -b Override output format as binary (only valid with '-A')\n"
+	      "        -S constantly stream from stdin to bus\n"
 	      "        -v verbose output\n"
 	      "        -h prints this message\n"
 	      "\n"
@@ -158,11 +160,12 @@ int
 main(int argc, char *argv[], char *envp[] __unused)
 {
 	struct spi_options opt;
-	int err, ch, hdev, finfo, fdir;
+	int err, ch, hdev, finfo, stream, fdir;
 	char *pstr;
 	char dev_name[PATH_MAX * 2 + 5];
 
 	finfo = 0;
+	stream = 0;
 	fdir = DIR_NONE;
 
 	hdev = -1;
@@ -180,7 +183,7 @@ main(int argc, char *argv[], char *envp[] __unused)
 	opt.ncmd = 0;
 	opt.pcmd = NULL;
 
-	while (!err && (ch = getopt(argc, argv, "f:d:m:s:c:C:AbLvih")) != -1) {
+	while (!err && (ch = getopt(argc, argv, "f:d:m:s:c:C:AbLviSh")) != -1) {
 		switch (ch) {
 		case 'd':
 			if (optarg[0] == 'r') {
@@ -275,6 +278,10 @@ main(int argc, char *argv[], char *envp[] __unused)
 			finfo = 1;
 			break;
 
+		case 'S':
+			stream = 1;
+			break;
+
 		default:
 			err = 1;
 			/* FALLTHROUGH */
@@ -358,15 +365,24 @@ main(int argc, char *argv[], char *envp[] __unused)
 
 	/* do data transfer */
 
-	if (fdir == DIR_READ) {
-		err = perform_read(hdev, &opt);
-	}
-	else if (fdir == DIR_WRITE) {
-		err = perform_write(hdev, &opt);
-	}
-	else if (fdir == DIR_READWRITE) {
-		err = perform_readwrite(hdev, &opt);
-	}
+	assert(fdir != DIR_NONE);
+	do {
+		switch (fdir) {
+		case DIR_READ:
+			err = perform_read(hdev, &opt);
+			break;
+		case DIR_WRITE:
+			err = perform_write(hdev, &opt);
+			break;
+		case DIR_READWRITE:
+			err = perform_readwrite(hdev, &opt);
+			break;
+		default:
+			fprintf(stderr, "Invalid state (%d)\n", fdir);
+			err = EINVAL;
+			break;
+		}
+	} while (stream && !err && !feof(stdin));
 
 the_end:
 

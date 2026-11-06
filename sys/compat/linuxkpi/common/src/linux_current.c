@@ -90,11 +90,8 @@ linux_alloc_current(struct thread *td, int flags)
 	}
 
 	ts = uma_zalloc(linux_current_zone, flags | M_ZERO);
-	if (ts == NULL) {
-		if ((flags & (M_WAITOK | M_NOWAIT)) == M_WAITOK)
-			panic("linux_alloc_current: failed to allocate task");
+	if (ts == NULL)
 		return (ENOMEM);
-	}
 	mm = NULL;
 
 	/* setup new task structure */
@@ -118,10 +115,7 @@ linux_alloc_current(struct thread *td, int flags)
 		PROC_UNLOCK(proc);
 		mm = uma_zalloc(linux_mm_zone, flags | M_ZERO);
 		if (mm == NULL) {
-			if ((flags & (M_WAITOK | M_NOWAIT)) == M_WAITOK)
-				panic(
-			    "linux_alloc_current: failed to allocate mm");
-			uma_zfree(linux_current_zone, mm);
+			uma_zfree(linux_current_zone, ts);
 			return (ENOMEM);
 		}
 
@@ -305,8 +299,8 @@ linux_current_init(void *arg __unused)
 	    linuxkpi_thread_dtor, NULL, EVENTHANDLER_PRI_ANY);
 	lkpi_alloc_current = linux_alloc_current;
 }
-SYSINIT(linux_current, SI_SUB_EVENTHANDLER + 1, SI_ORDER_SECOND,
-    linux_current_init, NULL);
+SYSINIT(linux_current, SI_SUB_EVENTHANDLER, SI_ORDER_LAST, linux_current_init,
+    NULL);
 
 static void
 linux_current_uninit(void *arg __unused)
@@ -339,5 +333,5 @@ linux_current_uninit(void *arg __unused)
 	uma_zdestroy(linux_current_zone);
 	uma_zdestroy(linux_mm_zone);
 }
-SYSUNINIT(linux_current, SI_SUB_EVENTHANDLER + 1, SI_ORDER_SECOND,
+SYSUNINIT(linux_current, SI_SUB_EVENTHANDLER, SI_ORDER_LAST,
     linux_current_uninit, NULL);

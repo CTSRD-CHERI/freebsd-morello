@@ -43,6 +43,7 @@
 #include <sys/priv.h>
 #include <sys/proc.h>
 #include <sys/rwlock.h>
+#include <sys/sdt.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/sysctl.h>
@@ -69,6 +70,9 @@
 #include <netpfil/ipfw/dn_aqm.h>
 #endif
 #include <netpfil/ipfw/dn_sched.h>
+
+SDT_PROVIDER_DEFINE(dummynet);
+SDT_PROBE_DEFINE2(dummynet, , , drop, "struct mbuf *", "struct dn_queue *");
 
 /*
  * We keep a private variable for the simulation time, but we could
@@ -252,34 +256,6 @@ dn_tag_get(struct mbuf *m)
 static inline void
 mq_append(struct mq *q, struct mbuf *m)
 {
-#ifdef USERSPACE
-	// buffers from netmap need to be copied
-	// XXX note that the routine is not expected to fail
-	ND("append %p to %p", m, q);
-	if (m->m_flags & M_STACK) {
-		struct mbuf *m_new;
-		void *p;
-		int l, ofs;
-
-		ofs = m->m_data - m->__m_extbuf;
-		// XXX allocate
-		MGETHDR(m_new, M_NOWAIT, MT_DATA);
-		ND("*** WARNING, volatile buf %p ext %p %d dofs %d m_new %p",
-			m, m->__m_extbuf, m->__m_extlen, ofs, m_new);
-		p = m_new->__m_extbuf;	/* new pointer */
-		l = m_new->__m_extlen;	/* new len */
-		if (l <= m->__m_extlen) {
-			panic("extlen too large");
-		}
-
-		*m_new = *m;	// copy
-		m_new->m_flags &= ~M_STACK;
-		m_new->__m_extbuf = p; // point to new buffer
-		_pkt_copy(m->__m_extbuf, p, m->__m_extlen);
-		m_new->m_data = p + ofs;
-		m = m_new;
-	}
-#endif /* USERSPACE */
 	if (q->head == NULL)
 		q->head = m;
 	else
@@ -545,6 +521,7 @@ dn_enqueue(struct dn_queue *q, struct mbuf* m, int drop)
 
 drop:
 	V_dn_cfg.io_pkt_drop++;
+	SDT_PROBE2(dummynet, , , drop, m, q);
 	q->ni.drops++;
 	ni->drops++;
 	FREE_PKT(m);
@@ -836,8 +813,7 @@ dummynet_send(struct mbuf *m)
 			 * contiguous in the first mbuf header.
 			 * Insure this is true.
 			 */
-			if (m->m_len < ETHER_HDR_LEN &&
-			    (m = m_pullup(m, ETHER_HDR_LEN)) == NULL) {
+			if ((m = m_pullup(m, ETHER_HDR_LEN)) == NULL) {
 				printf("dummynet/ether: pullup failed, "
 				    "dropping packet\n");
 				break;
@@ -1001,6 +977,7 @@ done:
 
 dropit:
 	V_dn_cfg.io_pkt_drop++;
+	SDT_PROBE2(dummynet, , , drop, m, q);
 	DN_BH_WUNLOCK();
 	if (m)
 		FREE_PKT(m);

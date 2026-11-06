@@ -47,8 +47,15 @@ using namespace testing;
  * invalidation.  This file tests our client's handling of those messages.
  */
 
-class Notify: public FuseTest {
+class Notify: public FuseTest,
+	      public WithParamInterface<int>
+{
 public:
+virtual void SetUp() {
+	m_init_flags |= GetParam();
+	FuseTest::SetUp();
+}
+
 /* Ignore an optional FUSE_FSYNC */
 void maybe_expect_fsync(uint64_t ino)
 {
@@ -154,7 +161,7 @@ static void* store(void* arg) {
 }
 
 /* Invalidate a nonexistent entry */
-TEST_F(Notify, inval_entry_nonexistent)
+TEST_P(Notify, inval_entry_nonexistent)
 {
 	const static char *name = "foo";
 	struct inval_entry_args iea;
@@ -173,7 +180,7 @@ TEST_F(Notify, inval_entry_nonexistent)
 }
 
 /* Invalidate a cached entry */
-TEST_F(Notify, inval_entry)
+TEST_P(Notify, inval_entry)
 {
 	const static char FULLPATH[] = "mountpoint/foo";
 	const static char RELPATH[] = "foo";
@@ -211,7 +218,7 @@ TEST_F(Notify, inval_entry)
  * Invalidate a cached entry beneath the root, which uses a slightly different
  * code path.
  */
-TEST_F(Notify, inval_entry_below_root)
+TEST_P(Notify, inval_entry_below_root)
 {
 	const static char FULLPATH[] = "mountpoint/some_dir/foo";
 	const static char DNAME[] = "some_dir";
@@ -258,7 +265,7 @@ TEST_F(Notify, inval_entry_below_root)
 }
 
 /* Invalidating an entry invalidates the parent directory's attributes */
-TEST_F(Notify, inval_entry_invalidates_parent_attrs)
+TEST_P(Notify, inval_entry_invalidates_parent_attrs)
 {
 	const static char FULLPATH[] = "mountpoint/foo";
 	const static char RELPATH[] = "foo";
@@ -302,7 +309,7 @@ TEST_F(Notify, inval_entry_invalidates_parent_attrs)
 }
 
 
-TEST_F(Notify, inval_inode_nonexistent)
+TEST_P(Notify, inval_inode_nonexistent)
 {
 	struct inval_inode_args iia;
 	ino_t ino = 42;
@@ -320,7 +327,7 @@ TEST_F(Notify, inval_inode_nonexistent)
 	EXPECT_EQ(0, (intptr_t)thr0_value);
 }
 
-TEST_F(Notify, inval_inode_with_clean_cache)
+TEST_P(Notify, inval_inode_with_clean_cache)
 {
 	const static char FULLPATH[] = "mountpoint/foo";
 	const static char RELPATH[] = "foo";
@@ -385,9 +392,30 @@ TEST_F(Notify, inval_inode_with_clean_cache)
 	leak(fd);
 }
 
+/*
+ * Attempting to invalidate an entry or inode after unmounting should fail, but
+ * nothing bad should happen.
+ * https://bugs.freebsd.org/bugzilla/show_bug.cgi?id=290519
+ */
+TEST_P(Notify, notify_after_unmount)
+{
+	const static char *name = "foo";
+	struct inval_entry_args iea;
+
+	expect_destroy(0);
+
+	m_mock->unmount();
+
+	iea.mock = m_mock;
+	iea.parent = FUSE_ROOT_ID;
+	iea.name = name;
+	iea.namelen = strlen(name);
+	iea.mock->notify_inval_entry(iea.parent, iea.name, iea.namelen, ENODEV);
+}
+
 /* FUSE_NOTIFY_STORE with a file that's not in the entry cache */
 /* disabled because FUSE_NOTIFY_STORE is not yet implemented */
-TEST_F(Notify, DISABLED_store_nonexistent)
+TEST_P(Notify, DISABLED_store_nonexistent)
 {
 	struct store_args sa;
 	ino_t ino = 42;
@@ -406,7 +434,7 @@ TEST_F(Notify, DISABLED_store_nonexistent)
 
 /* Store data into for a file that does not yet have anything cached */
 /* disabled because FUSE_NOTIFY_STORE is not yet implemented */
-TEST_F(Notify, DISABLED_store_with_blank_cache)
+TEST_P(Notify, DISABLED_store_with_blank_cache)
 {
 	const static char FULLPATH[] = "mountpoint/foo";
 	const static char RELPATH[] = "foo";
@@ -444,7 +472,7 @@ TEST_F(Notify, DISABLED_store_with_blank_cache)
 	leak(fd);
 }
 
-TEST_F(NotifyWriteback, inval_inode_with_dirty_cache)
+TEST_P(NotifyWriteback, inval_inode_with_dirty_cache)
 {
 	const static char FULLPATH[] = "mountpoint/foo";
 	const static char RELPATH[] = "foo";
@@ -485,7 +513,7 @@ TEST_F(NotifyWriteback, inval_inode_with_dirty_cache)
 	leak(fd);
 }
 
-TEST_F(NotifyWriteback, inval_inode_attrs_only)
+TEST_P(NotifyWriteback, inval_inode_attrs_only)
 {
 	const static char FULLPATH[] = "mountpoint/foo";
 	const static char RELPATH[] = "foo";
@@ -544,3 +572,45 @@ TEST_F(NotifyWriteback, inval_inode_attrs_only)
 
 	leak(fd);
 }
+
+/*
+ * Attempting asynchronous invalidation of an Entry before mounting the file
+ * system should fail, but nothing bad should happen.
+ *
+ * Note that invalidating an inode before mount goes through the same path, and
+ * is not separately tested.
+ *
+ * https://bugs.freebsd.org/bugzilla/show_bug.cgi?id=290519
+ */
+TEST(PreMount, inval_entry_before_mount)
+{
+	const static char name[] = "foo";
+	size_t namelen = strlen(name);
+	struct mockfs_buf_out *out;
+	int r;
+	int fuse_fd;
+
+	fuse_fd = open("/dev/fuse", O_CLOEXEC | O_RDWR);
+	ASSERT_GE(fuse_fd, 0) << strerror(errno);
+
+	out = new mockfs_buf_out;
+	out->header.unique = 0;	/* 0 means asynchronous notification */
+	out->header.error = FUSE_NOTIFY_INVAL_ENTRY;
+	out->body.inval_entry.parent = FUSE_ROOT_ID;
+	out->body.inval_entry.namelen = namelen;
+	strlcpy((char*)&out->body.bytes + sizeof(out->body.inval_entry),
+		name, sizeof(out->body.bytes) - sizeof(out->body.inval_entry));
+	out->header.len = sizeof(out->header) + sizeof(out->body.inval_entry) +
+		namelen;
+	r = write(fuse_fd, out, out->header.len);
+	EXPECT_EQ(-1, r);
+	EXPECT_EQ(ENODEV, errno);
+	delete out;
+}
+
+/*
+ * Try with and without async reads, because it affects the type of vnode lock
+ * acquired in fuse_internal_invalidate_entry.
+ */
+INSTANTIATE_TEST_SUITE_P(N, Notify, Values(0, FUSE_ASYNC_READ));
+INSTANTIATE_TEST_SUITE_P(N, NotifyWriteback, Values(0, FUSE_ASYNC_READ));

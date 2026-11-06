@@ -66,6 +66,17 @@ env_setenv(const char *name, int flags, const void *value,
 
 	if ((ev = env_getenv(name)) != NULL) {
 		/*
+		 * If the new value doesn't have NOKENV set, we'll drop the flag
+		 * if it's set on the entry so that the override propagates
+		 * correctly.  We do this *before* sending it to the hook in
+		 * case the hook declines to operate on it (e.g., because the
+		 * value matches what was already set) -- we would still want
+		 * the explicitly set value to propagate.
+		 */
+		if (!(flags & EV_NOKENV))
+			ev->ev_flags &= ~EV_NOKENV;
+
+		/*
 		 * If there's a set hook, let it do the work
 		 * (unless we are working for one already).
 		 */
@@ -77,7 +88,6 @@ env_setenv(const char *name, int flags, const void *value,
 			free(ev->ev_value);
 		ev->ev_value = NULL;
 		ev->ev_flags &= ~EV_DYNAMIC;
-
 	} else {
 
 		/*
@@ -123,11 +133,12 @@ env_setenv(const char *name, int flags, const void *value,
 	/* If we have a new value, use it */
 	if (flags & EV_VOLATILE) {
 		ev->ev_value = strdup(value);
-		ev->ev_flags |= EV_DYNAMIC;
+		flags |= EV_DYNAMIC;
 	} else {
 		ev->ev_value = (char *)value;
-		ev->ev_flags |= flags & EV_DYNAMIC;
 	}
+
+	ev->ev_flags |= flags & (EV_DYNAMIC | EV_NOKENV);
 
 	return (0);
 }
@@ -209,6 +220,82 @@ env_noset(struct env_var *ev __unused, int flags __unused,
     const void *value __unused)
 {
 	return (EPERM);
+}
+
+bool
+is_restricted_var(const char *name)
+{
+	/*
+	 * We impose restrictions if input is not verified/trusted
+	 * allowing for exceptions.
+	 * These entries should probably include the '='
+	 */
+	const char *allowed[] = {
+		"boot_function=",
+		"boot_phase=",
+		"boot_recover_cli=",
+		"boot_recover_volume=",
+		"boot_safe=",
+		"boot_set=",
+		"boot_single=",
+		"boot_verbose=",
+#ifdef ENV_IS_RESTRICTED_ALLOWED_LIST
+		ENV_IS_RESTRICTED_ALLOWED_LIST,
+#endif
+		NULL,
+	};
+	/*
+	 * These are prefixes we want to be careful with.
+	 */
+	const char *restricted[] = {
+		"boot",
+		"init",
+		"loader.ve.",
+		"rootfs",
+		"secur",
+		"vfs.",
+#ifdef ENV_IS_RESTRICTED_LIST
+		ENV_IS_RESTRICTED_LIST,
+#endif
+		NULL,
+	};
+	const char **cp;
+	int ok = -1;
+	
+	for (cp = restricted; *cp; cp++) {
+		if (strncmp(name, *cp, strlen(*cp)) == 0) {
+			ok = 0;
+			break;
+		}
+	}
+	if (!ok) {
+		for (cp = allowed; *cp; cp++) {
+			if (strncmp(name, *cp, strlen(*cp)) == 0) {
+				ok = 1;
+				break;
+			}
+		}
+	}
+	return (ok == 0);
+}
+
+static bool check_restricted = false;
+
+void
+set_check_restricted(bool b)
+{
+	check_restricted = b;
+}
+
+/* called from subr_boot with not quite trusted input */
+int
+boot_setenv(const char *name, const char *value)
+{
+	if (check_restricted && is_restricted_var(name)) {
+		errno = EPERM;
+		return -1;
+	}
+	return setenv(name, value, 1);
 }
 
 int

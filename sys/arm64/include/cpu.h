@@ -43,10 +43,10 @@
 #define	_MACHINE_CPU_H_
 
 #if !defined(__ASSEMBLER__)
+#include <machine/_armreg.h>
 #include <machine/atomic.h>
 #include <machine/frame.h>
 #endif
-#include <machine/armreg.h>
 
 #define	TRAPF_PC(tfp)		((tfp)->tf_elr)
 #define	TRAPF_USERMODE(tfp)	(((tfp)->tf_spsr & PSR_M_MASK) == PSR_M_EL0t)
@@ -125,7 +125,11 @@
 #define	CPU_PART_NEOVERSE_V3	0xD84
 #define	CPU_PART_CORTEX_X925	0xD85
 #define	CPU_PART_CORTEX_A725	0xD87
+#define	CPU_PART_C1_NANO	0xD8A
+#define	CPU_PART_C1_PRO		0xD8B
+#define	CPU_PART_C1_ULTRA	0xD8C
 #define	CPU_PART_NEOVERSE_N3	0xD8E
+#define	CPU_PART_C1_PREMIUM	0xD90
 
 /* Cavium Part numbers */
 #define	CPU_PART_THUNDERX	0x0A1
@@ -193,8 +197,35 @@
     (((mask) & PCPU_GET(midr)) ==			\
     ((mask) & CPU_ID_RAW((impl), (part), (var), (rev))))
 
-#define	CPU_MATCH_RAW(mask, devid)			\
-    (((mask) & PCPU_GET(midr)) == ((mask) & (devid)))
+#if !defined(__ASSEMBLER__)
+/*
+ * Check whether midr identifies the given implementer and part at a product
+ * revision rXpY from r(var_low)p(rev_low) to r(var_high)p(rev_high)
+ * inclusive.  X is MIDR_EL1.Variant, and Y is MIDR_EL1.Revision.
+ */
+static inline bool
+midr_check_var_rev_range(u_int midr, u_int impl, u_int part, u_int var_low,
+    u_int rev_low, u_int var_high, u_int rev_high)
+{
+	/* Check for the correct part */
+	if (CPU_IMPL(midr) != impl || CPU_PART(midr) != part)
+		return (false);
+
+	/* Check if the variant is between var_low and var_high inclusive */
+	if (CPU_VAR(midr) < var_low || CPU_VAR(midr) > var_high)
+		return (false);
+
+	/* If the variant is var_low, check if the revision is high enough */
+	if (CPU_VAR(midr) == var_low && CPU_REV(midr) < rev_low)
+		return (false);
+
+	/* If the variant is var_high, check if the revision is low enough */
+	if (CPU_VAR(midr) == var_high && CPU_REV(midr) > rev_high)
+		return (false);
+
+	return (true);
+}
+#endif
 
 /*
  * Chip-specific errata. This defines are intended to be
@@ -251,15 +282,25 @@ void	ptrauth_thread0(struct thread *);
 void	ptrauth_mp_start(uint64_t);
 #endif
 
+/* Memory Tagging Extension (MTE) support */
+void	mte_fork(struct thread *, struct thread *);
+void	mte_exec(struct thread *);
+void	mte_copy_thread(struct thread *, struct thread *);
+void	mte_thread_alloc(struct thread *);
+void	mte_thread0(struct thread *);
+
+void	mte_sync_tags(vm_page_t page);
+void	mte_copy_tags(vm_page_t, vm_page_t, char *, char *);
+
 /* Functions to read the sanitised view of the special registers */
 void	update_special_regs(u_int);
 void	update_special_reg_iss(u_int, uint64_t, uint64_t);
 #define	update_special_reg(reg, clear, set)			\
     update_special_reg_iss(reg ## _ISS, clear, set)
-bool	get_kernel_reg_iss(u_int, uint64_t *);
+void	get_kernel_reg_iss(u_int, uint64_t *);
 #define	get_kernel_reg(reg, valp)				\
     get_kernel_reg_iss(reg ## _ISS, valp)
-bool	get_kernel_reg_iss_masked(u_int, uint64_t *, uint64_t);
+void	get_kernel_reg_iss_masked(u_int, uint64_t *, uint64_t);
 #define	get_kernel_reg_masked(reg, valp, mask)			\
     get_kernel_reg_iss_masked(reg ## _ISS, valp, mask)
 bool	get_user_reg_iss(u_int, uint64_t *, bool);
@@ -302,7 +343,12 @@ ADDRESS_TRANSLATE_FUNC(s1e1r)
 ADDRESS_TRANSLATE_FUNC(s1e1w)
 
 #endif /* !__ASSEMBLER__ */
-#endif
+
+#define MEMSET_EARLY_FUNC	memset_std
+#define MEMCPY_EARLY_FUNC	memcpy_std
+#define MEMMOVE_EARLY_FUNC	memmove_std
+
+#endif /* _KERNEL */
 
 #endif /* !_MACHINE_CPU_H_ */
 

@@ -62,7 +62,13 @@ struct c4iw_dev {
 	pthread_spinlock_t lock;
 	TAILQ_ENTRY(c4iw_dev) list;
 	int abi_version;
+	bool write_cmpl_supported;
 };
+
+static inline int dev_is_t7(struct c4iw_dev *dev)
+{
+	return dev->chip_version == CHELSIO_T7;
+}
 
 static inline int dev_is_t6(struct c4iw_dev *dev)
 {
@@ -92,7 +98,7 @@ struct c4iw_pd {
 struct c4iw_mr {
 	struct ibv_mr ibv_mr;
 	uint64_t va_fbo;
-	uint32_t len;
+	uint64_t len;
 };
 
 static inline u32 c4iw_mmid(u32 stag)

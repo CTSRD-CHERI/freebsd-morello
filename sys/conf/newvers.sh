@@ -50,8 +50,8 @@
 #
 
 TYPE="FreeBSD"
-REVISION="15.0"
-BRANCH="PRERELEASE"
+REVISION="16.0"
+BRANCH="CURRENT"
 if [ -n "${BRANCH_OVERRIDE}" ]; then
 	BRANCH=${BRANCH_OVERRIDE}
 fi
@@ -110,13 +110,17 @@ COPYRIGHT="$COPYRIGHT
 
 # We expand include_metadata later since we may set it to the
 # future value of modified.
+builddir=$(pwd)
 include_metadata=yes
 modified=no
-while getopts crRvV: opt; do
+while getopts cd:rRvV: opt; do
 	case "$opt" in
 	c)
 		echo "$COPYRIGHT"
 		exit 0
+		;;
+	d)
+		builddir=$OPTARG
 		;;
 	r)
 		include_metadata=no
@@ -175,7 +179,12 @@ findvcs()
 
 git_tree_modified()
 {
-	! $git_cmd "--work-tree=${VCSTOP}" -c core.checkStat=minimal -c core.fileMode=off diff --quiet
+	! $git_cmd "--work-tree=${VCSTOP}" -c core.checkStat=minimal -c core.fileMode=off diff --quiet HEAD
+}
+
+got_tree_modified()
+{
+	( cd ${VCSTOP} && $got_cmd status -S '?m' | grep -q . )
 }
 
 LC_ALL=C; export LC_ALL
@@ -187,7 +196,7 @@ fi
 touch version
 v=$(cat version)
 u=${USER:-root}
-d=$(pwd)
+d=$builddir
 h=${HOSTNAME:-$(hostname)}
 if [ -n "$SOURCE_DATE_EPOCH" ]; then
 	if ! t=$(date -ur $SOURCE_DATE_EPOCH 2>/dev/null); then
@@ -229,6 +238,15 @@ if findvcs .gituprevision; then
 	gituprevision="${VCSTOP}/.gituprevision"
 fi
 
+if findvcs .got; then
+	for dir in /usr/bin /usr/local/bin; do
+		if [ -x "${dir}/got" ] ; then
+			got_cmd="${dir}/got"
+			break
+		fi
+	done
+fi
+
 if findvcs .hg; then
 	for dir in /usr/bin /usr/local/bin; do
 		if [ -x "${dir}/hg" ] ; then
@@ -256,21 +274,40 @@ fi
 
 if [ -n "$git_cmd" ] ; then
 	git=$($git_cmd rev-parse --verify --short=12 HEAD 2>/dev/null)
-	if [ "$($git_cmd rev-parse --is-shallow-repository)" = false ] ; then
-		git_cnt=$($git_cmd rev-list --first-parent --count HEAD 2>/dev/null)
-		if [ -n "$git_cnt" ] ; then
-			git="n${git_cnt}-${git}"
+	if [ $? -eq 0 ]; then
+		if [ "$($git_cmd rev-parse --is-shallow-repository)" = false ] ; then
+			git_cnt=$($git_cmd rev-list --first-parent --count HEAD 2>/dev/null)
+			if [ -n "$git_cnt" ] ; then
+				git="n${git_cnt}-${git}"
+			fi
 		fi
+		git_b=$($git_cmd rev-parse --abbrev-ref HEAD)
+		if [ -n "$git_b" -a "$git_b" != "HEAD" ] ; then
+			git="${git_b}-${git}"
+		fi
+		if git_tree_modified; then
+			git="${git}-dirty"
+			modified=yes
+		fi
+		git=" ${git}"
 	fi
-	git_b=$($git_cmd rev-parse --abbrev-ref HEAD)
-	if [ -n "$git_b" -a "$git_b" != "HEAD" ] ; then
-		git="${git_b}-${git}"
+fi
+
+if [ -n "$got_cmd" ] ; then
+	got=$(cd ${VCSTOP} && ${got_cmd} info | awk '/^work tree base commit:/ { print $NF; exit }' | cut -c 1-12 )
+	got_cnt=$(cd ${VCSTOP} && ${got_cmd} log -s | wc -l)
+	if [ -n "$got_cnt" ] ; then
+		got="n$(echo ${got_cnt})-${got}"
 	fi
-	if git_tree_modified; then
-		git="${git}-dirty"
+	got_b=$(cd ${VCSTOP} && ${got_cmd} branch )
+	if [ -n "$got_b" -a "$got_b" != "HEAD" ] ; then
+		got="${got_b}-${got}"
+	fi
+	if got_tree_modified; then
+		got="${got}-dirty"
 		modified=yes
 	fi
-	git=" ${git}"
+	got=" ${got}"
 fi
 
 if [ -n "$gituprevision" ] ; then
@@ -291,10 +328,10 @@ fi
 
 [ ${include_metadata} = "if-modified" -a ${modified} = "yes" ] && include_metadata=yes
 if [ ${include_metadata} != "yes" ]; then
-	VERINFO="${VERSION}${svn}${git}${gitup}${hg} ${i}"
+	VERINFO="${VERSION}${svn}${git}${gitup}${got}${hg} ${i}"
 	VERSTR="${VERINFO}\\n"
 else
-	VERINFO="${VERSION} #${v}${svn}${git}${gitup}${hg}: ${t}"
+	VERINFO="${VERSION} #${v}${svn}${git}${gitup}${got}${hg}: ${t}"
 	VERSTR="${VERINFO}\\n    ${u}@${h}:${d}\\n"
 fi
 

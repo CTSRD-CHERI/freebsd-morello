@@ -32,7 +32,6 @@
  *	$KAME: frag6.c,v 1.33 2002/01/07 11:34:48 kjc Exp $
  */
 
-#include <sys/cdefs.h>
 #include "opt_rss.h"
 
 #include <sys/param.h>
@@ -441,17 +440,14 @@ frag6_input(struct mbuf **mp, int *offp, int proto)
 #endif
 
 	m = *mp;
+	*mp = NULL;	/* Consumed in most cases. */
 	offset = *offp;
 
 	M_ASSERTPKTHDR(m);
 
-	if (m->m_len < offset + sizeof(struct ip6_frag)) {
-		m = m_pullup(m, offset + sizeof(struct ip6_frag));
-		if (m == NULL) {
-			IP6STAT_INC(ip6s_exthdrtoolong);
-			*mp = NULL;
-			return (IPPROTO_DONE);
-		}
+	if ((m = m_pullup(m, offset + sizeof(struct ip6_frag))) == NULL) {
+		IP6STAT_INC(ip6s_exthdrtoolong);
+		return (IPPROTO_DONE);
 	}
 	ip6 = mtod(m, struct ip6_hdr *);
 
@@ -465,7 +461,6 @@ frag6_input(struct mbuf **mp, int *offp, int proto)
 	if (ip6->ip6_plen == 0) {
 		icmp6_error(m, ICMP6_PARAM_PROB, ICMP6_PARAMPROB_HEADER, offset);
 		in6_ifstat_inc(dstifp, ifs6_reass_fail);
-		*mp = NULL;
 		return (IPPROTO_DONE);
 	}
 
@@ -475,13 +470,12 @@ frag6_input(struct mbuf **mp, int *offp, int proto)
 	 * sizeof(struct ip6_frag) == 8
 	 * sizeof(struct ip6_hdr) = 40
 	 */
-	ip6f = (struct ip6_frag *)((caddr_t)ip6 + offset);
+	ip6f = (struct ip6_frag *)((char *)ip6 + offset);
 	if ((ip6f->ip6f_offlg & IP6F_MORE_FRAG) &&
 	    (((ntohs(ip6->ip6_plen) - offset) & 0x7) != 0)) {
 		icmp6_error(m, ICMP6_PARAM_PROB, ICMP6_PARAMPROB_HEADER,
 		    offsetof(struct ip6_hdr, ip6_plen));
 		in6_ifstat_inc(dstifp, ifs6_reass_fail);
-		*mp = NULL;
 		return (IPPROTO_DONE);
 	}
 
@@ -504,7 +498,7 @@ frag6_input(struct mbuf **mp, int *offp, int proto)
 		 * we must update the last one.
 		 */
 		m_copyback(m, ip6_get_prevhdr(m, offset), sizeof(uint8_t),
-		    (caddr_t)&nxt);
+		   &nxt);
 		ip6->ip6_plen = htons(ntohs(ip6->ip6_plen) -
 		    sizeof(struct ip6_frag));
 		if (ip6_deletefraghdr(m, offset, M_NOWAIT) != 0)
@@ -525,7 +519,6 @@ frag6_input(struct mbuf **mp, int *offp, int proto)
 		    offsetof(struct ip6_hdr, ip6_plen));
 		in6_ifstat_inc(dstifp, ifs6_reass_fail);
 		IP6STAT_INC(ip6s_fragdropped);
-		*mp = NULL;
 		return (IPPROTO_DONE);
 	}
 
@@ -651,7 +644,6 @@ frag6_input(struct mbuf **mp, int *offp, int proto)
 			icmp6_error(m, ICMP6_PARAM_PROB, ICMP6_PARAMPROB_HEADER,
 			    offset - sizeof(struct ip6_frag) +
 			    offsetof(struct ip6_frag, ip6f_offlg));
-			*mp = NULL;
 			return (IPPROTO_DONE);
 		}
 	} else if (fragoff + frgpartlen > IPV6_MAXPACKET) {
@@ -661,7 +653,6 @@ frag6_input(struct mbuf **mp, int *offp, int proto)
 		icmp6_error(m, ICMP6_PARAM_PROB, ICMP6_PARAMPROB_HEADER,
 		    offset - sizeof(struct ip6_frag) +
 		    offsetof(struct ip6_frag, ip6f_offlg));
-		*mp = NULL;
 		return (IPPROTO_DONE);
 	}
 
@@ -810,7 +801,6 @@ postinsert:
 				frag6_freef(q6, bucket);
 			}
 			IP6QB_UNLOCK(bucket);
-			*mp = NULL;
 			return (IPPROTO_DONE);
 		}
 		plen += af6->ip6af_frglen;
@@ -822,7 +812,6 @@ postinsert:
 			frag6_freef(q6, bucket);
 		}
 		IP6QB_UNLOCK(bucket);
-		*mp = NULL;
 		return (IPPROTO_DONE);
 	}
 
@@ -865,8 +854,7 @@ postinsert:
 	ip6_deletefraghdr(m, offset, M_NOWAIT);
 
 	/* Set nxt(-hdr field value) to the original value. */
-	m_copyback(m, ip6_get_prevhdr(m, offset), sizeof(uint8_t),
-	    (caddr_t)&nxt);
+	m_copyback(m, ip6_get_prevhdr(m, offset), sizeof(uint8_t), &nxt);
 
 #ifdef MAC
 	mac_ip6q_reassemble(q6, m);
@@ -904,7 +892,6 @@ postinsert:
 #ifdef RSS
 	/* Queue/dispatch for reprocessing. */
 	netisr_dispatch(NETISR_IPV6_DIRECT, m);
-	*mp = NULL;
 	return (IPPROTO_DONE);
 #endif
 
@@ -920,7 +907,6 @@ dropfrag2:
 	in6_ifstat_inc(dstifp, ifs6_reass_fail);
 	IP6STAT_INC(ip6s_fragdropped);
 	m_freem(m);
-	*mp = NULL;
 	return (IPPROTO_DONE);
 }
 

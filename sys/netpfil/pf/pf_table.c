@@ -399,7 +399,8 @@ pfr_set_addrs(struct pfr_table *tbl, struct pfr_addr *addr, int size,
 
 	PF_RULES_WASSERT();
 
-	ACCEPT_FLAGS(flags, PFR_FLAG_DUMMY | PFR_FLAG_FEEDBACK);
+	ACCEPT_FLAGS(flags, PFR_FLAG_START | PFR_FLAG_DONE |
+	    PFR_FLAG_DUMMY | PFR_FLAG_FEEDBACK);
 	if (pfr_validate_table(tbl, ignore_pfrt_flags, flags &
 	    PFR_FLAG_USERIOCTL))
 		return (EINVAL);
@@ -411,7 +412,8 @@ pfr_set_addrs(struct pfr_table *tbl, struct pfr_addr *addr, int size,
 	tmpkt = pfr_create_ktable(&V_pfr_nulltable, 0, 0);
 	if (tmpkt == NULL)
 		return (ENOMEM);
-	pfr_mark_addrs(kt);
+	if (flags & PFR_FLAG_START)
+		pfr_mark_addrs(kt);
 	SLIST_INIT(&addq);
 	SLIST_INIT(&delq);
 	SLIST_INIT(&changeq);
@@ -446,6 +448,7 @@ pfr_set_addrs(struct pfr_table *tbl, struct pfr_addr *addr, int size,
 			    (kt->pfrkt_flags & PFR_TFLAG_COUNTERS) != 0);
 			if (p == NULL)
 				senderr(ENOMEM);
+			p->pfrke_mark = PFR_FB_ADDED;
 			if (pfr_route_kentry(tmpkt, p)) {
 				pfr_destroy_kentry(p);
 				ad.pfra_fback = PFR_FB_NONE;
@@ -459,8 +462,9 @@ _skip:
 		if (flags & PFR_FLAG_FEEDBACK)
 			bcopy(&ad, addr + i, sizeof(ad));
 	}
-	pfr_enqueue_addrs(kt, &delq, &xdel, ENQUEUE_UNMARKED_ONLY);
-	if ((flags & PFR_FLAG_FEEDBACK) && *size2) {
+	if (flags & PFR_FLAG_DONE)
+		pfr_enqueue_addrs(kt, &delq, &xdel, ENQUEUE_UNMARKED_ONLY);
+	if ((flags & PFR_FLAG_FEEDBACK) && size2 != NULL && *size2) {
 		if (*size2 < size+xdel) {
 			*size2 = size+xdel;
 			senderr(0);
@@ -486,7 +490,7 @@ _skip:
 		*ndel = xdel;
 	if (nchange != NULL)
 		*nchange = xchange;
-	if ((flags & PFR_FLAG_FEEDBACK) && size2)
+	if ((flags & PFR_FLAG_FEEDBACK) && size2 != NULL)
 		*size2 = size+xdel;
 	pfr_destroy_ktable(tmpkt, 0);
 	return (0);
@@ -647,16 +651,23 @@ pfr_clr_astats(struct pfr_table *tbl, struct pfr_addr *addr, int size,
 	kt = pfr_lookup_table(tbl);
 	if (kt == NULL || !(kt->pfrkt_flags & PFR_TFLAG_ACTIVE))
 		return (ESRCH);
-	SLIST_INIT(&workq);
 	for (i = 0, ad = addr; i < size; i++, ad++) {
 		if (pfr_validate_addr(ad))
 			senderr(EINVAL);
+		p = pfr_lookup_addr(kt, ad, 1);
+		if (p != NULL)
+			p->pfrke_mark = 0;
+	}
+	SLIST_INIT(&workq);
+	for (i = 0, ad = addr; i < size; i++, ad++) {
 		p = pfr_lookup_addr(kt, ad, 1);
 		if (flags & PFR_FLAG_FEEDBACK) {
 			ad->pfra_fback = (p != NULL) ?
 			    PFR_FB_CLEARED : PFR_FB_NONE;
 		}
-		if (p != NULL) {
+		/* An address given more than once is cleared once. */
+		if (p != NULL && !p->pfrke_mark) {
+			p->pfrke_mark = 1;
 			SLIST_INSERT_HEAD(&workq, p, pfrke_workq);
 			xzero++;
 		}
@@ -839,15 +850,16 @@ static void
 pfr_insert_kentries(struct pfr_ktable *kt,
     struct pfr_kentryworkq *workq, time_t tzero)
 {
-	struct pfr_kentry	*p;
+	struct pfr_kentry	*p, *q;
 	int			 rv, n = 0;
 
-	SLIST_FOREACH(p, workq, pfrke_workq) {
+	SLIST_FOREACH_SAFE(p, workq, pfrke_workq, q) {
 		rv = pfr_route_kentry(kt, p);
 		if (rv) {
 			printf("pfr_insert_kentries: cannot route entry "
 			    "(code=%d).\n", rv);
-			break;
+			pfr_destroy_kentry(p);
+			continue;
 		}
 		p->pfrke_counters.pfrkc_tzero = tzero;
 		n++;
@@ -869,11 +881,29 @@ pfr_insert_kentry(struct pfr_ktable *kt, struct pfr_addr *ad, time_t tzero)
 		return (ENOMEM);
 
 	rv = pfr_route_kentry(kt, p);
-	if (rv)
+	if (rv) {
+		pfr_destroy_kentry(p);
 		return (rv);
+	}
 
 	p->pfrke_counters.pfrkc_tzero = tzero;
 	kt->pfrkt_cnt++;
+
+	return (0);
+}
+
+int
+pfr_remove_kentry(struct pfr_ktable *kt, struct pfr_addr *ad)
+{
+	struct pfr_kentryworkq	 workq = SLIST_HEAD_INITIALIZER(workq);
+	struct pfr_kentry	*p;
+
+	p = pfr_lookup_addr(kt, ad, 1);
+	if (p == NULL || p->pfrke_not)
+		return (ESRCH);
+
+	SLIST_INSERT_HEAD(&workq, p, pfrke_workq);
+	pfr_remove_kentries(kt, &workq);
 
 	return (0);
 }
@@ -1514,6 +1544,53 @@ pfr_ina_begin(struct pfr_table *trs, u_int32_t *ticket, int *ndel, int flags)
 	return (0);
 }
 
+/*
+ * Add addresses to the shadow table of a definition that is in progress.
+ * The shadow is left as it was unless all of them are valid and there is
+ * memory for them.
+ */
+static int
+pfr_ina_append(struct pfr_ktable *shadow, struct pfr_addr *addr, int size,
+    int *nadd, int *naddr)
+{
+	struct pfr_kentryworkq	 addrq;
+	struct pfr_kentry	*p;
+	struct pfr_addr		*ad;
+	int			 i, xaddr = 0;
+
+	PF_RULES_WASSERT();
+
+	if (shadow->pfrkt_cnt == NO_ADDRESSES)
+		return (EINVAL);
+	for (i = 0, ad = addr; i < size; i++, ad++)
+		if (pfr_validate_addr(ad))
+			return (EINVAL);
+	SLIST_INIT(&addrq);
+	for (i = 0, ad = addr; i < size; i++, ad++) {
+		if (pfr_lookup_addr(shadow, ad, 1) != NULL)
+			continue;
+		p = pfr_create_kentry(ad,
+		    (shadow->pfrkt_flags & PFR_TFLAG_COUNTERS) != 0);
+		if (p == NULL) {
+			pfr_clean_node_mask(shadow, &addrq);
+			pfr_destroy_kentries(&addrq);
+			return (ENOMEM);
+		}
+		if (pfr_route_kentry(shadow, p)) {
+			pfr_destroy_kentry(p);
+			continue;
+		}
+		SLIST_INSERT_HEAD(&addrq, p, pfrke_workq);
+		xaddr++;
+	}
+	shadow->pfrkt_cnt += xaddr;
+	if (nadd != NULL)
+		*nadd = 0;
+	if (naddr != NULL)
+		*naddr = xaddr;
+	return (0);
+}
+
 int
 pfr_ina_define(struct pfr_table *tbl, struct pfr_addr *addr, int size,
     int *nadd, int *naddr, u_int32_t ticket, int flags)
@@ -1540,6 +1617,18 @@ pfr_ina_define(struct pfr_table *tbl, struct pfr_addr *addr, int size,
 	tbl->pfrt_flags |= PFR_TFLAG_INACTIVE;
 	SLIST_INIT(&tableq);
 	kt = RB_FIND(pfr_ktablehead, &V_pfr_ktables, (struct pfr_ktable *)tbl);
+	/*
+	 * The addresses of one definition may arrive in several requests.
+	 * All but the first ask for theirs to be added to the shadow table
+	 * that the first one made, instead of replacing it.  A dry run makes
+	 * no shadow table; it only checks the addresses, below.
+	 */
+	if ((flags & (PFR_FLAG_APPEND | PFR_FLAG_DUMMY)) == PFR_FLAG_APPEND) {
+		if (kt == NULL || kt->pfrkt_shadow == NULL)
+			return (EINVAL);
+		return (pfr_ina_append(kt->pfrkt_shadow, addr, size, nadd,
+		    naddr));
+	}
 	if (kt == NULL) {
 		kt = pfr_create_ktable(tbl, 0, 1);
 		if (kt == NULL)
@@ -2071,7 +2160,7 @@ pfr_lookup_table(struct pfr_table *tbl)
 	    (struct pfr_ktable *)tbl));
 }
 
-static struct pfr_kentry *
+struct pfr_kentry *
 pfr_kentry_byaddr(struct pfr_ktable *kt, struct pf_addr *a, sa_family_t af,
     int exact)
 {
@@ -2254,15 +2343,26 @@ pfr_attach_table(struct pf_kruleset *rs, char *name)
 		strlcpy(tbl.pfrt_anchor, ac->path, sizeof(tbl.pfrt_anchor));
 	kt = pfr_lookup_table(&tbl);
 	if (kt == NULL) {
+		/*
+		 * Hold rs across the table creation below.  A new table takes
+		 * a reference on the ruleset, and pfr_destroy_ktable() drops
+		 * it again on the failure paths, which lets
+		 * pf_remove_if_empty_ruleset() free the anchor rs points into
+		 * while our caller still holds rs.
+		 */
+		rs->tables++;
 		kt = pfr_create_ktable(&tbl, time_second, 1);
-		if (kt == NULL)
+		if (kt == NULL) {
+			rs->tables--;
 			return (NULL);
+		}
 		if (ac != NULL) {
 			bzero(tbl.pfrt_anchor, sizeof(tbl.pfrt_anchor));
 			rt = pfr_lookup_table(&tbl);
 			if (rt == NULL) {
 				rt = pfr_create_ktable(&tbl, 0, 1);
 				if (rt == NULL) {
+					rs->tables--;
 					pfr_destroy_ktable(kt, 0);
 					return (NULL);
 				}
@@ -2271,6 +2371,7 @@ pfr_attach_table(struct pf_kruleset *rs, char *name)
 			kt->pfrkt_root = rt;
 		}
 		pfr_insert_ktable(kt);
+		rs->tables--;
 	}
 	if (!kt->pfrkt_refcnt[PFR_REFCNT_RULE]++)
 		pfr_setflags_ktable(kt, kt->pfrkt_flags|PFR_TFLAG_REFERENCED);
@@ -2399,7 +2500,7 @@ _next_block:
 
 _next_entry:
 		/* we need to increase the counter past the nested block */
-		pfr_prepare_network(&umask, AF_INET, ke2->pfrke_net);
+		pfr_prepare_network(&umask, af, ke2->pfrke_net);
 		pfr_sockaddr_to_pf_addr(&umask, &umask_addr);
 		pf_poolmask(addr, addr, &umask_addr, &pfr_ffaddr, af);
 		pf_addr_inc(addr, af);

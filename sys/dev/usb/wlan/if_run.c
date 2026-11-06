@@ -882,6 +882,7 @@ run_attach(device_t self)
 
 	ic->ic_flags |= IEEE80211_F_DATAPAD;
 	ic->ic_flags_ext |= IEEE80211_FEXT_SWBMISS;
+	ic->ic_flags_ext |= IEEE80211_FEXT_SEQNO_OFFLOAD;
 
 	run_getradiocaps(ic, IEEE80211_CHAN_MAX, &ic->ic_nchans,
 	    ic->ic_channels);
@@ -2374,7 +2375,7 @@ run_key_set_cb(void *arg)
 	/* map net80211 cipher to RT2860 security mode */
 	switch (cipher) {
 	case IEEE80211_CIPHER_WEP:
-		if(k->wk_keylen < 8)
+		if(ieee80211_crypto_get_key_len(k) < 8) /* TODO: add a specific WEP40/WEP104 call! */
 			mode = RT2860_MODE_WEP40;
 		else
 			mode = RT2860_MODE_WEP104;
@@ -2407,15 +2408,20 @@ run_key_set_cb(void *arg)
 	}
 
 	if (cipher == IEEE80211_CIPHER_TKIP) {
-		if(run_write_region_1(sc, base, k->wk_key, 16))
+		if (run_write_region_1(sc, base,
+		    ieee80211_crypto_get_key_data(k), 16))
 			return;
-		if(run_write_region_1(sc, base + 16, &k->wk_key[16], 8))	/* wk_txmic */
+		if (run_write_region_1(sc, base + 16,
+		    ieee80211_crypto_get_key_txmic_data(k), 8))	/* wk_txmic */
 			return;
-		if(run_write_region_1(sc, base + 24, &k->wk_key[24], 8))	/* wk_rxmic */
+		if (run_write_region_1(sc, base + 24,
+		    ieee80211_crypto_get_key_rxmic_data(k), 8))	/* wk_rxmic */
 			return;
 	} else {
 		/* roundup len to 16-bit: XXX fix write_region_1() instead */
-		if(run_write_region_1(sc, base, k->wk_key, (k->wk_keylen + 1) & ~1))
+		if (run_write_region_1(sc, base,
+		    ieee80211_crypto_get_key_data(k),
+		    (ieee80211_crypto_get_key_len(k) + 1) & ~1))
 			return;
 	}
 
@@ -3522,6 +3528,9 @@ run_tx(struct run_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 	data->ni = ni;
 	data->ridx = ridx;
 
+	/* Assign sequence number now, regardless of A-MPDU TX or otherwise (for now) */
+	ieee80211_output_seqno_assign(ni, -1, m);
+
 	run_set_tx_desc(sc, data);
 
 	/*
@@ -3626,6 +3635,9 @@ run_tx_mgt(struct run_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 	data->m = m;
 	data->ni = ni;
 	data->ridx = ridx;
+
+	/* Assign sequence number now, regardless of A-MPDU TX or otherwise (for now) */
+	ieee80211_output_seqno_assign(ni, -1, m);
 
 	run_set_tx_desc(sc, data);
 
@@ -3770,6 +3782,9 @@ run_tx_param(struct run_softc *sc, struct mbuf *m, struct ieee80211_node *ni,
 		if (rt2860_rates[ridx].rate == rate)
 			break;
 	data->ridx = ridx;
+
+	/* Assign sequence number now, regardless of A-MPDU TX or otherwise (for now) */
+	ieee80211_output_seqno_assign(ni, -1, m);
 
         run_set_tx_desc(sc, data);
 
@@ -6416,6 +6431,10 @@ run_ampdu_enable(struct ieee80211_node *ni, struct ieee80211_tx_ampdu *tap)
 {
 
 	/* For now, no A-MPDU TX support in the driver */
+	/*
+	 * TODO: maybe we needed to enable seqno generation too?
+	 * What other TX desc bits are missing/needed?
+	 */
 	return (0);
 }
 

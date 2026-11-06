@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 1984-2025  Mark Nudelman
+ * Copyright (C) 1984-2026  Mark Nudelman
  *
  * You may distribute under the terms of either the GNU General Public
  * License or the Less License, as specified in the README file.
@@ -22,6 +22,7 @@
 #include "less.h"
 
 extern IFILE    curr_ifile;
+extern IFILE    old_ifile;
 
 struct ifile {
 	struct ifile *h_next;           /* Links for command line list */
@@ -31,9 +32,9 @@ struct ifile {
 	void *h_filestate;              /* File state (used in ch.c) */
 	int h_index;                    /* Index within command line list */
 	int h_hold;                     /* Hold count */
-	char h_opened;                  /* Has this ifile been opened? */
+	lbool h_opened;                 /* Has this ifile been opened? */
 	struct scrpos h_scrpos;         /* Saved position within the file */
-	void *h_altpipe;                /* Alt pipe */
+	FILE *h_altpipe;                /* Alt pipe */
 	char *h_altfilename;            /* Alt filename */
 };
 
@@ -108,7 +109,7 @@ static struct ifile * new_ifile(constant char *filename, struct ifile *prev)
 	p->h_filename = save(filename);
 	p->h_rfilename = lrealpath(filename);
 	p->h_scrpos.pos = NULL_POSITION;
-	p->h_opened = 0;
+	p->h_opened = FALSE;
 	p->h_hold = 0;
 	p->h_filestate = NULL;
 	p->h_altfilename = NULL;
@@ -139,6 +140,8 @@ public void del_ifile(IFILE h)
 	unmark(h);
 	if (h == curr_ifile)
 		curr_ifile = getoff_ifile(curr_ifile);
+	if (h == old_ifile)
+		old_ifile = NULL_IFILE;
 	p = int_ifile(h);
 	unlink_ifile(p);
 	free(p->h_rfilename);
@@ -269,7 +272,7 @@ public int get_index(IFILE ifile)
 /*
  * Save the file position to be associated with a given file.
  */
-public void store_pos(IFILE ifile, struct scrpos *scrpos)
+public void store_pos(IFILE ifile, constant struct scrpos *scrpos)
 {
 	int_ifile(ifile)->h_scrpos = *scrpos;
 }
@@ -288,13 +291,13 @@ public void get_pos(IFILE ifile, struct scrpos *scrpos)
  */
 public void set_open(IFILE ifile)
 {
-	int_ifile(ifile)->h_opened = 1;
+	int_ifile(ifile)->h_opened = TRUE;
 }
 
 /*
  * Return whether the ifile has been opened previously.
  */
-public int opened(IFILE ifile)
+public lbool opened(IFILE ifile)
 {
 	return (int_ifile(ifile)->h_opened);
 }
@@ -319,12 +322,12 @@ public void set_filestate(IFILE ifile, void *filestate)
 	int_ifile(ifile)->h_filestate = filestate;
 }
 
-public void set_altpipe(IFILE ifile, void *p)
+public void set_altpipe(IFILE ifile, FILE *p)
 {
 	int_ifile(ifile)->h_altpipe = p;
 }
 
-public void *get_altpipe(IFILE ifile)
+public FILE *get_altpipe(IFILE ifile)
 {
 	return (int_ifile(ifile)->h_altpipe);
 }

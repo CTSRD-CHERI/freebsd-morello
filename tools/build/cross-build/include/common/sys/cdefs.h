@@ -100,6 +100,14 @@
 	__attribute__((__format__(__printf0__, fmtarg, firstvararg)))
 #endif
 
+#ifndef __nonstring
+#if __has_attribute(__nonstring__)
+#define	__nonstring	__attribute__((__nonstring__))
+#else
+#define	__nonstring
+#endif
+#endif
+
 #ifndef __predict_true
 #define __predict_true(exp) __builtin_expect((exp), 1)
 #endif
@@ -269,6 +277,16 @@
 #define	__BSD_VISIBLE		1
 #define	__ISO_C_VISIBLE		2011
 #define	__EXT1_VISIBLE		1
+
+/*
+ * Macro to test if we're using a specific version of gcc or later.
+ */
+#if defined(__GNUC__)
+#define	__GNUC_PREREQ__(ma, mi)	\
+	(__GNUC__ > (ma) || __GNUC__ == (ma) && __GNUC_MINOR__ >= (mi))
+#else
+#define	__GNUC_PREREQ__(ma, mi)	0
+#endif
 
 /* Alignment builtins for better type checking and improved code generation. */
 /* Provide fallback versions for other compilers (GCC/Clang < 10): */

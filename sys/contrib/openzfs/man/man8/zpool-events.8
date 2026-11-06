@@ -1,23 +1,13 @@
 .\" SPDX-License-Identifier: CDDL-1.0
 .\"
-.\" CDDL HEADER START
+.\" This file and its contents are supplied under the terms of the
+.\" Common Development and Distribution License ("CDDL"), version 1.0.
+.\" You may only use this file in accordance with the terms of version
+.\" 1.0 of the CDDL.
 .\"
-.\" The contents of this file are subject to the terms of the
-.\" Common Development and Distribution License (the "License").
-.\" You may not use this file except in compliance with the License.
-.\"
-.\" You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-.\" or https://opensource.org/licenses/CDDL-1.0.
-.\" See the License for the specific language governing permissions
-.\" and limitations under the License.
-.\"
-.\" When distributing Covered Code, include this CDDL HEADER in each
-.\" file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-.\" If applicable, add the following below this CDDL HEADER, with the
-.\" fields enclosed by brackets "[]" replaced with your own identifying
-.\" information: Portions Copyright [yyyy] [name of copyright owner]
-.\"
-.\" CDDL HEADER END
+.\" A full copy of the text of the CDDL should have accompanied this
+.\" source.  A copy of the CDDL is also available via the Internet at
+.\" https://opensource.org/license/CDDL-1.0.
 .\"
 .\" Copyright (c) 2007, Sun Microsystems, Inc. All Rights Reserved.
 .\" Copyright (c) 2012, 2018 by Delphix. All rights reserved.
@@ -113,17 +103,19 @@ See
 for more details on the
 .Sy zfs_vdev_direct_write_verify
 module parameter.
-.It Sy config
+.It Sy config_sync
 Issued every time a vdev change have been done to the pool.
 .It Sy zpool
 Issued when a pool cannot be imported.
-.It Sy zpool.destroy
+.It Sy pool_create
+Issued when a pool is created.
+.It Sy pool_destroy
 Issued when a pool is destroyed.
-.It Sy zpool.export
+.It Sy pool_export
 Issued when a pool is exported.
-.It Sy zpool.import
+.It Sy pool_import
 Issued when a pool is imported.
-.It Sy zpool.reguid
+.It Sy pool_reguid
 Issued when a REGUID (new unique identifier for the pool have been regenerated)
 have been detected.
 .It Sy vdev.unknown
@@ -150,21 +142,31 @@ event.
 Issued when the label is OK but invalid.
 .It Sy vdev.bad_ashift
 Issued when the ashift alignment requirement has increased.
-.It Sy vdev.remove
+.It Sy vdev_remove
 Issued when a vdev is detached from a mirror (or a spare detached from a
 vdev where it have been used to replace a failed drive - only works if
 the original drive have been re-added).
-.It Sy vdev.clear
+.It Sy vdev_remove_aux
+Issued when an auxiliary vdev is removed.
+.It Sy vdev_remove_dev
+Issued when a specific device is removed from a vdev.
+.It Sy vdev_clear
 Issued when clearing device errors in a pool.
 Such as running
 .Nm zpool Cm clear
 on a device in the pool.
-.It Sy vdev.check
+.It Sy vdev_check
 Issued when a check to see if a given vdev could be opened is started.
-.It Sy vdev.spare
+.It Sy vdev_spare
 Issued when a spare have kicked in to replace a failed device.
-.It Sy vdev.autoexpand
+.It Sy vdev_autoexpand
 Issued when a vdev can be automatically expanded.
+.It Sy vdev_add
+Issued when a vdev is added to a pool.
+.It Sy vdev_attach
+Issued when a vdev is attached to a mirror or raidz vdev type.
+.It Sy vdev_online
+Issued when an offline vdev is brought online
 .It Sy io_failure
 Issued when there is an I/O failure in a vdev in the pool.
 .It Sy probe_failure
@@ -175,21 +177,56 @@ have removed the device).
 .It Sy log_replay
 Issued when the intent log cannot be replayed.
 The can occur in the case of a missing or damaged log device.
-.It Sy resilver.start
+.It Sy resilver_start
 Issued when a resilver is started.
-.It Sy resilver.finish
+.It Sy resilver_finish
 Issued when the running resilver have finished.
-.It Sy scrub.start
+.It Sy scrub_start
 Issued when a scrub is started on a pool.
-.It Sy scrub.finish
+.It Sy scrub_finish
 Issued when a pool has finished scrubbing.
-.It Sy scrub.abort
+.It Sy scrub_abort
 Issued when a scrub is aborted on a pool.
-.It Sy scrub.resume
+.It Sy scrub_resume
 Issued when a scrub is resumed on a pool.
-.It Sy scrub.paused
+.It Sy scrub_paused
 Issued when a scrub is paused on a pool.
-.It Sy bootfs.vdev.attach
+.It Sy errorscrub_start
+Issued when a errorscrub is started on a pool.
+.It Sy errorscrub_finish
+Issued when a pool has finished errorscrubbing.
+.It Sy errorscrub_abort
+Issued when a errorscrub is aborted on a pool.
+.It Sy errorscrub_resume
+Issued when a errorscrub is resumed on a pool.
+.It Sy errorscrub_paused
+Issued when a errorscrub is paused on a pool.
+.It Sy trim_start
+Issued when a trim is started on a pool.
+.It Sy trim_finish
+Issued when a pool has finished trimbing.
+.It Sy trim_cancel
+Issued when a trim is canceled on a pool.
+.It Sy trim_resume
+Issued when a trim is resumed on a pool.
+.It Sy trim_suspend
+Issued when a trim is suspend on a pool.
+.It Sy authentication
+Issued when there is a decryption / authentication error.
+.It Sy config_cache_write
+Issued when the config cache file cannot be written.
+.It Sy bootfs_vdev_attach
+Issued when a vdev is attached to a root pool with the bootfs property set.
+.It Sy sitout
+Issued when a
+.Sy RAIDZ
+or
+.Sy DRAID
+vdev triggers the
+.Sy autosit
+logic.
+This logic detects when a disk in such a vdev is significantly slower than its
+peers, and sits them out temporarily to preserve the performance of the pool.
 .El
 .
 .Sh PAYLOADS
@@ -411,12 +448,12 @@ ZIO_STAGE_CHECKSUM_GENERATE:0x00000080:-W----
 
 ZIO_STAGE_NOP_WRITE:0x00000100:-W----
 
-ZIO_STAGE_BRT_FREE:0x00000200:--F---
+ZIO_STAGE_DDT_READ_START:0x00000200:R-----
+ZIO_STAGE_DDT_READ_DONE:0x00000400:R-----
+ZIO_STAGE_DDT_WRITE:0x00000800:-W----
+ZIO_STAGE_DDT_FREE:0x00001000:--F---
 
-ZIO_STAGE_DDT_READ_START:0x00000400:R-----
-ZIO_STAGE_DDT_READ_DONE:0x00000800:R-----
-ZIO_STAGE_DDT_WRITE:0x00001000:-W----
-ZIO_STAGE_DDT_FREE:0x00002000:--F---
+ZIO_STAGE_BRT_FREE:0x00002000:--F---
 
 ZIO_STAGE_GANG_ASSEMBLE:0x00004000:RWFC--
 ZIO_STAGE_GANG_ISSUE:0x00008000:RWFC--
@@ -470,21 +507,24 @@ ZIO_FLAG_IO_RETRY:0x00008000
 ZIO_FLAG_PROBE:0x00010000
 ZIO_FLAG_TRYHARD:0x00020000
 ZIO_FLAG_OPTIONAL:0x00040000
+ZIO_FLAG_DIO_READ:0x00080000
+ZIO_FLAG_BYPASSED_QUEUE:0x00100000
 
-ZIO_FLAG_DONT_QUEUE:0x00080000
-ZIO_FLAG_DONT_PROPAGATE:0x00100000
-ZIO_FLAG_IO_BYPASS:0x00200000
-ZIO_FLAG_IO_REWRITE:0x00400000
-ZIO_FLAG_RAW_COMPRESS:0x00800000
-ZIO_FLAG_RAW_ENCRYPT:0x01000000
+ZIO_FLAG_DONT_QUEUE:0x00200000
+ZIO_FLAG_DONT_PROPAGATE:0x00400000
+ZIO_FLAG_IO_BYPASS:0x00800000
+ZIO_FLAG_IO_REWRITE:0x01000000
+ZIO_FLAG_RAW_COMPRESS:0x02000000
+ZIO_FLAG_RAW_ENCRYPT:0x04000000
 
-ZIO_FLAG_GANG_CHILD:0x02000000
-ZIO_FLAG_DDT_CHILD:0x04000000
-ZIO_FLAG_GODFATHER:0x08000000
-ZIO_FLAG_NOPWRITE:0x10000000
-ZIO_FLAG_REEXECUTED:0x20000000
-ZIO_FLAG_DELEGATED:0x40000000
-ZIO_FLAG_FASTWRITE:0x80000000
+ZIO_FLAG_GANG_CHILD:0x08000000
+ZIO_FLAG_DDT_CHILD:0x10000000
+ZIO_FLAG_GODFATHER:0x20000000
+ZIO_FLAG_NOPWRITE:0x40000000
+ZIO_FLAG_REEXECUTED:0x80000000
+ZIO_FLAG_DELEGATED:0x100000000
+ZIO_FLAG_PREALLOCATED:0x200000000
+ZIO_FLAG_POSTREAD:0x400000000
 .TE
 .
 .Sh I/O TYPES

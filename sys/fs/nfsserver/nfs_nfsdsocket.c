@@ -52,13 +52,13 @@ extern volatile int nfsrv_layoutcnt;
 NFSV4ROOTLOCKMUTEX;
 NFSSTATESPINLOCK;
 
-NFSD_VNET_DECLARE(struct nfsrv_stablefirst, nfsrv_stablefirst);
-NFSD_VNET_DECLARE(struct nfsclienthashhead *, nfsclienthash);
-NFSD_VNET_DECLARE(int, nfsrc_floodlevel);
-NFSD_VNET_DECLARE(int, nfsrc_tcpsavedreplies);
-NFSD_VNET_DECLARE(struct nfsrvfh, nfs_rootfh);
-NFSD_VNET_DECLARE(int, nfs_rootfhset);
-NFSD_VNET_DECLARE(struct nfsstatsv1 *, nfsstatsv1_p);
+VNET_DECLARE(struct nfsrv_stablefirst, nfsrv_stablefirst);
+VNET_DECLARE(struct nfsclienthashhead *, nfsclienthash);
+VNET_DECLARE(int, nfsrc_floodlevel);
+VNET_DECLARE(int, nfsrc_tcpsavedreplies);
+VNET_DECLARE(struct nfsrvfh, nfs_rootfh);
+VNET_DECLARE(int, nfs_rootfhset);
+VNET_DECLARE(struct nfsstatsv1 *, nfsstatsv1_p);
 
 int (*nfsrv3_procs0[NFS_V3NPROCS])(struct nfsrv_descript *,
     int, vnode_t , struct nfsexstuff *) = {
@@ -477,16 +477,16 @@ nfsrvd_statstart(int op, struct bintime *now)
 	}
 
 	mtx_lock(&nfsrvd_statmtx);
-	if (NFSD_VNET(nfsstatsv1_p)->srvstartcnt ==
-	    NFSD_VNET(nfsstatsv1_p)->srvdonecnt) {
+	if (VNET(nfsstatsv1_p)->srvstartcnt ==
+	    VNET(nfsstatsv1_p)->srvdonecnt) {
 		if (now != NULL)
-			NFSD_VNET(nfsstatsv1_p)->busyfrom = *now;
+			VNET(nfsstatsv1_p)->busyfrom = *now;
 		else
-			binuptime(&NFSD_VNET(nfsstatsv1_p)->busyfrom);
+			binuptime(&VNET(nfsstatsv1_p)->busyfrom);
 		
 	}
-	NFSD_VNET(nfsstatsv1_p)->srvrpccnt[op]++;
-	NFSD_VNET(nfsstatsv1_p)->srvstartcnt++;
+	VNET(nfsstatsv1_p)->srvrpccnt[op]++;
+	VNET(nfsstatsv1_p)->srvstartcnt++;
 	mtx_unlock(&nfsrvd_statmtx);
 
 }
@@ -509,21 +509,21 @@ nfsrvd_statend(int op, uint64_t bytes, struct bintime *now,
 
 	mtx_lock(&nfsrvd_statmtx);
 
-	NFSD_VNET(nfsstatsv1_p)->srvbytes[op] += bytes;
-	NFSD_VNET(nfsstatsv1_p)->srvops[op]++;
+	VNET(nfsstatsv1_p)->srvbytes[op] += bytes;
+	VNET(nfsstatsv1_p)->srvops[op]++;
 
 	if (then != NULL) {
 		dt = *now;
 		bintime_sub(&dt, then);
-		bintime_add(&NFSD_VNET(nfsstatsv1_p)->srvduration[op], &dt);
+		bintime_add(&VNET(nfsstatsv1_p)->srvduration[op], &dt);
 	}
 
 	dt = *now;
-	bintime_sub(&dt, &NFSD_VNET(nfsstatsv1_p)->busyfrom);
-	bintime_add(&NFSD_VNET(nfsstatsv1_p)->busytime, &dt);
-	NFSD_VNET(nfsstatsv1_p)->busyfrom = *now;
+	bintime_sub(&dt, &VNET(nfsstatsv1_p)->busyfrom);
+	bintime_add(&VNET(nfsstatsv1_p)->busytime, &dt);
+	VNET(nfsstatsv1_p)->busyfrom = *now;
 
-	NFSD_VNET(nfsstatsv1_p)->srvdonecnt++;
+	VNET(nfsstatsv1_p)->srvdonecnt++;
 
 	mtx_unlock(&nfsrvd_statmtx);
 }
@@ -652,6 +652,8 @@ tryagain:
 		vn_finished_write(mp);
 
 		if (error == 0 && nd->nd_repstat == ERELOOKUP) {
+			nfsrvd_statend(nfsv3to4op[nd->nd_procnum], /*bytes*/ 0,
+			    /*now*/ NULL, /*then*/ &start_time);
 			/*
 			 * Roll back to the beginning of the RPC request
 			 * arguments.
@@ -761,7 +763,7 @@ nfsrvd_compound(struct nfsrv_descript *nd, int isdgram, u_char *tag,
 	 */
 	igotlock = 0;
 	NFSLOCKV4ROOTMUTEX();
-	if (NFSD_VNET(nfsrv_stablefirst).nsf_flags & NFSNSF_NEEDLOCK)
+	if (VNET(nfsrv_stablefirst).nsf_flags & NFSNSF_NEEDLOCK)
 		igotlock = nfsv4_lock(&nfsv4rootfs_lock, 1, NULL,
 		    NFSV4ROOTLOCKMUTEXPTR, NULL);
 	else
@@ -774,8 +776,8 @@ nfsrvd_compound(struct nfsrv_descript *nd, int isdgram, u_char *tag,
 		 * Done when the grace period is over or a client has long
 		 * since expired.
 		 */
-		NFSD_VNET(nfsrv_stablefirst).nsf_flags &= ~NFSNSF_NEEDLOCK;
-		if ((NFSD_VNET(nfsrv_stablefirst).nsf_flags &
+		VNET(nfsrv_stablefirst).nsf_flags &= ~NFSNSF_NEEDLOCK;
+		if ((VNET(nfsrv_stablefirst).nsf_flags &
 		    (NFSNSF_GRACEOVER | NFSNSF_UPDATEDONE)) == NFSNSF_GRACEOVER)
 			nfsrv_updatestable(p);
 
@@ -785,12 +787,12 @@ nfsrvd_compound(struct nfsrv_descript *nd, int isdgram, u_char *tag,
 		 * stable storage file and then remove them from the client
 		 * list.
 		 */
-		if (NFSD_VNET(nfsrv_stablefirst).nsf_flags &
+		if (VNET(nfsrv_stablefirst).nsf_flags &
 		    NFSNSF_EXPIREDCLIENT) {
-			NFSD_VNET(nfsrv_stablefirst).nsf_flags &=
+			VNET(nfsrv_stablefirst).nsf_flags &=
 			    ~NFSNSF_EXPIREDCLIENT;
 			for (i = 0; i < nfsrv_clienthashsize; i++) {
-			    LIST_FOREACH_SAFE(clp, &NFSD_VNET(nfsclienthash)[i],
+			    LIST_FOREACH_SAFE(clp, &VNET(nfsclienthash)[i],
 				lc_hash, nclp) {
 				if (clp->lc_flags & LCL_EXPIREIT) {
 				    if (!LIST_EMPTY(&clp->lc_open) ||
@@ -824,7 +826,7 @@ nfsrvd_compound(struct nfsrv_descript *nd, int isdgram, u_char *tag,
 	 * If flagged, search for open owners that haven't had any opens
 	 * for a long time.
 	 */
-	if (NFSD_VNET(nfsrv_stablefirst).nsf_flags & NFSNSF_NOOPENS) {
+	if (VNET(nfsrv_stablefirst).nsf_flags & NFSNSF_NOOPENS) {
 		nfsrv_throwawayopens(p);
 	}
 
@@ -951,10 +953,10 @@ nfsrvd_compound(struct nfsrv_descript *nd, int isdgram, u_char *tag,
 		if (i == 0 && (nd->nd_rp == NULL ||
 		    nd->nd_rp->rc_refcnt == 0) &&
 		    (nfsrv_mallocmget_limit() ||
-		     NFSD_VNET(nfsrc_tcpsavedreplies) >
-		     NFSD_VNET(nfsrc_floodlevel))) {
-			if (NFSD_VNET(nfsrc_tcpsavedreplies) >
-			    NFSD_VNET(nfsrc_floodlevel))
+		     VNET(nfsrc_tcpsavedreplies) >
+		     VNET(nfsrc_floodlevel))) {
+			if (VNET(nfsrc_tcpsavedreplies) >
+			    VNET(nfsrc_floodlevel))
 				printf("nfsd server cache flooded, try "
 				    "increasing vfs.nfsd.tcphighwater\n");
 			nd->nd_repstat = NFSERR_RESOURCE;
@@ -1031,7 +1033,8 @@ nfsrvd_compound(struct nfsrv_descript *nd, int isdgram, u_char *tag,
 				cur_fsid = vp->v_mount->mnt_stat.f_fsid;
 				NFSVOPUNLOCK(vp);
 				vpnes = nes;
-			}
+			} else if (nd->nd_repstat == ESTALE)
+				nfsrv_freestrandedstate(&fh);
 			break;
 		case NFSV4OP_PUTPUBFH:
 			if (nfs_pubfhset) {
@@ -1069,7 +1072,7 @@ nfsrvd_compound(struct nfsrv_descript *nd, int isdgram, u_char *tag,
 			}
 			break;
 		case NFSV4OP_PUTROOTFH:
-			if (NFSD_VNET(nfs_rootfhset)) {
+			if (VNET(nfs_rootfhset)) {
 				if ((nd->nd_flag & ND_LASTOP) == 0) {
 					/*
 					 * Pre-parse the next op#.  If it is
@@ -1090,7 +1093,7 @@ nfsrvd_compound(struct nfsrv_descript *nd, int isdgram, u_char *tag,
 					} while (nextop == NFSV4OP_SAVEFH &&
 					    i < numops - 1);
 				}
-				nfsd_fhtovp(nd, &NFSD_VNET(nfs_rootfh),
+				nfsd_fhtovp(nd, &VNET(nfs_rootfh),
 				    LK_SHARED, &nvp, &nes, NULL, 0, nextop);
 				if (!nd->nd_repstat) {
 					if (vp)
@@ -1110,7 +1113,7 @@ nfsrvd_compound(struct nfsrv_descript *nd, int isdgram, u_char *tag,
 				if (vp != savevp) {
 					if (savevp)
 						vrele(savevp);
-					VREF(vp);
+					vref(vp);
 					savevp = vp;
 					savevpnes = vpnes;
 					save_fsid = cur_fsid;
@@ -1155,7 +1158,7 @@ nfsrvd_compound(struct nfsrv_descript *nd, int isdgram, u_char *tag,
 						    nfsvno_testexp(nd,
 						    &savevpnes);
 					if (nd->nd_repstat == 0) {
-						VREF(savevp);
+						vref(savevp);
 						vrele(vp);
 						vp = savevp;
 						vpnes = savevpnes;
@@ -1235,7 +1238,7 @@ tryagain:
 					break;
 				}
 			}
-			VREF(vp);
+			vref(vp);
 			if (nfsv4_opflag[op].modifyfs)
 				vn_start_write(vp, &temp_mp, V_WAIT);
 			error = (*(nfsrv4_ops1[op]))(nd, isdgram, vp,
@@ -1272,15 +1275,16 @@ tryagain:
 			if (vp == NULL || savevp == NULL) {
 				nd->nd_repstat = NFSERR_NOFILEHANDLE;
 				break;
-			} else if (fsidcmp(&cur_fsid, &save_fsid) != 0) {
+			} else if (fsidcmp(&cur_fsid, &save_fsid) != 0 &&
+			    op != NFSV4OP_COPY && op != NFSV4OP_CLONE) {
 				nd->nd_repstat = NFSERR_XDEV;
 				break;
 			}
 			if (nfsv4_opflag[op].modifyfs)
 				vn_start_write(savevp, &temp_mp, V_WAIT);
 			if (NFSVOPLOCK(savevp, LK_EXCLUSIVE) == 0) {
-				VREF(vp);
-				VREF(savevp);
+				vref(vp);
+				vref(savevp);
 				error = (*(nfsrv4_ops2[op]))(nd, isdgram,
 				    savevp, vp, &savevpnes, &vpnes);
 			} else
@@ -1301,7 +1305,7 @@ tryagain:
 							lktype = LK_SHARED;
 					}
 					if (NFSVOPLOCK(vp, lktype) == 0)
-						VREF(vp);
+						vref(vp);
 					else
 						nd->nd_repstat = NFSERR_PERM;
 				} else {
@@ -1351,6 +1355,11 @@ tryagain:
 		}
 
 		if (nd->nd_repstat == ERELOOKUP) {
+			if (statsinprog != 0) {
+				nfsrvd_statend(op, /*bytes*/ 0, /*now*/ NULL,
+				    /*then*/ &start_time);
+				statsinprog = 0;
+			}
 			/*
 			 * Roll back to the beginning of the operation
 			 * arguments.

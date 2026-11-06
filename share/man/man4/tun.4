@@ -1,26 +1,18 @@
 .\" $NetBSD: tun.4,v 1.1 1996/06/25 22:17:37 pk Exp $
-.\" Based on PR#2411
+.\" Based on NetBSD PR#2411
 .\"
-.Dd March 17, 2020
+.Dd September 5, 2026
 .Dt TUN 4
 .Os
 .Sh NAME
 .Nm tun
 .Nd tunnel software network interface
 .Sh SYNOPSIS
-To compile this driver into the kernel,
-place the following line in your
-kernel configuration file:
-.Bd -ragged -offset indent
-.Cd "device tuntap"
-.Ed
+.Cd device tuntap
 .Pp
-Alternatively, to load the driver as a
-module at boot time, place the following lines in
+In
 .Xr loader.conf 5 :
-.Bd -literal -offset indent
-if_tuntap_load="YES"
-.Ed
+.Cd if_tuntap_load="YES"
 .Sh DESCRIPTION
 The
 .Nm
@@ -282,6 +274,21 @@ The argument should be a pointer to an
 the ioctl sets the value to one if the device is in
 .Dq multi-af
 mode, and zero otherwise.
+.It Dv TUNSTRANSIENT
+The argument should be a pointer to an
+.Va int ;
+this sets the transient flag on
+the
+.Nm
+device.
+A transient
+.Nm
+will be destroyed upon last close.
+.It Dv TUNGTRANSIENT
+The argument should be a pointer to an
+.Va int ;
+this stores the current state (enabled or disabled) of the transient flag into
+it.
 .It Dv FIONBIO
 Turn non-blocking I/O for reads off or on, according as the argument
 .Vt int Ns 's
@@ -339,5 +346,4 @@ them pile up.
 .Xr tap 4 ,
 .Xr ifconfig 8
 .Sh AUTHORS
-This manual page was originally obtained from
-.Nx .
+.An Paul Kranenburg Aq Mt pk@netbsd.org

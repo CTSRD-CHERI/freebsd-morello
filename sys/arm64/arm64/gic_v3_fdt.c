@@ -86,7 +86,7 @@ EARLY_DRIVER_MODULE(gic_v3, ofwbus, gic_v3_fdt_driver, 0, 0,
 /*
  * Helper functions declarations.
  */
-static int gic_v3_ofw_bus_attach(device_t);
+static void gic_v3_ofw_bus_attach(device_t);
 
 /*
  * Device interface.
@@ -110,7 +110,7 @@ gic_v3_fdt_attach(device_t dev)
 {
 	struct gic_v3_softc *sc;
 	pcell_t redist_regions;
-	intptr_t xref;
+	phandle_t xref, node;
 	int err;
 	uint32_t *mbi_ranges;
 	ssize_t ret;
@@ -118,6 +118,19 @@ gic_v3_fdt_attach(device_t dev)
 	sc = device_get_softc(dev);
 	sc->dev = dev;
 	sc->gic_bus = GIC_BUS_FDT;
+	node = ofw_bus_get_node(dev);
+
+	/*
+	 * Limit DMA shareability. "dma-noncoherent" was introduced in DT 6.15.
+	 * For compatibility with previous versions, also use a match based on
+	 * affected SoCs.
+	 */
+	if (OF_hasprop(node, "dma-noncoherent") ||
+	    ofw_bus_is_machine_compatible("rockchip,rk3566") ||
+	    ofw_bus_is_machine_compatible("rockchip,rk3568") ||
+	    ofw_bus_is_machine_compatible("rockchip,rk3588") ||
+	    ofw_bus_is_machine_compatible("rockchip,rk3588s"))
+		sc->gic_flags |= GIC_V3_FLAGS_FORCE_NOSHAREABLE;
 
 	/*
 	 * Recover number of the Re-Distributor regions.
@@ -180,12 +193,7 @@ gic_v3_fdt_attach(device_t dev)
 	 * GIC will act as a bus in that case.
 	 * Failure here will not affect main GIC functionality.
 	 */
-	if (gic_v3_ofw_bus_attach(dev) != 0) {
-		if (bootverbose) {
-			device_printf(dev,
-			    "Failed to attach ITS to this GIC\n");
-		}
-	}
+	gic_v3_ofw_bus_attach(dev);
 
 	if (device_get_children(dev, &sc->gic_children, &sc->gic_nchildren) != 0)
 		sc->gic_nchildren = 0;
@@ -285,7 +293,7 @@ gic_v3_ofw_fill_ranges(phandle_t parent, struct gic_v3_softc *sc,
  * Collects and configures device informations and finally
  * adds ITS device as a child of GICv3 in Newbus hierarchy.
  */
-static int
+static void
 gic_v3_ofw_bus_attach(device_t dev)
 {
 	struct gic_v3_ofw_devinfo *di;
@@ -300,8 +308,13 @@ gic_v3_ofw_bus_attach(device_t dev)
 	if (parent > 0) {
 		rv = gic_v3_ofw_fill_ranges(parent, sc, &addr_cells,
 		    &size_cells);
-		if (rv != 0)
-			return (rv);
+		if (rv != 0) {
+			if (bootverbose) {
+				device_printf(dev,
+				    "Failed to attach ITS to this GIC\n");
+			}
+			goto vgic;
+		}
 
 		/* Iterate through all GIC subordinates */
 		for (node = OF_child(parent); node > 0; node = OF_peer(node)) {
@@ -356,28 +369,31 @@ gic_v3_ofw_bus_attach(device_t dev)
 			sc->gic_nchildren++;
 			device_set_ivars(child, di);
 		}
-	}
 
-	/*
-	 * If there is a vgic maintanance interrupt add a virtual gic
-	 * child so we can use this in the vmm module for bhyve.
-	 */
-	if (OF_hasprop(parent, "interrupts")) {
-		child = device_add_child(dev, "vgic", DEVICE_UNIT_ANY);
-		if (child == NULL) {
-			device_printf(dev, "Could not add vgic child\n");
-		} else {
-			di = malloc(sizeof(*di), M_GIC_V3, M_WAITOK | M_ZERO);
-			resource_list_init(&di->di_rl);
-			di->di_gic_dinfo.gic_domain = -1;
-			di->di_gic_dinfo.is_vgic = 1;
-			device_set_ivars(child, di);
-			sc->gic_nchildren++;
+vgic:
+
+		/*
+		 * If there is a vgic maintanance interrupt add a virtual gic
+		 * child so we can use this in the vmm module for bhyve.
+		 */
+		if (OF_hasprop(parent, "interrupts")) {
+			child = device_add_child(dev, "vgic", DEVICE_UNIT_ANY);
+			if (child == NULL) {
+				device_printf(dev,
+				    "Could not add vgic child\n");
+			} else {
+				di = malloc(sizeof(*di), M_GIC_V3,
+				    M_WAITOK | M_ZERO);
+				resource_list_init(&di->di_rl);
+				di->di_gic_dinfo.gic_domain = -1;
+				di->di_gic_dinfo.is_vgic = 1;
+				device_set_ivars(child, di);
+				sc->gic_nchildren++;
+			}
 		}
 	}
 
 	bus_attach_children(dev);
-	return (0);
 }
 
 static struct resource_list *

@@ -1949,8 +1949,8 @@
 #define CS_AC97_POWER_CONTROL_MIXVON_ON	0x0004
 #define CS_AC97_POWER_CONTROL_MIXVOFF_ON 0x0008
 
-/*  
- * this is 3*1024 for parameter, 3.5*1024 for sample and 2*3.5*1024 
+/*
+ * this is 3*1024 for parameter, 3.5*1024 for sample and 2*3.5*1024
  * for code since each instruction is 40 bits and takes two dwords
  */
 
@@ -1963,10 +1963,10 @@ struct cs461x_firmware_struct
 {
 	struct
 	{
-		u_int32_t ulDestAddr, ulSourceSize;
+		uint32_t ulDestAddr, ulSourceSize;
 	} MemoryStat[INKY_MEMORY_COUNT];
 
-	u_int32_t BA1Array[INKY_BA1_DWORD_SIZE];
+	uint32_t BA1Array[INKY_BA1_DWORD_SIZE];
 };
 
 #endif /* _CSA_REG_H */

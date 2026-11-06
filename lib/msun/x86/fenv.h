@@ -90,11 +90,26 @@ typedef struct {
 } fenv_t;
 #endif /* __i386__ */
 
+/*
+ * Control modes: x87 control word plus MXCSR bits other than the
+ * exception flags.  fesetmode() restores those bits without changing
+ * the raised exception flags.
+ */
+typedef struct {
+	__uint16_t	__control;
+	__uint16_t	__reserved;
+	__uint32_t	__mxcsr;
+} femode_t;
+
 __BEGIN_DECLS
 
 /* Default floating-point environment */
 extern const fenv_t	__fe_dfl_env;
 #define	FE_DFL_ENV	(&__fe_dfl_env)
+
+/* Default floating-point control modes */
+extern const femode_t	__fe_dfl_mode;
+#define	FE_DFL_MODE	(&__fe_dfl_mode)
 
 #define	__fldenvx(__env)	__asm __volatile("fldenv %0" : : "m" (__env)  \
 				: "st", "st(1)", "st(2)", "st(3)", "st(4)",   \
@@ -108,7 +123,7 @@ int feraiseexcept(int __excepts);
 int feupdateenv(const fenv_t *__envp);
 
 __fenv_static inline int
-fegetround(void)
+__fegetround_int(void)
 {
 	__uint16_t __control;
 
@@ -143,6 +158,34 @@ fegetexcept(void)
 
 #endif /* __BSD_VISIBLE */
 
+int feclearexcept(int);
+int fegetexceptflag(fexcept_t *, int);
+int fetestexcept(int);
+int fesetround(int);
+int fegetround(void);
+int fegetmode(femode_t *);
+int fesetmode(const femode_t *);
+int fesetenv(const fenv_t *);
+
+/*
+ * C permits a standard library function to also be exposed as a function-like
+ * macro (C23 7.1.4), and msun uses that here to inline the fast path.  C++
+ * forbids it: <cfenv> imports these names into namespace std (using
+ * ::feclearexcept; etc.), so std::feclearexcept() and friends must denote the
+ * actual functions.  Expose the inlining macros to C only; C++ uses the real
+ * extern functions (defined in the matching lib/msun/<arch>/fenv.c).
+ */
+#ifndef __cplusplus
+#define	feclearexcept(a)	__feclearexcept_int(a)
+#define	fegetexceptflag(e, a)	__fegetexceptflag_int(e, a)
+#define	fetestexcept(a)		__fetestexcept_int(a)
+#define	fesetround(a)		__fesetround_int(a)
+#define	fegetround()		__fegetround_int()
+#define	fegetmode(m)		__fegetmode_int(m)
+#define	fesetmode(m)		__fesetmode_int(m)
+#define	fesetenv(a)		__fesetenv_int(a)
+#endif /* !__cplusplus */
+
 #ifdef __i386__
 
 /* After testing for SSE support once, we cache the result in __has_sse. */
@@ -164,7 +207,7 @@ int __test_sse(void);
 } while (0)
 
 __fenv_static inline int
-feclearexcept(int __excepts)
+__feclearexcept_int(int __excepts)
 {
 	fenv_t __env;
 	__uint32_t __mxcsr;
@@ -185,7 +228,7 @@ feclearexcept(int __excepts)
 }
 
 __fenv_static inline int
-fegetexceptflag(fexcept_t *__flagp, int __excepts)
+__fegetexceptflag_int(fexcept_t *__flagp, int __excepts)
 {
 	__uint32_t __mxcsr;
 	__uint16_t __status;
@@ -200,7 +243,7 @@ fegetexceptflag(fexcept_t *__flagp, int __excepts)
 }
 
 __fenv_static inline int
-fetestexcept(int __excepts)
+__fetestexcept_int(int __excepts)
 {
 	__uint32_t __mxcsr;
 	__uint16_t __status;
@@ -214,7 +257,7 @@ fetestexcept(int __excepts)
 }
 
 __fenv_static inline int
-fesetround(int __round)
+__fesetround_int(int __round)
 {
 	__uint32_t __mxcsr;
 	__uint16_t __control;
@@ -238,7 +281,39 @@ fesetround(int __round)
 }
 
 __fenv_static inline int
-fesetenv(const fenv_t *__envp)
+__fegetmode_int(femode_t *__modep)
+{
+
+	__fnstcw(&__modep->__control);
+	__modep->__reserved = 0;
+	if (__HAS_SSE()) {
+		__stmxcsr(&__modep->__mxcsr);
+		__modep->__mxcsr &= ~FE_ALL_EXCEPT;
+	} else
+		__modep->__mxcsr = 0;
+
+	return (0);
+}
+
+__fenv_static inline int
+__fesetmode_int(const femode_t *__modep)
+{
+	__uint32_t __mxcsr;
+
+	__fldcw(&__modep->__control);
+
+	if (__HAS_SSE()) {
+		__stmxcsr(&__mxcsr);
+		__mxcsr &= FE_ALL_EXCEPT;
+		__mxcsr |= __modep->__mxcsr & ~FE_ALL_EXCEPT;
+		__ldmxcsr(&__mxcsr);
+	}
+
+	return (0);
+}
+
+__fenv_static inline int
+__fesetenv_int(const fenv_t *__envp)
 {
 	fenv_t __env = *__envp;
 	__uint32_t __mxcsr;
@@ -262,7 +337,7 @@ fesetenv(const fenv_t *__envp)
 #else /* __amd64__ */
 
 __fenv_static inline int
-feclearexcept(int __excepts)
+__feclearexcept_int(int __excepts)
 {
 	fenv_t __env;
 
@@ -280,7 +355,7 @@ feclearexcept(int __excepts)
 }
 
 __fenv_static inline int
-fegetexceptflag(fexcept_t *__flagp, int __excepts)
+__fegetexceptflag_int(fexcept_t *__flagp, int __excepts)
 {
 	__uint32_t __mxcsr;
 	__uint16_t __status;
@@ -292,7 +367,7 @@ fegetexceptflag(fexcept_t *__flagp, int __excepts)
 }
 
 __fenv_static inline int
-fetestexcept(int __excepts)
+__fetestexcept_int(int __excepts)
 {
 	__uint32_t __mxcsr;
 	__uint16_t __status;
@@ -303,7 +378,7 @@ fetestexcept(int __excepts)
 }
 
 __fenv_static inline int
-fesetround(int __round)
+__fesetround_int(int __round)
 {
 	__uint32_t __mxcsr;
 	__uint16_t __control;
@@ -325,7 +400,34 @@ fesetround(int __round)
 }
 
 __fenv_static inline int
-fesetenv(const fenv_t *__envp)
+__fegetmode_int(femode_t *__modep)
+{
+
+	__fnstcw(&__modep->__control);
+	__modep->__reserved = 0;
+	__stmxcsr(&__modep->__mxcsr);
+	__modep->__mxcsr &= ~FE_ALL_EXCEPT;
+
+	return (0);
+}
+
+__fenv_static inline int
+__fesetmode_int(const femode_t *__modep)
+{
+	__uint32_t __mxcsr;
+
+	__fldcw(&__modep->__control);
+
+	__stmxcsr(&__mxcsr);
+	__mxcsr &= FE_ALL_EXCEPT;
+	__mxcsr |= __modep->__mxcsr & ~FE_ALL_EXCEPT;
+	__ldmxcsr(&__mxcsr);
+
+	return (0);
+}
+
+__fenv_static inline int
+__fesetenv_int(const fenv_t *__envp)
 {
 
 	/*

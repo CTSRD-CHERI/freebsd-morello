@@ -278,7 +278,7 @@ kern_do_statfs(struct thread *td, struct mount *mp, struct statfs *buf)
 
 	if (mp == NULL)
 		return (EBADF);
-	error = vfs_busy(mp, 0);
+	error = vfs_busy(mp, MBF_PCATCH);
 	vfs_rel(mp);
 	if (error != 0)
 		return (error);
@@ -290,10 +290,8 @@ kern_do_statfs(struct thread *td, struct mount *mp, struct statfs *buf)
 	error = VFS_STATFS(mp, buf);
 	if (error != 0)
 		goto out;
-	if (priv_check_cred_vfs_generation(td->td_ucred)) {
-		buf->f_fsid.val[0] = buf->f_fsid.val[1] = 0;
+	if (priv_check_cred_vfs_generation(td->td_ucred))
 		prison_enforce_statfs(td->td_ucred, mp, buf);
-	}
 out:
 	vfs_unbusy(mp);
 	return (error);
@@ -545,7 +543,6 @@ restart:
 			sptmp = malloc(sizeof(struct statfs), M_STATFS,
 			    M_WAITOK);
 			*sptmp = *sp;
-			sptmp->f_fsid.val[0] = sptmp->f_fsid.val[1] = 0;
 			prison_enforce_statfs(td->td_ucred, mp, sptmp);
 			sp = sptmp;
 		} else
@@ -972,31 +969,51 @@ SYSCTL_INT(_security_bsd, OID_AUTO, unprivileged_chroot, CTLFLAG_RW,
     &unprivileged_chroot, 0,
     "Unprivileged processes can use chroot(2)");
 
+static int
+chroot_check_priv(struct thread *td)
+{
+	struct proc *p;
+
+	if (priv_check(td, PRIV_VFS_CHROOT) == 0)
+		return (0);
+	if (unprivileged_chroot == 0)
+		return (EXTERROR(EPERM,
+		    "security.bsd.unprivileged_chroot sysctl not enabled"));
+	p = td->td_proc;
+	if ((p->p_flag2 & P2_NO_NEW_PRIVS) == 0)
+		return (EXTERROR(EPERM,
+		    "PROC_NO_NEW_PRIVS not enabled"));
+
+	/*
+	 * Refuse chroot() when the pwd is shared with other
+	 * processes, since they might have been created before
+	 * P2_NO_NEW_PRIVS was set.
+	 *
+	 * The check races with fork(), but the race is harmless.  If
+	 * pd_sharecount was observed as 1 and another thread forked
+	 * in the meantime, the child inherited P2_NO_NEW_PRIVS.  Then
+	 * neither the parent nor the child can gain privileges by
+	 * executing a set-ID image, which prevents the issues
+	 * otherwise possible due to the pwd sharing.
+	 */
+	atomic_thread_fence_acq();
+	if (refcount_load(&p->p_pd->pd_sharecount) > 1)
+		return (EXTERROR(EPERM,
+		    "root/current directory shared with another process"));
+	return (0);
+}
+
 /*
  * Takes locked vnode, unlocks it before returning.
  */
 static int
 kern_chroot(struct thread *td, struct vnode *vp)
 {
-	struct proc *p;
 	int error;
 
-	error = priv_check(td, PRIV_VFS_CHROOT);
-	if (error != 0) {
-		p = td->td_proc;
-		if (unprivileged_chroot == 0) {
-			error = EXTERROR(EPERM,
-		    "security.bsd.unprivileged_chroot sysctl not enabled");
-			goto e_vunlock;
-		}
-		if ((p->p_flag2 & P2_NO_NEW_PRIVS) == 0) {
-			error = EXTERROR(EPERM,
-			    "PROC_NO_NEW_PRIVS not enabled");
-			goto e_vunlock;
-		}
-	}
-
-	error = change_dir(vp, td);
+	error = chroot_check_priv(td);
+	if (error == 0)
+		error = change_dir(vp, td);
 	if (error != 0)
 		goto e_vunlock;
 #ifdef MAC
@@ -1119,7 +1136,7 @@ flags_to_rights(int flags, cap_rights_t *rightsp)
 	if (flags & O_TRUNC)
 		cap_rights_set_one(rightsp, CAP_FTRUNCATE);
 
-	if (flags & (O_SYNC | O_FSYNC))
+	if (flags & (O_SYNC | O_FSYNC | O_DSYNC))
 		cap_rights_set_one(rightsp, CAP_FSYNC);
 
 	if (flags & (O_EXLOCK | O_SHLOCK))
@@ -1171,12 +1188,15 @@ openflags(int *flagsp)
 {
 	int flags;
 
+	flags = *flagsp;
+	if ((flags & ~FUSERALLOWED) != 0)
+		return (EINVAL);
+
 	/*
 	 * Only one of the O_EXEC, O_RDONLY, O_WRONLY and O_RDWR flags
 	 * may be specified.  On the other hand, for O_PATH any mode
 	 * except O_EXEC is ignored.
 	 */
-	flags = *flagsp;
 	if ((flags & O_PATH) != 0) {
 		flags &= ~O_ACCMODE;
 	} else if ((flags & O_EXEC) != 0) {
@@ -1882,7 +1902,7 @@ restart:
 	}
 	if ((vn_irflag_read(nd.ni_dvp) & VIRF_NAMEDDIR) != 0) {
 		error = EINVAL;
-		goto out;
+		goto out2;
 	}
 	VATTR_NULL(&vattr);
 	vattr.va_mode = ACCESSPERMS &~ td->td_proc->p_pd->pd_cmask;
@@ -1894,9 +1914,7 @@ restart:
 		goto out2;
 #endif
 	error = VOP_SYMLINK(nd.ni_dvp, &nd.ni_vp, &nd.ni_cnd, &vattr, syspath);
-#ifdef MAC
 out2:
-#endif
 	VOP_VPUT_PAIR(nd.ni_dvp, error == 0 ? &nd.ni_vp : NULL, true);
 	vn_finished_write(mp);
 	NDFREE_PNBUF(&nd);
@@ -1932,7 +1950,7 @@ restart:
 	if (error != 0)
 		return (error);
 
-	if (nd.ni_vp != NULLVP || !(nd.ni_cnd.cn_flags & ISWHITEOUT)) {
+	if (nd.ni_vp != NULL || !(nd.ni_cnd.cn_flags & ISWHITEOUT)) {
 		NDFREE_PNBUF(&nd);
 		if (nd.ni_vp == nd.ni_dvp)
 			vrele(nd.ni_dvp);
@@ -1976,16 +1994,17 @@ sys_unlink(struct thread *td, struct unlink_args *uap)
 
 static int
 kern_funlinkat_ex(struct thread *td, int dfd, const char *path, int fd,
-    int flag, enum uio_seg pathseg, ino_t oldinum)
+    int flags, enum uio_seg pathseg, ino_t oldinum)
 {
 
-	if ((flag & ~(AT_REMOVEDIR | AT_RESOLVE_BENEATH)) != 0)
+	if ((flags & ~(AT_REMOVEDIR | AT_RESOLVE_BENEATH)) != 0)
 		return (EINVAL);
 
-	if ((flag & AT_REMOVEDIR) != 0)
-		return (kern_frmdirat(td, dfd, path, fd, UIO_USERSPACE, 0));
+	if ((flags & AT_REMOVEDIR) != 0)
+		return (kern_frmdirat(td, dfd, path, fd, pathseg,
+		    flags & ~AT_REMOVEDIR));
 
-	return (kern_funlinkat(td, dfd, path, fd, UIO_USERSPACE, 0, 0));
+	return (kern_funlinkat(td, dfd, path, fd, pathseg, flags, 0));
 }
 
 #ifndef _SYS_SYSPROTO_H_
@@ -2571,6 +2590,8 @@ kern_statat(struct thread *td, int flag, int fd, const char *path,
 	}
 	error = VOP_STAT(nd.ni_vp, sbp, td->td_ucred, NOCRED);
 	NDFREE_PNBUF(&nd);
+	if (error == 0 && (nd.ni_vp->v_vflag & VV_ROOT) != 0)
+		sbp->st_bsdflags |= SFBSD_MNTPOINT;
 	vput(nd.ni_vp);
 #ifdef __STAT_TIME_T_EXT
 	sbp->st_atim_ext = 0;
@@ -2839,7 +2860,7 @@ setfflags(struct thread *td, struct vnode *vp, u_long flags)
 	 * if they are allowed to set flags and programs assume that
 	 * chown can't fail when done as root.
 	 */
-	if (vp->v_type == VCHR || vp->v_type == VBLK) {
+	if (VN_ISDEV(vp)) {
 		error = priv_check(td, PRIV_VFS_CHFLAGS_DEV);
 		if (error != 0)
 			return (error);
@@ -3723,7 +3744,7 @@ sys_rename(struct thread *td, struct rename_args *uap)
 {
 
 	return (kern_renameat(td, AT_FDCWD, uap->from, AT_FDCWD,
-	    uap->to, UIO_USERSPACE));
+	    uap->to, UIO_USERSPACE, 0));
 }
 
 #ifndef _SYS_SYSPROTO_H_
@@ -3739,18 +3760,27 @@ sys_renameat(struct thread *td, struct renameat_args *uap)
 {
 
 	return (kern_renameat(td, uap->oldfd, uap->old, uap->newfd, uap->new,
-	    UIO_USERSPACE));
+	    UIO_USERSPACE, 0));
+}
+
+int
+sys_renameat2(struct thread *td, struct renameat2_args *uap)
+{
+
+	return (kern_renameat(td, uap->oldfd, uap->old, uap->newfd, uap->new,
+	    UIO_USERSPACE, uap->flags));
 }
 
 #ifdef MAC
 static int
-kern_renameat_mac(struct thread *td, int oldfd, const char *old, int newfd,
-    const char *new, enum uio_seg pathseg, struct nameidata *fromnd)
+kern_renameat_mac(struct thread *td, int fromfd, const char *from, int tofd,
+    const char *to, enum uio_seg pathseg, struct nameidata *fromnd, int op,
+    int ndflags)
 {
 	int error;
 
-	NDINIT_ATRIGHTS(fromnd, DELETE, LOCKPARENT | LOCKLEAF | AUDITVNODE1,
-	    pathseg, old, oldfd, &cap_renameat_source_rights);
+	NDINIT_ATRIGHTS(fromnd, op, LOCKPARENT | LOCKLEAF | AUDITVNODE1 |
+	    ndflags, pathseg, from, fromfd, &cap_renameat_source_rights);
 	if ((error = namei(fromnd)) != 0)
 		return (error);
 	error = mac_vnode_check_rename_from(td->td_ucred, fromnd->ni_dvp,
@@ -3768,39 +3798,65 @@ kern_renameat_mac(struct thread *td, int oldfd, const char *old, int newfd,
 #endif
 
 int
-kern_renameat(struct thread *td, int oldfd, const char *old, int newfd,
-    const char *new, enum uio_seg pathseg)
+kern_renameat(struct thread *td, int fromfd, const char *from, int tofd,
+    const char *to, enum uio_seg pathseg, u_int flags)
 {
 	struct mount *mp, *tmp;
 	struct vnode *tvp, *fvp, *tdvp;
 	struct nameidata fromnd, tond;
 	uint64_t tondflags;
-	int error;
+	int error, fndflags, op;
 	short irflag;
+	bool exchange;
 
+	if ((flags & ~(AT_RENAME_NOREPLACE | AT_RENAME_EXCHANGE)) != 0)
+		return (EINVAL);
+	if ((flags & (AT_RENAME_NOREPLACE | AT_RENAME_EXCHANGE)) ==
+	    (AT_RENAME_NOREPLACE | AT_RENAME_EXCHANGE))
+		return (EINVAL);
+	if ((flags & AT_RENAME_EXCHANGE) != 0) {
+		op = RENAME;
+		exchange = true;
+	} else {
+		op = DELETE;
+		exchange = false;
+	}
+	fndflags = 0;
 again:
 	tmp = mp = NULL;
 	bwillwrite();
 #ifdef MAC
 	if (mac_vnode_check_rename_from_enabled()) {
-		error = kern_renameat_mac(td, oldfd, old, newfd, new, pathseg,
-		    &fromnd);
+		error = kern_renameat_mac(td, fromfd, from, tofd, to, pathseg,
+		    &fromnd, op, fndflags);
 		if (error != 0)
 			return (error);
 	} else {
 #endif
-	NDINIT_ATRIGHTS(&fromnd, DELETE, WANTPARENT | AUDITVNODE1,
-	    pathseg, old, oldfd, &cap_renameat_source_rights);
+	NDINIT_ATRIGHTS(&fromnd, op, WANTPARENT | AUDITVNODE1 | fndflags,
+	    pathseg, from, fromfd, &cap_renameat_source_rights);
 	if ((error = namei(&fromnd)) != 0)
 		return (error);
 #ifdef MAC
 	}
 #endif
 	fvp = fromnd.ni_vp;
+	if (fromnd.ni_dvp->v_type != VDIR) {
+		NDFREE_PNBUF(&fromnd);
+		vrele(fromnd.ni_dvp);
+		if (fvp != NULL)
+			vrele(fromnd.ni_vp);
+		return (EBUSY);
+	}
+	if (exchange && fvp == NULL) {
+		NDFREE_PNBUF(&fromnd);
+		vrele(fromnd.ni_dvp);
+		return (ENOENT);
+	}
 	tondflags = LOCKPARENT | LOCKLEAF | NOCACHE | AUDITVNODE2;
 	if (fromnd.ni_vp->v_type == VDIR)
 		tondflags |= WILLBEDIR;
-	NDINIT_ATRIGHTS(&tond, RENAME, tondflags, pathseg, new, newfd,
+	NDINIT_ATRIGHTS(&tond, RENAME, tondflags, pathseg, to, tofd,
 	    &cap_renameat_target_rights);
 	if ((error = namei(&tond)) != 0) {
 		/* Translate error code for rename("dir1", "dir2/."). */
@@ -3813,6 +3869,60 @@ again:
 	}
 	tdvp = tond.ni_dvp;
 	tvp = tond.ni_vp;
+	if (tdvp->v_type != VDIR) {
+		/*
+		 * Rename of the root vnode of the mounted
+		 * filesystem. It is possible to get there with the
+		 * nullfs mount over the regular file.
+		 */
+		error = EBUSY;
+		goto out;
+	}
+	if (tvp != NULL && (flags & AT_RENAME_NOREPLACE) != 0) {
+		/*
+		 * Often filesystems need to relock the vnodes in
+		 * VOP_RENAME(), which opens a window for invalidation
+		 * of this check.  Then, not all filesystems might
+		 * implement AT_RENAME_NOREPLACE.  This leads to
+		 * situation where sometimes EOPNOTSUPP might be
+		 * returned from the VOP due to race, while most of
+		 * the time this check works.
+		 */
+		error = EEXIST;
+		goto out;
+	}
+	if (fvp->v_type == VDIR &&
+	    ((fromnd.ni_resflags | tond.ni_resflags) & NIRES_BENEATH) != 0) {
+		/*
+		 * We must not rename a directory relative to FD_RESOLVE_BENEATH
+		 * descriptors.
+		 */
+		error = ENOTCAPABLE;
+		goto out;
+	}
+	if (exchange) {
+		if (tvp == NULL) {
+			error = ENOENT;
+			goto out;
+		}
+		if (tvp->v_type == VDIR && fndflags == 0) {
+			fndflags = WILLBEDIR;
+again2:
+			NDFREE_PNBUF(&fromnd);
+			vrele(fromnd.ni_dvp);
+			vrele(fvp);
+			NDFREE_PNBUF(&tond);
+			VOP_VPUT_PAIR(tdvp, &tvp, true);
+			error = sig_intr();
+			if (error != 0)
+				goto out1;
+			goto again;
+		}
+		if (tvp->v_type != VDIR && fndflags != 0) {
+			fndflags = 0;
+			goto again2;
+		}
+	}
 	error = vn_start_write(fvp, &mp, V_NOWAIT);
 	if (error != 0) {
 again1:
@@ -3832,6 +3942,9 @@ again1:
 			vfs_rel(tmp);
 			tmp = NULL;
 		}
+		error = sig_intr();
+		if (error != 0)
+			return (error);
 		error = vn_start_write(NULL, &mp, V_XSLEEP | V_PCATCH);
 		if (error != 0)
 			return (error);
@@ -3852,18 +3965,21 @@ again1:
 		goto out;
 	}
 	if (tvp != NULL) {
-		if (fvp->v_type == VDIR && tvp->v_type != VDIR) {
-			error = ENOTDIR;
-			goto out;
-		} else if (fvp->v_type != VDIR && tvp->v_type == VDIR) {
-			error = EISDIR;
-			goto out;
+		if (!exchange) {
+			if (fvp->v_type == VDIR && tvp->v_type != VDIR) {
+				error = ENOTDIR;
+				goto out;
+			} else if (fvp->v_type != VDIR &&
+			    tvp->v_type == VDIR) {
+				error = EISDIR;
+				goto out;
+			}
 		}
 #ifdef CAPABILITIES
-		if (newfd != AT_FDCWD && (tond.ni_resflags & NIRES_ABS) == 0) {
+		if (tofd != AT_FDCWD && (tond.ni_resflags & NIRES_ABS) == 0) {
 			/*
 			 * If the target already exists we require CAP_UNLINKAT
-			 * from 'newfd', when newfd was used for the lookup.
+			 * from 'tofd', when tofd was used for the lookup.
 			 */
 			error = cap_check(&tond.ni_filecaps.fc_rights,
 			    &cap_unlinkat_rights);
@@ -3890,7 +4006,7 @@ again1:
 out:
 	if (error == 0) {
 		error = VOP_RENAME(fromnd.ni_dvp, fromnd.ni_vp, &fromnd.ni_cnd,
-		    tond.ni_dvp, tond.ni_vp, &tond.ni_cnd);
+		    tond.ni_dvp, tond.ni_vp, &tond.ni_cnd, flags);
 		NDFREE_PNBUF(&fromnd);
 		NDFREE_PNBUF(&tond);
 	} else {
@@ -3905,14 +4021,20 @@ out:
 		vrele(fromnd.ni_dvp);
 		vrele(fvp);
 	}
-	lockmgr(&tmp->mnt_renamelock, LK_RELEASE, 0);
-	vfs_rel(tmp);
-	vn_finished_write(mp);
+	if (tmp != NULL) {
+		lockmgr(&tmp->mnt_renamelock, LK_RELEASE, 0);
+		vfs_rel(tmp);
+	}
+	if (mp != NULL)
+		vn_finished_write(mp);
 out1:
 	if (error == ERESTART)
 		return (0);
-	if (error == ERELOOKUP)
-		goto again;
+	if (error == ERELOOKUP) {
+		error = sig_intr();
+		if (error == 0)
+			goto again;
+	}
 	return (error);
 }
 
@@ -4363,7 +4485,7 @@ unionread:
 		struct vnode *tvp = vp;
 
 		vp = vp->v_mount->mnt_vnodecovered;
-		VREF(vp);
+		vref(vp);
 		fp->f_vnode = vp;
 		foffset = 0;
 		vput(tvp);

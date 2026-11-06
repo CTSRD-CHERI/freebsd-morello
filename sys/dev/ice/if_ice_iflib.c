@@ -81,6 +81,7 @@ static void ice_if_multi_set(if_ctx_t ctx);
 static void ice_if_vlan_register(if_ctx_t ctx, u16 vtag);
 static void ice_if_vlan_unregister(if_ctx_t ctx, u16 vtag);
 static void ice_if_stop(if_ctx_t ctx);
+static void ice_if_led_func(if_ctx_t ctx, int onoff);
 static uint64_t ice_if_get_counter(if_ctx_t ctx, ift_counter counter);
 static int ice_if_priv_ioctl(if_ctx_t ctx, u_long command, caddr_t data);
 static int ice_if_i2c_req(if_ctx_t ctx, struct ifi2creq *req);
@@ -92,6 +93,7 @@ static void ice_init_link(struct ice_softc *sc);
 static int ice_if_iov_init(if_ctx_t ctx, uint16_t num_vfs, const nvlist_t *params);
 static void ice_if_iov_uninit(if_ctx_t ctx);
 static int ice_if_iov_vf_add(if_ctx_t ctx, uint16_t vfnum, const nvlist_t *params);
+static int ice_if_vf_status(if_ctx_t ctx, struct if_vf_status **statusp);
 static void ice_if_vflr_handle(if_ctx_t ctx);
 #endif
 static int ice_setup_mirror_vsi(struct ice_mirr_if *mif);
@@ -130,6 +132,7 @@ static void ice_free_pci_mapping(struct ice_softc *sc);
 static void ice_update_link_status(struct ice_softc *sc, bool update_media);
 static void ice_init_device_features(struct ice_softc *sc);
 static void ice_init_tx_tracking(struct ice_vsi *vsi);
+static void ice_handle_rdma_pe_intr(struct ice_softc *sc);
 static void ice_handle_reset_event(struct ice_softc *sc);
 static void ice_handle_pf_reset_request(struct ice_softc *sc);
 static void ice_prepare_for_reset(struct ice_softc *sc);
@@ -139,6 +142,7 @@ static void ice_rebuild_recovery_mode(struct ice_softc *sc);
 static void ice_free_irqvs(struct ice_softc *sc);
 static void ice_update_rx_mbuf_sz(struct ice_softc *sc);
 static void ice_poll_for_media_avail(struct ice_softc *sc);
+static void ice_led_restore(struct ice_softc *sc);
 static void ice_setup_scctx(struct ice_softc *sc);
 static int ice_allocate_msix(struct ice_softc *sc);
 static void ice_admin_timer(void *arg);
@@ -201,6 +205,7 @@ static device_method_t ice_iflib_methods[] = {
 	DEVMETHOD(ifdi_media_change, ice_if_media_change),
 	DEVMETHOD(ifdi_init, ice_if_init),
 	DEVMETHOD(ifdi_stop, ice_if_stop),
+	DEVMETHOD(ifdi_led_func, ice_if_led_func),
 	DEVMETHOD(ifdi_timer, ice_if_timer),
 	DEVMETHOD(ifdi_update_admin_status, ice_if_update_admin_status),
 	DEVMETHOD(ifdi_multi_set, ice_if_multi_set),
@@ -216,6 +221,7 @@ static device_method_t ice_iflib_methods[] = {
 	DEVMETHOD(ifdi_iov_vf_add, ice_if_iov_vf_add),
 	DEVMETHOD(ifdi_iov_init, ice_if_iov_init),
 	DEVMETHOD(ifdi_iov_uninit, ice_if_iov_uninit),
+	DEVMETHOD(ifdi_vf_status, ice_if_vf_status),
 	DEVMETHOD(ifdi_vflr_handle, ice_if_vflr_handle),
 #endif
 	DEVMETHOD_END
@@ -306,7 +312,7 @@ static struct if_shared_ctx ice_sctx = {
 	 * vectors manually instead of relying on iflib code to do this.
 	 */
 	.isc_flags = IFLIB_NEED_SCRATCH | IFLIB_TSO_INIT_IP |
-		IFLIB_ADMIN_ALWAYS_RUN | IFLIB_SKIP_MSIX,
+		IFLIB_ADMIN_ALWAYS_RUN | IFLIB_SKIP_MSIX | IFLIB_SPARSE_TX,
 
 	.isc_nrxd_min = {ICE_MIN_DESC_COUNT},
 	.isc_ntxd_min = {ICE_MIN_DESC_COUNT},
@@ -522,11 +528,11 @@ ice_if_attach_pre(if_ctx_t ctx)
 	/* Setup ControlQ lengths */
 	ice_set_ctrlq_len(hw);
 
-reinit_hw:
-
 	fw_mode = ice_get_fw_mode(hw);
 	if (fw_mode == ICE_FW_MODE_REC) {
-		device_printf(dev, "Firmware recovery mode detected. Limiting functionality. Refer to Intel(R) Ethernet Adapters and Devices User Guide for details on firmware recovery mode.\n");
+		device_printf(dev, "Firmware recovery mode detected. \
+			Limiting functionality. Refer to Intel(R) Ethernet Adapters and \
+			Devices User Guide for details on firmware recovery mode.\n");
 
 		err = ice_attach_pre_recovery_mode(sc);
 		if (err)
@@ -568,14 +574,11 @@ reinit_hw:
 	if (err)
 		goto deinit_hw;
 
-	/*
-	 * Success indicates a change was made that requires a reinitialization
-	 * of the hardware
-	 */
 	err = ice_load_pkg_file(sc);
-	if (!err) {
-		ice_deinit_hw(hw);
-		goto reinit_hw;
+	if (err == ICE_ERR_RESET_FAILED) {
+		device_printf(dev,
+                  "Failed to re-init hardware after setting Tx topology\n");
+		goto deinit_hw;
 	}
 
 	err = ice_init_link_events(sc);
@@ -1379,7 +1382,8 @@ ice_msix_admin(void *arg)
 		if (oicr & PFINT_OICR_HMC_ERR_M)
 			/* Log the HMC errors */
 			ice_log_hmc_error(hw, dev);
-		ice_rdma_notify_pe_intr(sc, oicr);
+		atomic_set_32(&sc->rdma_oicr, oicr);
+		ice_set_state(&sc->state, ICE_STATE_RDMA_PE_INTR_PENDING);
 	}
 
 	if (oicr & PFINT_OICR_PCI_EXCEPTION_M) {
@@ -1907,15 +1911,13 @@ ice_if_promisc_set(if_ctx_t ctx, int flags)
 	
 	ice_set_default_promisc_mask(promisc_mask);
 
-	if (multi_enable)
-		return (EOPNOTSUPP);
-
 	if (promisc_enable) {
 		status = ice_set_vsi_promisc(hw, sc->pf_vsi.idx,
 					     promisc_mask, 0);
 		if (status && status != ICE_ERR_ALREADY_EXISTS) {
 			device_printf(dev,
-				      "Failed to enable promiscuous mode for PF VSI, err %s aq_err %s\n",
+				      "Failed to enable promiscuous mode for "
+				      "PF VSI, err %s aq_err %s\n",
 				      ice_status_str(status),
 				      ice_aq_str(hw->adminq.sq_last_status));
 			return (EIO);
@@ -1925,10 +1927,27 @@ ice_if_promisc_set(if_ctx_t ctx, int flags)
 					       promisc_mask, 0);
 		if (status) {
 			device_printf(dev,
-				      "Failed to disable promiscuous mode for PF VSI, err %s aq_err %s\n",
+				      "Failed to disable promiscuous mode for"
+				      " PF VSI, err %s aq_err %s\n",
 				      ice_status_str(status),
 				      ice_aq_str(hw->adminq.sq_last_status));
 			return (EIO);
+		}
+
+		if (multi_enable) {
+			ice_clear_bit(ICE_PROMISC_UCAST_TX, promisc_mask);
+			ice_clear_bit(ICE_PROMISC_UCAST_RX, promisc_mask);
+			status = ice_set_vsi_promisc(hw, sc->pf_vsi.idx,
+						     promisc_mask, 0);
+			if (status && status != ICE_ERR_ALREADY_EXISTS) {
+				device_printf(dev,
+					      "Failed to enable allmulti mode "
+					      "for PF VSI, err %s aq_err %s\n",
+					      ice_status_str(status),
+					      ice_aq_str(
+					      hw->adminq.sq_last_status));
+				return (EIO);
+			}
 		}
 	}
 
@@ -2051,12 +2070,13 @@ ice_update_rx_mbuf_sz(struct ice_softc *sc)
 static void
 ice_if_init(if_ctx_t ctx)
 {
-	struct ice_mirr_if *mif = (struct ice_mirr_if *)iflib_get_softc(ctx);
+	struct ice_mirr_if *mif;
 	struct ice_softc *sc = (struct ice_softc *)iflib_get_softc(ctx);
 	device_t dev = sc->dev;
 	int err;
 
 	ASSERT_CTX_LOCKED(sc);
+	mif = sc->mirr_if;
 
 	/*
 	 * We've seen an issue with 11.3/12.1 where sideband routines are
@@ -2069,16 +2089,16 @@ ice_if_init(if_ctx_t ctx)
 		return;
 
 	if (ice_test_state(&sc->state, ICE_STATE_RECOVERY_MODE))
-		return;
+		goto err_init_failed;
 
 	if (ice_test_state(&sc->state, ICE_STATE_RESET_FAILED)) {
 		device_printf(sc->dev, "request to start interface cannot be completed as the device failed to reset\n");
-		return;
+		goto err_init_failed;
 	}
 
 	if (ice_test_state(&sc->state, ICE_STATE_PREPARED_FOR_RESET)) {
 		device_printf(sc->dev, "request to start interface while device is prepared for impending reset\n");
-		return;
+		goto err_init_failed;
 	}
 
 	ice_update_rx_mbuf_sz(sc);
@@ -2089,7 +2109,7 @@ ice_if_init(if_ctx_t ctx)
 		device_printf(dev,
 			      "LAA address change failed, err %s\n",
 			      ice_err_str(err));
-		return;
+		goto err_init_failed;
 	}
 
 	/* Initialize software Tx tracking values */
@@ -2100,7 +2120,7 @@ ice_if_init(if_ctx_t ctx)
 		device_printf(dev,
 			      "Unable to configure the main VSI for Tx: %s\n",
 			      ice_err_str(err));
-		return;
+		goto err_cleanup_tx;
 	}
 
 	err = ice_cfg_vsi_for_rx(&sc->pf_vsi);
@@ -2114,9 +2134,9 @@ ice_if_init(if_ctx_t ctx)
 	err = ice_control_all_rx_queues(&sc->pf_vsi, true);
 	if (err) {
 		device_printf(dev,
-			      "Unable to enable Rx rings for transmit: %s\n",
+			      "Unable to enable Rx rings for receive: %s\n",
 			      ice_err_str(err));
-		goto err_cleanup_tx;
+		goto err_stop_rx;
 	}
 
 	err = ice_cfg_pf_default_mac_filters(sc);
@@ -2145,10 +2165,11 @@ ice_if_init(if_ctx_t ctx)
 
 	ice_set_state(&sc->state, ICE_STATE_DRIVER_INITIALIZED);
 
-	if (sc->mirr_if && ice_testandclear_state(&mif->state, ICE_STATE_SUBIF_NEEDS_REINIT)) {
+	if (mif != NULL && ice_testandclear_state(&mif->state,
+	    ICE_STATE_SUBIF_NEEDS_REINIT)) {
 		ice_clear_state(&mif->state, ICE_STATE_DRIVER_INITIALIZED);
-		iflib_request_reset(sc->mirr_if->subctx);
-		iflib_admin_intr_deferred(sc->mirr_if->subctx);
+		iflib_request_reset(mif->subctx);
+		iflib_admin_intr_deferred(mif->subctx);
 	}
 
 	return;
@@ -2157,6 +2178,8 @@ err_stop_rx:
 	ice_control_all_rx_queues(&sc->pf_vsi, false);
 err_cleanup_tx:
 	ice_vsi_disable_tx(&sc->pf_vsi);
+err_init_failed:
+	iflib_init_failed(ctx);
 }
 
 /**
@@ -2384,6 +2407,28 @@ ice_transition_safe_mode(struct ice_softc *sc)
 }
 
 /**
+ * ice_handle_rdma_pe_intr - Notify RDMA of deferred PE/HMC errors
+ * @sc: device private softc
+ *
+ * Deliver PE and HMC error notifications from the admin task because the
+ * RDMA notification path takes a sleepable lock. Multiple OICR causes which
+ * arrive before the task runs are accumulated by the interrupt filter.
+ */
+static void
+ice_handle_rdma_pe_intr(struct ice_softc *sc)
+{
+	u32 oicr;
+
+	if (!ice_testandclear_state(&sc->state,
+	    ICE_STATE_RDMA_PE_INTR_PENDING))
+		return;
+
+	oicr = atomic_readandclear_32(&sc->rdma_oicr);
+	if (oicr != 0)
+		ice_rdma_notify_pe_intr(sc, oicr);
+}
+
+/**
  * ice_if_update_admin_status - update admin status
  * @ctx: iflib ctx structure
  *
@@ -2398,8 +2443,10 @@ ice_if_update_admin_status(if_ctx_t ctx)
 {
 	struct ice_softc *sc = (struct ice_softc *)iflib_get_softc(ctx);
 	enum ice_fw_modes fw_mode;
-	bool reschedule = false;
+	bool defer_mailbox = false, reschedule = false;
+	u32 reg;
 	u16 pending = 0;
+	int error;
 
 	ASSERT_CTX_LOCKED(sc);
 
@@ -2422,6 +2469,9 @@ ice_if_update_admin_status(if_ctx_t ctx)
 		}
 	}
 
+	/* Notify RDMA before handling a reset it may request. */
+	ice_handle_rdma_pe_intr(sc);
+
 	/* Handle global reset events */
 	ice_handle_reset_event(sc);
 
@@ -2440,19 +2490,59 @@ ice_if_update_admin_status(if_ctx_t ctx)
 		 */
 		;
 	} else if (ice_testandclear_state(&sc->state, ICE_STATE_CONTROLQ_EVENT_PENDING)) {
+		pending = 0;
 		ice_process_ctrlq(sc, ICE_CTL_Q_ADMIN, &pending);
 		if (pending > 0)
 			reschedule = true;
 
 		if (ice_is_generic_mac(&sc->hw)) {
+			pending = 0;
 			ice_process_ctrlq(sc, ICE_CTL_Q_SB, &pending);
 			if (pending > 0)
 				reschedule = true;
 		}
 
-		ice_process_ctrlq(sc, ICE_CTL_Q_MAILBOX, &pending);
-		if (pending > 0)
+		pending = 0;
+		error = ice_process_ctrlq(sc, ICE_CTL_Q_MAILBOX, &pending);
+		if (error == 0 && pending == 0) {
+			reg = rd32(&sc->hw, PFINT_MBX_CTL);
+			if ((reg & PFINT_MBX_CTL_CAUSE_ENA_M) == 0) {
+				wr32(&sc->hw, PFINT_MBX_CTL,
+				    reg | PFINT_MBX_CTL_CAUSE_ENA_M);
+				ice_flush(&sc->hw);
+				/* Events received while masked may not interrupt. */
+				pending = (rd32(&sc->hw, sc->hw.mailboxq.rq.head) &
+				    sc->hw.mailboxq.rq.head_mask) !=
+				    sc->hw.mailboxq.rq.next_to_clean;
+			}
+		}
+		if (error != 0) {
+			/* Retry a failed read on the timer, not in a task loop. */
+			defer_mailbox = true;
+		} else if (pending > 0) {
+#ifdef PCI_IOV
+			/*
+			 * Two passes drain one initially full 512-entry mailbox.
+			 * If it remains nonempty, a VF is replenishing it faster
+			 * than this task can drain it. Mask only the mailbox cause
+			 * and let the periodic admin timer schedule bounded work.
+			 */
+			if (sc->mbx_admin_passes <
+			    howmany(ICE_MBXQ_LEN, ICE_CTRLQ_WORK_LIMIT))
+				sc->mbx_admin_passes++;
+			if (sc->mbx_admin_passes <
+			    howmany(ICE_MBXQ_LEN, ICE_CTRLQ_WORK_LIMIT))
+				reschedule = true;
+			else
+				defer_mailbox = true;
+#else
 			reschedule = true;
+#endif
+		} else {
+#ifdef PCI_IOV
+			sc->mbx_admin_passes = 0;
+#endif
+		}
 	}
 
 	/* Poll for link up */
@@ -2470,17 +2560,18 @@ ice_if_update_admin_status(if_ctx_t ctx)
 		iflib_iov_intr_deferred(ctx);
 #endif
 
-	/*
-	 * If there are still messages to process, we need to reschedule
-	 * ourselves. Otherwise, we can just re-enable the interrupt. We'll be
-	 * woken up at the next interrupt or timer event.
-	 */
-	if (reschedule) {
-		ice_set_state(&sc->state, ICE_STATE_CONTROLQ_EVENT_PENDING);
-		iflib_admin_intr_deferred(ctx);
-	} else {
-		ice_enable_intr(&sc->hw, sc->irqvs[0].me);
+	if (defer_mailbox) {
+		reg = rd32(&sc->hw, PFINT_MBX_CTL);
+		wr32(&sc->hw, PFINT_MBX_CTL,
+		    reg & ~PFINT_MBX_CTL_CAUSE_ENA_M);
 	}
+	if (reschedule || defer_mailbox)
+		ice_set_state(&sc->state, ICE_STATE_CONTROLQ_EVENT_PENDING);
+	if (reschedule)
+		iflib_admin_intr_deferred(ctx);
+	/* Keep OICR and the other control queues live during mailbox deferral. */
+	if (!reschedule || defer_mailbox)
+		ice_enable_intr(&sc->hw, sc->irqvs[0].me);
 }
 
 /**
@@ -2496,6 +2587,9 @@ static void
 ice_prepare_for_reset(struct ice_softc *sc)
 {
 	struct ice_hw *hw = &sc->hw;
+#ifdef PCI_IOV
+	int error;
+#endif
 
 	/* If we're already prepared, there's nothing to do */
 	if (ice_testandset_state(&sc->state, ICE_STATE_PREPARED_FOR_RESET))
@@ -2506,6 +2600,38 @@ ice_prepare_for_reset(struct ice_softc *sc)
 	/* In recovery mode, hardware is not initialized */
 	if (ice_test_state(&sc->state, ICE_STATE_RECOVERY_MODE))
 		return;
+
+#ifdef PCI_IOV
+	/*
+	 * A reset already reported by OICR gates DMA in hardware and rejects
+	 * new function resets. Otherwise notify and hold VFs while AdminQ is
+	 * still usable, before releasing any firmware topology.
+	 */
+	if (!hw->reset_ongoing) {
+		error = ice_iov_quiesce_vfs_for_reset(sc);
+		if (error != 0)
+			device_printf(sc->dev,
+			    "Failed to quiesce one or more VFs: %d\n", error);
+	} else {
+		/*
+		 * Hardware has already gated the VFs. Invalidate their cached
+		 * handshake before dropping CTX_LOCK to wait for reset, even if
+		 * rebuilding later fails before reaching the VF VSIs.
+		 */
+		for (int i = 0; i < sc->num_vfs; i++) {
+			struct ice_vf *vf = &sc->vfs[i];
+
+			if ((atomic_load_acq_32(&vf->vf_flags) &
+			    VF_FLAG_ENABLED) == 0 || vf->vsi == NULL)
+				continue;
+			atomic_clear_32(&vf->vf_flags, VF_FLAG_INITIALIZED);
+			atomic_set_32(&vf->vf_flags, VF_FLAG_REBUILD_REQUIRED);
+		}
+	}
+#endif
+
+	/* Restore identification while the control queues are still usable. */
+	ice_led_restore(sc);
 
 	/* inform the RDMA client */
 	ice_rdma_notify_reset(sc);
@@ -2585,7 +2711,7 @@ err_release_tx_queues:
 }
 
 /* determine if the iflib context is active */
-#define CTX_ACTIVE(ctx) ((if_getdrvflags(iflib_get_ifp(ctx)) & IFF_DRV_RUNNING))
+#define CTX_ACTIVE(ctx) iflib_is_running(ctx)
 
 /**
  * ice_rebuild_recovery_mode - Rebuild driver state while in recovery mode
@@ -2639,11 +2765,17 @@ ice_rebuild(struct ice_softc *sc)
 	enum ice_ddp_state pkg_state;
 	int status;
 	int err;
+	int i;
 
 	sc->rebuild_ticks = ticks;
 
 	/* If we're rebuilding, then a reset has succeeded. */
 	ice_clear_state(&sc->state, ICE_STATE_RESET_FAILED);
+	/* The reset discarded every firmware VSI before reconstruction. */
+	for (i = 0; i < sc->num_available_vsi; i++) {
+		if (sc->all_vsi[i] != NULL)
+			sc->all_vsi[i]->hw_vsi_created = false;
+	}
 
 	/*
 	 * If the firmware is in recovery mode, only restore the limited
@@ -2663,6 +2795,10 @@ ice_rebuild(struct ice_softc *sc)
 			      ice_status_str(status));
 		goto err_shutdown_ctrlq;
 	}
+
+#ifdef PCI_IOV
+	ice_iov_reconfigure_mbx(sc);
+#endif
 
 	/* Query the allocated resources for Tx scheduler */
 	status = ice_sched_query_res_alloc(hw);
@@ -2700,6 +2836,9 @@ ice_rebuild(struct ice_softc *sc)
 	err = ice_send_version(sc);
 	if (err)
 		goto err_shutdown_ctrlq;
+
+	/* Retry a restore which could not complete while reset was pending. */
+	ice_led_restore(sc);
 
 	err = ice_init_link_events(sc);
 	if (err) {
@@ -3118,10 +3257,12 @@ ice_if_vlan_unregister(if_ctx_t ctx, u16 vtag)
 static void
 ice_if_stop(if_ctx_t ctx)
 {
-	struct ice_mirr_if *mif = (struct ice_mirr_if *)iflib_get_softc(ctx);
+	struct ice_mirr_if *mif;
 	struct ice_softc *sc = (struct ice_softc *)iflib_get_softc(ctx);
 
 	ASSERT_CTX_LOCKED(sc);
+	mif = sc->mirr_if;
+	ice_led_restore(sc);
 
 	/*
 	 * The iflib core may call IFDI_STOP prior to the first call to
@@ -3169,10 +3310,45 @@ ice_if_stop(if_ctx_t ctx)
 		 !(if_getflags(sc->ifp) & IFF_UP) && sc->link_up)
 		ice_set_link(sc, false);
 
-	if (sc->mirr_if && ice_test_state(&mif->state, ICE_STATE_SUBIF_NEEDS_REINIT)) {
-		ice_subif_if_stop(sc->mirr_if->subctx);
+	if (mif != NULL && ice_test_state(&mif->state,
+	    ICE_STATE_SUBIF_NEEDS_REINIT)) {
+		ice_subif_if_stop(mif->subctx);
 		device_printf(sc->dev, "The subinterface also comes down and up after reset\n");
 	}
+}
+
+/**
+ * ice_if_led_func - Control the physical port identification LED
+ * @ctx: iflib context structure
+ * @onoff: non-zero to identify the port, zero to restore normal operation
+ *
+ * The firmware implements identification as a blinking mode and retains the
+ * netlist-selected mode so it can be restored without a register snapshot.
+ */
+static void
+ice_if_led_func(if_ctx_t ctx, int onoff)
+{
+	struct ice_softc *sc = iflib_get_softc(ctx);
+	enum ice_status status;
+	bool active;
+
+	active = onoff != 0;
+	if (active == sc->led_active)
+		return;
+
+	status = ice_aq_set_port_id_led(sc->hw.port_info, !active, NULL);
+	if (status == ICE_SUCCESS)
+		sc->led_active = active;
+}
+
+static void
+ice_led_restore(struct ice_softc *sc)
+{
+
+	if (!sc->led_active)
+		return;
+	if (ice_aq_set_port_id_led(sc->hw.port_info, true, NULL) == ICE_SUCCESS)
+		sc->led_active = false;
 }
 
 /**
@@ -3317,7 +3493,7 @@ ice_if_i2c_req(if_ctx_t ctx, struct ifi2creq *req)
  * Deinitializes the driver and clears HW resources in preparation for
  * suspend or an FLR.
  *
- * @returns 0; this return value is ignored
+ * @returns 0 on success, or an error code on failure
  */
 static int
 ice_if_suspend(if_ctx_t ctx)
@@ -3341,7 +3517,7 @@ ice_if_suspend(if_ctx_t ctx)
  * Reinitializes the driver and the HW after PCI resume or after
  * an FLR. An init is performed by iflib after this function is finished.
  *
- * @returns 0; this return value is ignored
+ * @returns 0 on success, or an error code on failure
  */
 static int
 ice_if_resume(if_ctx_t ctx)
@@ -3403,6 +3579,13 @@ ice_init_link(struct ice_softc *sc)
 		/* Do not access PHY config while PHY FW is busy initializing */
 	} else {
 		ice_clear_state(&sc->state, ICE_STATE_PHY_FW_INIT_PENDING);
+
+		if (ice_is_e830(hw) &&
+		    (sc->ldo_tlv.options & ICE_LINK_OVERRIDE_PORT_DIS) != 0) {
+			ice_set_state(&sc->state, ICE_STATE_TOTAL_PORT_SHUTDOWN);
+			ice_clear_state(&sc->state, ICE_STATE_LINK_ACTIVE_ON_DOWN);
+		}
+
 		ice_init_link_configuration(sc);
 		ice_update_link_status(sc, true);
 	}
@@ -3462,6 +3645,19 @@ ice_if_iov_vf_add(if_ctx_t ctx, uint16_t vfnum, const nvlist_t *params)
 	struct ice_softc *sc = (struct ice_softc *)iflib_get_softc(ctx);
 
 	return ice_iov_add_vf(sc, vfnum, params);
+}
+
+/**
+ * ice_if_vf_status - report configured VF state
+ * @ctx: iflib context pointer
+ * @statusp: returned VF status snapshot
+ */
+static int
+ice_if_vf_status(if_ctx_t ctx, struct if_vf_status **statusp)
+{
+	struct ice_softc *sc = (struct ice_softc *)iflib_get_softc(ctx);
+
+	return (ice_iov_vf_status(sc, statusp));
 }
 
 /**
@@ -3564,7 +3760,7 @@ static struct if_shared_ctx ice_subif_sctx = {
 
 	.isc_flags = IFLIB_NEED_SCRATCH | IFLIB_TSO_INIT_IP |
 		IFLIB_ADMIN_ALWAYS_RUN | IFLIB_SKIP_MSIX |
-		IFLIB_IS_VF,
+		IFLIB_IS_VF | IFLIB_SPARSE_TX,
 
 	.isc_nrxd_min = {ICE_MIN_DESC_COUNT},
 	.isc_ntxd_min = {ICE_MIN_DESC_COUNT},
@@ -3968,7 +4164,7 @@ fail:
 static int
 ice_subif_rebuild(struct ice_softc *sc)
 {
-	struct ice_mirr_if *mif = (struct ice_mirr_if *)iflib_get_softc(sc->ctx);
+	struct ice_mirr_if *mif = sc->mirr_if;
 	struct ice_vsi *vsi = sc->mirr_if->vsi;
 	int err;
 
@@ -4391,20 +4587,20 @@ ice_subif_if_init(if_ctx_t ctx)
 		return;
 
 	if (ice_test_state(&sc->state, ICE_STATE_RECOVERY_MODE))
-		return;
+		goto err_init_failed;
 
 	if (ice_test_state(&sc->state, ICE_STATE_RESET_FAILED)) {
 		device_printf(dev,
 		    "request to start interface cannot be completed as the parent device %s failed to reset\n",
 		    device_get_nameunit(sc->dev));
-		return;
+		goto err_init_failed;
 	}
 
 	if (ice_test_state(&sc->state, ICE_STATE_PREPARED_FOR_RESET)) {
 		device_printf(dev,
 		    "request to start interface cannot be completed while parent device %s is prepared for impending reset\n",
 		    device_get_nameunit(sc->dev));
-		return;
+		goto err_init_failed;
 	}
 
 	/* XXX: Equiv to ice_update_rx_mbuf_sz */
@@ -4418,7 +4614,7 @@ ice_subif_if_init(if_ctx_t ctx)
 		device_printf(dev,
 			      "Unable to configure subif VSI for Tx: %s\n",
 			      ice_err_str(err));
-		return;
+		goto err_cleanup_tx;
 	}
 
 	err = ice_cfg_vsi_for_rx(vsi);
@@ -4434,7 +4630,7 @@ ice_subif_if_init(if_ctx_t ctx)
 		device_printf(dev,
 			      "Unable to enable subif Rx rings for receive: %s\n",
 			      ice_err_str(err));
-		goto err_cleanup_tx;
+		goto err_stop_rx;
 	}
 
 	ice_configure_all_rxq_interrupts(vsi);
@@ -4443,8 +4639,12 @@ ice_subif_if_init(if_ctx_t ctx)
 	ice_set_state(&mif->state, ICE_STATE_DRIVER_INITIALIZED);
 	return;
 
+err_stop_rx:
+	ice_control_all_rx_queues(vsi, false);
 err_cleanup_tx:
 	ice_vsi_disable_tx(vsi);
+err_init_failed:
+	iflib_init_failed(ctx);
 }
 
 /**

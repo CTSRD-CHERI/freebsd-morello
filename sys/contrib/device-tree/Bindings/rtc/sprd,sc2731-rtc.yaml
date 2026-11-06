@@ -13,7 +13,12 @@ maintainers:
 
 properties:
   compatible:
-    const: sprd,sc2731-rtc
+    oneOf:
+      - items:
+          - enum:
+              - sprd,sc2730-rtc
+          - const: sprd,sc2731-rtc
+      - const: sprd,sc2731-rtc
 
   reg:
     maxItems: 1
@@ -30,20 +35,4 @@ allOf:
   - $ref: rtc.yaml#
 
 unevaluatedProperties: false
-
-examples:
-  - |
-    #include <dt-bindings/interrupt-controller/irq.h>
-
-    pmic {
-      #address-cells = <1>;
-      #size-cells = <0>;
-
-      rtc@280 {
-        compatible = "sprd,sc2731-rtc";
-        reg = <0x280>;
-        interrupt-parent = <&sc2731_pmic>;
-        interrupts = <2 IRQ_TYPE_LEVEL_HIGH>;
-      };
-    };
 ...

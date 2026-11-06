@@ -29,7 +29,6 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/cdefs.h>
 #include "opt_inet.h"
 
 #include <sys/param.h>
@@ -245,7 +244,7 @@ icmp_error(struct mbuf *n, int type, int code, uint32_t dest, int mtu)
 	if (oip->ip_off & htons(~(IP_MF|IP_DF)))
 		goto freeit;
 	if (oip->ip_p == IPPROTO_ICMP && type != ICMP_REDIRECT &&
-	    !ICMP_INFOTYPE(((struct icmp *)((caddr_t)oip +
+	    !ICMP_INFOTYPE(((struct icmp *)((char *)oip +
 		oiphlen))->icmp_type)) {
 		ICMPSTAT_INC(icps_oldicmp);
 		goto freeit;
@@ -264,8 +263,7 @@ icmp_error(struct mbuf *n, int type, int code, uint32_t dest, int mtu)
 		if (oiphlen + sizeof(struct tcphdr) > n->m_len &&
 		    n->m_next == NULL)
 			goto stdreply;
-		if (n->m_len < oiphlen + sizeof(struct tcphdr) &&
-		    (n = m_pullup(n, oiphlen + sizeof(struct tcphdr))) == NULL)
+		if ((n = m_pullup(n, oiphlen + sizeof(struct tcphdr))) == NULL)
 			goto freeit;
 		oip = mtod(n, struct ip *);
 		th = mtodo(n, oiphlen);
@@ -276,8 +274,7 @@ icmp_error(struct mbuf *n, int type, int code, uint32_t dest, int mtu)
 			goto freeit;
 		if (oiphlen + tcphlen > n->m_len && n->m_next == NULL)
 			goto stdreply;
-		if (n->m_len < oiphlen + tcphlen &&
-		    (n = m_pullup(n, oiphlen + tcphlen)) == NULL)
+		if ((n = m_pullup(n, oiphlen + tcphlen)) == NULL)
 			goto freeit;
 		oip = mtod(n, struct ip *);
 		icmpelen = max(tcphlen, min(V_icmp_quotelen,
@@ -291,8 +288,7 @@ icmp_error(struct mbuf *n, int type, int code, uint32_t dest, int mtu)
 		if (oiphlen + sizeof(struct sctphdr) > n->m_len &&
 		    n->m_next == NULL)
 			goto stdreply;
-		if (n->m_len < oiphlen + sizeof(struct sctphdr) &&
-		    (n = m_pullup(n, oiphlen + sizeof(struct sctphdr))) == NULL)
+		if ((n = m_pullup(n, oiphlen + sizeof(struct sctphdr))) == NULL)
 			goto freeit;
 		oip = mtod(n, struct ip *);
 		icmpelen = max(sizeof(struct sctphdr),
@@ -303,9 +299,8 @@ icmp_error(struct mbuf *n, int type, int code, uint32_t dest, int mtu)
 		    sizeof(struct sctphdr) + 8 &&
 		    (n->m_len >= oiphlen + sizeof(struct sctphdr) + 8 ||
 		     n->m_next != NULL)) {
-			if (n->m_len < oiphlen + sizeof(struct sctphdr) + 8 &&
-			    (n = m_pullup(n, oiphlen +
-			    sizeof(struct sctphdr) + 8)) == NULL)
+			if ((n = m_pullup(n, oiphlen + sizeof(struct sctphdr) +
+			    8)) == NULL)
 				goto freeit;
 			oip = mtod(n, struct ip *);
 			sh = mtodo(n, oiphlen);
@@ -368,7 +363,7 @@ stdreply:	icmpelen = max(8, min(V_icmp_quotelen, ntohs(oip->ip_len) -
 	 * Copy the quotation into ICMP message and
 	 * convert quoted IP header back to network representation.
 	 */
-	m_copydata(n, 0, icmplen, (caddr_t)&icp->icmp_ip);
+	m_copydata(n, 0, icmplen, &icp->icmp_ip);
 	nip = &icp->icmp_ip;
 
 	/*
@@ -385,13 +380,12 @@ stdreply:	icmpelen = max(8, min(V_icmp_quotelen, ntohs(oip->ip_len) -
 	m->m_pkthdr.len = m->m_len;
 	m->m_pkthdr.rcvif = n->m_pkthdr.rcvif;
 	nip = mtod(m, struct ip *);
-	bcopy((caddr_t)oip, (caddr_t)nip, sizeof(struct ip));
+	bcopy(oip, nip, sizeof(struct ip));
 	nip->ip_len = htons(m->m_len);
 	nip->ip_v = IPVERSION;
 	nip->ip_hl = 5;
 	nip->ip_p = IPPROTO_ICMP;
 	nip->ip_tos = 0;
-	nip->ip_off = 0;
 
 	if (V_error_keeptags)
 		m_tag_copy_chain(m, n, M_NOWAIT);
@@ -465,7 +459,6 @@ icmp_input(struct mbuf **mp, int *offp, int proto)
 	int hlen = *offp;
 	int icmplen = ntohs(ip->ip_len) - *offp;
 	int i, code;
-	int fibnum;
 
 	NET_EPOCH_ASSERT();
 
@@ -490,7 +483,7 @@ icmp_input(struct mbuf **mp, int *offp, int proto)
 		goto freeit;
 	}
 	i = hlen + min(icmplen, ICMP_ADVLENMIN);
-	if (m->m_len < i && (m = m_pullup(m, i)) == NULL)  {
+	if ((m = m_pullup(m, i)) == NULL)  {
 		ICMPSTAT_INC(icps_tooshort);
 		return (IPPROTO_DONE);
 	}
@@ -573,7 +566,7 @@ icmp_input(struct mbuf **mp, int *offp, int proto)
 		 */
 		i = sizeof(struct ip) + min(icmplen, ICMP_ADVLENPREF(icp));
 		ip_stripoptions(m);
-		if (m->m_len < i && (m = m_pullup(m, i)) == NULL) {
+		if ((m = m_pullup(m, i)) == NULL) {
 			/* This should actually not happen */
 			ICMPSTAT_INC(icps_tooshort);
 			return (IPPROTO_DONE);
@@ -731,12 +724,10 @@ reflect:
 			break;
 		}
 
-		for ( fibnum = 0; fibnum < rt_numfibs; fibnum++) {
-			rib_add_redirect(fibnum, (struct sockaddr *)&icmpsrc,
-			    (struct sockaddr *)&icmpdst,
-			    (struct sockaddr *)&icmpgw, m->m_pkthdr.rcvif,
-			    RTF_GATEWAY, V_redirtimeout);
-		}
+		rib_add_redirect(M_GETFIB(m), (struct sockaddr *)&icmpsrc,
+		    (struct sockaddr *)&icmpdst,
+		    (struct sockaddr *)&icmpgw, m->m_pkthdr.rcvif,
+		    RTF_GATEWAY, V_redirtimeout);
 		break;
 
 	/*
@@ -872,6 +863,8 @@ match:
 	mac_netinet_icmp_replyinplace(m);
 #endif
 	ip->ip_src = t;
+	/* ip->ip_tos will be reflected. */
+	ip->ip_off = htons(0);
 	ip->ip_ttl = V_ip_defttl;
 
 	if (optlen > 0) {
@@ -914,18 +907,17 @@ match:
 			     */
 			    if (opt == IPOPT_RR || opt == IPOPT_TS ||
 				opt == IPOPT_SECURITY) {
-				    bcopy((caddr_t)cp,
-					mtod(opts, caddr_t) + opts->m_len, len);
-				    opts->m_len += len;
+					bcopy(cp, mtod(opts, char *) +
+					    opts->m_len, len);
+					opts->m_len += len;
 			    }
 		    }
 		    /* Terminate & pad, if necessary */
 		    cnt = opts->m_len % 4;
 		    if (cnt) {
 			    for (; cnt < 4; cnt++) {
-				    *(mtod(opts, caddr_t) + opts->m_len) =
-					IPOPT_EOL;
-				    opts->m_len++;
+				*(mtod(opts, char *) + opts->m_len) = IPOPT_EOL;
+				opts->m_len++;
 			    }
 		    }
 #ifdef ICMPPRINTFS
@@ -965,8 +957,7 @@ icmp_verify_redirect_gateway(struct sockaddr_in *src, struct sockaddr_in *dst,
 	if ((ifa = ifa_ifwithnet((struct sockaddr *)gateway, 0, fibnum))==NULL)
 		return (ENETUNREACH);
 
-	/* TODO: fib-aware. */
-	if (ifa_ifwithaddr_check((struct sockaddr *)gateway))
+	if (ifa_ifwithaddr_fib_check((struct sockaddr *)gateway, fibnum))
 		return (EHOSTUNREACH);
 
 	nh = fib4_lookup(fibnum, dst->sin_addr, 0, NHR_NONE, 0);

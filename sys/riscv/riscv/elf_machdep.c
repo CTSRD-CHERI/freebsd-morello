@@ -82,8 +82,7 @@ static struct sysentvec elf64_freebsd_sysvec = {
 	.sv_setregs	= exec_setregs,
 	.sv_fixlimit	= NULL,
 	.sv_maxssiz	= NULL,
-	.sv_flags	= SV_ABI_FREEBSD | SV_LP64 | SV_SHP | SV_TIMEKEEP |
-	    SV_ASLR | SV_RNG_SEED_VER | SV_SIGSYS,
+	.sv_flags	= SV_ABI_FREEBSD_FLAGS | SV_LP64,
 	.sv_set_syscall_retval = cpu_set_syscall_retval,
 	.sv_fetch_syscall_args = cpu_fetch_syscall_args,
 	.sv_syscallnames = syscallnames,
@@ -100,7 +99,7 @@ static struct sysentvec elf64_freebsd_sysvec = {
 };
 INIT_SYSENTVEC(elf64_sysvec, &elf64_freebsd_sysvec);
 
-static Elf64_Brandinfo freebsd_brand_info = {
+static const Elf64_Brandinfo freebsd_brand_info = {
 	.brand		= ELFOSABI_FREEBSD,
 	.machine	= EM_RISCV,
 	.compat_3_brand	= "FreeBSD",
@@ -110,7 +109,7 @@ static Elf64_Brandinfo freebsd_brand_info = {
 	.brand_note	= &elf64_freebsd_brandnote,
 	.flags		= BI_CAN_EXEC_DYN | BI_BRAND_NOTE
 };
-SYSINIT(elf64, SI_SUB_EXEC, SI_ORDER_FIRST,
+C_SYSINIT(elf64, SI_SUB_EXEC, SI_ORDER_FIRST,
     (sysinit_cfunc_t)elf64_insert_brand_entry, &freebsd_brand_info);
 
 static void
@@ -271,10 +270,10 @@ reloctype_to_str(int type)
 }
 
 bool
-elf_is_ifunc_reloc(Elf_Size r_info __unused)
+elf_is_ifunc_reloc(Elf_Size r_info)
 {
 
-	return (false);
+	return (ELF_R_TYPE(r_info) == R_RISCV_IRELATIVE);
 }
 
 /*
@@ -501,7 +500,12 @@ elf_reloc_internal(linker_file_t lf, Elf_Addr relocbase, const void *data,
 			    (local ? 'l' : 'g'), reloctype_to_str(rtype),
 			    before32, *insn32p);
 		break;
-
+	case R_RISCV_IRELATIVE:
+		addr = relocbase + addend;
+		val = ((Elf64_Addr (*)(void))addr)();
+		if (*where != val)
+			*where = val;
+		break;
 	default:
 		printf("kldload: unexpected relocation type %ld, "
 		    "symbol index %ld\n", rtype, symidx);

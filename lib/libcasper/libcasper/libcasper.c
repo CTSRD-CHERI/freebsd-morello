@@ -95,7 +95,7 @@ cap_init(void)
 		return (NULL);
 	}
 
-	pid = pdfork(&pfd, 0);
+	pid = casper_pdfork(&pfd);
 	if (pid == 0) {
 		/* Child. */
 		close(sock[0]);

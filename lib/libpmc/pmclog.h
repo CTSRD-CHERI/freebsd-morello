@@ -69,6 +69,13 @@ struct pmclog_ev_initialize {
 
 struct pmclog_ev_map_in {
 	pid_t		pl_pid;
+	union {
+		uint32_t	pl_u;
+		struct {
+			uint8_t	pl_pageshift;
+			uint8_t	pl_pad[3];
+		};
+	};
 	uintfptr_t	pl_start;
 	char		pl_pathname[PATH_MAX];
 };
@@ -169,7 +176,10 @@ struct pmclog_ev {
 	enum pmclog_state pl_state;	/* state after 'get_event()' */
 	off_t		  pl_offset;	/* byte offset in stream */
 	size_t		  pl_count;	/* count of records so far */
-	struct timespec   pl_ts;	/* log entry timestamp */
+	union {
+		uint64_t	  pl_tsc;	/* TSC timestamp */
+		struct timespec pl_ts;		/* log entry timestamp (legacy) */
+	};
 	enum pmclog_type  pl_type;	/* type of log entry */
 	void		 *pl_data;
 	int		  pl_len;
@@ -229,4 +239,3 @@ void	pmclog_close(void *_cookie);
 __END_DECLS
 
 #endif
-

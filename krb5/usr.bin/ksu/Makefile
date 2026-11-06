@@ -1,5 +1,5 @@
 #
-# SPDX-License-Idendifier: BSD-2-Clause
+# SPDX-License-Identifier: BSD-2-Clause
 #
 # Copyright (c) 2025 FreeBSD Foundation
 #
@@ -24,7 +24,9 @@ SRCS=	authorization.c \
 
 CFLAGS+=-I${KRB5_DIR}/include \
 	-I${KRB5_SRCTOP}/include \
-	-DGET_TGT_VIA_PASSWD
+	-I${KRB5_OBJTOP}/util/profile \
+	-DGET_TGT_VIA_PASSWD \
+	-DPRINC_LOOK_AHEAD
 
 MAN=	ksu.1
 

@@ -38,11 +38,15 @@
 
 #include "nvme_private.h"
 
+#include "nvme_if.h"
+
 static int    nvme_pci_probe(device_t);
 static int    nvme_pci_attach(device_t);
 static int    nvme_pci_detach(device_t);
 static int    nvme_pci_suspend(device_t);
 static int    nvme_pci_resume(device_t);
+static bool   nvme_pci_is_storage_device(device_t);
+
 
 static int nvme_ctrlr_setup_interrupts(struct nvme_controller *ctrlr);
 
@@ -54,7 +58,8 @@ static device_method_t nvme_pci_methods[] = {
 	DEVMETHOD(device_suspend,   nvme_pci_suspend),
 	DEVMETHOD(device_resume,    nvme_pci_resume),
 	DEVMETHOD(device_shutdown,  nvme_shutdown),
-	{ 0, 0 }
+	DEVMETHOD(nvme_is_storage_device, nvme_pci_is_storage_device),
+	DEVMETHOD_END
 };
 
 static driver_t nvme_pci_driver = {
@@ -92,7 +97,15 @@ static struct _pcsid
 	{ 0xa821144d,		0, 0, "Samsung PM1725", QUIRK_DELAY_B4_CHK_RDY },
 	{ 0xa822144d,		0, 0, "Samsung PM1725a", QUIRK_DELAY_B4_CHK_RDY },
 	{ 0x07f015ad,		0, 0, "VMware NVMe Controller" },
-	{ 0x2003106b,		0, 0, "Apple S3X NVMe Controller" },
+	{ 0x2003106b,		0, 0, "Apple S3X NVMe Controller",
+	    QUIRK_APPLE_NO_ASYNC_EVENT | QUIRK_APPLE_S3X_NS1_ONLY |
+	    QUIRK_PCIE_FLR_ON_FATAL | QUIRK_IGNORE_RAB },
+	{ 0x2005106b,		0, 0, "Apple ANS2 NVMe Controller (T2)",
+	    QUIRK_APPLE_IDENTIFY_CNS_BROKEN | QUIRK_APPLE_SHARED_CID_SPACE |
+	    QUIRK_APPLE_NO_ASYNC_EVENT | QUIRK_APPLE_SINGLE_VECTOR |
+	    QUIRK_APPLE_128_BYTE_SQES | QUIRK_IGNORE_RAB },
+	{ 0x80611d0f,		0, 0, "Amazon EBS NVMe Controller",
+	    QUIRK_EMPTY_NAMESPACE_CHANGED_LOG },
 	{ 0x00000000,		0, 0, NULL  }
 };
 
@@ -131,6 +144,9 @@ nvme_pci_probe (device_t device)
 	if (ep->devid)
 		ctrlr->quirks = ep->quirks;
 
+	if (ctrlr->quirks & QUIRK_APPLE_IDENTIFY_CNS_BROKEN)
+		ctrlr->max_identify_cns = NVME_APPLE_ANS2_MAX_CNS;
+
 	if (ep->desc) {
 		device_set_desc(device, ep->desc);
 		return (BUS_PROBE_DEFAULT);
@@ -151,31 +167,77 @@ nvme_pci_probe (device_t device)
 static int
 nvme_ctrlr_allocate_bar(struct nvme_controller *ctrlr)
 {
+	int error;
 
 	ctrlr->resource_id = PCIR_BAR(0);
+	ctrlr->msix_table_resource_id = -1;
+	ctrlr->msix_table_resource = NULL;
+	ctrlr->msix_pba_resource_id = -1;
+	ctrlr->msix_pba_resource = NULL;
 
+	/*
+	 * Using RF_ACTIVE will set the Memory Space bit in the PCI command register.
+	 * The remaining BARs will get mapped in before they've been programmed with
+	 * an address.  To avoid this we'll not set this flag and instead call
+	 * bus_activate_resource() after all the BARs have been programmed.
+	 */
 	ctrlr->resource = bus_alloc_resource_any(ctrlr->dev, SYS_RES_MEMORY,
-	    &ctrlr->resource_id, RF_ACTIVE);
+	    &ctrlr->resource_id, 0);
 
-	if(ctrlr->resource == NULL) {
+	if (ctrlr->resource == NULL) {
 		nvme_printf(ctrlr, "unable to allocate pci resource\n");
 		return (ENOMEM);
 	}
 
-	ctrlr->bus_tag = rman_get_bustag(ctrlr->resource);
-	ctrlr->bus_handle = rman_get_bushandle(ctrlr->resource);
-	ctrlr->regs = (struct nvme_registers *)ctrlr->bus_handle;
-
 	/*
-	 * The NVMe spec allows for the MSI-X table to be placed behind
-	 *  BAR 4/5, separate from the control/doorbell registers.  Always
-	 *  try to map this bar, because it must be mapped prior to calling
-	 *  pci_alloc_msix().  If the table isn't behind BAR 4/5,
-	 *  bus_alloc_resource() will just return NULL which is OK.
+	 * The NVMe spec allows for the MSI-X tables to be placed behind
+	 *  BAR 4 and/or 5, separate from the control/doorbell registers.
 	 */
-	ctrlr->bar4_resource_id = PCIR_BAR(4);
-	ctrlr->bar4_resource = bus_alloc_resource_any(ctrlr->dev, SYS_RES_MEMORY,
-	    &ctrlr->bar4_resource_id, RF_ACTIVE);
+
+	ctrlr->msix_table_resource_id = pci_msix_table_bar(ctrlr->dev);
+	ctrlr->msix_pba_resource_id = pci_msix_pba_bar(ctrlr->dev);
+
+	if (ctrlr->msix_table_resource_id >= 0 &&
+	    ctrlr->msix_table_resource_id != ctrlr->resource_id) {
+		ctrlr->msix_table_resource = bus_alloc_resource_any(ctrlr->dev,
+		    SYS_RES_MEMORY, &ctrlr->msix_table_resource_id, 0);
+		if (ctrlr->msix_table_resource == NULL) {
+			nvme_printf(ctrlr, "unable to allocate msi-x table resource\n");
+			return (ENOMEM);
+		}
+	}
+	if (ctrlr->msix_pba_resource_id >= 0 &&
+	    ctrlr->msix_pba_resource_id != ctrlr->resource_id &&
+	    ctrlr->msix_pba_resource_id != ctrlr->msix_table_resource_id) {
+		ctrlr->msix_pba_resource = bus_alloc_resource_any(ctrlr->dev,
+		    SYS_RES_MEMORY, &ctrlr->msix_pba_resource_id, 0);
+		if (ctrlr->msix_pba_resource == NULL) {
+			nvme_printf(ctrlr, "unable to allocate msi-x pba resource\n");
+			return (ENOMEM);
+		}
+	}
+
+	error = bus_activate_resource(ctrlr->dev, ctrlr->resource);
+	if (error) {
+		nvme_printf(ctrlr, "unable to activate pci resource: %d\n", error);
+		return (error);
+	}
+	if (ctrlr->msix_table_resource != NULL) {
+		error = bus_activate_resource(ctrlr->dev, ctrlr->msix_table_resource);
+		if (error) {
+			nvme_printf(ctrlr, "unable to activate msi-x table resource: %d\n",
+			    error);
+			return (error);
+		}
+	}
+	if (ctrlr->msix_pba_resource != NULL) {
+		error = bus_activate_resource(ctrlr->dev, ctrlr->msix_pba_resource);
+		if (error) {
+			nvme_printf(ctrlr, "unable to activate msi-x pba resource: %d\n",
+			    error);
+			return (error);
+		}
+	}
 
 	return (0);
 }
@@ -201,9 +263,14 @@ bad:
 		    ctrlr->resource_id, ctrlr->resource);
 	}
 
-	if (ctrlr->bar4_resource != NULL) {
+	if (ctrlr->msix_table_resource != NULL) {
 		bus_release_resource(dev, SYS_RES_MEMORY,
-		    ctrlr->bar4_resource_id, ctrlr->bar4_resource);
+		    ctrlr->msix_table_resource_id, ctrlr->msix_table_resource);
+	}
+
+	if (ctrlr->msix_pba_resource != NULL) {
+		bus_release_resource(dev, SYS_RES_MEMORY,
+		    ctrlr->msix_pba_resource_id, ctrlr->msix_pba_resource);
 	}
 
 	if (ctrlr->tag)
@@ -272,6 +339,15 @@ nvme_ctrlr_setup_interrupts(struct nvme_controller *ctrlr)
 	if (force_intx)
 		return (nvme_ctrlr_setup_shared(ctrlr, 0));
 
+	if (ctrlr->quirks & QUIRK_APPLE_SINGLE_VECTOR) {
+		int n = 1;
+		if (pci_alloc_msi(dev, &n) == 0) {
+			ctrlr->msi_count = n;
+			return (nvme_ctrlr_setup_shared(ctrlr, 1));
+		}
+		return (nvme_ctrlr_setup_shared(ctrlr, 0));
+	}
+
 	if (pci_msix_count(dev) == 0)
 		goto msi;
 
@@ -309,6 +385,7 @@ again:
 		ctrlr->msi_count = 0;
 		goto msi;
 	}
+	ctrlr->is_msix = true;
 	if (ctrlr->msi_count == 1)
 		return (nvme_ctrlr_setup_shared(ctrlr, 1));
 	if (ctrlr->msi_count != num_vectors_requested) {
@@ -354,4 +431,14 @@ nvme_pci_resume(device_t dev)
 
 	ctrlr = DEVICE2SOFTC(dev);
 	return (nvme_ctrlr_resume(ctrlr));
+}
+
+static bool
+nvme_pci_is_storage_device(device_t dev)
+{
+	/*
+	 * NVMHCI 1.0 interfaces are the only devices that
+	 * have namespaces with LBA ranges.
+	 */
+	return (pci_get_progif(dev) == PCIP_STORAGE_NVM_ENTERPRISE_NVMHCI_1_0);
 }

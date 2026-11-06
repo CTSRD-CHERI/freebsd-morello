@@ -28,6 +28,9 @@
  */
 
 #include <sys/param.h>
+
+#include <machine/atomic.h>
+
 #include <time.h>
 
 #include "pci_hda.h"
@@ -81,7 +84,7 @@ struct hda_bdle {
 	uint32_t addrh;
 	uint32_t len;
 	uint32_t ioc;
-} __packed;
+};
 
 struct hda_bdle_desc {
 	void *addr;
@@ -612,20 +615,27 @@ hda_stream_start(struct hda_softc *sc, uint8_t stream_ind)
 	uint8_t strm = 0;
 	uint8_t dir = 0;
 
-	assert(!st->run);
+	if (st->run) {
+		DPRINTF("Stream 0x%x is already running", stream_ind);
+		return (-1);
+	}
 
 	lvi = hda_get_reg_by_offset(sc, off + HDAC_SDLVI);
 	bdpl = hda_get_reg_by_offset(sc, off + HDAC_SDBDPL);
 	bdpu = hda_get_reg_by_offset(sc, off + HDAC_SDBDPU);
 
+	if (lvi >= HDA_BDL_MAX_LEN) {
+		DPRINTF("Invalid LVI: 0x%x", lvi);
+		return (-1);
+	}
 	bdl_cnt = lvi + 1;
-	assert(bdl_cnt <= HDA_BDL_MAX_LEN);
 
 	bdl_paddr = bdpl | (bdpu << 32);
 	bdl_vaddr = hda_dma_get_vaddr(sc, bdl_paddr,
 	    HDA_BDL_ENTRY_LEN * bdl_cnt);
-	if (!bdl_vaddr) {
-		DPRINTF("Fail to get the guest virtual address");
+	if (bdl_vaddr == NULL ||
+	    (uintptr_t)bdl_vaddr % HDA_DMA_ACCESS_LEN != 0) {
+		DPRINTF("Invalid guest virtual address %p", bdl_vaddr);
 		return (-1);
 	}
 
@@ -636,11 +646,14 @@ hda_stream_start(struct hda_softc *sc, uint8_t stream_ind)
 
 	bdle = (struct hda_bdle *)bdl_vaddr;
 	for (size_t i = 0; i < bdl_cnt; i++, bdle++) {
-		bdle_sz = bdle->len;
-		assert(!(bdle_sz % HDA_DMA_ACCESS_LEN));
+		bdle_sz = atomic_load_32(&bdle->len);
+		if (bdle_sz % HDA_DMA_ACCESS_LEN != 0 || bdle_sz == 0) {
+			DPRINTF("Invalid BDLE length: 0x%x", bdle_sz);
+			return (-1);
+		}
 
-		bdle_addrl = bdle->addrl;
-		bdle_addrh = bdle->addrh;
+		bdle_addrl = atomic_load_32(&bdle->addrl);
+		bdle_addrh = atomic_load_32(&bdle->addrh);
 
 		bdle_paddr = bdle_addrl | (bdle_addrh << 32);
 		bdle_vaddr = hda_dma_get_vaddr(sc, bdle_paddr, bdle_sz);
@@ -652,7 +665,7 @@ hda_stream_start(struct hda_softc *sc, uint8_t stream_ind)
 		bdle_desc = &st->bdl[i];
 		bdle_desc->addr = bdle_vaddr;
 		bdle_desc->len = bdle_sz;
-		bdle_desc->ioc = bdle->ioc;
+		bdle_desc->ioc = atomic_load_32(&bdle->ioc);
 
 		DPRINTF("bdle: 0x%zx bdle_sz: 0x%x", i, bdle_sz);
 	}
@@ -785,7 +798,6 @@ hda_corb_run(struct hda_softc *sc)
 {
 	struct hda_codec_cmd_ctl *corb = &sc->corb;
 	uint32_t verb = 0;
-	int err;
 
 	corb->wp = hda_get_reg_by_offset(sc, HDAC_CORBWP);
 	if (corb->wp >= corb->size) {
@@ -801,8 +813,8 @@ hda_corb_run(struct hda_softc *sc)
 		verb = hda_dma_ld_dword((uint8_t *)corb->dma_vaddr +
 		    HDA_CORB_ENTRY_LEN * corb->rp);
 
-		err = hda_send_command(sc, verb);
-		assert(!err);
+		if (hda_send_command(sc, verb) != 0)
+			DPRINTF("Fail to send verb: 0x%x", verb);
 	}
 
 	hda_set_reg_by_offset(sc, HDAC_CORBRP, corb->rp);
@@ -928,13 +940,16 @@ static void
 hda_set_corbctl(struct hda_softc *sc, uint32_t offset, uint32_t old)
 {
 	uint32_t value = hda_get_reg_by_offset(sc, offset);
-	int err;
 	struct hda_codec_cmd_ctl *corb = NULL;
 
 	if (value & HDAC_CORBCTL_CORBRUN) {
 		if (!(old & HDAC_CORBCTL_CORBRUN)) {
-			err = hda_corb_start(sc);
-			assert(!err);
+			if (hda_corb_start(sc) != 0) {
+				DPRINTF("Fail to start CORB");
+				hda_set_field_by_offset(sc, offset,
+				    HDAC_CORBCTL_CORBRUN, 0);
+				return;
+			}
 		}
 	} else {
 		corb = &sc->corb;
@@ -948,12 +963,15 @@ static void
 hda_set_rirbctl(struct hda_softc *sc, uint32_t offset, uint32_t old __unused)
 {
 	uint32_t value = hda_get_reg_by_offset(sc, offset);
-	int err;
 	struct hda_codec_cmd_ctl *rirb = NULL;
 
 	if (value & HDAC_RIRBCTL_RIRBDMAEN) {
-		err = hda_rirb_start(sc);
-		assert(!err);
+		if (hda_rirb_start(sc) != 0) {
+			DPRINTF("Fail to start RIRB");
+			hda_set_field_by_offset(sc, offset,
+			    HDAC_RIRBCTL_RIRBDMAEN, 0);
+			return;
+		}
 	} else {
 		rirb = &sc->rirb;
 		memset(rirb, 0, sizeof(*rirb));
@@ -996,7 +1014,8 @@ hda_set_dpiblbase(struct hda_softc *sc, uint32_t offset, uint32_t old)
 			if (!sc->dma_pib_vaddr) {
 				DPRINTF("Fail to get the guest \
 					 virtual address");
-				assert(0);
+				hda_set_field_by_offset(sc, offset,
+				    HDAC_DPLBASE_DPLBASE_DMAPBE, 0);
 			}
 		} else {
 			DPRINTF("DMA Position In Buffer Reset");
@@ -1010,7 +1029,6 @@ hda_set_sdctl(struct hda_softc *sc, uint32_t offset, uint32_t old)
 {
 	uint8_t stream_ind = hda_get_stream_by_offsets(offset, HDAC_SDCTL0);
 	uint32_t value = hda_get_reg_by_offset(sc, offset);
-	int err;
 
 	DPRINTF("stream_ind: 0x%x old: 0x%x value: 0x%x",
 	    stream_ind, old, value);
@@ -1021,11 +1039,16 @@ hda_set_sdctl(struct hda_softc *sc, uint32_t offset, uint32_t old)
 
 	if ((value & HDAC_SDCTL_RUN) != (old & HDAC_SDCTL_RUN)) {
 		if (value & HDAC_SDCTL_RUN) {
-			err = hda_stream_start(sc, stream_ind);
-			assert(!err);
+			if (hda_stream_start(sc, stream_ind) != 0) {
+				DPRINTF("Fail to start stream 0x%x",
+				    stream_ind);
+				hda_set_field_by_offset(sc, offset,
+				    HDAC_SDCTL_RUN, 0);
+			}
 		} else {
-			err = hda_stream_stop(sc, stream_ind);
-			assert(!err);
+			if (hda_stream_stop(sc, stream_ind) != 0)
+				DPRINTF("Fail to stop stream 0x%x",
+				    stream_ind);
 		}
 	}
 }

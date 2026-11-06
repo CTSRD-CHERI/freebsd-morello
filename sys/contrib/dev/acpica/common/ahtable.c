@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2025, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2026, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -216,6 +216,7 @@ const AH_TABLE      AcpiGbl_SupportedTables[] =
     {ACPI_SIG_DBGP, "Debug Port Table"},
     {ACPI_SIG_DMAR, "DMA Remapping Table"},
     {ACPI_SIG_DRTM, "Dynamic Root of Trust for Measurement Table"},
+    {ACPI_SIG_DTPR, "DMA TXT Protection Ranges Table"},
     {ACPI_SIG_DSDT, "Differentiated System Description Table (AML table)"},
     {ACPI_SIG_ECDT, "Embedded Controller Boot Resources Table"},
     {ACPI_SIG_EINJ, "Error Injection Table"},
@@ -229,6 +230,7 @@ const AH_TABLE      AcpiGbl_SupportedTables[] =
     {ACPI_SIG_HMAT, "Heterogeneous Memory Attributes Table"},
     {ACPI_SIG_HPET, "High Precision Event Timer Table"},
     {ACPI_SIG_IORT, "IO Remapping Table"},
+    {ACPI_SIG_IOVT, "I/O Virtualization Table"},
     {ACPI_SIG_IVRS, "I/O Virtualization Reporting Structure"},
     {ACPI_SIG_LPIT, "Low Power Idle Table"},
     {ACPI_SIG_MADT, "Multiple APIC Description Table (MADT)"},
@@ -265,6 +267,7 @@ const AH_TABLE      AcpiGbl_SupportedTables[] =
     {ACPI_SIG_SSDT, "Secondary System Description Table (AML table)"},
     {ACPI_SIG_STAO, "Status Override Table"},
     {ACPI_SIG_SVKL, "Storage Volume Key Location Table"},
+    {ACPI_SIG_SWFT, "SoundWire File Table"},
     {ACPI_SIG_TCPA, "Trusted Computing Platform Alliance Table"},
     {ACPI_SIG_TDEL, "TD-Event Log Table"},
     {ACPI_SIG_TPM2, "Trusted Platform Module hardware interface Table"},

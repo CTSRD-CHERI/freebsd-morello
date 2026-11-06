@@ -404,6 +404,7 @@ uchcom_detach(device_t dev)
 	DPRINTFN(11, "\n");
 
 	ucom_detach(&sc->sc_super_ucom, &sc->sc_ucom);
+	usbd_transfer_unsetup(&sc->sc_intr_xfer, 1);
 	usbd_transfer_unsetup(sc->sc_xfer, UCHCOM_N_TRANSFER);
 
 	device_claim_softc(dev);
@@ -708,24 +709,24 @@ static int
 uchcom_pre_param(struct ucom_softc *ucom, struct termios *t)
 {
 	struct uchcom_softc *sc = ucom->sc_parent;
+	uint32_t maxspeed;
 
 	/* 
-	 * Check requested baud rate.
 	 * The CH340/CH341 can set any baud rate up to 2Mb.
 	 * The CH9102/CH343 can set any baud rate up to 6Mb.
 	 */
 	switch (sc->sc_chiptype) {
 	case TYPE_CH343:
-		if (t->c_ospeed <= 6000000)
-			return (0);
+		maxspeed = 6000000;
 		break;
 	default:
-		if (t->c_ospeed <= 2000000)
-			return (0);
+		maxspeed = 2000000;
 		break;
 	}
 
-	return (EIO);
+	if (t->c_ospeed <= 0 || t->c_ospeed > maxspeed)
+		return (EINVAL);
+	return (0);
 }
 
 static void

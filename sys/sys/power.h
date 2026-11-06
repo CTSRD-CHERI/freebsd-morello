@@ -3,6 +3,10 @@
  *
  * Copyright (c) 2001 Mitsuru IWASAKI
  * All rights reserved.
+ * Copyright (c) 2025-2026 The FreeBSD Foundation
+ *
+ * Portions of this software were developed by Aymeric Wibo
+ * <obiwac@freebsd.org> under sponsorship from the FreeBSD Foundation.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -29,6 +33,30 @@
 #ifndef _SYS_POWER_H_
 #define _SYS_POWER_H_
 
+#include <sys/types.h>
+#include <sys/ioccom.h>
+
+/*
+ * Sleep state transition requests.
+ *
+ * These are high-level sleep states that the system can enter.  They map to
+ * a specific generic sleep type (enum power_stype), depending on the
+ * kern.power.* sysctls.
+ */
+enum power_transition {
+	POWER_TRANSITION_STANDBY,
+	POWER_TRANSITION_SUSPEND,
+	POWER_TRANSITION_HIBERNATE,
+	POWER_TRANSITION_COUNT,
+};
+
+/*
+ * Power ioctls.
+ */
+#define	PIOTRANSITION	_IOW('T', 1, uint32_t)
+
+#ifdef _KERNEL
+
 #include <sys/_eventhandler.h>
 
 /* Power management system type */
@@ -38,15 +66,56 @@
 /* Commands for Power management function */
 #define POWER_CMD_SUSPEND		0x00
 
-/* Sleep state */
-#define POWER_SLEEP_STATE_STANDBY	0x00
-#define POWER_SLEEP_STATE_SUSPEND	0x01
-#define POWER_SLEEP_STATE_HIBERNATE	0x02
+/*
+ * Sleep type.
+ *
+ * These are the specific generic methods of entering a sleep state.  E.g.
+ * POWER_TRANSITION_SUSPEND could be set to enter either firmware suspend (which
+ * is suspend-to-RAM or S3 on ACPI systems), or suspend-to-idle (S0ix on ACPI
+ * platforms).  This would be done through the kern.power.suspend sysctl.
+ */
+enum power_stype {
+	POWER_STYPE_AWAKE,
+	POWER_STYPE_STANDBY,
+	POWER_STYPE_FW_SUSPEND,
+	POWER_STYPE_SUSPEND_TO_IDLE,
+	POWER_STYPE_FW_HIBERNATE,
+	POWER_STYPE_POWEROFF,
+	POWER_STYPE_UNKNOWN,
+	POWER_STYPE_COUNT = POWER_STYPE_UNKNOWN,
+};
 
-typedef int (*power_pm_fn_t)(u_long, void*, ...);
-extern int	 power_pm_register(u_int, power_pm_fn_t, void *);
+/* XXX NUL terminator is included in this number */
+#define	POWER_STYPE_NAME_LEN	16
+
+static const char power_stype_names[POWER_STYPE_COUNT][POWER_STYPE_NAME_LEN] = {
+	[POWER_STYPE_AWAKE]		= "awake",
+	[POWER_STYPE_STANDBY]		= "standby",
+	[POWER_STYPE_FW_SUSPEND]	= "fw_suspend",
+	[POWER_STYPE_SUSPEND_TO_IDLE]	= "suspend_to_idle",
+	[POWER_STYPE_FW_HIBERNATE]	= "fw_hibernate",
+	[POWER_STYPE_POWEROFF]		= "poweroff",
+};
+
+extern enum power_stype	 power_standby_stype;
+extern enum power_stype	 power_suspend_stype;
+extern enum power_stype	 power_hibernate_stype;
+
+extern enum power_stype	 power_name_to_stype(const char *_name);
+extern const char	*power_stype_to_name(enum power_stype _stype);
+
+typedef int (*power_pm_fn_t)(u_long _cmd, void* _arg, enum power_stype _stype);
+extern int	 power_pm_register(u_int _pm_type, power_pm_fn_t _pm_fn,
+			void *_pm_arg,
+			const bool _pm_supported[static POWER_STYPE_COUNT]);
 extern u_int	 power_pm_get_type(void);
-extern void	 power_pm_suspend(int);
+extern int	 power_pm_suspend(enum power_transition _trans);
+
+typedef void (*power_change_fn)(void *, enum power_stype stype);
+EVENTHANDLER_DECLARE(power_resume, power_change_fn);
+EVENTHANDLER_DECLARE(power_resume_check, power_change_fn);
+EVENTHANDLER_DECLARE(power_suspend, power_change_fn);
+EVENTHANDLER_DECLARE(power_suspend_early, power_change_fn);
 
 /*
  * System power API.
@@ -60,4 +129,5 @@ extern void	power_profile_set_state(int);
 typedef void (*power_profile_change_hook)(void *, int);
 EVENTHANDLER_DECLARE(power_profile_change, power_profile_change_hook);
 
+#endif	/* _KERNEL */
 #endif	/* !_SYS_POWER_H_ */

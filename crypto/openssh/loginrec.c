@@ -66,7 +66,7 @@
  *  code should suffice.
  *
  *  Retrieving the time of last login ('lastlog') is in some ways even
- *  more problemmatic than login recording. Some systems provide a
+ *  more problematic than login recording. Some systems provide a
  *  simple table of all users which we seek based on uid and retrieve a
  *  relatively standard structure. Others record the same information in
  *  a directory with a separate file, and others don't record the
@@ -129,18 +129,14 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
-#ifdef HAVE_SYS_TIME_H
-# include <sys/time.h>
-#endif
+#include <sys/time.h>
 
 #include <netinet/in.h>
 
 #include <stdlib.h>
 #include <errno.h>
 #include <fcntl.h>
-#ifdef HAVE_PATHS_H
-# include <paths.h>
-#endif
+#include <paths.h>
 #include <pwd.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -162,8 +158,10 @@
 #include "ssherr.h"
 #include "misc.h"
 
-#ifdef HAVE_UTIL_H
 # include <util.h>
+
+#ifdef USE_WTMPDB
+# include <wtmpdb.h>
 #endif
 
 /**
@@ -186,6 +184,9 @@ int wtmp_write_entry(struct logininfo *li);
 int wtmpx_write_entry(struct logininfo *li);
 int lastlog_write_entry(struct logininfo *li);
 int syslogin_write_entry(struct logininfo *li);
+#ifdef USE_WTMPDB
+int wtmpdb_write_entry(struct logininfo *li);
+#endif
 
 int getlast_entry(struct logininfo *li);
 int lastlog_get_entry(struct logininfo *li);
@@ -446,6 +447,9 @@ login_write(struct logininfo *li)
 #ifdef USE_WTMPX
 	wtmpx_write_entry(li);
 #endif
+#ifdef USE_WTMPDB
+	wtmpdb_write_entry(li);
+#endif
 #ifdef CUSTOM_SYS_AUTH_RECORD_LOGIN
 	if (li->type == LTYPE_LOGIN &&
 	    !sys_auth_record_login(li->username,li->hostname,li->line,
@@ -647,6 +651,9 @@ construct_utmp(struct logininfo *li,
 # ifdef HAVE_TYPE_IN_UTMP
 	/* This is done here to keep utmp constants out of struct logininfo */
 	switch (li->type) {
+	case LTYPE_FAILED:
+		ut->ut_type = LOGIN_PROCESS;
+		break;
 	case LTYPE_LOGIN:
 		ut->ut_type = USER_PROCESS;
 		break;
@@ -843,7 +850,7 @@ utmp_write_direct(struct logininfo *li, struct utmp *ut)
 	endttyent();
 
 	if (NULL == ty) {
-		logit("%s: tty not found", __func__);
+		logit_f("tty not found");
 		return (0);
 	}
 #else /* FIXME */
@@ -857,7 +864,7 @@ utmp_write_direct(struct logininfo *li, struct utmp *ut)
 
 		pos = (off_t)tty * sizeof(struct utmp);
 		if ((ret = lseek(fd, pos, SEEK_SET)) == -1) {
-			logit("%s: lseek: %s", __func__, strerror(errno));
+			logit_f("lseek: %s", strerror(errno));
 			close(fd);
 			return (0);
 		}
@@ -879,7 +886,7 @@ utmp_write_direct(struct logininfo *li, struct utmp *ut)
 			memcpy(ut->ut_host, old_ut.ut_host, sizeof(ut->ut_host));
 
 		if ((ret = lseek(fd, pos, SEEK_SET)) == -1) {
-			logit("%s: lseek: %s", __func__, strerror(errno));
+			logit_f("lseek: %s", strerror(errno));
 			close(fd);
 			return (0);
 		}
@@ -912,12 +919,12 @@ utmp_perform_login(struct logininfo *li)
 	construct_utmp(li, &ut);
 # ifdef UTMP_USE_LIBRARY
 	if (!utmp_write_library(li, &ut)) {
-		logit("%s: utmp_write_library() failed", __func__);
+		logit_f("utmp_write_library() failed");
 		return (0);
 	}
 # else
 	if (!utmp_write_direct(li, &ut)) {
-		logit("%s: utmp_write_direct() failed", __func__);
+		logit_f("utmp_write_direct() failed");
 		return (0);
 	}
 # endif
@@ -933,12 +940,12 @@ utmp_perform_logout(struct logininfo *li)
 	construct_utmp(li, &ut);
 # ifdef UTMP_USE_LIBRARY
 	if (!utmp_write_library(li, &ut)) {
-		logit("%s: utmp_write_library() failed", __func__);
+		logit_f("utmp_write_library() failed");
 		return (0);
 	}
 # else
 	if (!utmp_write_direct(li, &ut)) {
-		logit("%s: utmp_write_direct() failed", __func__);
+		logit_f("utmp_write_direct() failed");
 		return (0);
 	}
 # endif
@@ -957,7 +964,7 @@ utmp_write_entry(struct logininfo *li)
 		return (utmp_perform_logout(li));
 
 	default:
-		logit("%s: invalid type field", __func__);
+		logit_f("invalid type field");
 		return (0);
 	}
 }
@@ -971,7 +978,7 @@ utmp_write_entry(struct logininfo *li)
 /* not much point if we don't want utmpx entries */
 #ifdef USE_UTMPX
 
-/* if we have the wherewithall, use pututxline etc. */
+/* if we have the wherewithal, use pututxline etc. */
 # if !defined(DISABLE_PUTUTXLINE) && defined(HAVE_SETUTXENT) && \
 	defined(HAVE_PUTUTXLINE)
 #  define UTMPX_USE_LIBRARY
@@ -998,7 +1005,7 @@ utmpx_write_library(struct logininfo *li, struct utmpx *utx)
 static int
 utmpx_write_direct(struct logininfo *li, struct utmpx *utx)
 {
-	logit("%s: not implemented!", __func__);
+	logit_f("not implemented!");
 	return (0);
 }
 # endif /* UTMPX_USE_LIBRARY */
@@ -1011,12 +1018,12 @@ utmpx_perform_login(struct logininfo *li)
 	construct_utmpx(li, &utx);
 # ifdef UTMPX_USE_LIBRARY
 	if (!utmpx_write_library(li, &utx)) {
-		logit("%s: utmp_write_library() failed", __func__);
+		logit_f("utmp_write_library() failed");
 		return (0);
 	}
 # else
-	if (!utmpx_write_direct(li, &ut)) {
-		logit("%s: utmp_write_direct() failed", __func__);
+	if (!utmpx_write_direct(li, &utx)) {
+		logit_f("utmp_write_direct() failed");
 		return (0);
 	}
 # endif
@@ -1054,7 +1061,7 @@ utmpx_write_entry(struct logininfo *li)
 	case LTYPE_LOGOUT:
 		return (utmpx_perform_logout(li));
 	default:
-		logit("%s: invalid type field", __func__);
+		logit_f("invalid type field");
 		return (0);
 	}
 }
@@ -1122,7 +1129,7 @@ wtmp_write_entry(struct logininfo *li)
 	case LTYPE_LOGOUT:
 		return (wtmp_perform_logout(li));
 	default:
-		logit("%s: invalid type field", __func__);
+		logit_f("invalid type field");
 		return (0);
 	}
 }
@@ -1301,7 +1308,7 @@ wtmpx_write_entry(struct logininfo *li)
 	case LTYPE_LOGOUT:
 		return (wtmpx_perform_logout(li));
 	default:
-		logit("%s: invalid type field", __func__);
+		logit_f("invalid type field");
 		return (0);
 	}
 }
@@ -1391,6 +1398,64 @@ wtmpx_get_entry(struct logininfo *li)
 }
 #endif /* USE_WTMPX */
 
+#ifdef USE_WTMPDB
+static int
+wtmpdb_perform_login(struct logininfo *li)
+{
+	uint64_t login_time = li->tv_sec * ((uint64_t) 1000000ULL) +
+	    li->tv_usec;
+	const char *tty;
+
+	if (strncmp(li->line, "/dev/", 5) == 0)
+		tty = &(li->line[5]);
+	else
+		tty = li->line;
+
+	li->wtmpdb_id = wtmpdb_login(NULL, USER_PROCESS, li->username,
+	    login_time, tty, li->hostname, 0, 0);
+
+	if (li->wtmpdb_id < 0)
+		return (0);
+
+	return (1);
+}
+
+static int
+wtmpdb_perform_logout(struct logininfo *li)
+{
+	uint64_t logout_time = li->tv_sec * ((uint64_t) 1000000ULL) +
+	   li->tv_usec;
+
+	if (li->wtmpdb_id == 0) {
+		const char *tty;
+
+		if (strncmp(li->line, "/dev/", 5) == 0)
+			tty = &(li->line[5]);
+		else
+			tty = li->line;
+
+		li->wtmpdb_id = wtmpdb_get_id(NULL, tty, NULL);
+	}
+	wtmpdb_logout(NULL, li->wtmpdb_id, logout_time, NULL);
+
+	return (1);
+}
+
+int
+wtmpdb_write_entry(struct logininfo *li)
+{
+	switch(li->type) {
+	case LTYPE_LOGIN:
+		return (wtmpdb_perform_login(li));
+	case LTYPE_LOGOUT:
+		return (wtmpdb_perform_logout(li));
+	default:
+		logit_f("invalid type field");
+		return (0);
+	}
+}
+#endif
+
 /**
  ** Low-level libutil login() functions
  **/
@@ -1418,7 +1483,7 @@ syslogin_perform_logout(struct logininfo *li)
 	(void)line_stripname(line, li->line, sizeof(line));
 
 	if (!logout(line))
-		logit("%s: logout() returned an error", __func__);
+		logit_f("logout() returned an error");
 #  ifdef HAVE_LOGWTMP
 	else
 		logwtmp(line, "", "");
@@ -1440,7 +1505,7 @@ syslogin_write_entry(struct logininfo *li)
 	case LTYPE_LOGOUT:
 		return (syslogin_perform_logout(li));
 	default:
-		logit("%s: Invalid type field", __func__);
+		logit_f("Invalid type field");
 		return (0);
 	}
 }
@@ -1529,10 +1594,10 @@ lastlog_write_entry(struct logininfo *li)
 		strlcpy(last.ll_host, li->hostname,
 		    MIN_SIZEOF(last.ll_host, li->hostname));
 		last.ll_time = li->tv_sec;
-	
+
 		if (!lastlog_openseek(li, &fd, O_RDWR|O_CREAT))
 			return (0);
-	
+
 		/* write the entry */
 		if (atomicio(vwrite, fd, &last, sizeof(last)) != sizeof(last)) {
 			close(fd);
@@ -1540,11 +1605,11 @@ lastlog_write_entry(struct logininfo *li)
 			    LASTLOG_FILE, strerror(errno));
 			return (0);
 		}
-	
+
 		close(fd);
 		return (1);
 	default:
-		logit("%s: Invalid type field", __func__);
+		logit_f("Invalid type field");
 		return (0);
 	}
 }
@@ -1636,7 +1701,7 @@ utmpx_get_entry(struct logininfo *li)
 /*
  * Logs failed login attempts in _PATH_BTMP if that exists.
  * The most common login failure is to give password instead of username.
- * So the _PATH_BTMP file checked for the correct permission, so that only
+ * So the _PATH_BTMP file is checked for the correct permission, so that only
  * root can read it.
  */
 void
@@ -1670,7 +1735,7 @@ record_failed_login(struct ssh *ssh, const char *username, const char *hostname,
 
 	/* Construct a logininfo and turn it into a utmp */
 	memset(&li, 0, sizeof(li));
-	li.type = LTYPE_LOGIN;
+	li.type = LTYPE_FAILED;
 	li.pid = getpid();
 	strlcpy(li.line, "ssh:notty", sizeof(li.line));
 	strlcpy(li.username, username, sizeof(li.username));

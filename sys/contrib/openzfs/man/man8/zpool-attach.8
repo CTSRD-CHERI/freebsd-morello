@@ -1,23 +1,13 @@
 .\" SPDX-License-Identifier: CDDL-1.0
 .\"
-.\" CDDL HEADER START
+.\" This file and its contents are supplied under the terms of the
+.\" Common Development and Distribution License ("CDDL"), version 1.0.
+.\" You may only use this file in accordance with the terms of version
+.\" 1.0 of the CDDL.
 .\"
-.\" The contents of this file are subject to the terms of the
-.\" Common Development and Distribution License (the "License").
-.\" You may not use this file except in compliance with the License.
-.\"
-.\" You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-.\" or https://opensource.org/licenses/CDDL-1.0.
-.\" See the License for the specific language governing permissions
-.\" and limitations under the License.
-.\"
-.\" When distributing Covered Code, include this CDDL HEADER in each
-.\" file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-.\" If applicable, add the following below this CDDL HEADER, with the
-.\" fields enclosed by brackets "[]" replaced with your own identifying
-.\" information: Portions Copyright [yyyy] [name of copyright owner]
-.\"
-.\" CDDL HEADER END
+.\" A full copy of the text of the CDDL should have accompanied this
+.\" source.  A copy of the CDDL is also available via the Internet at
+.\" https://opensource.org/license/CDDL-1.0.
 .\"
 .\" Copyright (c) 2007, Sun Microsystems, Inc. All Rights Reserved.
 .\" Copyright (c) 2012, 2018 by Delphix. All rights reserved.
@@ -27,7 +17,7 @@
 .\" Copyright 2017 Nexenta Systems, Inc.
 .\" Copyright (c) 2017 Open-E, Inc. All Rights Reserved.
 .\"
-.Dd June 28, 2023
+.Dd May 9, 2026
 .Dt ZPOOL-ATTACH 8
 .Os
 .
@@ -39,24 +29,24 @@
 .Cm attach
 .Op Fl fsw
 .Oo Fl o Ar property Ns = Ns Ar value Oc
-.Ar pool device new_device
+.Ar pool vdev new_device
 .
 .Sh DESCRIPTION
 Attaches
 .Ar new_device
 to the existing
-.Ar device .
+.Ar vdev .
 The behavior differs depending on if the existing
-.Ar device
+.Ar vdev
 is a RAID-Z device, or a mirror/plain device.
 .Pp
-If the existing device is a mirror or plain device
+If the existing vdev is a mirror or plain device
 .Pq e.g. specified as Qo Li sda Qc or Qq Li mirror-7 ,
-the new device will be mirrored with the existing device, a resilver will be
+the new device will be mirrored with the existing vdev, a resilver will be
 initiated, and the new device will contribute to additional redundancy once the
 resilver completes.
 If
-.Ar device
+.Ar vdev
 is not currently part of a mirrored configuration,
 .Ar device
 automatically transforms into a two-way mirror of
@@ -64,7 +54,7 @@ automatically transforms into a two-way mirror of
 and
 .Ar new_device .
 If
-.Ar device
+.Ar vdev
 is part of a two-way mirror, attaching
 .Ar new_device
 creates a three-way mirror, and so on.
@@ -72,7 +62,7 @@ In either case,
 .Ar new_device
 begins to resilver immediately and any running scrub is canceled.
 .Pp
-If the existing device is a RAID-Z device
+If the existing vdev is a RAID-Z device
 .Pq e.g. specified as Qq Ar raidz2-0 ,
 the new device will become part of that RAID-Z group.
 A "raidz expansion" will be initiated, and once the expansion completes,
@@ -112,7 +102,7 @@ the checksums of all blocks which have been copied during the expansion.
 Forces use of
 .Ar new_device ,
 even if it appears to be in use.
-Not all devices can be overridden in this manner.
+Not all vdevs can be overridden in this manner.
 .It Fl o Ar property Ns = Ns Ar value
 Sets the given pool properties.
 See the
@@ -121,7 +111,7 @@ manual page for a list of valid properties that can be set.
 The only property supported at the moment is
 .Sy ashift .
 .It Fl s
-When attaching to a mirror or plain device, the
+When attaching to a mirror or plain vdev, the
 .Ar new_device
 is reconstructed sequentially to restore redundancy as quickly as possible.
 Checksums are not verified during sequential reconstruction so a scrub is
@@ -131,6 +121,35 @@ Waits until
 .Ar new_device
 has finished resilvering or expanding before returning.
 .El
+.
+.Sh EXAMPLES
+.\" Example 1 is example 5 from zpool.8.
+.\" Make sure to update them bidirectionally
+.Ss Example 1 : No Making a non-mirrored ZFS Storage Pool mirrored
+The following command converts an existing single device
+.Ar sda
+into a mirror by attaching a second device to it,
+.Ar sdb .
+.Dl # Nm zpool Cm attach Ar tank Pa sda sdb
+.
+.Ss Example 2 : No Expanding a RAID-Z vdev with an additional disk
+The following command adds
+.Ar sdg
+to the existing
+.Ar raidz2-0
+vdev in
+.Ar tank ,
+turning a 6-wide RAID-Z2 into a 7-wide RAID-Z2:
+.Dl # Nm zpool Cm attach Ar tank raidz2-0 Pa sdg
+Progress is reported by
+.Nm zpool Cm status .
+The operation requires the
+.Sy raidz_expansion
+pool feature, and
+.Ar sdg
+must be at least as large as the smallest existing disk in the vdev.
+Old blocks keep their original data-to-parity ratio; only blocks written
+after the expansion use the new ratio.
 .
 .Sh SEE ALSO
 .Xr zpool-add 8 ,

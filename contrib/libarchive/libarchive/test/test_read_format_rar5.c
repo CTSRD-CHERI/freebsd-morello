@@ -154,6 +154,37 @@ DEFINE_TEST(test_read_format_rar5_stored)
 	EPILOGUE();
 }
 
+DEFINE_TEST(test_read_format_rar5_zip_in_rar)
+{
+	/* Regression test for issue #2249.  This archive begins with the
+	 * RAR5 signature but stores an uncompressed (method "store") Zip
+	 * file as one of its members.  The Zip bidder used to outscore the
+	 * RAR5 bidder on such archives (its seekable end-of-central-directory
+	 * bid of 32 beat the RAR5 signature bid of 30), so auto-detection
+	 * misread the whole thing as a Zip and reported the embedded Zip's
+	 * entries instead of the RAR members.  With the RAR5 signature bid
+	 * raised to 64 the reader must pick RAR5 and list the real members. */
+
+	const char *expected[] = {
+		"payload/inner.zip",
+		"payload/real_after.txt",
+		"payload",
+	};
+	size_t i;
+
+	PROLOGUE("test_read_format_rar5_zip_in_rar.rar");
+
+	for(i = 0; i < sizeof(expected) / sizeof(expected[0]); ++i) {
+		assertA(0 == archive_read_next_header(a, &ae));
+		assertEqualInt(ARCHIVE_FORMAT_RAR_V5, archive_format(a));
+		assertEqualString(expected[i], archive_entry_pathname(ae));
+	}
+
+	assertA(ARCHIVE_EOF == archive_read_next_header(a, &ae));
+
+	EPILOGUE();
+}
+
 DEFINE_TEST(test_read_format_rar5_compressed)
 {
 	const int DATA_SIZE = 1200;
@@ -250,6 +281,35 @@ DEFINE_TEST(test_read_format_rar5_multiple_files_solid)
 	assertA(1 == verify_data(buff, 4, DATA_SIZE));
 
 	assertA(ARCHIVE_EOF == archive_read_next_header(a, &ae));
+	EPILOGUE();
+}
+
+DEFINE_TEST(test_read_format_rar5_multiarchive_first_volume_only)
+{
+	/* Regression test: opening only the first volume of a multivolume
+	 * RAR5 set must not silently return a truncated file.  The first
+	 * entry's data is flagged 'split after', i.e. it continues in the
+	 * following volumes; when those are not supplied, reading the data
+	 * has to fail rather than report a clean end of file after a short
+	 * read, which used to silently hand back corrupted data. */
+	char buf[16384];
+	la_ssize_t r;
+
+	PROLOGUE("test_read_format_rar5_multiarchive.part01.rar");
+
+	assertA(0 == archive_read_next_header(a, &ae));
+	assertEqualString(
+	    "home/antek/temp/build/unrar5/libarchive/bin/bsdcat_test",
+	    archive_entry_pathname(ae));
+
+	/* Drain the entry's data.  It must terminate with a fatal error,
+	 * not a clean 0-length end of file. */
+	do {
+		r = archive_read_data(a, buf, sizeof(buf));
+	} while(r > 0);
+
+	assertEqualInt(ARCHIVE_FATAL, r);
+
 	EPILOGUE();
 }
 
@@ -912,6 +972,50 @@ DEFINE_TEST(test_read_format_rar5_owner)
 	EPILOGUE();
 }
 
+DEFINE_TEST(test_read_format_rar5_owner_name_toolong)
+{
+	/* GH #3066: a crafted HEAD_FILE declares an EX_UOWNER owner user name
+	 * whose length is far larger than the extra field that contains it.
+	 * The reader used to pass that length straight to read_ahead(), which
+	 * attempted a multi-terabyte allocation. It must reject the header
+	 * instead of trying to satisfy the bogus length. */
+	PROLOGUE("test_read_format_rar5_owner_name_toolong.rar");
+
+	assertA(archive_read_next_header(a, &ae) < 0);
+
+	EPILOGUE();
+}
+
+DEFINE_TEST(test_read_format_rar5_group_name_toolong)
+{
+	/* Companion to test_read_format_rar5_owner_name_toolong: the crafted
+	 * HEAD_FILE declares an EX_UOWNER owner group name whose length
+	 * (0x8000000000000) is far larger than the extra field that contains
+	 * it. The length must be validated in 64 bits: 32-bit platforms used
+	 * to truncate it to zero and accept the header instead of rejecting
+	 * it. */
+	PROLOGUE("test_read_format_rar5_group_name_toolong.rar");
+
+	assertA(archive_read_next_header(a, &ae) < 0);
+
+	EPILOGUE();
+}
+
+DEFINE_TEST(test_read_format_rar5_extra_data_size_toolong)
+{
+	/* A crafted HEAD_FILE declares a file-header extra-area size
+	 * (edata_size) far larger than the 2 MB header cap.  That value was
+	 * used, unbounded, as the ceiling for the EX_UOWNER owner-name length,
+	 * so parse_file_extra_owner() passed an attacker-chosen length straight
+	 * to read_ahead(), attempting a multi-terabyte allocation.  The reader
+	 * must reject the oversized extra-area size instead. */
+	PROLOGUE("test_read_format_rar5_extra_data_size_toolong.rar.Z");
+
+	assertA(archive_read_next_header(a, &ae) < 0);
+
+	EPILOGUE();
+}
+
 DEFINE_TEST(test_read_format_rar5_symlink)
 {
 	const int DATA_SIZE = 5;
@@ -1107,6 +1211,18 @@ DEFINE_TEST(test_read_format_rar5_nonempty_dir_stream)
 	(void) archive_read_next_header(a, &ae);
 	(void) archive_read_data(a, buf, sizeof(buf));
 	(void) archive_read_next_header(a, &ae);
+
+	EPILOGUE();
+}
+
+DEFINE_TEST(test_read_format_rar5_nonempty_dir_data)
+{
+	PROLOGUE("test_read_format_rar5_dirdata.rar");
+
+	/* This archive is invalid. It declares a directory entry with nonzero
+	   data size. */
+
+	assertA(archive_read_next_header(a, &ae) == ARCHIVE_FATAL);
 
 	EPILOGUE();
 }
@@ -1425,6 +1541,210 @@ DEFINE_TEST(test_read_format_rar5_data_ready_pointer_leak)
 	(void) archive_read_next_header(a, &ae);
 	/* This call shouldn't produce SIGSEGV. */
 	(void) archive_read_data(a, buf, sizeof(buf));
+
+	EPILOGUE();
+}
+
+DEFINE_TEST(test_read_format_rar5_only_crypt_exfld)
+{
+	/* GH #2711 */
+
+	char buf[4096];
+	PROLOGUE("test_read_format_rar5_only_crypt_exfld.rar");
+
+	/* The reader should allow iteration through files, but should fail
+	   during data extraction. */
+
+	assertA(archive_read_next_header(a, &ae) == ARCHIVE_OK);
+	assertA(archive_read_data(a, buf, sizeof(buf)) == ARCHIVE_FAILED);
+
+	/* The reader should also provide a valid error message. */
+	assertA(archive_error_string(a) != NULL);
+
+	EPILOGUE();
+}
+
+DEFINE_TEST(test_read_format_rar5_only_unsupported_exfld)
+{
+	/* GH #2711 */
+
+	char buf[4096];
+	PROLOGUE("test_read_format_rar5_unsupported_exfld.rar");
+
+	/* The reader should allow iteration through files, and it should
+	   succeed with data extraction. */
+
+	assertA(archive_read_next_header(a, &ae) == ARCHIVE_OK);
+
+	/* 48 is the expected number of bytes that should be extracted */
+	assertA(archive_read_data(a, buf, sizeof(buf)) == 48);
+
+	EPILOGUE();
+}
+
+DEFINE_TEST(test_read_format_rar5_invalidhash_and_validhtime_exfld)
+{
+	/* GH #2711 */
+
+	char buf[4096];
+	PROLOGUE("test_read_format_rar5_invalid_hash_valid_htime_exfld.rar");
+
+	/* The reader should report an error when trying to process this data.
+	   Returning EOF here means that the reader has failed to identify
+	   malformed structure. */
+
+	assertA(archive_read_next_header(a, &ae) < 0);
+	assertA(archive_read_data(a, buf, sizeof(buf)) < 0);
+
+	EPILOGUE();
+}
+
+/*
+ * Regression tests for the RAR5 base-block parser leaving unconsumed body
+ * bytes before returning ARCHIVE_RETRY (GHSA-9h2c-464f-j3hj). Each archive is
+ * the test_read_format_rar5_stored archive with extra, unread bytes appended
+ * to a no-data block's body. Before the fix the reader did not skip those
+ * bytes, so the stream misaligned and the following file entry was lost; with
+ * the fix the trailing bytes are skipped and helloworld.txt is read normally.
+ */
+DEFINE_TEST(test_read_format_rar5_main_block_extra_bytes)
+{
+	const char helloworld_txt[] = "hello libarchive test suite!\n";
+	la_ssize_t file_size = sizeof(helloworld_txt) - 1;
+	char buff[64];
+
+	/* HEAD_MAIN block padded with trailing bytes the parser does not read. */
+	PROLOGUE("test_read_format_rar5_main_block_extra_bytes.rar");
+
+	assertA(0 == archive_read_next_header(a, &ae));
+	assertEqualString("helloworld.txt", archive_entry_pathname(ae));
+	assertEqualInt(file_size, archive_entry_size(ae));
+	assertA(file_size == archive_read_data(a, buff, file_size));
+	assertEqualMem(buff, helloworld_txt, file_size);
+
+	assertA(ARCHIVE_EOF == archive_read_next_header(a, &ae));
+
+	EPILOGUE();
+}
+
+DEFINE_TEST(test_read_format_rar5_skip_block_extra_bytes)
+{
+	const char helloworld_txt[] = "hello libarchive test suite!\n";
+	la_ssize_t file_size = sizeof(helloworld_txt) - 1;
+	char buff[64];
+
+	/* An unknown HFL_SKIP_IF_UNKNOWN block carrying trailing bytes is inserted
+	 * before the file entry; the parser must skip the entire block. */
+	PROLOGUE("test_read_format_rar5_skip_block_extra_bytes.rar");
+
+	assertA(0 == archive_read_next_header(a, &ae));
+	assertEqualString("helloworld.txt", archive_entry_pathname(ae));
+	assertEqualInt(file_size, archive_entry_size(ae));
+	assertA(file_size == archive_read_data(a, buff, file_size));
+	assertEqualMem(buff, helloworld_txt, file_size);
+
+	assertA(ARCHIVE_EOF == archive_read_next_header(a, &ae));
+
+	EPILOGUE();
+}
+
+DEFINE_TEST(test_read_format_rar5_bytes_remaining_underflow)
+{
+	/* GH #2986 — CWE-191 signed integer underflow on
+	 * rar->file.bytes_remaining in process_block(). A malformed RAR5
+	 * archive whose compressed-block to_skip value exceeds the declared
+	 * remaining file data drives bytes_remaining negative; the negative
+	 * ssize_t later reaches read_ahead() and is implicitly converted to
+	 * a near-SIZE_MAX malloc request (CWE-122).
+	 *
+	 * The patched reader must reject the malformed archive with
+	 * ARCHIVE_FATAL before the negative value is reached. */
+
+	char buf[4096];
+	la_ssize_t r;
+	PROLOGUE("test_read_format_rar5_bytes_remaining_underflow.rar");
+
+	assertEqualIntA(a, ARCHIVE_OK, archive_read_next_header(a, &ae));
+	assertEqualString("poc.txt", archive_entry_pathname(ae));
+
+	do {
+		r = archive_read_data(a, buf, sizeof(buf));
+	} while (r > 0);
+
+	assertEqualIntA(a, ARCHIVE_FATAL, r);
+	assertA(archive_error_string(a) != NULL);
+
+	EPILOGUE();
+}
+
+DEFINE_TEST(test_read_format_rar5_unpacked_size_exceeds_declared)
+{
+	PROLOGUE("test_read_format_rar5_unpacked_size_exceeds_declared.rar");
+
+	assertEqualIntA(a, ARCHIVE_OK, archive_read_next_header(a, &ae));
+	assertEqualString("seed", archive_entry_pathname(ae));
+	assertEqualInt(109, archive_entry_size(ae));
+
+	assertEqualIntA(a, ARCHIVE_FATAL, archive_read_next_header(a, &ae));
+	assertA(archive_error_string(a) != NULL);
+
+	assertEqualInt(ARCHIVE_OK, archive_read_free(a));
+}
+
+/*
+ * RAR5 is a streaming unpacker and never implements seeking.
+ * archive_seek_data() on a RAR5 entry must report unsupported via
+ * ARCHIVE_FAILED without poisoning the archive state.  See #3323.
+ */
+DEFINE_TEST(test_read_format_rar5_seek_data_unsupported)
+{
+	const int DATA_SIZE = 1200;
+	uint8_t buff[1200];
+
+	PROLOGUE("test_read_format_rar5_compressed.rar");
+
+	assertA(0 == archive_read_next_header(a, &ae));
+	assertEqualString("test.bin", archive_entry_pathname(ae));
+
+	/* Capability probe. */
+	assertEqualIntA(a, ARCHIVE_FAILED,
+	    archive_seek_data(a, 0, SEEK_CUR));
+	assertA(archive_error_string(a) != NULL);
+
+	/* Subsequent read must still return the real entry content. */
+	assertA(DATA_SIZE == archive_read_data(a, buff, DATA_SIZE));
+	assertA(ARCHIVE_EOF == archive_read_next_header(a, &ae));
+	assertA(1 == verify_data(buff, 0, DATA_SIZE));
+
+	EPILOGUE();
+}
+
+DEFINE_TEST(test_read_format_rar5_redir_varint_2byte)
+{
+	/*
+	 * A crafted RAR5 whose EX_REDIR symlink target is exactly 128 bytes.
+	 * That makes read_var_sized() encode the length as a 2-byte varint
+	 * (0x80 0x01) instead of the 1-byte form assumed by the old "+1" code.
+	 * With the old code extra_data_size was decremented by only target_size+1
+	 * (129) instead of target_size+2 (130), leaving it 1 too large.
+	 * process_head_file_extra() would then loop back and attempt to parse a
+	 * phantom extra field from the one byte of padding that follows, which
+	 * returns ARCHIVE_EOF.  With the fix, extra_data_size reaches exactly 0
+	 * and the loop exits cleanly.
+	 */
+	char expected_target[129];
+	memset(expected_target, 'a', 128);
+	expected_target[128] = '\0';
+
+	PROLOGUE("test_read_format_rar5_redir_varint_2byte.rar");
+
+	assertA(0 == archive_read_next_header(a, &ae));
+	assertEqualString("link.txt", archive_entry_pathname(ae));
+	assertEqualInt(AE_IFLNK, archive_entry_filetype(ae));
+	assertEqualString(expected_target, archive_entry_symlink(ae));
+	assertEqualInt(128, (int)strlen(archive_entry_symlink(ae)));
+
+	assertA(ARCHIVE_EOF == archive_read_next_header(a, &ae));
 
 	EPILOGUE();
 }

@@ -151,6 +151,12 @@ openpic_common_attach(device_t dev, uint32_t node)
 	    OPENPIC_FEATURE_LAST_CPU_SHIFT) + 1;
 	sc->sc_nirq = ((x & OPENPIC_FEATURE_LAST_IRQ_MASK) >>
 	    OPENPIC_FEATURE_LAST_IRQ_SHIFT) + 1;
+	/*
+	 * Generate the vector mask used for IACK.
+	 * Some PICs may not support the full 11 bit vector width, so clamp the
+	 * mask to only the next-power-of-2 from the max IRQ.
+	 */
+	sc->sc_vec_mask = (1 << fls(sc->sc_nirq)) - 1;
 
 	/*
 	 * PSIM seems to report 1 too many IRQs and CPUs
@@ -225,7 +231,7 @@ openpic_common_attach(device_t dev, uint32_t node)
  * PIC I/F methods
  */
 
-void
+static void
 openpic_bind(device_t dev, u_int irq, cpuset_t cpumask, void **priv __unused)
 {
 	struct openpic_softc *sc;
@@ -254,7 +260,7 @@ openpic_bind(device_t dev, u_int irq, cpuset_t cpumask, void **priv __unused)
 				break;
 			ncpu++;
 		}
-		mask &= (1 << cpu);
+		mask = (1 << __pcpu[cpu].pc_pic);
 	}
 
 	openpic_write(sc, OPENPIC_IDEST(irq), mask);
@@ -280,6 +286,27 @@ openpic_config(device_t dev, u_int irq, enum intr_trigger trig,
 	openpic_write(sc, OPENPIC_SRC_VECTOR(irq), x);
 }
 
+static void
+openpic_dispatch(device_t dev, struct trapframe *tf)
+{
+	struct openpic_softc *sc;
+	u_int cpuid, vector;
+
+	CTR1(KTR_INTR, "%s: got interrupt", __func__);
+
+	sc = device_get_softc(dev);
+
+	cpuid = (dev == root_pic) ? PCPU_GET(pic) : 0;
+
+	while (1) {
+		vector = openpic_read(sc, OPENPIC_PCPU_IACK(cpuid));
+		vector &= sc->sc_vec_mask;
+		if (vector == sc->sc_vec_mask)
+			break;
+		powerpc_dispatch_intr(vector, tf);
+	}
+}
+
 static int
 openpic_intr(void *arg)
 {
@@ -289,26 +316,6 @@ openpic_intr(void *arg)
 	openpic_dispatch(dev, NULL);
 
 	return (FILTER_HANDLED);
-}
-
-void
-openpic_dispatch(device_t dev, struct trapframe *tf)
-{
-	struct openpic_softc *sc;
-	u_int cpuid, vector;
-
-	CTR1(KTR_INTR, "%s: got interrupt", __func__);
-
-	cpuid = (dev == root_pic) ? PCPU_GET(cpuid) : 0;
-
-	sc = device_get_softc(dev);
-	while (1) {
-		vector = openpic_read(sc, OPENPIC_PCPU_IACK(cpuid));
-		vector &= OPENPIC_VECTOR_MASK;
-		if (vector == 255)
-			break;
-		powerpc_dispatch_intr(vector, tf);
-	}
 }
 
 void
@@ -337,13 +344,13 @@ openpic_eoi(device_t dev, u_int irq __unused, void *priv __unused)
 	struct openpic_softc *sc;
 	u_int cpuid;
 
-	cpuid = (dev == root_pic) ? PCPU_GET(cpuid) : 0;
-
 	sc = device_get_softc(dev);
+	cpuid = (dev == root_pic) ? PCPU_GET(pic) : 0;
+
 	openpic_write(sc, OPENPIC_PCPU_EOI(cpuid), 0);
 }
 
-void
+static void
 openpic_ipi(device_t dev, u_int cpu)
 {
 	struct openpic_softc *sc;
@@ -352,12 +359,12 @@ openpic_ipi(device_t dev, u_int cpu)
 
 	sc = device_get_softc(dev);
 	sched_pin();
-	openpic_write(sc, OPENPIC_PCPU_IPI_DISPATCH(PCPU_GET(cpuid), 0),
-	    1u << cpu);
+	openpic_write(sc, OPENPIC_PCPU_IPI_DISPATCH(PCPU_GET(pic), 0),
+	    1u << pcpu_find(cpu)->pc_pic);
 	sched_unpin();
 }
 
-void
+static void
 openpic_mask(device_t dev, u_int irq, void *priv __unused)
 {
 	struct openpic_softc *sc;
@@ -393,7 +400,7 @@ openpic_unmask(device_t dev, u_int irq, void *priv __unused)
 	}
 }
 
-int
+static int
 openpic_suspend(device_t dev)
 {
 	struct openpic_softc *sc;
@@ -424,7 +431,7 @@ openpic_suspend(device_t dev)
 	return (0);
 }
 
-int
+static int
 openpic_resume(device_t dev)
 {
     	struct openpic_softc *sc;
@@ -453,3 +460,52 @@ openpic_resume(device_t dev)
 
 	return (0);
 }
+
+static void
+openpic_ap_init(device_t dev)
+{
+	struct openpic_softc *sc;
+
+	if (dev != root_pic)
+		return;
+
+	/*
+	 * Not everything implements the full OpenPIC specification.
+	 *
+	 * Notably the CPC945 Bridge and Memory Controller User Manual, which
+	 * is in the PPC 970 (ie Apple G5) CPUs, calls out a set of
+	 * deviations from the specification.  Thus we can't just assume
+	 * WHOAMI is available everywhere.
+	 *
+	 * See 9.5.3.3 - Deviations from the OpenPIC specification.
+	 * Notably - the WhoAmI register is actually 0xF8000050 for all CPUs.
+	 */
+
+	sc = device_get_softc(dev);
+	if (sc->sc_quirks & OPENPIC_QUIRK_WHOAMI_WORKS)
+		PCPU_SET(pic, bus_read_4(sc->sc_memr, OPENPIC_WHOAMI));
+	else
+		PCPU_SET(pic, PCPU_GET(cpuid));
+}
+
+static device_method_t openpic_methods[] = {
+	/* Device interface */
+	DEVMETHOD(device_suspend,	openpic_suspend),
+	DEVMETHOD(device_resume,	openpic_resume),
+
+	/* PIC interface */
+	DEVMETHOD(pic_bind,		openpic_bind),
+	DEVMETHOD(pic_config,		openpic_config),
+	DEVMETHOD(pic_dispatch,		openpic_dispatch),
+	DEVMETHOD(pic_enable,		openpic_enable),
+	DEVMETHOD(pic_eoi,		openpic_eoi),
+	DEVMETHOD(pic_ipi,		openpic_ipi),
+	DEVMETHOD(pic_mask,		openpic_mask),
+	DEVMETHOD(pic_unmask,		openpic_unmask),
+	DEVMETHOD(pic_ap_init,		openpic_ap_init),
+
+	DEVMETHOD_END
+};
+
+DEFINE_CLASS_0(openpic, openpic_class, openpic_methods,
+    sizeof(struct openpic_softc));

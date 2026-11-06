@@ -38,7 +38,7 @@
 .\" ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS
 .\" SOFTWARE.
 .\"
-.Dd July 9, 2025
+.Dd July 28, 2026
 .Dt DEVD.CONF 5
 .Os
 .Sh NAME
@@ -246,7 +246,7 @@ The time this event was processed, in seconds since 1970 dot fraction.
 Device name of parent bus.
 .It Li cdev
 Device node path if one is created by the
-.Xr devfs 5
+.Xr devfs 4
 filesystem.
 .It Li class
 Device class.
@@ -362,6 +362,8 @@ system.
 Events related to peripheral devices.
 .It Li CAM Ta Li periph Ta Li error Ta
 Generic errors.
+.It Li CAM Ta Li periph Ta Li invalidate Ta
+Peripheral invalidation.
 .It Li CAM Ta Li periph Ta Li timeout Ta
 Command timeouts.
 .El
@@ -400,11 +402,11 @@ String containing the temperature of the core that has become too hot.
 .It Li DEVFS
 .It Li DEVFS Ta Li CDEV Ta Li CREATE Ta
 The
-.Xr devfs 5
+.Xr devfs 4
 node is created.
 .It Li DEVFS Ta Li CDEV Ta Li DESTROY Ta
 The
-.Xr devfs 5
+.Xr devfs 4
 node is destroyed.
 .El
 .Pp
@@ -652,6 +654,24 @@ and
 for details.
 .El
 .Pp
+.Bl -column "System" "Subsystem" "1234567" -compact
+.Sy "System" Ta Sy "Subsystem" Ta Sy "Type" Ta Sy "Description"
+.It Li SND Ta Ta Ta
+Events related to the
+.Xr sound 4
+driver.
+.It Li SND Ta Li CONN Ta Li IN Ta
+Connected input device specified in
+.Pa cdev
+variable.
+.It Li SND Ta Li CONN Ta Li OUT Ta
+Connected output device specified in
+.Pa cdev
+variable.
+.It Li SND Ta Li CONN Ta Li NODEV Ta
+No connected devices.
+.El
+.Pp
 .\"
 .\" End of tables
 .\"
@@ -860,7 +880,7 @@ detach 0 {
 };
 .Ed
 .Pp
-The following example illustrates the difference betwen internal and shell variables:
+The following example illustrates the difference between internal and shell variables:
 .Bd -literal
 attach 20 {
         device-name             "umodem[0-9]+";
@@ -897,7 +917,7 @@ has many additional examples.
 .Sh SEE ALSO
 .Xr cam 4 ,
 .Xr coretemp 4 ,
-.Xr devfs 5 ,
+.Xr devfs 4 ,
 .Xr re_format 7 ,
 .Xr devd 8
 .Sh BUGS

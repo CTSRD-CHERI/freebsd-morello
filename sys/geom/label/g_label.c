@@ -251,8 +251,8 @@ g_label_create(struct gctl_req *req, struct g_class *mp, struct g_provider *pp,
 		if ((pp2->flags & G_PF_ORPHAN) != 0)
 			continue;
 		if (strcmp(pp2->name, name) == 0) {
-			G_LABEL_DEBUG(1, "Label %s(%s) already exists (%s).",
-			    label, name, pp->name);
+			G_LABEL_DEBUG(1, "Label %s (%s) already exists.",
+			    label, name);
 			if (req != NULL) {
 				gctl_error(req, "Provider %s already exists.",
 				    name);
@@ -399,7 +399,7 @@ g_label_taste(struct g_class *mp, struct g_provider *pp, int flags __unused)
 	if (strcmp(pp->geom->class->name, mp->name) == 0)
 		return (NULL);
 
-	gp = g_new_geomf(mp, "label:taste");
+	gp = g_new_geom(mp, "label:taste");
 	gp->start = g_label_start_taste;
 	gp->access = g_label_access_taste;
 	gp->orphan = g_label_orphan_taste;

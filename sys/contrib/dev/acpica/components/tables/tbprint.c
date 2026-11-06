@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2025, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2026, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -254,6 +254,10 @@ AcpiTbPrintTableHeader (
 {
     ACPI_TABLE_HEADER       LocalHeader;
 
+#pragma GCC diagnostic push
+#if defined(__GNUC__) && __GNUC__ >= 11
+#pragma GCC diagnostic ignored "-Wstringop-overread"
+#endif
 
     if (ACPI_COMPARE_NAMESEG (Header->Signature, ACPI_SIG_FACS))
     {
@@ -279,6 +283,14 @@ AcpiTbPrintTableHeader (
             ACPI_CAST_PTR (ACPI_TABLE_RSDP, Header)->Revision,
             LocalHeader.OemId));
     }
+    else if (AcpiGbl_CDAT && !AcpiUtValidNameseg (Header->Signature))
+    {
+	/* CDAT does not use the common ACPI table header */
+
+        ACPI_INFO (("%-4.4s 0x%8.8X%8.8X %06X",
+            ACPI_SIG_CDAT, ACPI_FORMAT_UINT64 (Address),
+            ACPI_CAST_PTR (ACPI_TABLE_CDAT, Header)->Length));
+    }
     else
     {
         /* Standard ACPI table with full common header */
@@ -293,4 +305,5 @@ AcpiTbPrintTableHeader (
             LocalHeader.OemTableId, LocalHeader.OemRevision,
             LocalHeader.AslCompilerId, LocalHeader.AslCompilerRevision));
     }
+#pragma GCC diagnostic pop
 }

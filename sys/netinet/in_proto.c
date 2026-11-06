@@ -29,7 +29,6 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/cdefs.h>
 #include "opt_mrouting.h"
 #include "opt_ipsec.h"
 #include "opt_inet.h"
@@ -77,8 +76,6 @@ struct domain inetdomain = {
 #ifdef VIMAGE
 	.dom_rtdetach =		in_detachhead,
 #endif
-	.dom_ifattach =		in_domifattach,
-	.dom_ifdetach =		in_domifdetach,
 	.dom_nprotosw =		14,
 	.dom_protosw = {
 		&tcp_protosw,
@@ -108,6 +105,8 @@ SYSCTL_NODE(_net_inet, IPPROTO_ICMP, icmp, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "ICMP");
 SYSCTL_NODE(_net_inet, IPPROTO_UDP, udp, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "UDP");
+SYSCTL_NODE(_net_inet, IPPROTO_UDPLITE, udplite, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "UDP-Lite");
 SYSCTL_NODE(_net_inet, IPPROTO_TCP, tcp, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "TCP");
 #if defined(SCTP) || defined(SCTP_SUPPORT)

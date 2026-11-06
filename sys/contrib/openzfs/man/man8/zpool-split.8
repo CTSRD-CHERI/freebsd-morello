@@ -1,23 +1,13 @@
 .\" SPDX-License-Identifier: CDDL-1.0
 .\"
-.\" CDDL HEADER START
+.\" This file and its contents are supplied under the terms of the
+.\" Common Development and Distribution License ("CDDL"), version 1.0.
+.\" You may only use this file in accordance with the terms of version
+.\" 1.0 of the CDDL.
 .\"
-.\" The contents of this file are subject to the terms of the
-.\" Common Development and Distribution License (the "License").
-.\" You may not use this file except in compliance with the License.
-.\"
-.\" You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-.\" or https://opensource.org/licenses/CDDL-1.0.
-.\" See the License for the specific language governing permissions
-.\" and limitations under the License.
-.\"
-.\" When distributing Covered Code, include this CDDL HEADER in each
-.\" file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-.\" If applicable, add the following below this CDDL HEADER, with the
-.\" fields enclosed by brackets "[]" replaced with your own identifying
-.\" information: Portions Copyright [yyyy] [name of copyright owner]
-.\"
-.\" CDDL HEADER END
+.\" A full copy of the text of the CDDL should have accompanied this
+.\" source.  A copy of the CDDL is also available via the Internet at
+.\" https://opensource.org/license/CDDL-1.0.
 .\"
 .\" Copyright (c) 2007, Sun Microsystems, Inc. All Rights Reserved.
 .\" Copyright (c) 2012, 2018 by Delphix. All rights reserved.
@@ -27,7 +17,7 @@
 .\" Copyright 2017 Nexenta Systems, Inc.
 .\" Copyright (c) 2017 Open-E, Inc. All Rights Reserved.
 .\"
-.Dd June 2, 2021
+.Dd September 9, 2026
 .Dt ZPOOL-SPLIT 8
 .Os
 .
@@ -66,6 +56,19 @@ included in the new
 .Ar pool
 and, should any devices remain unspecified,
 the last device in each mirror is used as would be by default.
+.Pp
+.Ar newpool
+gets a new GUID.
+On Linux, the filesystems of
+.Ar newpool
+thus get a new filesystem UUID at their first mount; see the
+.Sy guid
+property in
+.Xr zfsprops 7
+and the effect on overlayfs in the
+.Sx Filesystem UUIDs and Overlayfs
+section of
+.Xr zpool-reguid 8 .
 .Bl -tag -width Ds
 .It Fl g
 Display vdev GUIDs instead of the normal device names.

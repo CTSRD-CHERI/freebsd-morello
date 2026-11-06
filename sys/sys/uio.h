@@ -50,13 +50,13 @@ typedef	__off_t	off_t;
 #ifdef _KERNEL
 
 struct uio {
-	struct	iovec *uio_iov;		/* scatter/gather list */
-	int	uio_iovcnt;		/* length of scatter/gather list */
-	off_t	uio_offset;		/* offset in target object */
-	ssize_t	uio_resid;		/* remaining bytes to process */
-	enum	uio_seg uio_segflg;	/* address space */
-	enum	uio_rw uio_rw;		/* operation */
-	struct	thread *uio_td;		/* owner */
+	struct iovec	*uio_iov;	/* scatter/gather list */
+	int		 uio_iovcnt;	/* length of scatter/gather list */
+	off_t		 uio_offset;	/* offset in target object */
+	ssize_t		 uio_resid;	/* remaining bytes to process */
+	enum uio_seg	 uio_segflg;	/* address space */
+	enum uio_rw	 uio_rw;	/* operation */
+	struct thread	*uio_td;	/* owner */
 };
 
 /*
@@ -81,7 +81,7 @@ void	freeuio(struct uio *uio);
 struct uio *cloneuio(struct uio *uiop);
 int	copyiniov(const struct iovec *iovp, u_int iovcnt, struct iovec **iov,
 	    int error);
-int	copyinuio(const struct iovec *iovp, u_int iovcnt, struct uio **uiop);
+int	copyinuio(const void *iovp, u_int iovcnt, struct uio **uiop);
 int	copyout_map(struct thread *td, vm_offset_t *addr, size_t sz);
 int	copyout_unmap(struct thread *td, vm_offset_t addr, size_t sz);
 void	exterr_copyout(struct thread *td);
@@ -98,6 +98,8 @@ int	uiomove_fromphys(struct vm_page *ma[], vm_offset_t offset, int n,
 	    struct uio *uio);
 int	uiomove_nofault(void *cp, int n, struct uio *uio);
 int	uiomove_object(struct vm_object *obj, off_t obj_size, struct uio *uio);
+int	uiomove_step(void *cp, void *base, size_t cnt, struct uio *uio);
+int	updateiov(const struct uio *uiop, void *iovp);
 
 #else /* !_KERNEL */
 

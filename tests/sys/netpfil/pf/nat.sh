@@ -55,6 +55,9 @@ exhaust_body()
 	jexec echo ifconfig ${epair_echo}b 198.51.100.2/24 up
 	jexec echo /usr/sbin/inetd -p ${PWD}/inetd-echo.pid $(atf_get_srcdir)/echo_inetd.conf
 
+	# Disable checksum offload on one of the interfaces to ensure pf handles that
+	jexec nat ifconfig ${epair_nat}a -txcsum
+
 	# Enable pf!
 	jexec nat pfctl -e
 	pft_set_rules nat \
@@ -159,20 +162,26 @@ endpoint_independent_common()
 	pft_set_rules nat "${1}"
 
 	jexec server1 tcpdump -i ${epair_server1}a -w ${PWD}/server1.pcap \
-		--immediate-mode $filter &
+		--immediate-mode $filter -c 1 &
 	server1tcppid="$!"
 	jexec server2 tcpdump -i ${epair_server2}a -w ${PWD}/server2.pcap \
-		--immediate-mode $filter &
+		--immediate-mode $filter -c 1 &
 	server2tcppid="$!"
 
-	# send out multiple packets
-	for i in $(seq 1 10); do
-		echo "ping" | jexec client nc -u 198.51.100.32 1234 -p 4242 -w 0
-		echo "ping" | jexec client nc -u 198.51.100.22 1234 -p 4242 -w 0
+	# wait for tcpdumps to fully attach and block in bpfread()
+	for p in ${server1tcppid} ${server2tcppid}; do
+		while [ $(ps -o wchan ${p} | tr "\n" " " | cut -w -f 2) != "bpf" ]; do
+			sleep 0.01;
+		done
 	done
 
-	kill $server1tcppid
-	kill $server2tcppid
+	echo "ping" | jexec client nc -u 198.51.100.32 1234 -p 4242
+	echo "ping" | jexec client nc -u 198.51.100.22 1234 -p 4242
+
+	for p in ${server1tcppid} ${server2tcppid}; do
+		wait ${p}
+		atf_check_equal 0 $?
+	done
 
 	tuple_server1=$(tcpdump -r ${PWD}/server1.pcap | awk '{addr=$3} END {print addr}')
 	tuple_server2=$(tcpdump -r ${PWD}/server2.pcap | awk '{addr=$3} END {print addr}')
@@ -198,20 +207,26 @@ endpoint_independent_common()
 	pft_set_rules nat "${2}"
 
 	jexec server1 tcpdump -i ${epair_server1}a -w ${PWD}/server1.pcap \
-		--immediate-mode $filter &
+		--immediate-mode $filter -c 1 &
 	server1tcppid="$!"
 	jexec server2 tcpdump -i ${epair_server2}a -w ${PWD}/server2.pcap \
-		--immediate-mode $filter &
+		--immediate-mode $filter -c 1 &
 	server2tcppid="$!"
 
-	# send out multiple packets,  sometimes one fails to go through
-	for i in $(seq 1 10); do
-		echo "ping" | jexec client nc -u 198.51.100.32 1234 -p 4242 -w 0
-		echo "ping" | jexec client nc -u 198.51.100.22 1234 -p 4242 -w 0
+	# wait for tcpdumps to fully attach and block in bpfread()
+	for p in ${server1tcppid} ${server2tcppid}; do
+		while [ $(ps -o wchan ${p} | tr "\n" " " | cut -w -f 2) != "bpf" ]; do
+			sleep 0.01;
+		done
 	done
 
-	kill $server1tcppid
-	kill $server2tcppid
+	echo "ping" | jexec client nc -u 198.51.100.32 1234 -p 4242
+	echo "ping" | jexec client nc -u 198.51.100.22 1234 -p 4242
+
+	for p in ${server1tcppid} ${server2tcppid}; do
+		wait ${p}
+		atf_check_equal 0 $?
+	done
 
 	tuple_server1=$(tcpdump -r ${PWD}/server1.pcap | awk '{addr=$3} END {print addr}')
 	tuple_server2=$(tcpdump -r ${PWD}/server2.pcap | awk '{addr=$3} END {print addr}')
@@ -251,6 +266,64 @@ endpoint_independent_compat_body()
 }
 
 endpoint_independent_compat_cleanup()
+{
+	pft_cleanup
+	rm -f server1.out
+	rm -f server2.out
+}
+
+atf_test_case "endpoint_independent_exhaust" "cleanup"
+endpoint_independent_exhaust_head()
+{
+	atf_set descr 'Test that a client behind NAT gets the same external IP:port for different servers'
+	atf_set require.user root
+}
+
+endpoint_independent_exhaust_body()
+{
+	endpoint_independent_setup # Sets ${epair_…} variables
+
+	endpoint_independent_common \
+		"nat on ${epair_nat}a inet from ! (${epair_nat}a) to any -> (${epair_nat}a)" \
+		"nat on ${epair_nat}a inet from ! (${epair_nat}a) to any -> (${epair_nat}a) port 3000:3001 sticky-address endpoint-independent"
+
+	# Exhaust the available nat ports
+	for i in $(seq 1 10); do
+		echo "ping" | jexec client nc -u 198.51.100.32 1234 -w 0
+		echo "ping" | jexec client nc -u 198.51.100.22 1234 -w 0
+	done
+}
+
+endpoint_independent_exhaust_cleanup()
+{
+	pft_cleanup
+	rm -f server1.out
+	rm -f server2.out
+}
+
+atf_test_case "endpoint_independent_static_port" "cleanup"
+endpoint_independent_static_port_head()
+{
+	atf_set descr 'Test that a client behind NAT gets the same external IP:port for different servers, with static-port'
+	atf_set require.user root
+}
+
+endpoint_independent_static_port_body()
+{
+	endpoint_independent_setup # Sets ${epair_…} variables
+
+	endpoint_independent_common \
+		"nat on ${epair_nat}a inet from ! (${epair_nat}a) to any -> (${epair_nat}a)" \
+		"nat on ${epair_nat}a inet from ! (${epair_nat}a) to any -> (${epair_nat}a) static-port sticky-address endpoint-independent"
+
+	# Exhaust the available nat ports
+	for i in $(seq 1 10); do
+		echo "ping" | jexec client nc -u 198.51.100.32 1234 -w 0
+		echo "ping" | jexec client nc -u 198.51.100.22 1234 -w 0
+	done
+}
+
+endpoint_independent_static_port_cleanup()
 {
 	pft_cleanup
 	rm -f server1.out
@@ -474,14 +547,49 @@ no_addrs_random_cleanup()
 	pft_cleanup
 }
 
-nat_pass_head()
+atf_test_case "nat_pass_in" "cleanup"
+nat_pass_in_head()
 {
-	atf_set descr 'IPv4 NAT on pass rule'
+	atf_set descr 'IPv4 NAT on inbound pass rule'
 	atf_set require.user root
 	atf_set require.progs scapy
 }
 
-nat_pass_body()
+nat_pass_in_body()
+{
+	setup_router_server_ipv4
+	# Delete the route back to make sure that the traffic has been NAT-ed
+	jexec server route del -net ${net_tester} ${net_server_host_router}
+	# Provide routing back to the NAT address
+	jexec server route add 203.0.113.0/24 ${net_server_host_router}
+	jexec router route add 203.0.113.0/24 -iface ${epair_tester}b
+
+	pft_set_rules router \
+		"block" \
+		"pass in  on ${epair_tester}b inet proto tcp nat-to 203.0.113.0 keep state" \
+		"pass out on ${epair_server}a inet proto tcp keep state"
+
+	ping_server_check_reply exit:0 --ping-type=tcp3way --send-sport=4201
+
+	jexec router pfctl -qvvsr
+	jexec router pfctl -qvvss
+	jexec router ifconfig
+	jexec router netstat -rn
+}
+
+nat_pass_in_cleanup()
+{
+	pft_cleanup
+}
+
+nat_pass_out_head()
+{
+	atf_set descr 'IPv4 NAT on outbound pass rule'
+	atf_set require.user root
+	atf_set require.progs scapy
+}
+
+nat_pass_out_body()
 {
 	setup_router_server_ipv4
 	# Delete the route back to make sure that the traffic has been NAT-ed
@@ -500,11 +608,12 @@ nat_pass_body()
 	jexec router netstat -rn
 }
 
-nat_pass_cleanup()
+nat_pass_out_cleanup()
 {
 	pft_cleanup
 }
 
+atf_test_case "nat_match" "cleanup"
 nat_match_head()
 {
 	atf_set descr 'IPv4 NAT on match rule'
@@ -644,6 +753,7 @@ map_e_pass_cleanup()
 	pft_cleanup
 }
 
+atf_test_case "binat_compat" "cleanup"
 binat_compat_head()
 {
 	atf_set descr 'IPv4 BINAT with nat ruleset'
@@ -706,10 +816,11 @@ binat_compat_body()
 
 binat_compat_cleanup()
 {
+	[ -f ${PWD}/inetd_tester.pid ] && kill $(cat ${PWD}/inetd_tester.pid)
 	pft_cleanup
-	kill $(cat ${PWD}/inetd_tester.pid)
 }
 
+atf_test_case "binat_match" "cleanup"
 binat_match_head()
 {
 	atf_set descr 'IPv4 BINAT with nat ruleset'
@@ -773,8 +884,8 @@ binat_match_body()
 
 binat_match_cleanup()
 {
+	[ -f ${PWD}/inetd_tester.pid ] && kill $(cat ${PWD}/inetd_tester.pid)
 	pft_cleanup
-	kill $(cat ${PWD}/inetd_tester.pid)
 }
 
 atf_test_case "empty_pool" "cleanup"
@@ -810,11 +921,146 @@ empty_pool_cleanup()
 	pft_cleanup
 }
 
+atf_test_case "dummynet_mask" "cleanup"
+dummynet_mask_head()
+{
+	atf_set descr 'Verify that dummynet uses the pre-nat address for masking'
+	atf_set require.user root
+}
+
+dummynet_mask_body()
+{
+	dummynet_init
+
+	epair_srv=$(vnet_mkepair)
+	epair_cl=$(vnet_mkepair)
+
+	ifconfig ${epair_cl}b 192.0.2.2/24 up
+	route add default 192.0.2.1
+
+	vnet_mkjail srv ${epair_srv}a
+	jexec srv ifconfig ${epair_srv}a 198.51.100.2/24 up
+
+	vnet_mkjail gw ${epair_srv}b ${epair_cl}a
+	jexec gw ifconfig ${epair_srv}b 198.51.100.1/24 up
+	jexec gw ifconfig ${epair_cl}a 192.0.2.1/24 up
+	jexec gw sysctl net.inet.ip.forwarding=1
+
+	jexec gw dnctl pipe 1 config delay 100 mask src-ip 0xffffff00
+	jexec gw pfctl -e
+	pft_set_rules gw \
+	    "nat on ${epair_srv}b inet from 192.0.2.0/24 to any -> (${epair_srv}b)" \
+	    "pass out dnpipe 1"
+
+	atf_check -s exit:0 -o ignore \
+	    ping -c  3 198.51.100.2
+
+	# Now check that dummynet looked at the correct address
+	atf_check -s exit:0 -o match:"ip.*192.0.2.0/0" \
+	    jexec gw dnctl pipe show
+}
+
+dummynet_mask_cleanup()
+{
+	pft_cleanup
+}
+
+atf_test_case "first_match" "cleanup"
+first_match_head()
+{
+	atf_set descr 'Test that NAT rules are first match'
+	atf_set require.user root
+}
+
+first_match_body()
+{
+	pft_init
+
+	epair_nat=$(vnet_mkepair)
+	epair_echo=$(vnet_mkepair)
+
+	vnet_mkjail nat ${epair_nat}b ${epair_echo}a
+	vnet_mkjail echo ${epair_echo}b
+
+	ifconfig ${epair_nat}a 192.0.2.2/24 up
+	route add -net 198.51.100.0/24 192.0.2.1
+
+	jexec nat ifconfig ${epair_nat}b 192.0.2.1/24 up
+	jexec nat ifconfig ${epair_echo}a 198.51.100.1/24 up
+	jexec nat sysctl net.inet.ip.forwarding=1
+
+	jexec echo ifconfig ${epair_echo}b 198.51.100.2/24 up
+
+	# Enable pf!
+	jexec nat pfctl -e
+	pft_set_rules nat \
+		"table <foo> { 192.0.2.0/24 }" \
+		"nat on ${epair_echo}a inet from <foo> to any -> 198.51.100.1" \
+		"nat on ${epair_echo}a inet from 192.0.2.0/24 to any -> 198.51.100.3"
+
+	atf_check -s exit:0 -o ignore ping -c 3 198.51.100.2
+	atf_check -s exit:0 -e ignore \
+	    -o match:"all icmp 198.51.100.1:.*(192.0.2.2:.*) -> 198.51.100.2:8.*" \
+		jexec nat pfctl -ss
+}
+
+first_match_cleanup()
+{
+	pft_cleanup
+}
+
+atf_test_case "first_match_anchor" "cleanup"
+first_match_anchor_head()
+{
+	atf_set descr 'Test that NAT matches within an anchor are final (PR 299320)'
+	atf_set require.user root
+}
+
+first_match_anchor_body()
+{
+	pft_init
+
+	epair_nat=$(vnet_mkepair)
+	epair_echo=$(vnet_mkepair)
+
+	vnet_mkjail nat ${epair_nat}b ${epair_echo}a
+	vnet_mkjail echo ${epair_echo}b
+
+	ifconfig ${epair_nat}a 192.0.2.2/24 up
+	route add -net 198.51.100.0/24 192.0.2.1
+
+	jexec nat ifconfig ${epair_nat}b 192.0.2.1/24 up
+	jexec nat ifconfig ${epair_echo}a 198.51.100.1/24 up
+	jexec nat sysctl net.inet.ip.forwarding=1
+
+	jexec echo ifconfig ${epair_echo}b 198.51.100.2/24 up
+
+	# Enable pf!
+	jexec nat pfctl -e
+	pft_set_rules nat \
+		"nat-anchor \"foo\"" \
+		"nat on ${epair_echo}a inet from 192.0.2.0/24 to any -> 198.51.100.3"
+
+	echo "nat on ${epair_echo}a inet from 192.0.2.0/24 to any -> 198.51.100.1" | jexec nat pfctl -g -f - -a "foo"
+
+	atf_check -s exit:0 -o ignore ping -c 3 198.51.100.2
+	atf_check -s exit:0 -e ignore \
+	    -o match:"all icmp 198.51.100.1:.*(192.0.2.2:.*) -> 198.51.100.2:8.*" \
+		jexec nat pfctl -ss
+}
+
+first_match_anchor_cleanup()
+{
+	pft_cleanup
+}
+
 atf_init_test_cases()
 {
 	atf_add_test_case "exhaust"
 	atf_add_test_case "nested_anchor"
 	atf_add_test_case "endpoint_independent_compat"
+	atf_add_test_case "endpoint_independent_exhaust"
+	atf_add_test_case "endpoint_independent_static_port"
 	atf_add_test_case "endpoint_independent_pass"
 	atf_add_test_case "nat6_nolinklocal"
 	atf_add_test_case "empty_table_source_hash"
@@ -823,9 +1069,13 @@ atf_init_test_cases()
 	atf_add_test_case "no_addrs_random"
 	atf_add_test_case "map_e_compat"
 	atf_add_test_case "map_e_pass"
-	atf_add_test_case "nat_pass"
+	atf_add_test_case "nat_pass_in"
+	atf_add_test_case "nat_pass_out"
 	atf_add_test_case "nat_match"
 	atf_add_test_case "binat_compat"
 	atf_add_test_case "binat_match"
 	atf_add_test_case "empty_pool"
+	atf_add_test_case "dummynet_mask"
+	atf_add_test_case "first_match"
+	atf_add_test_case "first_match_anchor"
 }

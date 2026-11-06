@@ -125,7 +125,7 @@ static int	me_set_tunnel(struct me_softc *, in_addr_t, in_addr_t);
 static void	me_delete_tunnel(struct me_softc *);
 
 SYSCTL_DECL(_net_link);
-static SYSCTL_NODE(_net_link, IFT_TUNNEL, me, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+static SYSCTL_NODE(_net_link, OID_AUTO, me, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "Minimal Encapsulation for IP (RFC 2004)");
 #ifndef MAX_ME_NEST
 #define MAX_ME_NEST 1
@@ -480,9 +480,7 @@ me_input(struct mbuf *m, int off, int proto, void *arg)
 	hlen = sizeof(struct mobhdr);
 	if (m->m_pkthdr.len < sizeof(struct ip) + hlen)
 		hlen -= sizeof(struct in_addr);
-	if (m->m_len < sizeof(struct ip) + hlen)
-		m = m_pullup(m, sizeof(struct ip) + hlen);
-	if (m == NULL)
+	if ((m = m_pullup(m, sizeof(struct ip) + hlen)) == NULL)
 		goto drop;
 	mh = (struct mobhdr *)mtodo(m, sizeof(struct ip));
 	/* check for wrong flags */
@@ -581,9 +579,7 @@ me_transmit(struct ifnet *ifp, struct mbuf *m)
 		m_freem(m);
 		goto drop;
 	}
-	if (m->m_len < sizeof(struct ip))
-		m = m_pullup(m, sizeof(struct ip));
-	if (m == NULL) {
+	if ((m = m_pullup(m, sizeof(struct ip))) == NULL) {
 		error = ENOBUFS;
 		goto drop;
 	}
@@ -615,9 +611,7 @@ me_transmit(struct ifnet *ifp, struct mbuf *m)
 		error = ENOBUFS;
 		goto drop;
 	}
-	if (m->m_len < sizeof(struct ip) + hlen)
-		m = m_pullup(m, sizeof(struct ip) + hlen);
-	if (m == NULL) {
+	if ((m = m_pullup(m, sizeof(struct ip) + hlen)) == NULL) {
 		error = ENOBUFS;
 		goto drop;
 	}

@@ -54,6 +54,8 @@ ev2name(int event)
 		return ("IN_MOVED_TO");
 	case IN_OPEN:
 		return ("IN_OPEN");
+	case IN_IGNORED:
+		return ("IN_IGNORED");
 	default:
 		return (NULL);
 	}
@@ -94,7 +96,8 @@ consume_event_cookie(int ifd, int wd, unsigned int event, unsigned int flags,
 	ATF_REQUIRE(ev != NULL);
 
 	n = read(ifd, ev, evsz);
-	ATF_REQUIRE_MSG(n >= 0, "failed to read event %s", ev2name(event));
+	ATF_REQUIRE_MSG(n >= 0, "failed to read event %s: %s",
+	    ev2name(event), strerror(errno));
 	ATF_REQUIRE((size_t)n >= sizeof(*ev));
 	ATF_REQUIRE((size_t)n == sizeof(*ev) + ev->len);
 	ATF_REQUIRE((size_t)n == evsz);
@@ -316,6 +319,40 @@ ATF_TC_BODY(inotify_mask_create, tc)
 }
 
 /*
+ * Verify that inotify events are not generated for devfs.  In principle such
+ * events could leak timing information about I/O device accesses.
+ */
+ATF_TC_WITHOUT_HEAD(inotify_devfs);
+ATF_TC_BODY(inotify_devfs, tc)
+{
+	char buf[1];
+	int fd, ifd, n, wd1, wd2, wd3;
+
+	ifd = inotify(IN_NONBLOCK);
+
+	wd1 = inotify_add_watch(ifd, "/dev", IN_ALL_EVENTS);
+	ATF_REQUIRE(wd1 >= 0);
+	wd2 = inotify_add_watch(ifd, "/dev/null", IN_ALL_EVENTS);
+	ATF_REQUIRE(wd2 >= 0);
+	wd3 = inotify_add_watch(ifd, "/dev/zero", IN_ALL_EVENTS);
+	ATF_REQUIRE(wd3 >= 0);
+
+	fd = open("/dev/null", O_WRONLY);
+	ATF_REQUIRE(fd != -1);
+	ATF_REQUIRE(write(fd, buf, sizeof(buf)) == (ssize_t)sizeof(buf));
+	close_checked(fd);
+
+	fd = open("/dev/zero", O_RDONLY);
+	ATF_REQUIRE(fd != -1);
+	ATF_REQUIRE(read(fd, buf, sizeof(buf)) == (ssize_t)sizeof(buf));
+	close_checked(fd);
+
+	ATF_REQUIRE(ioctl(ifd, FIONREAD, &n) == 0);
+	ATF_REQUIRE_MSG(n == 0, "unexpected %d bytes of inotify events", n);
+	close_checked(ifd);
+}
+
+/*
  * Make sure that inotify cooperates with nullfs: if a lower vnode is the
  * subject of an event, the upper vnode should be notified, and if the upper
  * vnode is the subject of an event, the lower vnode should be notified.
@@ -382,6 +419,116 @@ ATF_TC_BODY(inotify_nullfs, tc)
 	close_inotify(ifd);
 }
 ATF_TC_CLEANUP(inotify_nullfs, tc)
+{
+	int error;
+
+	error = unmount("./mnt", 0);
+	if (error != 0) {
+		perror("unmount");
+		exit(1);
+	}
+}
+
+/*
+ * Watch a file in a nullfs mount, and remove it from the lower mount.  Make
+ * sure that we get an IN_DELETE_SELF event and that the watch is removed.
+ */
+ATF_TC_WITH_CLEANUP(inotify_nullfs_remove);
+ATF_TC_HEAD(inotify_nullfs_remove, tc)
+{
+	atf_tc_set_md_var(tc, "require.user", "root");
+}
+ATF_TC_BODY(inotify_nullfs_remove, tc)
+{
+	char dir[PATH_MAX], path[PATH_MAX], *p;
+	int error, fd, ifd, wd;
+
+	strlcpy(dir, "./test.XXXXXX", sizeof(dir));
+	p = mkdtemp(dir);
+	ATF_REQUIRE(p == dir);
+
+	error = mkdir("./mnt", 0755);
+	ATF_REQUIRE(error == 0);
+
+	/* Mount the testdir onto ./mnt. */
+	mount_nullfs("./mnt", dir);
+
+	snprintf(path, sizeof(path), "%s/file", dir);
+	fd = open(path, O_RDWR | O_CREAT, 0644);
+	ATF_REQUIRE(fd != -1);
+	close_checked(fd);
+
+	ifd = inotify(IN_NONBLOCK);
+	wd = inotify_add_watch(ifd, "./mnt/file", IN_DELETE_SELF);
+	ATF_REQUIRE(wd != -1);
+
+	error = unlink(path);
+	ATF_REQUIRE(error == 0);
+
+	consume_event(ifd, wd, IN_DELETE_SELF, 0, NULL);
+	consume_event(ifd, wd, 0, IN_IGNORED, NULL);
+
+	close_inotify(ifd);
+}
+ATF_TC_CLEANUP(inotify_nullfs_remove, tc)
+{
+	int error;
+
+	error = unmount("./mnt", 0);
+	if (error != 0) {
+		perror("unmount");
+		exit(1);
+	}
+}
+
+/*
+ * Exercise a scenario where a watched lower vnode is deleted by a rename.  The
+ * deletion causes the upper vnode to be reclaimed, and after that point it
+ * should stop trying to forward events back to the (now detached) lower vnode.
+ */
+ATF_TC_WITH_CLEANUP(inotify_nullfs_rename);
+ATF_TC_HEAD(inotify_nullfs_rename, tc)
+{
+	atf_tc_set_md_var(tc, "require.user", "root");
+}
+ATF_TC_BODY(inotify_nullfs_rename, tc)
+{
+	char dir[PATH_MAX], path1[PATH_MAX], path2[PATH_MAX], *p;
+	int error, fd, ifd, wd;
+
+	strlcpy(dir, "./test.XXXXXX", sizeof(dir));
+	p = mkdtemp(dir);
+	ATF_REQUIRE(p == dir);
+
+	error = mkdir("./mnt", 0755);
+	ATF_REQUIRE(error == 0);
+
+	/* Mount the testdir onto ./mnt. */
+	mount_nullfs("./mnt", dir);
+
+	ifd = inotify(IN_NONBLOCK);
+
+	/* Create two files, they will be renamed in the upper layer. */
+	snprintf(path1, sizeof(path1), "%s/file1", dir);
+	fd = open(path1, O_RDWR | O_CREAT, 0644);
+	ATF_REQUIRE(fd != -1);
+	close_checked(fd);
+	snprintf(path2, sizeof(path2), "%s/file2", dir);
+	fd = open(path2, O_RDWR | O_CREAT, 0644);
+	ATF_REQUIRE(fd != -1);
+	close_checked(fd);
+
+	wd = inotify_add_watch(ifd, "./mnt/file1", IN_DELETE_SELF);
+	ATF_REQUIRE(wd != -1);
+	error = rename("./mnt/file2", "./mnt/file1");
+	ATF_REQUIRE(error == 0);
+
+	consume_event(ifd, wd, IN_DELETE_SELF, 0, NULL);
+	consume_event(ifd, wd, 0, IN_IGNORED, NULL);
+
+	close_inotify(ifd);
+}
+ATF_TC_CLEANUP(inotify_nullfs_rename, tc)
 {
 	int error;
 
@@ -722,6 +869,27 @@ ATF_TC_BODY(inotify_event_delete, tc)
 	close_inotify(ifd);
 }
 
+ATF_TC_WITHOUT_HEAD(inotify_event_delete_ignored);
+ATF_TC_BODY(inotify_event_delete_ignored, tc)
+{
+	char path[PATH_MAX];
+	int error, ifd, wd;
+
+	ifd = inotify(IN_NONBLOCK);
+
+	wd = watch_dir(ifd, IN_DELETE, path);
+
+	/*
+	 * IN_IGNORED should be generated when a watched directory is removed,
+	 * even if the watch was not configured to raise IN_DELETE_SELF.
+	 */
+	error = rmdir(path);
+	ATF_REQUIRE(error == 0);
+	consume_event(ifd, wd, 0, IN_IGNORED, NULL);
+
+	close_inotify(ifd);
+}
+
 ATF_TC_WITHOUT_HEAD(inotify_event_move);
 ATF_TC_BODY(inotify_event_move, tc)
 {
@@ -757,6 +925,36 @@ ATF_TC_BODY(inotify_event_move, tc)
 	error = rename(path3, "foo");
 	ATF_REQUIRE(error == 0);
 	consume_event(ifd, wd3, IN_MOVE_SELF, 0, NULL);
+
+	close_inotify(ifd);
+}
+
+ATF_TC_WITHOUT_HEAD(inotify_event_move_dir);
+ATF_TC_BODY(inotify_event_move_dir, tc)
+{
+	char dir[PATH_MAX], subdir1[PATH_MAX], subdir2[PATH_MAX];
+	uint32_t cookie1, cookie2;
+	int error, ifd, wd1, wd2;
+
+	ifd = inotify(IN_NONBLOCK);
+
+	wd1 = watch_dir(ifd, IN_MOVE, dir);
+	snprintf(subdir1, sizeof(subdir1), "%s/subdir", dir);
+	error = mkdir(subdir1, 0755);
+	ATF_REQUIRE(error == 0);
+	wd2 = inotify_add_watch(ifd, subdir1, IN_MOVE);
+	ATF_REQUIRE(wd2 != -1);
+
+	snprintf(subdir2, sizeof(subdir2), "%s/newsubdir", dir);
+	error = rename(subdir1, subdir2);
+	ATF_REQUIRE(error == 0);
+
+	cookie1 = consume_event_cookie(ifd, wd1, IN_MOVED_FROM, IN_ISDIR,
+	    "subdir");
+	cookie2 = consume_event_cookie(ifd, wd1, IN_MOVED_TO, IN_ISDIR,
+	    "newsubdir");
+	ATF_REQUIRE_MSG(cookie1 == cookie2,
+	    "expected cookie %u, got %u", cookie1, cookie2);
 
 	close_inotify(ifd);
 }
@@ -847,7 +1045,10 @@ ATF_TP_ADD_TCS(tp)
 	ATF_TP_ADD_TC(tp, inotify_capsicum);
 	ATF_TP_ADD_TC(tp, inotify_coalesce);
 	ATF_TP_ADD_TC(tp, inotify_mask_create);
+	ATF_TP_ADD_TC(tp, inotify_devfs);
 	ATF_TP_ADD_TC(tp, inotify_nullfs);
+	ATF_TP_ADD_TC(tp, inotify_nullfs_remove);
+	ATF_TP_ADD_TC(tp, inotify_nullfs_rename);
 	ATF_TP_ADD_TC(tp, inotify_queue_overflow);
 	/* Tests for the various inotify event types. */
 	ATF_TP_ADD_TC(tp, inotify_event_access_file);
@@ -857,7 +1058,9 @@ ATF_TP_ADD_TCS(tp)
 	ATF_TP_ADD_TC(tp, inotify_event_close_write);
 	ATF_TP_ADD_TC(tp, inotify_event_create);
 	ATF_TP_ADD_TC(tp, inotify_event_delete);
+	ATF_TP_ADD_TC(tp, inotify_event_delete_ignored);
 	ATF_TP_ADD_TC(tp, inotify_event_move);
+	ATF_TP_ADD_TC(tp, inotify_event_move_dir);
 	ATF_TP_ADD_TC(tp, inotify_event_open);
 	ATF_TP_ADD_TC(tp, inotify_event_unmount);
 	return (atf_no_error());

@@ -46,13 +46,32 @@
 #include "bhyve_machdep.h"
 #include "bhyverun.h"
 #include "config.h"
+#include "config_schema.h"
 #include "debug.h"
 #include "fdt.h"
 #include "mem.h"
+#include "ipc.h"
 #include "pci_emul.h"
 #include "pci_irq.h"
 #include "rtc_pl031.h"
 #include "uart_emul.h"
+
+static const struct config_option config_options_machdep[] = {
+	{ "gdb.address", CONFIG_OPTION_STRING },
+	{ "gdb.port", CONFIG_OPTION_INTEGER },
+	{ "gdb.wait", CONFIG_OPTION_BOOL },
+	{ "rtc.use_localtime", CONFIG_OPTION_BOOL },
+	{ "console", CONFIG_OPTION_STRING },
+	{ "fdt.bootargs", CONFIG_OPTION_STRING },
+};
+
+void
+config_schema_merge_options_machdep(struct config_schema *schema)
+{
+
+	config_schema_merge_options(schema, NULL, config_options_machdep,
+	    nitems(config_options_machdep));
+}
 
 /* Start of mem + 1M */
 #define	FDT_BASE	0x100000
@@ -87,6 +106,7 @@ bhyve_init_config(void)
 	set_config_bool("acpi_tables", false);
 	set_config_bool("acpi_tables_in_memory", false);
 	set_config_value("memory.size", "256M");
+	set_config_value("rundir", BHYVE_RUN_DIR);
 }
 
 void
@@ -100,14 +120,17 @@ bhyve_usage(int code)
 	    "Usage: %s [-CDHhSW]\n"
 	    "       %*s [-c [[cpus=]numcpus][,sockets=n][,cores=n][,threads=n]]\n"
 	    "       %*s [-k config_file] [-m mem] [-o var=value]\n"
-	    "       %*s [-p vcpu:hostcpu] [-r file] [-s pci] [-U uuid] vmname\n"
+	    "       %*s [-p vcpuN[-vcpuM]]:hostcpuX[-hostcpuY]\n"
+	    "       %*s [-r file] [-s pci] [-U uuid] vmname\n"
 	    "       -C: include guest memory in core file\n"
 	    "       -c: number of CPUs and/or topology specification\n"
 	    "       -D: destroy on power-off\n"
 	    "       -G: start a debug server\n"
 	    "       -h: help\n"
 	    "       -k: key=value flat config file\n"
+	    "       -M: monitor mode\n"
 	    "       -m: memory size\n"
+	    "       -N: don't reboot while in monitor mode\n"
 	    "       -o: set config 'var' to 'value'\n"
 	    "       -p: pin 'vcpu' to 'hostcpu'\n"
 	    "       -S: guest memory cannot be swapped\n"
@@ -115,7 +138,7 @@ bhyve_usage(int code)
 	    "       -U: UUID\n"
 	    "       -W: force virtio to use single-vector MSI\n",
 	    progname, (int)strlen(progname), "", (int)strlen(progname), "",
-	    (int)strlen(progname), "");
+	    (int)strlen(progname), "", (int)strlen(progname), "");
 	exit(code);
 }
 
@@ -125,7 +148,7 @@ bhyve_optparse(int argc, char **argv)
 	const char *optstr;
 	int c;
 
-	optstr = "hCDSWk:f:o:p:G:c:s:m:U:";
+	optstr = "hCDMNSWk:f:o:p:G:c:s:m:U:";
 	while ((c = getopt(argc, argv, optstr)) != -1) {
 		switch (c) {
 		case 'c':
@@ -149,7 +172,17 @@ bhyve_optparse(int argc, char **argv)
 		case 'm':
 			set_config_value("memory.size", optarg);
 			break;
+		case 'M':
+			set_config_bool("monitor.enabled", true);
+			break;
+		case 'N':
+			set_config_bool("monitor.no_reboot", true);
+			break;
 		case 'o':
+			if (strcmp(optarg, "help") == 0) {
+				print_config_options();
+				exit(0);
+			}
 			if (!bhyve_parse_config_option(optarg)) {
 				errx(EX_USAGE,
 				    "invalid configuration option '%s'",
@@ -168,7 +201,7 @@ bhyve_optparse(int argc, char **argv)
 				pci_print_supported_devices();
 				exit(0);
 			} else if (pci_parse_slot(optarg) != 0)
-				exit(4);
+				exit(BHYVE_EXIT_ERROR);
 			else
 				break;
 		case 'S':
@@ -178,7 +211,7 @@ bhyve_optparse(int argc, char **argv)
 			set_config_value("uuid", optarg);
 			break;
 		case 'W':
-			set_config_bool("virtio_msix", false);
+			set_config_bool("virtio.msix", false);
 			break;
 		case 'h':
 			bhyve_usage(0);
@@ -186,6 +219,10 @@ bhyve_optparse(int argc, char **argv)
 			bhyve_usage(1);
 		}
 	}
+
+	/* Handle backwards compatibility aliases in config options. */
+	bhyve_cfg_warn("virtio_msix", "virtio.msix");
+	bhyve_cfg_warn("monitor", "monitor.enabled");
 }
 
 void
@@ -266,7 +303,7 @@ mmio_uart_mem_handler(struct vcpu *vcpu __unused, int dir,
 	return (0);
 }
 
-static bool
+static int
 init_mmio_uart(struct vmctx *ctx)
 {
 	struct uart_pl011_softc *sc;
@@ -276,14 +313,14 @@ init_mmio_uart(struct vmctx *ctx)
 
 	path = get_config_value("console");
 	if (path == NULL)
-		return (false);
+		return (1);
 
 	sc = uart_pl011_init(mmio_uart_intr_assert, mmio_uart_intr_deassert,
 	    ctx);
 	if (uart_pl011_tty_open(sc, path) != 0) {
 		EPRINTLN("Unable to initialize backend '%s' for mmio uart",
 		    path);
-		assert(0);
+		return (-1);
 	}
 
 	bzero(&mr, sizeof(struct mem_range));
@@ -297,7 +334,7 @@ init_mmio_uart(struct vmctx *ctx)
 	error = register_mem(&mr);
 	assert(error == 0);
 
-	return (true);
+	return (0);
 }
 
 static void
@@ -380,9 +417,9 @@ bhyve_init_platform(struct vmctx *ctx, struct vcpu *bsp)
 		error = vm_get_register(fbsdrun_vcpu(cpu), VM_REG_GUEST_MPIDR_EL1,
 		    &mpidr);
 		assert(error == 0);
-#define	MPIDR_AFF_MASK	(MPIDR_AFF0_MASK | MPIDR_AFF1_MASK | MPIDR_AFF2_MASK | MPIDR_AFF3_MASK)
-		cpu_to_mpidr[cpu] = mpidr & MPIDR_AFF_MASK;
-#undef MPIDR_AFF_MASK
+#define	MPIDR_Aff_MASK	(MPIDR_Aff0_MASK | MPIDR_Aff1_MASK | MPIDR_Aff2_MASK | MPIDR_Aff3_MASK)
+		cpu_to_mpidr[cpu] = mpidr & MPIDR_Aff_MASK;
+#undef MPIDR_Aff_MASK
 	}
 
 	bootrom = get_config_value("bootrom");
@@ -410,8 +447,11 @@ bhyve_init_platform(struct vmctx *ctx, struct vcpu *bsp)
 		return (error);
 	}
 
-	if (init_mmio_uart(ctx))
+	error = init_mmio_uart(ctx);
+	if (error == 0)
 		fdt_add_uart(UART_MMIO_BASE, UART_MMIO_SIZE, UART_INTR);
+	else if (error < 0)
+		return (error);
 	init_mmio_rtc(ctx);
 	fdt_add_rtc(RTC_MMIO_BASE, RTC_MMIO_SIZE, RTC_INTR);
 	fdt_add_timer();

@@ -320,7 +320,7 @@ mac_policy_xlock_assert(void)
  * Initialize the MAC subsystem, including appropriate SMP locks.
  */
 static void
-mac_init(void)
+mac_init(void *dummy __unused)
 {
 
 	LIST_INIT(&mac_static_policy_list);
@@ -340,7 +340,7 @@ mac_init(void)
  * kernel, or loaded before the kernel startup.
  */
 static void
-mac_late_init(void)
+mac_late_init(void *dummy __unused)
 {
 
 	mac_late = 1;
@@ -374,6 +374,7 @@ mac_policy_getlabeled(struct mac_policy_conf *mpc)
 	MPC_FLAG(mount_init_label, MPC_OBJECT_MOUNT);
 	MPC_FLAG(posixsem_init_label, MPC_OBJECT_POSIXSEM);
 	MPC_FLAG(posixshm_init_label, MPC_OBJECT_POSIXSHM);
+	MPC_FLAG(prison_init_label, MPC_OBJECT_PRISON);
 	MPC_FLAG(sysvmsg_init_label, MPC_OBJECT_SYSVMSG);
 	MPC_FLAG(sysvmsq_init_label, MPC_OBJECT_SYSVMSQ);
 	MPC_FLAG(sysvsem_init_label, MPC_OBJECT_SYSVSEM);
@@ -416,7 +417,7 @@ mac_policy_update(void)
  * policies. Gross hack below enables doing it in a cheap manner.
  */
 
-#define FPO(f)	(offsetof(struct mac_policy_ops, mpo_##f) / sizeof(uintptr_t))
+#define FPO(f)	(offsetof(struct mac_policy_ops, mpo_##f) / sizeof(void *))
 
 struct mac_policy_fastpath_elem {
 	int	count;
@@ -487,12 +488,12 @@ static void
 mac_policy_fastpath_register(struct mac_policy_conf *mpc)
 {
 	struct mac_policy_fastpath_elem *mpfe;
-	uintptr_t **ops;
+	const void * const *ops;
 	int i;
 
 	mac_policy_xlock_assert();
 
-	ops = (uintptr_t **)mpc->mpc_ops;
+	ops = (const void * const *)mpc->mpc_ops;
 	for (i = 0; i < nitems(mac_policy_fastpath_array); i++) {
 		mpfe = &mac_policy_fastpath_array[i];
 		if (ops[mpfe->offset] != NULL)
@@ -504,12 +505,12 @@ static void
 mac_policy_fastpath_unregister(struct mac_policy_conf *mpc)
 {
 	struct mac_policy_fastpath_elem *mpfe;
-	uintptr_t **ops;
+	const void * const *ops;
 	int i;
 
 	mac_policy_xlock_assert();
 
-	ops = (uintptr_t **)mpc->mpc_ops;
+	ops = (const void * const *)mpc->mpc_ops;
 	for (i = 0; i < nitems(mac_policy_fastpath_array); i++) {
 		mpfe = &mac_policy_fastpath_array[i];
 		if (ops[mpfe->offset] != NULL)

@@ -584,6 +584,11 @@ iwn_attach(device_t dev)
 		| IEEE80211_C_PMGT		/* Station-side power mgmt */
 		;
 
+	/* Driver / firmware assigned sequence numbers */
+	ic->ic_flags_ext |= IEEE80211_FEXT_SEQNO_OFFLOAD;
+	/* Don't originate null data frames in net80211 */
+	ic->ic_flags_ext |= IEEE80211_FEXT_NO_NULLDATA;
+
 	/* Read MAC address, channels, etc from EEPROM. */
 	if ((error = iwn_read_eeprom(sc, ic->ic_macaddr)) != 0) {
 		device_printf(dev, "could not read EEPROM, error %d\n",
@@ -4577,17 +4582,34 @@ iwn_tx_data(struct iwn_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 	 * XXX TODO: Group addressed frames aren't aggregated and must
 	 * go to the normal non-aggregation queue, and have a NONQOS TID
 	 * assigned from net80211.
+	 *
+	 * TODO: same with NULL QOS frames, which we shouldn't be sending
+	 * anyway ourselves (and should stub out / warn / etc.)
 	 */
 
+	/*
+	 * Ok, this is a bit "fun" and could do with some cleanup.
+	 * 'ac' here is (mostly) the AC, not TID.  It's actually used
+	 * as the destination txq.
+	 *
+	 * For A-MPDU enabled queues, 'ac' becomes the private queue
+	 * allocated for this TID.  However, ni_tx_ampdu[] is now per
+	 * TID, not per AC.  So a little twisty logic is done here.
+	 */
 	ac = M_WME_GETAC(m);
 	if (m->m_flags & M_AMPDU_MPDU) {
-		struct ieee80211_tx_ampdu *tap = &ni->ni_tx_ampdu[ac];
+		struct ieee80211_tx_ampdu *tap =
+		    &ni->ni_tx_ampdu[WME_AC_TO_TID(ac)];
 
 		if (!IEEE80211_AMPDU_RUNNING(tap))
 			return (EINVAL);
 
 		ac = *(int *)tap->txa_private;
 	}
+
+	/* Only assign if not A-MPDU; the A-MPDU TX path will do its own */
+	if ((m->m_flags & M_AMPDU_MPDU) == 0)
+		ieee80211_output_seqno_assign(ni, -1, m);
 
 	/* Encrypt the frame if need be. */
 	if (wh->i_fc[1] & IEEE80211_FC1_PROTECTED) {
@@ -4758,6 +4780,10 @@ iwn_tx_data_raw(struct iwn_softc *sc, struct mbuf *m,
 	type = wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK;
 
 	ac = params->ibp_pri & 3;
+
+	/* Assign sequence number. */
+	if ((m->m_flags & M_AMPDU_MPDU) == 0)
+		ieee80211_output_seqno_assign(ni, -1, m);
 
 	/* Choose a TX rate. */
 	rate = params->ibp_rate0;

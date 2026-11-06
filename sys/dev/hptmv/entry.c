@@ -95,8 +95,7 @@ static driver_t hpt_pci_driver = {
 	sizeof(IAL_ADAPTER_T)
 };
 
-#define __DRIVER_MODULE(p1, p2, p3, p4, p5) DRIVER_MODULE(p1, p2, p3, p4, p5)
-__DRIVER_MODULE(PROC_DIR_NAME, pci, hpt_pci_driver, 0, 0);
+DRIVER_MODULE(PROC_DIR_NAME, pci, hpt_pci_driver, NULL, NULL);
 MODULE_DEPEND(PROC_DIR_NAME, cam, 1, 1, 1);
 
 #define ccb_ccb_ptr spriv_ptr0
@@ -430,7 +429,7 @@ static void device_change(IAL_ADAPTER_T *pAdapter , MV_U8 channelIndex, int plug
 		if(pVDev->pParent) 
 		{
 			int iMember;
-			for(iMember = 0; iMember < 	pVDev->pParent->u.array.bArnMember; iMember++)
+			for (iMember = 0; iMember < pVDev->pParent->u.array.bArnMember; iMember++)
 				if((PVDevice)pVDev->pParent->u.array.pMember[iMember] == pVDev)
 					pVDev->pParent->u.array.pMember[iMember] = NULL;
 			pVDev->pParent = NULL;
@@ -984,7 +983,7 @@ fRegisterVdevice(IAL_ADAPTER_T *pAdapter)
 	PVBus  pVBus;
 	int i,j;
 
-	for(i=0;i<MV_SATA_CHANNELS_NUM;i++) {
+	for (i = 0; i < MV_SATA_CHANNELS_NUM; i++) {
 		pPhysical = &(pAdapter->VDevices[i]);
 		pLogical = pPhysical;
 		while (pLogical->pParent) pLogical = pLogical->pParent;
@@ -1027,8 +1026,7 @@ GetSpareDisk(_VBUS_ARG PVDevice pArray)
 	PVDevice pVDevice, pFind = NULL;
 	int i;
 
-	for(i=0;i<MV_SATA_CHANNELS_NUM;i++)
-	{
+	for (i=0; i < MV_SATA_CHANNELS_NUM; i++) {
 		pVDevice = &pAdapter->VDevices[i];
 		if(!pVDevice) 
 			continue;
@@ -1356,7 +1354,7 @@ unregister:
 		goto unregister;
 	}
 
-	for (i=0; i<MAX_COMMAND_BLOCKS_FOR_EACH_VBUS; i++) {
+	for (i = 0; i < MAX_COMMAND_BLOCKS_FOR_EACH_VBUS; i++) {
 		FreeCommand(_VBUS_P &(pAdapter->pCommandBlocks[i]));
 	}
 
@@ -1370,7 +1368,7 @@ unregister:
 
 	memset((void *)pAdapter->pbus_dmamap, 0, sizeof(struct _BUS_DMAMAP) * MAX_QUEUE_COMM);
 	pAdapter->pbus_dmamap_list = 0;
-	for (i=0; i < MAX_QUEUE_COMM; i++) {
+	for (i = 0; i < MAX_QUEUE_COMM; i++) {
 		PBUS_DMAMAP  pmap = &(pAdapter->pbus_dmamap[i]);
 		pmap->pAdapter = pAdapter;
 		dmamap_put(pmap);
@@ -1398,7 +1396,7 @@ unregister:
 	pAdapter->prdTableAlignedAddr = (PUCHAR)(((ULONG_PTR)pAdapter->prdTableAddr + 0x1f) & ~(ULONG_PTR)0x1fL);
 	{
 		PUCHAR PRDTable = pAdapter->prdTableAlignedAddr;
-		for (i=0; i<PRD_TABLES_FOR_VBUS; i++)
+		for (i = 0; i < PRD_TABLES_FOR_VBUS; i++)
 		{
 /*			KdPrint(("i=%d,pAdapter->pFreePRDLink=%p\n",i,pAdapter->pFreePRDLink)); */
 			FreePRDTable(pAdapter, PRDTable);
@@ -1447,7 +1445,7 @@ unregister:
 	}
 
 #ifdef SUPPORT_ARRAY
-	for(i = MAX_ARRAY_DEVICE - 1; i >= 0; i--) {
+	for (i = MAX_ARRAY_DEVICE - 1; i >= 0; i--) {
 		pVDev = ArrayTables(i);
 		mArFreeArrayTable(pVDev);
 	}
@@ -1467,7 +1465,7 @@ unregister:
 	_vbus_p->nInstances = 1;
 	fRegisterVdevice(pAdapter);
 
-	for (channel=0;channel<MV_SATA_CHANNELS_NUM;channel++) {
+	for (channel = 0; channel < MV_SATA_CHANNELS_NUM; channel++) {
 		pVDev = _vbus_p->pVDevice[channel];
 		if (pVDev && pVDev->vf_online)
 			fCheckBootable(pVDev);
@@ -1567,7 +1565,7 @@ fResetActiveCommands(PVBus _vbus_p)
 {
 	MV_SATA_ADAPTER *pMvSataAdapter = &((IAL_ADAPTER_T *)_vbus_p->OsExt)->mvSataAdapter;
 	MV_U8 channel;
-	for (channel=0;channel< MV_SATA_CHANNELS_NUM;channel++) {
+	for (channel = 0; channel < MV_SATA_CHANNELS_NUM; channel++) {
 		if (pMvSataAdapter->sataChannel[channel] && pMvSataAdapter->sataChannel[channel]->outstandingCommands) 
 			MvSataResetChannel(pMvSataAdapter,channel);
 	}
@@ -1590,7 +1588,7 @@ check_cmds:
 		dataxfer_poll();
 		xor_poll();
 #endif
-		for (channel=0;channel< MV_SATA_CHANNELS_NUM;channel++) {
+		for (channel = 0; channel < MV_SATA_CHANNELS_NUM; channel++) {
 			pMvSataChannel = pMvSataAdapter->sataChannel[channel];
 			if (pMvSataChannel && pMvSataChannel->outstandingCommands) 
 			{
@@ -1716,7 +1714,7 @@ fDeviceSendCommand(_VBUS_ARG PCommand pCmd)
 
 	MV_BOOLEAN is48bit;
 	MV_U8      channel;
-	int        i=0;
+	int        i = 0;
 	
 	DECLARE_BUFFER(FPSCAT_GATH, tmpSg);
 
@@ -2141,7 +2139,7 @@ FlushAdapter(IAL_ADAPTER_T *pAdapter)
 	hpt_printk(("flush all devices\n"));
 	
 	/* flush all devices */
-	for (i=0; i<MAX_VDEVICE_PER_VBUS; i++) {
+	for (i = 0; i < MAX_VDEVICE_PER_VBUS; i++) {
 		PVDevice pVDev = pAdapter->VBus.pVDevice[i];
 		if(pVDev) fFlushVDev(pVDev);
 	}
@@ -2174,7 +2172,7 @@ Check_Idle_Call(IAL_ADAPTER_T *pAdapter)
 		{
 			int i;
 			PVDevice pArray;
-			for(i = 0; i < MAX_ARRAY_PER_VBUS; i++){
+			for (i = 0; i < MAX_ARRAY_PER_VBUS; i++) {
 				if ((pArray=ArrayTables(i))->u.array.dArStamp==0) 
 					continue; 
 				else if (pArray->u.array.rf_auto_rebuild) {
@@ -2378,7 +2376,7 @@ hpt_free_ccb(union ccb **ccb_Q, union ccb *ccb)
 static void hpt_worker_thread(void)
 {
 
-	for(;;)	{
+	for (;;) {
 		mtx_lock(&DpcQueue_Lock);
 		while (DpcQueue_First!=DpcQueue_Last) {
 			ST_HPT_DPC p;
@@ -2418,7 +2416,7 @@ static void hpt_worker_thread(void)
 					mtx_lock(&pAdapter->lock);
 					_vbus_p = &pAdapter->VBus;
 
-					for (i=0;i<MAX_ARRAY_PER_VBUS;i++) 
+					for (i = 0; i < MAX_ARRAY_PER_VBUS; i++)
 					{
 						if ((pArray=ArrayTables(i))->u.array.dArStamp==0) 
 							continue; 
@@ -2472,7 +2470,7 @@ launch_worker_thread(void)
 		int i;
 		PVDevice pVDev;
 
-		for(i = 0; i < MAX_ARRAY_PER_VBUS; i++) 
+		for (i = 0; i < MAX_ARRAY_PER_VBUS; i++)
 			if ((pVDev=ArrayTables(i))->u.array.dArStamp==0) 
 				continue; 
 			else{

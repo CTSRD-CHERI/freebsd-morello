@@ -1389,7 +1389,7 @@ ppc_exec_microseq(device_t dev, struct ppb_microseq **p_msq)
 
 		/* let's suppose the next instr. is the same */
 		prefetch:
-			for (;mi->opcode == MS_OP_RASSERT; INCR_PC)
+			for (; mi->opcode == MS_OP_RASSERT; INCR_PC)
 				w_reg(mi->arg[0].i, ppc, (char)mi->arg[1].i);
 
 			if (mi->opcode == MS_OP_DELAY) {
@@ -1964,14 +1964,14 @@ ppc_write_ivar(device_t bus, device_t dev, int index, uintptr_t val)
  * interrupt handlers.
  */
 struct resource *
-ppc_alloc_resource(device_t bus, device_t child, int type, int *rid,
+ppc_alloc_resource(device_t bus, device_t child, int type, int rid,
     rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
 {
 	struct ppc_data *ppc = DEVTOSOFTC(bus);
 
 	switch (type) {
 	case SYS_RES_IRQ:
-		if (*rid == 0)
+		if (rid == 0)
 			return (ppc->res_irq);
 		break;
 	}

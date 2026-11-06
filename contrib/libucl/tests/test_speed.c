@@ -21,13 +21,24 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include "ucl.h"
+#include "ucl_internal.h"
+
 #include <sys/types.h>
+
+#ifndef _WIN32
 #include <sys/mman.h>
-#include <sys/stat.h>
 #include <sys/time.h>
+#endif
+
+#include <sys/stat.h>
 #include <stdio.h>
 #include <errno.h>
+
+#ifndef _WIN32
 #include <unistd.h>
+#endif
+
 #include <fcntl.h>
 #include <time.h>
 
@@ -37,14 +48,12 @@
 #endif
 #endif
 
-#include "ucl.h"
-
 static double
 get_ticks (void)
 {
 	double res;
 
-#ifdef __APPLE__
+#if defined(__APPLE__) && defined(HAVE_MACH_MACH_TIME_H)
 	res = mach_absolute_time () / 1000000000.;
 #else
 	struct timespec ts;

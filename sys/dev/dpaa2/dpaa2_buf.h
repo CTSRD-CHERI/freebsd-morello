@@ -33,6 +33,8 @@
 #include <sys/malloc.h>
 #include <sys/lock.h>
 #include <sys/mutex.h>
+#include <sys/systm.h>
+#include <sys/mbuf.h>
 
 #include <machine/bus.h>
 
@@ -48,6 +50,11 @@ struct dpaa2_buf {
 	struct mbuf		*m;
 	struct dpaa2_buf	*sgt;
 	void			*opt;
+};
+
+struct dpaa2_bufext_rx {
+	struct mtx		 dma_mtx;
+	struct dpaa2_channel	*ch;
 };
 
 #define DPAA2_BUF_INIT_TAGOPT(__buf, __tag, __opt) do {			\
@@ -145,7 +152,7 @@ struct dpaa2_buf {
 	KASSERT((__buf)->nseg  == 0,    ("%s: nseg > 0?", __func__));	\
 	KASSERT((__buf)->m     == NULL, ("%s: mbuf set?", __func__));	\
 	KASSERT((__buf)->sgt   == NULL, ("%s: S/G table set?", __func__)); \
-	KASSERT((__buf)->opt   != NULL, ("%s: no channel?", __func__));	\
+	KASSERT((__buf)->opt   != NULL, ("%s: no Rx ext?", __func__));	\
 } while(0)
 #define DPAA2_BUF_ASSERT_RXREADY(__buf) do {				\
 	KASSERT((__buf)->paddr != 0,    ("%s: paddr not set?", __func__)); \
@@ -157,7 +164,7 @@ struct dpaa2_buf {
 	KASSERT((__buf)->nseg  == 1,    ("%s: nseg != 1?", __func__));	\
 	KASSERT((__buf)->m     != NULL, ("%s: no mbuf?", __func__));	\
 	KASSERT((__buf)->sgt   == NULL, ("%s: S/G table set?", __func__)); \
-	KASSERT((__buf)->opt   != NULL, ("%s: no channel?", __func__));	\
+	KASSERT((__buf)->opt   != NULL, ("%s: no Rx ext?", __func__));	\
 } while(0)
 #else /* !INVARIANTS */
 #define DPAA2_BUF_ASSERT_RXPREP(__buf) do {	\
@@ -166,8 +173,8 @@ struct dpaa2_buf {
 } while(0)
 #endif /* INVARIANTS */
 
-int dpaa2_buf_seed_pool(device_t, device_t, void *, uint32_t, int, struct mtx *);
-int dpaa2_buf_seed_rxb(device_t, struct dpaa2_buf *, int, struct mtx *);
+int dpaa2_buf_seed_pool(device_t, device_t, void *, uint32_t, int);
+int dpaa2_buf_seed_rxb(device_t, struct dpaa2_buf *, int);
 int dpaa2_buf_seed_txb(device_t, struct dpaa2_buf *);
 
 #endif /* _DPAA2_BUF_H */

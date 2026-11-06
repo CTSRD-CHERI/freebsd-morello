@@ -1,23 +1,13 @@
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
+# This file and its contents are supplied under the terms of the
+# Common Development and Distribution License ("CDDL"), version 1.0.
+# You may only use this file in accordance with the terms of version
+# 1.0 of the CDDL.
 #
-# The contents of this file are subject to the terms of the
-# Common Development and Distribution License (the "License").
-# You may not use this file except in compliance with the License.
-#
-# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or https://opensource.org/licenses/CDDL-1.0.
-# See the License for the specific language governing permissions
-# and limitations under the License.
-#
-# When distributing Covered Code, include this CDDL HEADER in each
-# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-# If applicable, add the following below this CDDL HEADER, with the
-# fields enclosed by brackets "[]" replaced with your own identifying
-# information: Portions Copyright [yyyy] [name of copyright owner]
-#
-# CDDL HEADER END
+# A full copy of the text of the CDDL should have accompanied this
+# source.  A copy of the CDDL is also available via the Internet at
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -30,6 +20,7 @@
 # Copyright (c) 2017, Open-E Inc. All rights reserved.
 # Copyright (c) 2021, The FreeBSD Foundation.
 # Copyright (c) 2025, Klara, Inc.
+# Copyright (c) 2026, TrueNAS.
 # Use is subject to license terms.
 #
 
@@ -168,7 +159,12 @@ function is_32bit
 
 function is_kmemleak
 {
-	is_linux && [ -e /sys/kernel/debug/kmemleak ]
+	is_linux && [ -e /sys/kernel/debug/kmemleak ] || return 1
+
+	# That file exists even when the detector never started. Its slab
+	# cache does not. Unreadable slabinfo errs towards enabled.
+	[ -r /proc/slabinfo ] || return 0
+	grep -q '^kmemleak_object ' /proc/slabinfo
 }
 
 # Determine whether a dataset is mounted
@@ -270,6 +266,10 @@ function default_setup_noexit
 	typeset volume=$3
 	typeset no_mountpoint=$4
 	log_note begin default_setup_noexit
+
+	if [[ "/${TESTPOOL}" -ef / ]]; then
+		log_fail "TESTPOOL is not set"
+	fi
 
 	if is_global_zone; then
 		if poolexists $TESTPOOL ; then
@@ -473,6 +473,10 @@ function default_mirror_setup_noexit
 	typeset primary=$1
 	typeset secondary=$2
 
+	if [[ "/${TESTPOOL}" -ef / ]]; then
+		log_fail "TESTPOOL is not set"
+	fi
+
 	[[ -z $primary ]] && \
 		log_fail "$func: No parameters passed"
 	[[ -z $secondary ]] && \
@@ -509,6 +513,10 @@ function default_raidz_setup_noexit
 {
 	typeset disklist="$*"
 	disks=(${disklist[*]})
+
+	if [[ "/${TESTPOOL}" -ef / ]]; then
+		log_fail "TESTPOOL is not set"
+	fi
 
 	if [[ ${#disks[*]} -lt 2 ]]; then
 		log_fail "A raid-z requires a minimum of two disks."
@@ -559,7 +567,7 @@ function default_cleanup_noexit
 		# Here, we loop through the pools we're allowed to
 		# destroy, only destroying them if it's safe to do
 		# so.
-		while [ ! -z ${ALL_POOLS} ]
+		while [ -n "${ALL_POOLS}" ]
 		do
 			for pool in ${ALL_POOLS}
 			do
@@ -1085,7 +1093,7 @@ function fill_fs # destdir dirnum filenum bytes num_writes data
 	typeset -i filenum=${3:-50}
 	typeset -i bytes=${4:-8192}
 	typeset -i num_writes=${5:-10240}
-	typeset data=${6:-0}
+	typeset data=${6:-"R"}
 
 	mkdir -p $destdir/{1..$dirnum}
 	for f in $destdir/{1..$dirnum}/$TESTFILE{1..$filenum}; do
@@ -1110,6 +1118,16 @@ function get_pool_prop # property pool
 	typeset pool=$2
 
 	zpool get -Hpo value "$prop" "$pool" || log_fail "zpool get $prop $pool"
+}
+
+# Get the specified vdev property in parsable format or fail
+function get_vdev_prop
+{
+	typeset prop="$1"
+	typeset pool="$2"
+	typeset vdev="$3"
+
+	zpool get -Hpo value "$prop" "$pool" "$vdev" || log_fail "zpool get $prop $pool $vdev"
 }
 
 # Return 0 if a pool exists; $? otherwise
@@ -1158,6 +1176,22 @@ function datasetnonexists
 	done
 
 	return 0
+}
+
+# Check if the specified dataset property has the expected value or fail
+function dataset_has_prop # property expected_value dataset
+{
+	typeset prop=$1
+	typeset expected=$2
+	typeset dataset=$3
+
+	typeset value=""
+
+	value="$(get_prop "$prop" "$dataset")"
+	[[ "$value" == "$expected" ]] || {
+		log_note "dataset $dataset: property $prop == $value (!= $expected)"
+		return 1
+	}
 }
 
 # FreeBSD breaks exports(5) at whitespace and doesn't process escapes
@@ -1971,6 +2005,48 @@ function wait_vdev_state # pool disk state timeout
 }
 
 #
+# Wait for vdev 'sit_out' property to be cleared.
+#
+# $1 pool name
+# $2 vdev name
+# $3 timeout
+#
+function wait_sit_out #pool vdev timeout
+{
+	typeset pool=${1:-$TESTPOOL}
+	typeset vdev="$2"
+	typeset timeout=${3:-300}
+	for (( timer = 0; timer < $timeout; timer++ )); do
+		if [ "$(get_vdev_prop sit_out "$pool" "$vdev")" = "off" ]; then
+			return 0
+		fi
+		sleep 1;
+	done
+
+	return 1
+}
+
+#
+# Check the output of 'zpool status -v <pool>',
+# and to see if the counts of <device> contain the <regex> specified.
+#
+# Return 0 is contain, 1 otherwise
+#
+function check_pool_device # pool device regex <verbose>
+{
+	typeset pool=$1
+	typeset device=$2
+	typeset regex=$3
+	typeset verbose=${4:-false}
+
+	scan=$(zpool status -v "$pool" 2>/dev/null | grep $device)
+	if [[ $verbose == true ]]; then
+		log_note $scan
+	fi
+	echo $scan | grep -qi "$regex"
+}
+
+#
 # Check the output of 'zpool status -v <pool>',
 # and to see if the content of <token> contain the <keyword> specified.
 #
@@ -1998,6 +2074,7 @@ function check_pool_status # pool token keyword <verbose>
 #	is_pool_scrubbed - to check if the pool scrub is completed
 #	is_pool_scrub_stopped - to check if the pool scrub is stopped
 #	is_pool_scrub_paused - to check if the pool scrub has paused
+#	pause_scrub - start and pause a scrub without racing completion
 #	is_pool_removing - to check if the pool removing is a vdev
 #	is_pool_removed - to check if the pool remove is completed
 #	is_pool_discarding - to check if the pool checkpoint is being discarded
@@ -2050,6 +2127,24 @@ function is_pool_error_scrub_paused #pool <verbose>
 {
 	check_pool_status "$1" "scrub" "error scrub paused since " $2
 	return $?
+}
+
+#
+# Start a scrub and pause it without racing completion. Pins
+# SCAN_SUSPEND_PROGRESS until the scrub is paused, then clears it so a
+# later resume/wait can finish. Extra args are passed to `zpool scrub`
+# (e.g. -t). Callers should still reset SCAN_SUSPEND_PROGRESS in cleanup.
+#
+function pause_scrub # pool [scrub-args...]
+{
+	typeset pool=$1
+	shift
+
+	log_must set_tunable32 SCAN_SUSPEND_PROGRESS 1
+	log_must zpool scrub "$@" $pool
+	log_must zpool scrub -p $pool
+	log_must is_pool_scrub_paused $pool true
+	log_must set_tunable32 SCAN_SUSPEND_PROGRESS 0
 }
 
 function is_pool_removing #pool
@@ -2596,9 +2691,14 @@ function verify_opt_p_ops
 	typeset datatype=$2
 	typeset dataset=$3
 	typeset newdataset=$4
+	typeset popt=$5
 
 	if [[ $datatype != "fs" && $datatype != "vol" ]]; then
 		log_fail "$datatype is not supported."
+	fi
+
+	if [[ -z "$popt" ]]; then
+		popt=-p
 	fi
 
 	# check parameters accordingly
@@ -2638,7 +2738,7 @@ function verify_opt_p_ops
 	log_mustnot datasetexists $newdataset ${newdataset%/*}
 
 	# with -p option, operation should succeed
-	log_must zfs $ops -p $dataset $newdataset
+	log_must zfs $ops $popt $dataset $newdataset
 	block_device_wait
 
 	if ! datasetexists $newdataset ; then
@@ -2647,7 +2747,7 @@ function verify_opt_p_ops
 
 	# when $ops is create or clone, redo the operation still return zero
 	if [[ $ops != "rename" ]]; then
-		log_must zfs $ops -p $dataset $newdataset
+		log_must zfs $ops $popt $dataset $newdataset
 	fi
 
 	return 0
@@ -2864,7 +2964,7 @@ function is_mp
 function get_cpu_freq
 {
 	if is_linux; then
-		lscpu | awk '/CPU MHz/ { print $3 }'
+		lscpu | awk '/CPU( max)? MHz/ { print $NF }'
 	elif is_freebsd; then
 		sysctl -n hw.clockrate
 	else
@@ -2880,6 +2980,28 @@ function user_run
 
 	log_note "user: $user"
 	log_note "cmd: $*"
+
+	if ! sudo -Eu $user test -x $PATH ; then
+		log_note "-------------------------------------------------"
+		log_note "Warning: $user doesn't have permissions on $PATH"
+		log_note ""
+		log_note "This usually happens when you're running ZTS locally"
+		log_note "from inside the ZFS source dir, and are attempting to"
+		log_note "run a test that calls user_run.  The ephemeral user"
+		log_note "($user) that ZTS is creating does not have permission"
+		log_note "to traverse to $PATH, or the binaries in $PATH are"
+		log_note "not the right permissions."
+		log_note ""
+		log_note "To get around this, copy your ZFS source directory"
+		log_note "to a world-accessible location (like /tmp), and "
+		log_note "change the permissions on your ZFS source dir "
+		log_note "to allow access."
+		log_note ""
+		log_note "Also, verify that /dev/zfs is RW for others:"
+		log_note ""
+		log_note "    sudo chmod o+rw /dev/zfs"
+		log_note "-------------------------------------------------"
+	fi
 
 	typeset out=$TEST_BASE_DIR/out
 	typeset err=$TEST_BASE_DIR/err
@@ -3083,6 +3205,61 @@ function wait_scrubbed #pool timeout
                is_pool_scrubbed $pool && break;
                sleep 1;
        done
+}
+
+# Wait for a pool to be resilvered
+#
+# $1 pool name
+# $2 timeout
+#
+function wait_resilvered #pool timeout
+{
+       typeset timeout=${2:-300}
+       typeset pool=${1:-$TESTPOOL}
+       for (( timer = 0; timer < $timeout; timer++ )); do
+               is_pool_resilvered $pool && break;
+               sleep 1;
+       done
+}
+
+# Wait for a raidz expansion to stop reflowing
+#
+# The raidz expansion tests pause a reflow by setting the tunable
+# RAIDZ_EXPAND_MAX_REFLOW_BYTES, then inspect the pool while it is
+# stopped.  A pause offset at or past the end of the reflow lets the
+# expansion run to completion instead, and it may already have completed
+# before this is called, so both states end the wait.
+#
+# $1 pool name
+# $2 timeout
+#
+function wait_raidz_expand_paused #pool timeout
+{
+	typeset pool=${1:-$TESTPOOL}
+	typeset -i timeout=${2:-300}
+	typeset -i t0=$SECONDS
+	typeset status
+	typeset oldcopied=''
+	typeset newcopied=''
+
+	while :; do
+		status=$(zpool status $pool)
+
+		# Nothing is left to wait for once it is no longer running.
+		echo "$status" | grep -q 'expansion of .* in progress' || return
+
+		# It has paused once the amount copied stops changing.
+		newcopied=$(echo "$status" | grep ' copied at ' | \
+		    awk '{print $1}')
+		[[ -n $newcopied && $newcopied == "$oldcopied" ]] && return
+		oldcopied=$newcopied
+
+		if ((SECONDS - t0 > timeout)); then
+			log_fail "expansion of $pool neither paused nor" \
+			    "completed in $timeout seconds"
+		fi
+		sleep 1
+	done
 }
 
 # Backup the zed.rc in our test directory so that we can edit it for our test.
@@ -3510,6 +3687,34 @@ function stat_size #<path>
 	esac
 }
 
+function stat_blksz #<path>
+{
+	typeset path=$1
+
+	case "$UNAME" in
+	FreeBSD)
+		stat -f %k "$path"
+		;;
+	*)
+		stat -c %o "$path"
+		;;
+	esac
+}
+
+function stat_blocks #<path>
+{
+	typeset path=$1
+
+	case "$UNAME" in
+	FreeBSD)
+		stat -f %b "$path"
+		;;
+	*)
+		stat -c %b "$path"
+		;;
+	esac
+}
+
 function stat_mtime #<path>
 {
 	typeset path=$1
@@ -3807,8 +4012,6 @@ function directory_diff # dir_a dir_b
 	# do not match there is a "c" entry in one of the columns).
 	if rsync --version | grep -q "[, ] crtimes"; then
 		args+=("--crtimes")
-	else
-		log_note "This rsync package does not support --crtimes (-N)."
 	fi
 
 	# If we are testing a ZIL replay, we need to ignore timestamp changes.
@@ -3889,6 +4092,55 @@ function pop_coredump_pattern
 		sysctl kern.corefile="$(<"$1")" >/dev/null
 		;;
 	esac
+}
+
+#
+# get_same_blocks dataset1 path/to/file1 dataset2 path/to/file2 [key]
+#
+# Returns a space-separated list of the indexes (starting at 0) of the L0
+# blocks that are shared between both files (by first DVA and checksum).
+#
+function get_same_blocks # dataset1 file1 dataset2 file2 [key]
+{
+	typeset ds1=$1
+	typeset file1=$2
+	typeset ds2=$3
+	typeset file2=$4
+
+	typeset key=$5
+	typeset keyarg=
+	if [ ${#key} -gt 0 ]; then
+		keyarg="--key=$key"
+	fi
+
+	# this is usually called as $(get_same_blocks ...), and so expected
+	# to put its result on stdout, and usually the caller is not watching
+	# for failure. this makes things a little tricky to fail properly if
+	# zdb fails or crashes, as we end up returning an empty string, which
+	# is a valid return (no blocks the same)
+	#
+	# to get around this, we check zdb's return and echo a dummy value
+	# before returning failure. this will not match whatever the caller
+	# is checking for. if they do call it with log_must, then they get
+	# a failure as expected.
+
+	typeset zdbout1=$(mktemp)
+	typeset zdbout2=$(mktemp)
+	typeset awkout1=$(mktemp)
+	typeset awkout2=$(mktemp)
+
+	zdb $keyarg -vvvvv $ds1 -O $file1 > $zdbout1
+	[[ $? -ne 0 ]] && echo "zdb $ds1 failed" && return 1
+
+	zdb $keyarg -vvvvv $ds2 -O $file2 > $zdbout2
+	[[ $? -ne 0 ]] && echo "zdb $ds2 failed" && return 1
+
+	awk '/ L0 / { print l++ " " $3 " " $7 }' < $zdbout1 > $awkout1
+	awk '/ L0 / { print l++ " " $3 " " $7 }' < $zdbout2 > $awkout2
+
+	echo $(sort -n $awkout1 $awkout2 | uniq -d | cut -f1 -d' ')
+
+	rm -f $zdbout1 $zdbout2 $awkout1 $awkout2
 }
 
 . ${STF_SUITE}/include/kstat.shlib

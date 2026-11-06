@@ -182,6 +182,7 @@ r92ce_attach(struct rtwn_pci_softc *pc)
 	sc->sc_rf_write			= r92c_rf_write;
 	sc->sc_check_condition		= r92c_check_condition;
 	sc->sc_efuse_postread		= r92c_efuse_postread;
+	sc->sc_efuse_preread		= rtwn_nop_int_softc;
 	sc->sc_parse_rom		= r92c_parse_rom;
 	sc->sc_set_led			= r92ce_set_led;
 	sc->sc_power_on			= r92ce_power_on;
@@ -191,6 +192,7 @@ r92ce_attach(struct rtwn_pci_softc *pc)
 	sc->sc_fw_download_enable	= r92c_fw_download_enable;
 #endif
 	sc->sc_llt_init			= r92c_llt_init;
+	sc->sc_enable_mac_txrx		= rtwn_nop_softc;
 	sc->sc_set_page_size		= r92c_set_page_size;
 	sc->sc_lc_calib			= r92c_lc_calib;
 	sc->sc_iq_calib			= r92ce_iq_calib;
@@ -214,6 +216,7 @@ r92ce_attach(struct rtwn_pci_softc *pc)
 	sc->sc_temp_read		= r92c_temp_read;
 	sc->sc_init_tx_agg		= rtwn_nop_softc;
 	sc->sc_init_rx_agg		= rtwn_nop_softc;
+	sc->sc_init_beacon_timer	= r92c_init_beacon_timer;
 	sc->sc_init_ampdu		= r92ce_init_ampdu;
 	sc->sc_init_intr		= r92ce_init_intr;
 	sc->sc_init_edca		= r92ce_init_edca;

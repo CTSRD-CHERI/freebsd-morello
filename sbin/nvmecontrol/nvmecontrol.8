@@ -33,7 +33,7 @@
 .\"
 .\" Author: Jim Harris <jimharris@FreeBSD.org>
 .\"
-.Dd July 9, 2025
+.Dd September 21, 2026
 .Dt NVMECONTROL 8
 .Os
 .Sh NAME
@@ -153,7 +153,9 @@
 .Aq Ar device-id
 .Nm
 .Ic format
+.Op Fl n
 .Op Fl f Ar fmt
+.Op Fl s Ar sector-size
 .Op Fl m Ar mset
 .Op Fl p Ar pi
 .Op Fl l Ar pil
@@ -172,9 +174,13 @@
 .Aq Ar device-id
 .Nm
 .Ic power
+.Op Fl a Ar apst_state
+.Op Fl d Ar apst_data
 .Op Fl l
+.Op Fl m Ar apst_limit
 .Op Fl p power_state
 .Op Fl w workload_hint
+.Aq Ar device-id | Ar namespace-id
 .Nm
 .Ic selftest
 .Aq Fl c Ar code
@@ -256,6 +262,7 @@
 .Ic telemetry-log
 .Fl O Ar output-file
 .Op Fl d Ar data-area
+.Op Fl v
 .Aq Ar device-id
 .Sh DESCRIPTION
 NVM Express (NVMe) is a storage protocol standard for SSDs and other
@@ -376,9 +383,9 @@ and section 3
 .Em NVM Express Architecture
 of the latest NVM standard.
 .Ss ns active
-Provide a list of active namespace identifiers for the givne NVM controller.
+Provide a list of active namespace identifiers for the given NVM controller.
 .Ss ns allocated
-Provide a list of allocated namespace identifiers for the givne NVM controller.
+Provide a list of allocated namespace identifiers for the given NVM controller.
 .Ss ns attach
 Attach an nsid to a controller.
 The primary controller is used if one is not specified.
@@ -464,10 +471,10 @@ Change Persist Through Power Loss State:
 .It Dv 0
 No change to PTPL state
 .It Dv 2
-Set PTPL state to ‘0’.
+Set PTPL state to 0.
 Reservations are released and registrants are cleared on a power on.
 .It Dv 3
-Set PTPL state to ‘1’.
+Set PTPL state to 1.
 Reservations and registrants persist across a power loss.
 .El
 .El
@@ -499,6 +506,10 @@ Use Extended Data Structure.
 Format either specified namespace, or all namespaces of specified controller,
 using specified parameters:
 .Bl -tag -width 8n
+.It Fl n , Fl Fl dry-run
+Print the resolved Format NVM command without submitting it to the controller.
+Identify commands needed to resolve and validate the format parameters are
+still performed.
 .It Fl f Ar fmt
 The index
 .Ar fmt
@@ -506,6 +517,24 @@ of the parameters to use.
 LBA Format #, as specified in the identification of the namespace using
 .Dq nvmecontrol identify
 command with a namespace specified maps this index into these parameters.
+.It Fl s Ar sector-size
+Select the LBA format matching the specified total sector size.
+The data size is the largest power of two not greater than
+.Ar sector-size ,
+and any remainder is the metadata size.
+When formatting a namespace, the format with the best relative performance is
+selected, with the lowest format index used to break ties.
+When formatting a controller, every active namespace must have exactly one
+matching format, and that format must have the same index in every namespace.
+The effective
+.Ar mset ,
+.Ar pi ,
+and
+.Ar pil
+values must also match across all active namespaces.
+Otherwise, the operation is rejected.
+This option is mutually exclusive with
+.Fl f .
 .It Fl m Ar mset
 Metadata Setting.
 .Ar mset
@@ -626,8 +655,27 @@ This will report status on a sanitize that is already running on the drive.
 .Ss power
 Manage the power modes of the NVMe controller.
 .Bl -tag -width 6n
+.It Fl a Ar state
+Enable (1) or disable (0) Autonomous Power State Transition (APST).
+When enabled, the controller will autonomously switch power states
+according to configuration data.
+.It Fl d Ar target:idle[,target:idle ...]
+Set the APST data.
+Each target:idle pair corresponds to a specific available power
+state starting from the lowest, and defines the target state to
+transition to, as well as the idle time in milliseconds to wait
+before that transition.
+Setting both parameters to zero disables switching from that state.
 .It Fl l
 List all supported power modes.
+Modes marked with an asterisk
+.Pq Dq *
+are non-operational power modes.
+.It Fl m Ar limit
+Configure APST to use all available non-operational power states
+with total latency below the specified
+.Ar limit
+(in milliseconds).
 .It Fl p Ar mode
 Set the power mode to
 .Ar mode .
@@ -718,7 +766,7 @@ This is ignored and not implemented in
 .It Fl f -flags
 Nvme command flags.
 .It Fl n -namespace-id
-Namespace ID for command (Ignored).
+Namespace ID for command (ignored for admin, defaults to device's namespace for io).
 .It Fl p -prefill
 Value to prefill payload with.
 .It Fl b -raw-binary
@@ -827,8 +875,8 @@ NVMe Qualified Name to use for this host.
 By default an NQN is auto-generated from the current host's UUID.
 .It Fl Q Ar entries
 Number of entries in each I/O queue.
-By default the maximum queue size reported by the MQES field
-of the remote host's CAP property is used.
+The default is the minimum of 128 or the maximum queue size reported
+by the MQES field of the remote host's CAP property.
 .El
 .Ss connect-all
 Query the Discovery Controller at
@@ -839,7 +887,7 @@ The
 flag determines the transport used for the initial association with
 the Discovery Controller and defaults to
 .Ar tcp .
-All other flags are used to control properties of each I/O assocation as
+All other flags are used to control properties of each I/O association as
 described above for the
 .Cm connect
 command.
@@ -875,6 +923,9 @@ Output file for the data.
 This parameter is mandatory.
 .It Fl d Ar data-area
 The data area is either 1, 2 or 3.
+.It Fl v
+Verbose output reporting progress.
+This log can be quite large and take minutes to retrieve.
 .El
 .Sh DEVICE NAMES
 Where

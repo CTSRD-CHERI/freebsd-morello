@@ -30,7 +30,6 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/cdefs.h>
 #include "opt_capsicum.h"
 #include "opt_ktrace.h"
 
@@ -168,11 +167,44 @@ update_gdt_fsbase(struct thread *td, uint32_t base)
 	critical_exit();
 }
 
+/*
+ * Tag (or untag, when 'clear' is true) a range of the calling
+ * process's address space with a protection key.  The map read lock
+ * synchronizes with a parallel pmap_vmspace_copy() on fork.
+ *
+ * Shared between sysarch(2) and the Linuxulator's pkey_mprotect().
+ */
+int
+amd64_pkru_update(struct thread *td, uintptr_t addr, size_t len, u_int keyidx,
+    int flags, bool clear)
+{
+	struct vm_map *map;
+	vm_offset_t start, end;
+	int error;
+
+	MPASS(td == curthread);
+
+	map = &td->td_proc->p_vmspace->vm_map;
+	vm_map_lock_read(map);
+	if (len == 0 || !vm_map_check_boundary(map, addr, addr + len)) {
+		vm_map_unlock_read(map);
+		return (EINVAL);
+	}
+	start = trunc_page(addr);
+	end = round_page(addr + len);
+	if (clear)
+		error = pmap_pkru_clear(PCPU_GET(curpmap), start, end);
+	else
+		error = pmap_pkru_set(PCPU_GET(curpmap), start, end, keyidx,
+		    flags);
+	vm_map_unlock_read(map);
+	return (error);
+}
+
 int
 sysarch(struct thread *td, struct sysarch_args *uap)
 {
 	struct pcb *pcb;
-	struct vm_map *map;
 	uint32_t i386base;
 	uint64_t a64base;
 	struct i386_ioperm_args iargs;
@@ -180,7 +212,7 @@ sysarch(struct thread *td, struct sysarch_args *uap)
 	struct i386_set_pkru i386pkru;
 	struct amd64_get_xfpustate a64xfpu;
 	struct amd64_set_pkru a64pkru;
-	int error;
+	int error, val;
 
 #ifdef CAPABILITY_MODE
 	/*
@@ -199,6 +231,8 @@ sysarch(struct thread *td, struct sysarch_args *uap)
 	case I386_GET_XFPUSTATE:
 	case I386_SET_PKRU:
 	case I386_CLEAR_PKRU:
+	case I386_SET_SPLITLOCK:
+	case I386_GET_SPLITLOCK:
 	case AMD64_GET_FSBASE:
 	case AMD64_SET_FSBASE:
 	case AMD64_GET_GSBASE:
@@ -265,6 +299,10 @@ sysarch(struct thread *td, struct sysarch_args *uap)
 	case AMD64_CLEAR_PKRU:
 		if ((error = copyin(uap->parms, &a64pkru,
 		    sizeof(struct amd64_set_pkru))) != 0)
+			return (error);
+		break;
+	case I386_SET_SPLITLOCK:
+		if ((error = copyin(uap->parms, &val, sizeof(val))) != 0)
 			return (error);
 		break;
 	default:
@@ -370,16 +408,8 @@ sysarch(struct thread *td, struct sysarch_args *uap)
 
 	case I386_SET_PKRU:
 	case AMD64_SET_PKRU:
-		/*
-		 * Read-lock the map to synchronize with parallel
-		 * pmap_vmspace_copy() on fork.
-		 */
-		map = &td->td_proc->p_vmspace->vm_map;
-		vm_map_lock_read(map);
-		error = pmap_pkru_set(PCPU_GET(curpmap),
-		    (vm_offset_t)a64pkru.addr, (vm_offset_t)a64pkru.addr +
-		    a64pkru.len, a64pkru.keyidx, a64pkru.flags);
-		vm_map_unlock_read(map);
+		error = amd64_pkru_update(td, (uintptr_t)a64pkru.addr,
+		    a64pkru.len, a64pkru.keyidx, a64pkru.flags, false);
 		break;
 
 	case I386_CLEAR_PKRU:
@@ -388,17 +418,32 @@ sysarch(struct thread *td, struct sysarch_args *uap)
 			error = EINVAL;
 			break;
 		}
-		map = &td->td_proc->p_vmspace->vm_map;
-		vm_map_lock_read(map);
-		error = pmap_pkru_clear(PCPU_GET(curpmap),
-		    (vm_offset_t)a64pkru.addr,
-		    (vm_offset_t)a64pkru.addr + a64pkru.len);
-		vm_map_unlock_read(map);
+		error = amd64_pkru_update(td, (uintptr_t)a64pkru.addr,
+		    a64pkru.len, 0, 0, true);
 		break;
 
 	case AMD64_DISABLE_TLSBASE:
 		clear_pcb_flags(pcb, PCB_TLSBASE);
 		update_pcb_bases(pcb);
+		break;
+
+	case I386_SET_SPLITLOCK:
+		if (!ia32_splitlock) {
+			if (val != 0)
+				error = ENOTSUP;
+			break;
+		}
+		if (val == 0)
+			disable_splitlock(td);
+		else if (val == 1)
+			enable_splitlock(td);
+		else
+			error = EINVAL;
+		break;
+
+	case I386_GET_SPLITLOCK:
+		val = (td->td_md.md_td_flags & TDF_MD_SPLITLOCK_AC) != 0;
+		error = copyout(&val, uap->parms, sizeof(val));
 		break;
 
 	default:

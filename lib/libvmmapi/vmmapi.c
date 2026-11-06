@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  *
  * Copyright (c) 2011 NetApp, Inc.
+ * Copyright (c) 2026 Hans Rosenfeld
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -100,11 +101,13 @@ vm_ctl_open(void)
 }
 
 static int
-vm_ctl_create(const char *name, int ctlfd)
+vm_ctl_create(const char *name, int flags, int ctlfd)
 {
 	struct vmmctl_vm_create vmc;
 
 	memset(&vmc, 0, sizeof(vmc));
+	if ((flags & VMMAPI_OPEN_CREATE_DESTROY_ON_CLOSE) != 0)
+		vmc.flags |= VMMCTL_CREATE_DESTROY_ON_CLOSE;
 	if (strlcpy(vmc.name, name, sizeof(vmc.name)) >= sizeof(vmc.name)) {
 		errno = ENAMETOOLONG;
 		return (-1);
@@ -121,7 +124,7 @@ vm_create(const char *name)
 	if (fd < 0)
 		return (-1);
 
-	error = vm_ctl_create(name, fd);
+	error = vm_ctl_create(name, 0, fd);
 	if (error != 0) {
 		error = errno;
 		(void)close(fd);
@@ -162,7 +165,7 @@ vm_openf(const char *name, int flags)
 	vm->fd = vm_device_open(vm->name);
 	if (vm->fd < 0 && errno == ENOENT) {
 		if (flags & VMMAPI_OPEN_CREATE) {
-			if (vm_ctl_create(vm->name, vm->ctlfd) != 0)
+			if (vm_ctl_create(vm->name, flags, vm->ctlfd) != 0)
 				goto err;
 			vm->fd = vm_device_open(vm->name);
 			created = true;
@@ -216,6 +219,9 @@ vm_vcpu_open(struct vmctx *ctx, int vcpuid)
 	struct vcpu *vcpu;
 
 	vcpu = malloc(sizeof(*vcpu));
+	if (vcpu == NULL)
+		return (vcpu);
+
 	vcpu->ctx = ctx;
 	vcpu->vcpuid = vcpuid;
 	return (vcpu);

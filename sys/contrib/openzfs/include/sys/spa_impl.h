@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -28,6 +18,8 @@
  * Copyright (c) 2016 Actifio, Inc. All rights reserved.
  * Copyright (c) 2017, Intel Corporation.
  * Copyright (c) 2019 Datto Inc.
+ * Copyright (c) 2024-2026, Klara, Inc.
+ * Copyright (c) 2026, TrueNAS.
  */
 
 #ifndef _SYS_SPA_IMPL_H
@@ -52,6 +44,7 @@
 #include <sys/dsl_crypt.h>
 #include <sys/zfeature.h>
 #include <sys/zthr.h>
+#include <sys/arc_impl.h>
 #include <sys/dsl_deadlist.h>
 #include <zfeature_common.h>
 
@@ -149,11 +142,15 @@ struct spa_aux_vdev {
 	uint_t		sav_npending;		/* # pending devices */
 };
 
+/*
+ * scl_count holds the reference count plus SCL_COUNT_WRITER, so that a reader
+ * can take a reference and check for a writer in one atomic operation.
+ */
 typedef struct spa_config_lock {
 	kmutex_t	scl_lock;
 	kthread_t	*scl_writer;
 	int		scl_write_wanted;
-	int		scl_count;
+	uint32_t	scl_count;
 	kcondvar_t	scl_cv;
 } ____cacheline_aligned spa_config_lock_t;
 
@@ -216,17 +213,35 @@ typedef enum spa_config_source {
 	SPA_CONFIG_SRC_MOS		/* MOS, but not always from right txg */
 } spa_config_source_t;
 
+typedef enum spa_condense_type {
+	SPA_CONDENSE_LOG_SPACEMAP = 0,
+#ifdef ZFS_DEBUG
+	SPA_CONDENSE_DEBUG,
+#endif
+	SPA_CONDENSE_TYPES
+} spa_condense_type_t;
+
+typedef struct spa_condense_stat {
+	uint64_t scns_start_time;	/* time_t */
+	uint64_t scns_end_time;		/* time_t */
+	uint64_t scns_processed;	/* items processed */
+	uint64_t scns_total;		/* total items to process */
+} spa_condense_stat_t;
+
+
 struct spa {
 	/*
 	 * Fields protected by spa_namespace_lock.
 	 */
 	char		spa_name[ZFS_MAX_DATASET_NAME_LEN];	/* pool name */
+	char		*spa_load_name;		/* unmodified pool name */
 	char		*spa_comment;		/* comment */
 	avl_node_t	spa_avl;		/* node in spa_namespace_avl */
 	nvlist_t	*spa_config;		/* last synced config */
 	nvlist_t	*spa_config_syncing;	/* currently syncing config */
 	nvlist_t	*spa_config_splitting;	/* config for splitting */
 	nvlist_t	*spa_load_info;		/* info and errors from load */
+	nvlist_t	*spa_create_info;	/* info from create */
 	uint64_t	spa_config_txg;		/* txg of last config change */
 	uint32_t	spa_sync_pass;		/* iterate-to-convergence */
 	pool_state_t	spa_state;		/* pool state */
@@ -265,6 +280,7 @@ struct spa {
 	uint64_t	spa_min_ashift;		/* of vdevs in normal class */
 	uint64_t	spa_max_ashift;		/* of vdevs in normal class */
 	uint64_t	spa_min_alloc;		/* of vdevs in normal class */
+	uint64_t	spa_max_alloc;		/* of vdevs in normal class */
 	uint64_t	spa_gcd_alloc;		/* of vdevs in normal class */
 	uint64_t	spa_config_guid;	/* config pool guid */
 	uint64_t	spa_load_guid;		/* spa_load initialized guid */
@@ -282,6 +298,7 @@ struct spa {
 	spa_aux_vdev_t	spa_spares;		/* hot spares */
 	spa_aux_vdev_t	spa_l2cache;		/* L2ARC cache devices */
 	boolean_t	spa_aux_sync_uber;	/* need to sync aux uber */
+	l2arc_info_t	spa_l2arc_info;		/* L2ARC state and stats */
 	nvlist_t	*spa_label_features;	/* Features for reading MOS */
 	uint64_t	spa_config_object;	/* MOS object for pool config */
 	uint64_t	spa_config_generation;	/* config generation number */
@@ -294,6 +311,7 @@ struct spa {
 	void		*spa_cksum_tmpls[ZIO_CHECKSUM_FUNCTIONS];
 	uberblock_t	spa_ubsync;		/* last synced uberblock */
 	uberblock_t	spa_uberblock;		/* current uberblock */
+	boolean_t	spa_activity_check; 	/* activity check required */
 	boolean_t	spa_extreme_rewind;	/* rewind past deferred frees */
 	kmutex_t	spa_scrub_lock;		/* resilver/scrub lock */
 	uint64_t	spa_scrub_inflight;	/* in-flight scrub bytes */
@@ -327,7 +345,7 @@ struct spa {
 	kthread_t	*spa_async_thread;	/* thread doing async task */
 	int		spa_async_suspended;	/* async tasks suspended */
 	kcondvar_t	spa_async_cv;		/* wait for thread_exit() */
-	uint16_t	spa_async_tasks;	/* async task mask */
+	uint32_t	spa_async_tasks;	/* async task mask */
 	uint64_t	spa_missing_tvds;	/* unopenable tvds on load */
 	uint64_t	spa_missing_tvds_allowed; /* allow loading spa? */
 
@@ -358,6 +376,7 @@ struct spa {
 	avl_tree_t	spa_metaslabs_by_flushed;
 	spa_unflushed_stats_t	spa_unflushed_stats;
 	list_t		spa_log_summary;
+	spa_log_flushall_mode_t	spa_log_flushall_mode;
 	uint64_t	spa_log_flushall_txg;
 
 	zthr_t		*spa_livelist_delete_zthr; /* deleting livelists */
@@ -416,6 +435,7 @@ struct spa {
 	boolean_t	spa_active_ddt_prune;	/* ddt prune process active */
 	brt_vdev_t	**spa_brt_vdevs;	/* array of per-vdev BRTs */
 	uint64_t	spa_brt_nvdevs;		/* number of vdevs in BRT */
+	brt_dedup_shard_t *spa_brt_dedup;	/* pending dedup'd clones */
 	uint64_t	spa_brt_rangesize;	/* pool's BRT range size */
 	krwlock_t	spa_brt_lock;		/* Protects brt_vdevs/nvdevs */
 	kmutex_t	spa_vdev_top_lock;	/* dueling offline/remove */
@@ -474,6 +494,15 @@ struct spa {
 	uint64_t	spa_dedup_table_quota;	/* property DDT maximum size */
 	uint64_t	spa_dedup_dsize;	/* cached on-disk size of DDT */
 	uint64_t	spa_dedup_class_full_txg; /* txg dedup class was full */
+
+	/* stats for user-initiated condense operations */
+	spa_condense_stat_t	spa_condense_stats[SPA_CONDENSE_TYPES];
+	kmutex_t		spa_condense_stats_lock;
+
+#ifdef ZFS_DEBUG
+	/* see spa_condense_debug_task() */
+	taskqid_t	spa_condense_debug_tqid;
+#endif
 
 	/*
 	 * spa_refcount & spa_config_lock must be the last elements

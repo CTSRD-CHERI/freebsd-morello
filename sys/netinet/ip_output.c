@@ -29,13 +29,11 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/cdefs.h>
 #include "opt_inet.h"
 #include "opt_ipsec.h"
 #include "opt_kern_tls.h"
 #include "opt_mbuf_stress_test.h"
 #include "opt_ratelimit.h"
-#include "opt_route.h"
 #include "opt_rss.h"
 #include "opt_sctp.h"
 
@@ -79,6 +77,7 @@
 #include <netinet/in_var.h>
 #include <netinet/ip_var.h>
 #include <netinet/ip_options.h>
+#include <netinet/ip_mroute.h>
 
 #include <netinet/udp.h>
 #include <netinet/udp_var.h>
@@ -460,7 +459,7 @@ again:
 		 */
 		ifp = imo->imo_multicast_ifp;
 		mtu = ifp->if_mtu;
-		IFP_TO_IA(ifp, ia);
+		ia = in_ifprimaryaddr(ifp);
 		isbroadcast = false;
 		/* Interface may have no addresses. */
 		if (ia != NULL)
@@ -562,12 +561,13 @@ again:
 		 * See if the caller provided any multicast options
 		 */
 		if (imo != NULL) {
+			int vif;
+
+			vif = imo->imo_multicast_vif;
 			ip->ip_ttl = imo->imo_multicast_ttl;
-			if (imo->imo_multicast_vif != -1)
-				ip->ip_src.s_addr =
-				    ip_mcast_src ?
-				    ip_mcast_src(imo->imo_multicast_vif) :
-				    INADDR_ANY;
+			if (vif != -1)
+				ip->ip_src.s_addr = ip_mcast_src ?
+				    ip_mcast_src(fibnum, vif) : INADDR_ANY;
 		} else
 			ip->ip_ttl = IP_DEFAULT_MULTICAST_TTL;
 		/*
@@ -610,7 +610,8 @@ again:
 			 * above, will be forwarded by the ip_input() routine,
 			 * if necessary.
 			 */
-			if (V_ip_mrouter && (flags & IP_FORWARDING) == 0) {
+			if (V_ip_mrouting_enabled &&
+			    (flags & IP_FORWARDING) == 0) {
 				/*
 				 * If rsvp daemon is not running, do not
 				 * set ip_moptions. This ensures that the packet
@@ -1044,20 +1045,20 @@ done:
 }
 
 void
-in_delayed_cksum(struct mbuf *m)
+in_delayed_cksum_o(struct mbuf *m, uint16_t iph_offset)
 {
 	struct ip *ip;
 	struct udphdr *uh;
 	uint16_t cklen, csum, offset;
 
-	ip = mtod(m, struct ip *);
-	offset = ip->ip_hl << 2 ;
+	ip = (struct ip *)mtodo(m, iph_offset);
+	offset = iph_offset + (ip->ip_hl << 2);
 
 	if (m->m_pkthdr.csum_flags & CSUM_UDP) {
 		/* if udp header is not in the first mbuf copy udplen */
 		if (offset + sizeof(struct udphdr) > m->m_len) {
 			m_copydata(m, offset + offsetof(struct udphdr,
-			    uh_ulen), sizeof(cklen), (caddr_t)&cklen);
+			    uh_ulen), sizeof(cklen), &cklen);
 			cklen = ntohs(cklen);
 		} else {
 			uh = (struct udphdr *)mtodo(m, offset);
@@ -1067,15 +1068,22 @@ in_delayed_cksum(struct mbuf *m)
 		if (csum == 0)
 			csum = 0xffff;
 	} else {
-		cklen = ntohs(ip->ip_len);
-		csum = in_cksum_skip(m, cklen, offset);
+		cklen = ntohs(ip->ip_len) - (ip->ip_hl << 2);
+		csum = in_cksum_skip(m, cklen + offset, offset);
 	}
 	offset += m->m_pkthdr.csum_data;	/* checksum offset */
 
 	if (offset + sizeof(csum) > m->m_len)
-		m_copyback(m, offset, sizeof(csum), (caddr_t)&csum);
+		m_copyback(m, offset, sizeof(csum), &csum);
 	else
 		*(u_short *)mtodo(m, offset) = csum;
+}
+
+void
+in_delayed_cksum(struct mbuf *m)
+{
+
+	in_delayed_cksum_o(m, 0);
 }
 
 /*

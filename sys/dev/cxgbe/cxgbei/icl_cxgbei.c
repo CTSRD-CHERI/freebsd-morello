@@ -164,7 +164,7 @@ static kobj_method_t icl_cxgbei_methods[] = {
 	KOBJMETHOD(icl_conn_task_done, icl_cxgbei_conn_task_done),
 	KOBJMETHOD(icl_conn_transfer_setup, icl_cxgbei_conn_transfer_setup),
 	KOBJMETHOD(icl_conn_transfer_done, icl_cxgbei_conn_transfer_done),
-	{ 0, 0 }
+	KOBJMETHOD_END
 };
 
 DEFINE_CLASS(icl_cxgbei, icl_cxgbei_methods, sizeof(struct icl_cxgbei_conn));
@@ -434,6 +434,7 @@ icl_cxgbei_tx_main(void *arg)
 	struct toepcb *toep = icc->toep;
 	struct socket *so = ic->ic_socket;
 	struct inpcb *inp = sotoinpcb(so);
+	struct tcpcb *tp = intotcpcb(inp);
 	struct icl_pdu *ip;
 	struct mbuf *m;
 	struct mbufq mq;
@@ -476,7 +477,7 @@ icl_cxgbei_tx_main(void *arg)
 		INP_WLOCK(inp);
 
 		ICL_CONN_UNLOCK(ic);
-		if (__predict_false(inp->inp_flags & INP_DROPPED) ||
+		if (__predict_false(tp->t_flags & TF_DISCONNECTED) ||
 		    __predict_false((toep->flags & TPF_ATTACHED) == 0)) {
 			mbufq_drain(&mq);
 		} else {
@@ -621,7 +622,7 @@ icl_cxgbei_conn_pdu_append_bio(struct icl_conn *ic, struct icl_pdu *ip,
 {
 	struct icl_cxgbei_pdu *icp = ip_to_icp(ip);
 	struct mbuf *m, *m_tail;
-	vm_offset_t vaddr;
+	void *vaddr;
 	size_t page_offset, todo, mtodo;
 	bool mapped;
 	int i;
@@ -809,7 +810,7 @@ icl_cxgbei_conn_pdu_get_bio(struct icl_conn *ic, struct icl_pdu *ip,
     size_t pdu_off, struct bio *bp, size_t bio_off, size_t len)
 {
 	struct icl_cxgbei_pdu *icp = ip_to_icp(ip);
-	vm_offset_t vaddr;
+	void *vaddr;
 	size_t page_offset, todo;
 	bool mapped;
 	int i;
@@ -976,42 +977,6 @@ icl_cxgbei_setsockopt(struct icl_conn *ic, struct socket *so, int sspace,
 	return (0);
 }
 
-/*
- * Request/response structure used to find out the adapter offloading a socket.
- */
-struct find_ofld_adapter_rr {
-	struct socket *so;
-	struct adapter *sc;	/* result */
-};
-
-static void
-find_offload_adapter(struct adapter *sc, void *arg)
-{
-	struct find_ofld_adapter_rr *fa = arg;
-	struct socket *so = fa->so;
-	struct tom_data *td = sc->tom_softc;
-	struct tcpcb *tp;
-	struct inpcb *inp;
-
-	/* Non-TCP were filtered out earlier. */
-	MPASS(so->so_proto->pr_protocol == IPPROTO_TCP);
-
-	if (fa->sc != NULL)
-		return;	/* Found already. */
-
-	if (td == NULL)
-		return;	/* TOE not enabled on this adapter. */
-
-	inp = sotoinpcb(so);
-	INP_WLOCK(inp);
-	if ((inp->inp_flags & INP_DROPPED) == 0) {
-		tp = intotcpcb(inp);
-		if (tp->t_flags & TF_TOE && tp->tod == &td->tod)
-			fa->sc = sc;	/* Found. */
-	}
-	INP_WUNLOCK(inp);
-}
-
 static bool
 is_memfree(struct adapter *sc)
 {
@@ -1023,46 +988,6 @@ is_memfree(struct adapter *sc)
 	if (is_t5(sc) && (em & F_EXT_MEM1_ENABLE) != 0)
 		return (false);
 	return (true);
-}
-
-/* XXXNP: move this to t4_tom. */
-static void
-send_iscsi_flowc_wr(struct adapter *sc, struct toepcb *toep, int maxlen)
-{
-	struct wrqe *wr;
-	struct fw_flowc_wr *flowc;
-	const u_int nparams = 1;
-	u_int flowclen;
-	struct ofld_tx_sdesc *txsd = &toep->txsd[toep->txsd_pidx];
-
-	flowclen = sizeof(*flowc) + nparams * sizeof(struct fw_flowc_mnemval);
-
-	wr = alloc_wrqe(roundup2(flowclen, 16), &toep->ofld_txq->wrq);
-	if (wr == NULL) {
-		/* XXX */
-		panic("%s: allocation failure.", __func__);
-	}
-	flowc = wrtod(wr);
-	memset(flowc, 0, wr->wr_len);
-
-	flowc->op_to_nparams = htobe32(V_FW_WR_OP(FW_FLOWC_WR) |
-	    V_FW_FLOWC_WR_NPARAMS(nparams));
-	flowc->flowid_len16 = htonl(V_FW_WR_LEN16(howmany(flowclen, 16)) |
-	    V_FW_WR_FLOWID(toep->tid));
-
-	flowc->mnemval[0].mnemonic = FW_FLOWC_MNEM_TXDATAPLEN_MAX;
-	flowc->mnemval[0].val = htobe32(maxlen);
-
-	txsd->tx_credits = howmany(flowclen, 16);
-	txsd->plen = 0;
-	KASSERT(toep->tx_credits >= txsd->tx_credits && toep->txsd_avail > 0,
-	    ("%s: not enough credits (%d)", __func__, toep->tx_credits));
-	toep->tx_credits -= txsd->tx_credits;
-	if (__predict_false(++toep->txsd_pidx == toep->txsd_total))
-		toep->txsd_pidx = 0;
-	toep->txsd_avail--;
-
-	t4_wrq_tx(sc, wr);
 }
 
 static void
@@ -1093,7 +1018,6 @@ int
 icl_cxgbei_conn_handoff(struct icl_conn *ic, int fd)
 {
 	struct icl_cxgbei_conn *icc = ic_to_icc(ic);
-	struct find_ofld_adapter_rr fa;
 	struct file *fp;
 	struct socket *so;
 	struct inpcb *inp;
@@ -1137,15 +1061,11 @@ icl_cxgbei_conn_handoff(struct icl_conn *ic, int fd)
 	fdrop(fp, curthread);
 	ICL_CONN_UNLOCK(ic);
 
-	/* Find the adapter offloading this socket. */
-	fa.sc = NULL;
-	fa.so = so;
-	t4_iterate(find_offload_adapter, &fa);
-	if (fa.sc == NULL) {
+	icc->sc = find_offload_adapter(so);
+	if (icc->sc == NULL) {
 		error = EINVAL;
 		goto out;
 	}
-	icc->sc = fa.sc;
 
 	max_rx_pdu_len = ISCSI_BHS_SIZE + ic->ic_max_recv_data_segment_length;
 	max_tx_pdu_len = ISCSI_BHS_SIZE + ic->ic_max_send_data_segment_length;
@@ -1161,7 +1081,7 @@ icl_cxgbei_conn_handoff(struct icl_conn *ic, int fd)
 	inp = sotoinpcb(so);
 	INP_WLOCK(inp);
 	tp = intotcpcb(inp);
-	if (inp->inp_flags & INP_DROPPED) {
+	if (tp->t_flags & TF_DISCONNECTED) {
 		INP_WUNLOCK(inp);
 		error = ENOTCONN;
 		goto out;
@@ -1203,7 +1123,7 @@ icl_cxgbei_conn_handoff(struct icl_conn *ic, int fd)
 	toep->params.ulp_mode = ULP_MODE_ISCSI;
 	toep->ulpcb = icc;
 
-	send_iscsi_flowc_wr(icc->sc, toep,
+	send_txdataplen_max_flowc_wr(icc->sc, toep,
 	    roundup(max_iso_pdus * max_tx_pdu_len, tp->t_maxseg));
 	set_ulp_mode_iscsi(icc->sc, toep, icc->ulp_submode);
 	INP_WUNLOCK(inp);
@@ -1415,6 +1335,7 @@ icl_cxgbei_conn_task_setup(struct icl_conn *ic, struct icl_pdu *ip,
 	struct cxgbei_ddp_state *ddp;
 	struct ppod_reservation *prsv;
 	struct inpcb *inp;
+	struct tcpcb *tp;
 	struct mbufq mq;
 	uint32_t itt;
 	int rc = 0;
@@ -1502,8 +1423,9 @@ no_ddp:
 	 * detached already.
 	 */
 	inp = sotoinpcb(ic->ic_socket);
+	tp = intotcpcb(inp);
 	INP_WLOCK(inp);
-	if ((inp->inp_flags & INP_DROPPED) != 0) {
+	if ((tp->t_flags & TF_DISCONNECTED) != 0) {
 		INP_WUNLOCK(inp);
 		mbufq_drain(&mq);
 		t4_free_page_pods(prsv);
@@ -1578,6 +1500,7 @@ icl_cxgbei_conn_transfer_setup(struct icl_conn *ic, struct icl_pdu *ip,
 	struct ppod_reservation *prsv;
 	struct ctl_sg_entry *sgl, sg_entry;
 	struct inpcb *inp;
+	struct tcpcb *tp;
 	struct mbufq mq;
 	int sg_entries = ctsio->kern_sg_entries;
 	uint32_t ttt;
@@ -1678,9 +1601,10 @@ no_ddp:
 			return (ECONNRESET);
 		}
 		inp = sotoinpcb(ic->ic_socket);
+		tp = intotcpcb(inp);
 		INP_WLOCK(inp);
 		ICL_CONN_UNLOCK(ic);
-		if ((inp->inp_flags & INP_DROPPED) != 0) {
+		if ((tp->t_flags & TF_DISCONNECTED) != 0) {
 			INP_WUNLOCK(inp);
 			mbufq_drain(&mq);
 			t4_free_page_pods(prsv);
@@ -1776,7 +1700,6 @@ cxgbei_limits(struct adapter *sc, void *arg)
 static int
 cxgbei_limits_fd(struct icl_drv_limits *idl, int fd)
 {
-	struct find_ofld_adapter_rr fa;
 	struct file *fp;
 	struct socket *so;
 	struct adapter *sc;
@@ -1799,17 +1722,13 @@ cxgbei_limits_fd(struct icl_drv_limits *idl, int fd)
 		return (EINVAL);
 	}
 
-	/* Find the adapter offloading this socket. */
-	fa.sc = NULL;
-	fa.so = so;
-	t4_iterate(find_offload_adapter, &fa);
-	if (fa.sc == NULL) {
+	sc = find_offload_adapter(so);
+	if (sc == NULL) {
 		fdrop(fp, curthread);
 		return (ENXIO);
 	}
 	fdrop(fp, curthread);
 
-	sc = fa.sc;
 	error = begin_synchronized_op(sc, NULL, HOLD_LOCK, "t4lims");
 	if (error != 0)
 		return (error);

@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -77,7 +67,8 @@ static const uint32_t SHA256_K[64] = {
 	h = g, g = f, f = e, e = d + T1; \
 	d = c, c = b, b = a, a = T1 + T2;
 
-static void sha256_generic(uint32_t state[8], const void *data, size_t num_blks)
+static void
+icp_sha256_generic(uint32_t state[8], const void *data, size_t num_blks)
 {
 	uint64_t blk;
 
@@ -173,7 +164,8 @@ static const uint64_t SHA512_K[80] = {
 	0x5fcb6fab3ad6faec, 0x6c44198c4a475817
 };
 
-static void sha512_generic(uint64_t state[8], const void *data, size_t num_blks)
+static void
+icp_sha512_generic(uint64_t state[8], const void *data, size_t num_blks)
 {
 	uint64_t blk;
 
@@ -226,7 +218,8 @@ static void sha512_generic(uint64_t state[8], const void *data, size_t num_blks)
 	}
 }
 
-static void sha256_update(sha256_ctx *ctx, const uint8_t *data, size_t len)
+static void
+icp_sha256_update(sha256_ctx *ctx, const uint8_t *data, size_t len)
 {
 	uint64_t pos = ctx->count[0];
 	uint64_t total = ctx->count[1];
@@ -258,7 +251,8 @@ static void sha256_update(sha256_ctx *ctx, const uint8_t *data, size_t len)
 	ctx->count[1] = total;
 }
 
-static void sha512_update(sha512_ctx *ctx, const uint8_t *data, size_t len)
+static void
+icp_sha512_update(sha512_ctx *ctx, const uint8_t *data, size_t len)
 {
 	uint64_t pos = ctx->count[0];
 	uint64_t total = ctx->count[1];
@@ -290,7 +284,8 @@ static void sha512_update(sha512_ctx *ctx, const uint8_t *data, size_t len)
 	ctx->count[1] = total;
 }
 
-static void sha256_final(sha256_ctx *ctx, uint8_t *result, int bits)
+static void
+icp_sha256_final(sha256_ctx *ctx, uint8_t *result, int bits)
 {
 	uint64_t mlen, pos = ctx->count[0];
 	uint8_t *m = ctx->wbuf;
@@ -334,7 +329,8 @@ static void sha256_final(sha256_ctx *ctx, uint8_t *result, int bits)
 	memset(ctx, 0, sizeof (*ctx));
 }
 
-static void sha512_final(sha512_ctx *ctx, uint8_t *result, int bits)
+static void
+icp_sha512_final(sha512_ctx *ctx, uint8_t *result, int bits)
 {
 	uint64_t mlen, pos = ctx->count[0];
 	uint8_t *m = ctx->wbuf, *r;
@@ -461,14 +457,14 @@ SHA2Update(SHA2_CTX *ctx, const void *data, size_t len)
 
 	switch (ctx->algotype) {
 		case SHA256:
-			sha256_update(&ctx->sha256, data, len);
+			icp_sha256_update(&ctx->sha256, data, len);
 			break;
 		case SHA512:
 		case SHA512_HMAC_MECH_INFO_TYPE:
-			sha512_update(&ctx->sha512, data, len);
+			icp_sha512_update(&ctx->sha512, data, len);
 			break;
 		case SHA512_256:
-			sha512_update(&ctx->sha512, data, len);
+			icp_sha512_update(&ctx->sha512, data, len);
 			break;
 	}
 }
@@ -479,32 +475,33 @@ SHA2Final(void *digest, SHA2_CTX *ctx)
 {
 	switch (ctx->algotype) {
 		case SHA256:
-			sha256_final(&ctx->sha256, digest, 256);
+			icp_sha256_final(&ctx->sha256, digest, 256);
 			break;
 		case SHA512:
 		case SHA512_HMAC_MECH_INFO_TYPE:
-			sha512_final(&ctx->sha512, digest, 512);
+			icp_sha512_final(&ctx->sha512, digest, 512);
 			break;
 		case SHA512_256:
-			sha512_final(&ctx->sha512, digest, 256);
+			icp_sha512_final(&ctx->sha512, digest, 256);
 			break;
 	}
 }
 
 /* the generic implementation is always okay */
-static boolean_t sha2_is_supported(void)
+static boolean_t
+icp_sha2_is_supported(void)
 {
 	return (B_TRUE);
 }
 
 const sha256_ops_t sha256_generic_impl = {
 	.name = "generic",
-	.transform = sha256_generic,
-	.is_supported = sha2_is_supported
+	.transform = icp_sha256_generic,
+	.is_supported = icp_sha2_is_supported
 };
 
 const sha512_ops_t sha512_generic_impl = {
 	.name = "generic",
-	.transform = sha512_generic,
-	.is_supported = sha2_is_supported
+	.transform = icp_sha512_generic,
+	.is_supported = icp_sha2_is_supported
 };

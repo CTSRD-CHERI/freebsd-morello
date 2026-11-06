@@ -50,10 +50,10 @@ msg_abort="Abort"
 msg_an_installation_step_has_been_aborted="An installation step has been aborted. Would you like\nto restart the installation or exit the installer?"
 msg_auto_ufs="Auto (UFS)"
 msg_auto_ufs_desc="Guided UFS Disk Setup"
-msg_auto_ufs_help="Menu options help choose which disk to setup using UFS and standard partitions"
+msg_auto_ufs_help="Choose which disk to setup using UFS and standard partition layout"
 msg_auto_zfs="Auto (ZFS)"
 msg_auto_zfs_desc="Guided Root-on-ZFS"
-msg_auto_zfs_help="To use ZFS with less than 8GB RAM, see https://wiki.freebsd.org/ZFSTuningGuide"
+msg_auto_zfs_help="Choose which disk to setup using ZFS and standard partition layout"
 msg_exit="Exit"
 msg_freebsd_installer="$OSNAME Installer"
 msg_gpt_active_fix="Your hardware is known to have issues booting in CSM/Legacy/BIOS mode from GPT partitions that are not set active. Would you like the installer to apply this workaround for you?"
@@ -73,7 +73,7 @@ msg_yes="YES"
 # error [$msg]
 #
 # Display generic error message when a script fails. An optional message
-# argument can preceed the generic message. User is given the choice of
+# argument can precede the generic message. User is given the choice of
 # restarting the installer or exiting.
 #
 error()
@@ -178,6 +178,9 @@ environment_save
 rm -rf $BSDINSTALL_TMPETC
 mkdir $BSDINSTALL_TMPETC
 
+# Reset the ESP list
+: > ${TMPDIR:-"/tmp"}/bsdinstall-esps
+
 # With pkgbase, pkg OOM has been observed with QEMU-default 128 MiB memory size.
 # Ensure we have at least about 256 MiB (with an allowance for rounding etc.).
 physmem=$(($(sysctl -n hw.physmem) / 1048576))
@@ -206,9 +209,9 @@ if [ ! -f $BSDINSTALL_DISTDIR/MANIFEST ]; then
 	PKGBASE=yes
 else
 	bsddialog --backtitle "$OSNAME Installer" --title "Select Installation Type" \
-		--yes-label "Traditional" --no-label "Packages (Experimental)" --yesno \
+		--yes-label "Distribution Sets" --no-label "Packages" --yesno \
 		$PKGBASE_DEFAULT_BUTTON \
-		"Would you like to install the base system using traditional distribution sets or packages (experimental)?" 0 0
+		"Would you like to install the base system using legacy distribution sets or packages?" 0 0
 	if [ $? -eq 1 ]; then
 		PKGBASE=yes
 	fi
@@ -402,6 +405,7 @@ case "$PARTMODE" in
 	clear
 	echo "Use this shell to set up partitions for the new system. When finished, mount the system at $BSDINSTALL_CHROOT and place an fstab file for the new system at $PATH_FSTAB. Then type 'exit'. You can also enter the partition editor at any time by entering 'bsdinstall partedit'."
 	sh 2>&1
+	bsdinstall mount_aux || error "Failed to mount auxiliary filesystems"
 	;;
 "$msg_manual")		# Manual
 	if f_isset debugFile; then

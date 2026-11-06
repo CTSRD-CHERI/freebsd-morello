@@ -51,7 +51,7 @@ struct audio_soc_aux_node {
 
 struct audio_soc_channel {
 	struct audio_soc_softc	*sc;	/* parent device's softc */
-	struct pcm_channel 	*pcm;	/* PCM channel */
+	struct pcm_channel	*pcm;	/* PCM channel */
 	struct snd_dbuf		*buf;	/* PCM buffer */
 	int			dir;	/* direction */
 };
@@ -69,8 +69,8 @@ struct audio_soc_softc {
 	device_t		codec_dev;
 	SLIST_HEAD(, audio_soc_aux_node)	aux_devs;
 	unsigned int		mclk_fs;
-	struct audio_soc_channel 	play_channel;
-	struct audio_soc_channel 	rec_channel;
+	struct audio_soc_channel	play_channel;
+	struct audio_soc_channel	rec_channel;
 	/*
 	 * The format is from the CPU node, for CODEC node clock roles
 	 * need to be reversed.
@@ -249,9 +249,8 @@ audio_soc_chan_free(kobj_t obj, void *data)
 
 	ausoc_chan = (struct audio_soc_channel *)data;
 
-	buffer = sndbuf_getbuf(ausoc_chan->buf);
-	if (buffer)
-		free(buffer, M_DEVBUF);
+	buffer = ausoc_chan->buf->buf;
+	free(buffer, M_DEVBUF);
 
 	return (0);
 }
@@ -269,10 +268,10 @@ audio_soc_chan_getcaps(kobj_t obj, void *data)
 }
 
 static kobj_method_t audio_soc_chan_methods[] = {
-	KOBJMETHOD(channel_init, 	audio_soc_chan_init),
-	KOBJMETHOD(channel_free, 	audio_soc_chan_free),
-	KOBJMETHOD(channel_setformat, 	audio_soc_chan_setformat),
-	KOBJMETHOD(channel_setspeed, 	audio_soc_chan_setspeed),
+	KOBJMETHOD(channel_init,	audio_soc_chan_init),
+	KOBJMETHOD(channel_free,	audio_soc_chan_free),
+	KOBJMETHOD(channel_setformat,	audio_soc_chan_setformat),
+	KOBJMETHOD(channel_setspeed,	audio_soc_chan_setspeed),
 	KOBJMETHOD(channel_setblocksize,audio_soc_chan_setblocksize),
 	KOBJMETHOD(channel_trigger,	audio_soc_chan_trigger),
 	KOBJMETHOD(channel_getptr,	audio_soc_chan_getptr),
@@ -399,6 +398,11 @@ audio_soc_init(void *arg)
 
 	pcm_init(sc->dev, sc);
 
+	AUDIO_DAI_SETUP_MIXER(sc->codec_dev, sc->dev);
+	SLIST_FOREACH(aux_node, &sc->aux_devs, link) {
+		AUDIO_DAI_SETUP_MIXER(aux_node->dev, sc->dev);
+	}
+
 	sc->play_channel.sc = sc;
 	sc->rec_channel.sc = sc;
 
@@ -411,10 +415,6 @@ audio_soc_init(void *arg)
 	}
 
 	AUDIO_DAI_SETUP_INTR(sc->cpu_dev, audio_soc_intr, sc);
-	AUDIO_DAI_SETUP_MIXER(sc->codec_dev, sc->dev);
-	SLIST_FOREACH(aux_node, &sc->aux_devs, link) {
-		AUDIO_DAI_SETUP_MIXER(aux_node->dev, sc->dev);
-	}
 }
 
 static int
@@ -508,8 +508,7 @@ audio_soc_detach(device_t dev)
 	struct audio_soc_aux_node *aux;
 
 	sc = device_get_softc(dev);
-	if (sc->name)
-		free(sc->name, M_DEVBUF);
+	free(sc->name, M_DEVBUF);
 
 	while ((aux = SLIST_FIRST(&sc->aux_devs)) != NULL) {
 		SLIST_REMOVE_HEAD(&sc->aux_devs, link);

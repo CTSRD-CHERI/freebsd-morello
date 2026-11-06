@@ -92,8 +92,8 @@ static uint16_t evdev_usb_scancodes[256] = {
 	NONE,		NONE,		NONE,		NONE,
 	NONE,		NONE,		NONE,		NONE,
 	/* 0xc0 - 0xdf */
-	NONE,		NONE,		NONE,		NONE,
-	NONE,		NONE,		NONE,		NONE,
+	KEY_BRIGHTNESSDOWN, KEY_BRIGHTNESSUP, KEY_SCALE, KEY_DASHBOARD,
+	KEY_KBDILLUMDOWN, KEY_KBDILLUMUP, NONE, 	NONE,
 	NONE,		NONE,		NONE,		NONE,
 	NONE,		NONE,		NONE,		NONE,
 	NONE,		NONE,		NONE,		NONE,
@@ -108,7 +108,12 @@ static uint16_t evdev_usb_scancodes[256] = {
 	KEY_WWW,	KEY_BACK,	KEY_FORWARD,	KEY_STOP,
 	KEY_FIND,	KEY_SCROLLUP,	KEY_SCROLLDOWN,	KEY_EDIT,
 	KEY_SLEEP,	KEY_COFFEE,	KEY_REFRESH,	KEY_CALC,
-	NONE,		NONE,		NONE,		NONE,
+	/*
+	 * last item maps to APPLE_FN_KEY in hkbd.c. using KEY_WAKEUP instead
+	 * of KEY_FN as evdev translates the latter to too high of a code for
+	 * xkb to parse.
+	 */
+	NONE,		NONE,		NONE,		KEY_WAKEUP,
 
 };
 
@@ -154,10 +159,15 @@ static uint16_t evdev_at_set1_scancodes[] = {
 	NONE,		NONE,		NONE,		NONE,
 	NONE,		NONE,		NONE,		NONE,
 	NONE,		NONE,		NONE,		NONE,
-	KEY_PREVIOUSSONG,	NONE,	NONE,		NONE,
-	NONE,		NONE,		NONE,		NONE,
-	NONE,		KEY_NEXTSONG,	NONE,		NONE,
-	KEY_KPENTER,	KEY_RIGHTCTRL,	NONE,		NONE,
+	/*
+	 * 0xE0 0x11 - 0xE0 0x1E: ChromeOS EC "Vivaldi" top-row action keys
+	 * (see chrome-ec include/keyboard_8042_sharedlib.h).
+	 */
+	KEY_PREVIOUSSONG, KEY_ZOOM,	KEY_SCALE,	KEY_SYSRQ,
+	KEY_BRIGHTNESSDOWN, KEY_BRIGHTNESSUP,		/* 0x14 - 0x15 */
+	KEY_PRIVACY_SCREEN_TOGGLE, KEY_KBDILLUMDOWN,	/* 0x16 - 0x17 */
+	KEY_KBDILLUMUP,	KEY_NEXTSONG,	KEY_PLAYPAUSE,	KEY_MICMUTE,
+	KEY_KPENTER,	KEY_RIGHTCTRL,	KEY_KBDILLUMTOGGLE, NONE,
 	/* 0x20 - 0x3f. 0xE0 prefixed */
 	KEY_MUTE,	KEY_CALC,	KEY_PLAYPAUSE,	NONE,
 	KEY_STOPCD,	NONE,		NONE,		NONE,

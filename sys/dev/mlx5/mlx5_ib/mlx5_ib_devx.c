@@ -40,10 +40,13 @@
 
 #include <sys/priv.h>
 
+#include <linux/bitops.h>
+#include <linux/overflow.h>
 #include <linux/xarray.h>
 #include <linux/rculist.h>
 #include <linux/srcu.h>
 #include <linux/file.h>
+#include <linux/eventfd.h>
 #include <linux/poll.h>
 #include <linux/wait.h>
 
@@ -102,7 +105,7 @@ struct devx_event_subscription {
 	struct rcu_head	rcu;
 	u64 cookie;
 	struct devx_async_event_file *ev_file;
-	struct fd eventfd;
+	struct eventfd_ctx *eventfd;
 };
 
 struct devx_async_event_file {
@@ -2006,24 +2009,24 @@ static int UVERBS_HANDLER(MLX5_IB_METHOD_DEVX_SUBSCRIBE_EVENT)(
 		if (!event_sub)
 			goto err;
 
+		event_sub->cookie = cookie;
+		event_sub->ev_file = ev_file;
+		event_sub->xa_key_level1 = key_level1;
+		event_sub->xa_key_level2 = obj_id;
+		INIT_LIST_HEAD(&event_sub->obj_list);
+
 		list_add_tail(&event_sub->event_list, &sub_list);
 		uverbs_uobject_get(&ev_file->uobj);
 		if (use_eventfd) {
 			event_sub->eventfd =
-				fdget(redirect_fd);
+				eventfd_ctx_fdget(redirect_fd);
 
-			if (event_sub->eventfd.file == NULL) {
-				err = -EBADF;
+			if (IS_ERR(event_sub->eventfd)) {
+				err = PTR_ERR(event_sub->eventfd);
+				event_sub->eventfd = NULL;
 				goto err;
 			}
 		}
-
-		event_sub->cookie = cookie;
-		event_sub->ev_file = ev_file;
-		/* May be needed upon cleanup the devx object/subscription */
-		event_sub->xa_key_level1 = key_level1;
-		event_sub->xa_key_level2 = obj_id;
-		INIT_LIST_HEAD(&event_sub->obj_list);
 	}
 
 	/* Once all the allocations and the XA data insertions were done we
@@ -2071,8 +2074,8 @@ err:
 					   obj,
 					   obj_id);
 
-		if (event_sub->eventfd.file)
-			fdput(event_sub->eventfd);
+		if (event_sub->eventfd)
+			eventfd_ctx_put(event_sub->eventfd);
 		uverbs_uobject_put(&event_sub->ev_file->uobj);
 		kfree(event_sub);
 	}
@@ -2081,19 +2084,151 @@ err:
 	return err;
 }
 
+/*
+ * A DevX UMEM is mapped at an IOVA equal to the DMA address of its first
+ * byte, the UMEM VA plays no part in choosing its page size or MTT list.
+ */
+static u64 devx_umem_start_dma_addr(struct ib_umem *umem)
+{
+	return sg_dma_address(umem->sg_head.sgl) + ib_umem_offset(umem);
+}
+
+static u64 devx_umem_dma_offset(struct ib_umem *umem, u64 pgsz)
+{
+	return devx_umem_start_dma_addr(umem) & (pgsz - 1);
+}
+
+static size_t devx_umem_num_dma_blocks(struct ib_umem *umem, u64 pgsz)
+{
+	u64 iova = devx_umem_start_dma_addr(umem);
+
+	return (ALIGN(iova + umem->length, pgsz) - ALIGN_DOWN(iova, pgsz)) /
+	       pgsz;
+}
+
+static u64 devx_umem_find_best_pgoff(struct ib_umem *umem, u64 pgsz_bitmap)
+{
+	u64 iova = devx_umem_start_dma_addr(umem);
+	u64 pgoff = ib_umem_offset(umem);
+	u64 curr_base = ~0ULL;
+	u64 curr_len = 0;
+	u64 mask = 0;
+	struct scatterlist *sg;
+	unsigned int bits;
+	u64 last_iova;
+	u64 end;
+	int i;
+
+	/* The best result is the smallest page size that results in the minimum
+	 * number of required pages. Compute the largest page size that could
+	 * work based on IOVA bits that don't change.
+	 */
+	if (check_add_overflow(umem->length - 1, iova, &last_iova))
+		return 0;
+	bits = fls64(iova ^ last_iova);
+	if (bits < 64)
+		mask = pgsz_bitmap & GENMASK_ULL(63, bits);
+
+	for_each_sg(umem->sg_head.sgl, sg, umem->nmap, i) {
+		/* If the current entry is physically contiguous with the
+		 * previous one, no need to take its start addresses into
+		 * consideration.
+		 */
+		if (check_add_overflow(curr_base, curr_len, &end) ||
+		    end != sg_dma_address(sg)) {
+			curr_base = sg_dma_address(sg);
+			curr_len = 0;
+
+			/* Reduce max page size if IOVA/DMA bits differ */
+			mask |= (curr_base + pgoff) ^ iova;
+
+			/* The alignment of any IOVA matching a discontinuity
+			 * point in the DMA list sets the maximum possible page
+			 * size as this must be a starting point of a new page
+			 * that needs to be aligned.
+			 */
+			if (i != 0)
+				mask |= iova;
+		}
+
+		curr_len += sg_dma_len(sg);
+		iova += sg_dma_len(sg) - pgoff;
+
+		pgoff = 0;
+	}
+
+	/* The mask accumulates 1's in each position where the IOVA and DMA
+	 * address differ, thus the length of trailing 0 is the largest page
+	 * size that can pass the IOVA through to the DMA address.
+	 */
+	if (mask)
+		pgsz_bitmap &= GENMASK_ULL(__ffs64(mask), 0);
+	return pgsz_bitmap ? rounddown_pow_of_two(pgsz_bitmap) : 0;
+}
+
+static u64 devx_umem_find_best_pgsize(struct ib_umem *umem, u64 pgsz_bitmap)
+{
+	u64 page_size;
+
+	/* Don't bother checking larger page sizes as offset must be zero and
+	 * total DEVX umem length must be equal to total umem length.
+	 */
+	pgsz_bitmap &= GENMASK_ULL(max_t(u64, order_base_2(umem->length),
+					 PAGE_SHIFT),
+				   MLX5_ADAPTER_PAGE_SHIFT);
+	if (!pgsz_bitmap)
+		return 0;
+
+	page_size = devx_umem_find_best_pgoff(umem, pgsz_bitmap);
+	if (!page_size)
+		return 0;
+
+	/* If the page_size is less than the CPU page size then we can use the
+	 * offset and create a umem which is a subset of the page list.
+	 * For larger page sizes we can't be sure the DMA  list reflects the
+	 * VA so we must ensure that the umem extent is exactly equal to the
+	 * page list. Reduce the page size until one of these cases is true.
+	 */
+	while ((devx_umem_dma_offset(umem, page_size) != 0 ||
+		(umem->length % page_size) != 0) &&
+		page_size > PAGE_SIZE)
+		page_size /= 2;
+
+	return page_size;
+}
+
 static int devx_umem_get(struct mlx5_ib_dev *dev, struct ib_ucontext *ucontext,
 			 struct uverbs_attr_bundle *attrs,
 			 struct devx_umem *obj)
 {
+	u64 pgsz_bitmap;
+	u64 page_size;
 	u64 addr;
 	size_t size;
 	u32 access;
-	int npages;
 	int err;
-	u32 page_mask;
 
 	if (uverbs_copy_from(&addr, attrs, MLX5_IB_ATTR_DEVX_UMEM_REG_ADDR) ||
 	    uverbs_copy_from(&size, attrs, MLX5_IB_ATTR_DEVX_UMEM_REG_LEN))
+		return -EFAULT;
+
+	/*
+	 * If the user does not pass in pgsz_bitmap then the user promises not
+	 * to use umem_offset!=0 in any commands that allocate on top of the
+	 * umem.
+	 *
+	 * If the user wants to use a umem_offset then it must pass in
+	 * pgsz_bitmap which guides the maximum page size and thus maximum
+	 * object alignment inside the umem. See the PRM.
+	 *
+	 * Users are not allowed to use IOVA here, mkeys are not supported on
+	 * umem.
+	 */
+	pgsz_bitmap = GENMASK_ULL(63, min(PAGE_SHIFT, MLX5_ADAPTER_PAGE_SHIFT));
+	if (uverbs_attr_is_valid(attrs,
+				 MLX5_IB_ATTR_DEVX_UMEM_REG_PGSZ_BITMAP) &&
+	    uverbs_copy_from(&pgsz_bitmap, attrs,
+			     MLX5_IB_ATTR_DEVX_UMEM_REG_PGSZ_BITMAP))
 		return -EFAULT;
 
 	err = uverbs_get_flags32(&access, attrs,
@@ -2112,17 +2247,15 @@ static int devx_umem_get(struct mlx5_ib_dev *dev, struct ib_ucontext *ucontext,
 	if (IS_ERR(obj->umem))
 		return PTR_ERR(obj->umem);
 
-	mlx5_ib_cont_pages(obj->umem, obj->umem->address,
-			   MLX5_MKEY_PAGE_SHIFT_MASK, &npages,
-			   &obj->page_shift, &obj->ncont, NULL);
-
-	if (!npages) {
+	page_size = devx_umem_find_best_pgsize(obj->umem, pgsz_bitmap);
+	if (!page_size) {
 		ib_umem_release(obj->umem);
 		return -EINVAL;
 	}
 
-	page_mask = (1 << obj->page_shift) - 1;
-	obj->page_offset = obj->umem->address & page_mask;
+	obj->page_shift = order_base_2(page_size);
+	obj->page_offset = devx_umem_dma_offset(obj->umem, page_size);
+	obj->ncont = devx_umem_num_dma_blocks(obj->umem, page_size);
 
 	return 0;
 }
@@ -2339,8 +2472,8 @@ static void dispatch_event_fd(struct list_head *fd_list,
 	struct devx_event_subscription *item;
 
 	list_for_each_entry_rcu(item, fd_list, xa_list) {
-		if (item->eventfd.file != NULL)
-			linux_poll_wakeup(item->eventfd.file);
+		if (item->eventfd != NULL)
+			eventfd_signal(item->eventfd);
 		else
 			deliver_event(item, data);
 	}
@@ -2357,12 +2490,21 @@ static bool mlx5_devx_event_notifier(struct mlx5_core_dev *mdev,
 	bool is_unaffiliated;
 	u32 obj_id;
 
-	/* Explicit filtering to kernel events which may occur frequently */
+	/*
+	 * Command completions and page requests must be processed by the
+	 * mlx5_core default EQ handler.  Returning true here tells
+	 * mlx5_eq_int() the event was consumed and skips core processing,
+	 * which stalls the firmware command interface and page supply and
+	 * wedges the device.  Return false so the core handler runs for
+	 * these frequent kernel events.
+	 */
 	if (event_type == MLX5_EVENT_TYPE_CMD ||
 	    event_type == MLX5_EVENT_TYPE_PAGE_REQUEST)
-		return true;
+		return false;
 
-	dev = mdev->priv.eq_table.dev;
+	dev = READ_ONCE(mdev->priv.eq_table.dev);
+	if (dev == NULL)
+		return false;
 	table = &dev->devx_event_table;
 	is_unaffiliated = is_unaffiliated_event(dev->mdev, event_type);
 
@@ -2401,8 +2543,14 @@ void mlx5_ib_devx_init_event_table(struct mlx5_ib_dev *dev)
 
 	xa_init_flags(&table->event_xa, 0);
 	mutex_init(&table->event_xa_lock);
-	dev->mdev->priv.eq_table.dev = dev;
-	dev->mdev->priv.eq_table.cb = mlx5_devx_event_notifier;
+	/*
+	 * Publish dev before cb.  The EQ interrupt handler loads cb with
+	 * acquire semantics and the notifier then dereferences eq_table.dev,
+	 * so dev must be visible to that handler once cb is observed.
+	 */
+	WRITE_ONCE(dev->mdev->priv.eq_table.dev, dev);
+	smp_store_release(&dev->mdev->priv.eq_table.cb,
+			  mlx5_devx_event_notifier);
 }
 
 void mlx5_ib_devx_cleanup_event_table(struct mlx5_ib_dev *dev)
@@ -2413,8 +2561,14 @@ void mlx5_ib_devx_cleanup_event_table(struct mlx5_ib_dev *dev)
 	void *entry;
 	unsigned long id;
 
-	dev->mdev->priv.eq_table.cb = NULL;
-	dev->mdev->priv.eq_table.dev = NULL;
+	/*
+	 * Stop new dispatch by clearing cb, then wait for any in-flight EQ
+	 * callback to finish its RCU read section before clearing dev and
+	 * tearing down the event table.
+	 */
+	WRITE_ONCE(dev->mdev->priv.eq_table.cb, NULL);
+	synchronize_rcu();
+	WRITE_ONCE(dev->mdev->priv.eq_table.dev, NULL);
 	mutex_lock(&dev->devx_event_table.event_xa_lock);
 	xa_for_each(&table->event_xa, id, entry) {
 		event = entry;
@@ -2609,8 +2763,8 @@ static void devx_free_subscription(struct rcu_head *rcu)
 	struct devx_event_subscription *event_sub =
 		container_of(rcu, struct devx_event_subscription, rcu);
 
-	if (event_sub->eventfd.file)
-		fdput(event_sub->eventfd);
+	if (event_sub->eventfd)
+		eventfd_ctx_put(event_sub->eventfd);
 	uverbs_uobject_put(&event_sub->ev_file->uobj);
 	kfree(event_sub);
 }
@@ -2711,6 +2865,8 @@ DECLARE_UVERBS_NAMED_METHOD(
 			   UA_MANDATORY),
 	UVERBS_ATTR_FLAGS_IN(MLX5_IB_ATTR_DEVX_UMEM_REG_ACCESS,
 			     enum ib_access_flags),
+	UVERBS_ATTR_CONST_IN(MLX5_IB_ATTR_DEVX_UMEM_REG_PGSZ_BITMAP,
+			     u64),
 	UVERBS_ATTR_PTR_OUT(MLX5_IB_ATTR_DEVX_UMEM_REG_OUT_ID,
 			    UVERBS_ATTR_TYPE(u32),
 			    UA_MANDATORY));

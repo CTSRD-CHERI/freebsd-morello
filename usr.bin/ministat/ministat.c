@@ -510,7 +510,8 @@ ReadSet(FILE *f, const char *n, int column, const char *delim)
 
 		d = strtod(t, &p);
 		if (p != NULL && *p != '\0')
-			errx(2, "Invalid data on line %d in %s", line, n);
+			errx(2, "Invalid data \"%s\" on line %d in %s",
+			    t, line, n);
 		if (*buf != '\0')
 			AddPoint(s, d);
 	}
@@ -530,7 +531,7 @@ usage(char const *whine)
 
 	fprintf(stderr, "%s\n", whine);
 	fprintf(stderr,
-	    "Usage: ministat [-C column] [-c confidence] [-d delimiter(s)] [-Anqs] [-w width] [file [file ...]]\n");
+	    "Usage: ministat [-Anqs] [-C column] [-c confidence] [-d delimiter(s)] [-w width] [file ...]]\n");
 	fprintf(stderr, "\tconfidence = {");
 	for (i = 0; i < NCONF; i++) {
 		fprintf(stderr, "%s%g%%",

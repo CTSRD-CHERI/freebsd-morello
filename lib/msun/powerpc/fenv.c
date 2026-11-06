@@ -26,59 +26,97 @@
  * SUCH DAMAGE.
  */
 
-#define	__fenv_static
 #include "fenv.h"
-#ifdef __SPE__
-#include <sys/types.h>
-#include <machine/spr.h>
-#endif
 
-#ifdef __GNUC_GNU_INLINE__
-#error "This file must be compiled with C99 'inline' semantics"
-#endif
-
-#ifdef __SPE__
-const fenv_t __fe_dfl_env = SPEFSCR_DFLT;
-#else
 const fenv_t __fe_dfl_env = 0x00000000;
-#endif
+const femode_t __fe_dfl_mode = 0x00000000;
 
-extern inline int feclearexcept(int __excepts);
-extern inline int fegetexceptflag(fexcept_t *__flagp, int __excepts);
-extern inline int fesetexceptflag(const fexcept_t *__flagp, int __excepts);
-#ifndef __SPE__
-extern inline int feraiseexcept(int __excepts);
-#endif
-extern inline int fetestexcept(int __excepts);
-extern inline int fegetround(void);
-extern inline int fesetround(int __round);
-extern inline int fegetenv(fenv_t *__envp);
-extern inline int feholdexcept(fenv_t *__envp);
-extern inline int fesetenv(const fenv_t *__envp);
-extern inline int feupdateenv(const fenv_t *__envp);
-extern inline int feenableexcept(int __mask);
-extern inline int fedisableexcept(int __mask);
-
-#ifdef __SPE__
-#define	PMAX	0x7f7fffff
-#define	PMIN	0x00800000
-int	feraiseexcept(int __excepts)
+int
+(feclearexcept)(int excepts)
 {
-	uint32_t spefscr;
-
-	spefscr = mfspr(SPR_SPEFSCR);
-	mtspr(SPR_SPEFSCR, spefscr | (__excepts & FE_ALL_EXCEPT));
-
-	if (__excepts & FE_INVALID)
-		__asm __volatile ("efsdiv %0, %0, %1" :: "r"(0), "r"(0));
-	if (__excepts & FE_DIVBYZERO)
-		__asm __volatile ("efsdiv %0, %0, %1" :: "r"(1.0f), "r"(0));
-	if (__excepts & FE_UNDERFLOW)
-		__asm __volatile ("efsmul %0, %0, %0" :: "r"(PMIN));
-	if (__excepts & FE_OVERFLOW)
-		__asm __volatile ("efsadd %0, %0, %0" :: "r"(PMAX));
-	if (__excepts & FE_INEXACT)
-		__asm __volatile ("efssub %0, %0, %1" :: "r"(PMIN), "r"(1.0f));
-	return (0);
+	return (__feclearexcept_int(excepts));
 }
-#endif
+
+int
+(fegetexceptflag)(fexcept_t *flagp, int excepts)
+{
+	return (__fegetexceptflag_int(flagp, excepts));
+}
+
+int
+(fesetexceptflag)(const fexcept_t *flagp, int excepts)
+{
+	return (__fesetexceptflag_int(flagp, excepts));
+}
+
+int
+(feraiseexcept)(int excepts)
+{
+	return (__feraiseexcept_int(excepts));
+}
+
+int
+(fetestexcept)(int excepts)
+{
+	return (__fetestexcept_int(excepts));
+}
+
+int
+(fegetround)(void)
+{
+	return (__fegetround_int());
+}
+
+int
+(fesetround)(int round)
+{
+	return (__fesetround_int(round));
+}
+
+int
+(fegetmode)(femode_t *modep)
+{
+	return (__fegetmode_int(modep));
+}
+
+int
+(fesetmode)(const femode_t *modep)
+{
+	return (__fesetmode_int(modep));
+}
+
+int
+(fegetenv)(fenv_t *envp)
+{
+	return (__fegetenv_int(envp));
+}
+
+int
+(feholdexcept)(fenv_t *envp)
+{
+	return (__feholdexcept_int(envp));
+}
+
+int
+(fesetenv)(const fenv_t *envp)
+{
+	return (__fesetenv_int(envp));
+}
+
+int
+(feupdateenv)(const fenv_t *envp)
+{
+	return (__feupdateenv_int(envp));
+}
+
+int
+(feenableexcept)(int mask)
+{
+	return (__feenableexcept_int(mask));
+}
+
+int
+(fedisableexcept)(int mask)
+{
+	return (__fedisableexcept_int(mask));
+}

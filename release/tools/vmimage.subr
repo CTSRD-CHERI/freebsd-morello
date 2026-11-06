@@ -39,10 +39,21 @@ cleanup() {
 }
 
 metalog_add_data() {
-	if [ -n "${NO_ROOT}" ]; then
-		echo "$1 type=file uname=root gname=wheel mode=0644" >> \
-		    ${DESTDIR}/METALOG
+	local file mode type
+
+	file=$1
+	if [ -f ${DESTDIR}/${file} ]; then
+		type=file
+		mode=${2:-0644}
+	elif [ -d ${DESTDIR}/${file} ]; then
+		type=dir
+		mode=${2:-0755}
+	else
+		echo "metalog_add_data: ${file} not found" >&2
+		return 1
 	fi
+	echo "${file} type=${type} uname=root gname=wheel mode=${mode}" >> \
+	    ${DESTDIR}/METALOG
 }
 
 vm_create_base() {
@@ -57,32 +68,68 @@ vm_copy_base() {
 	return 0
 }
 
+vm_base_packages_list() {
+	# Output a list of package sets equivalent to what we get from
+	# "installworld installkernel distribution", aka. the full base
+	# system.
+	echo FreeBSD-set-base
+	[ -z "${WITHOUT_DEBUG_FILES}" ] && echo FreeBSD-set-base-dbg
+	echo FreeBSD-set-kernels
+	[ -z "${WITHOUT_KERNEL_SYMBOLS}" ] && echo FreeBSD-set-kernels-dbg
+	case ${TARGET_ARCH} in
+	amd64 | aarch64 | powerpc64)
+		echo FreeBSD-set-lib32
+		[ -z "${WITHOUT_DEBUG_FILES}" ] && echo FreeBSD-set-lib32-dbg
+	esac
+	[ -n "${WITH_SRC}" ] && echo FreeBSD-set-src
+	echo FreeBSD-set-tests
+	# Also install pkg, since systems with a packaged base system should
+	# have the tools to upgrade themselves.
+	echo pkg
+}
+
+vm_extra_filter_base_packages() {
+	# Prototype. When overridden, allows further filtering of base system
+	# packages, reading package names from stdin and writing to stdout.
+	cat
+}
+
 vm_install_base() {
 	# Installs the FreeBSD userland/kernel to the virtual machine disk.
 
-	cd ${WORLDDIR} && \
-		make DESTDIR=${DESTDIR} ${INSTALLOPTS} \
-		installworld installkernel distribution || \
-		err "\n\nCannot install the base system to ${DESTDIR}."
+	if [ -z "${NOPKGBASE}" ]; then
+		local pkg_cmd
+		pkg_cmd="${PKG_CMD} --rootdir ${DESTDIR} --repo-conf-dir ${PKGBASE_REPO_DIR}
+			-o ASSUME_ALWAYS_YES=yes -o IGNORE_OSVERSION=yes
+			-o ABI=${PKG_ABI} -o INSTALL_AS_USER=yes "
+		pkg_cmd="$pkg_cmd -o METALOG=METALOG"
+		$pkg_cmd update
+		selected=$(vm_base_packages_list | vm_extra_filter_base_packages)
+		$pkg_cmd install -U -r FreeBSD-base $selected
+		metalog_add_data ./var/db/pkg/local.sqlite
+	else
+		cd ${WORLDDIR} && \
+			make DESTDIR=${DESTDIR} ${INSTALLOPTS} \
+			installworld installkernel distribution || \
+			err "\n\nCannot install the base system to ${DESTDIR}."
+	fi
 
 	# Bootstrap etcupdate(8) database.
 	mkdir -p ${DESTDIR}/var/db/etcupdate
 	etcupdate extract -B \
 		-M "TARGET=${TARGET} TARGET_ARCH=${TARGET_ARCH}" \
 		-s ${WORLDDIR} -d ${DESTDIR}/var/db/etcupdate \
-		-L /dev/stdout ${NO_ROOT:+-N}
-	if [ -n "${NO_ROOT}" ]; then
-		# Reroot etcupdate's internal METALOG to the whole tree
-		sed -n 's,^\.,./var/db/etcupdate/current,p' \
-		    ${DESTDIR}/var/db/etcupdate/current/METALOG | \
-		    env -i LC_COLLATE=C sort >> ${DESTDIR}/METALOG
-		rm ${DESTDIR}/var/db/etcupdate/current/METALOG
-	fi
+		-L /dev/stdout -N
+	# Reroot etcupdate's internal METALOG to the whole tree
+	sed -n 's,^\.,./var/db/etcupdate/current,p' \
+	    ${DESTDIR}/var/db/etcupdate/current/METALOG | \
+	    env -i LC_COLLATE=C sort >> ${DESTDIR}/METALOG
+	rm ${DESTDIR}/var/db/etcupdate/current/METALOG
 
 	echo '# Custom /etc/fstab for FreeBSD VM images' \
 		> ${DESTDIR}/etc/fstab
 	if [ "${VMFS}" != zfs ]; then
-		echo "/dev/${ROOTLABEL}/rootfs   /       ${VMFS}   rw      1       1" \
+		echo "/dev/${ROOTLABEL}/rootfs   /       ${VMFS}   rw,noatime      1       1" \
 			>> ${DESTDIR}/etc/fstab
 	fi
 	if [ -z "${NOSWAP}" ]; then
@@ -144,26 +191,28 @@ vm_extra_enable_services() {
 			${DESTDIR}/etc/rc.conf
 		# Expand the filesystem to fill the disk.
 		echo 'growfs_enable="YES"' >> ${DESTDIR}/etc/rc.conf
-		touch ${DESTDIR}/firstboot
 	fi
 
 	return 0
 }
 
 vm_extra_install_packages() {
-	if [ -n "${WITHOUT_QEMU}" ]; then
-		return 0
-	fi
-
 	if [ -z "${VM_EXTRA_PACKAGES}" ]; then
 		return 0
 	fi
-	chroot ${DESTDIR} ${EMULATOR} env ASSUME_ALWAYS_YES=yes \
-		/usr/sbin/pkg bootstrap -y
-	for p in ${VM_EXTRA_PACKAGES}; do
-		chroot ${DESTDIR} ${EMULATOR} env ASSUME_ALWAYS_YES=yes \
-			/usr/sbin/pkg install -y ${p}
+	for pkg in ${VM_EXTRA_PACKAGES}; do
+		INSTALL_AS_USER=yes \
+		    ${PKG_CMD} \
+		    -o ABI=${PKG_ABI} \
+		    -o METALOG=${DESTDIR}/METALOG.pkg \
+		    -o REPOS_DIR=${PKG_REPOS_DIR} \
+		    -o PKG_DBDIR=${DESTDIR}/var/db/pkg \
+		    -r ${DESTDIR} \
+		    install -y -r ${PKG_REPO_NAME} $pkg
 	done
+	if [ -n "${NOPKGBASE}" ]; then
+		metalog_add_data ./var/db/pkg/local.sqlite
+	fi
 
 	return 0
 }
@@ -196,10 +245,11 @@ vm_emulation_cleanup() {
 }
 
 vm_extra_pkg_rmcache() {
-	if [ -e ${DESTDIR}/usr/local/sbin/pkg ]; then
-		chroot ${DESTDIR} ${EMULATOR} env ASSUME_ALWAYS_YES=yes \
-			/usr/local/sbin/pkg clean -y -a
-	fi
+	${PKG_CMD} \
+	    -o ASSUME_ALWAYS_YES=yes \
+	    -o INSTALL_AS_USER=yes \
+	    -r ${DESTDIR} \
+	    clean -y -a
 
 	return 0
 }
@@ -207,10 +257,67 @@ vm_extra_pkg_rmcache() {
 buildfs() {
 	local md tmppool
 
+	# Copy entries from METALOG.pkg into METALOG, but first check to
+	# make sure that filesystem objects still exist; some things may
+	# have been logged which no longer exist if a package was removed.
+	if [ -f ${DESTDIR}/METALOG.pkg ]; then
+		while read F REST; do
+			if [ -e "${DESTDIR}/${F}" ] ||
+			    [ -L "${DESTDIR}/${F}" ]; then
+				echo "${F} ${REST}" >> ${DESTDIR}/METALOG
+			fi
+		done < ${DESTDIR}/METALOG.pkg
+	fi
+
+	# Check for any directories in the staging tree which weren't
+	# recorded in METALOG, and record them now.  This is a quick hack
+	# to avoid creating unusable VM images and should go away once
+	# the bugs which produce such unlogged directories are gone.
+	grep type=dir ${DESTDIR}/METALOG |
+	    cut -f 1 -d ' ' |
+	    sort -u > ${DESTDIR}/METALOG.dirs
+	( cd ${DESTDIR} && find . -type d ) |
+	    sort |
+	    comm -23 - ${DESTDIR}/METALOG.dirs > ${DESTDIR}/METALOG.missingdirs
+	if [ -s ${DESTDIR}/METALOG.missingdirs ]; then
+		echo "WARNING: Directories exist but were not in METALOG"
+		cat ${DESTDIR}/METALOG.missingdirs
+	fi
+	while read DIR; do
+		metalog_add_data ${DIR}
+	done < ${DESTDIR}/METALOG.missingdirs
+
+	if [ -z "${NOPKGBASE}" ]; then
+		# Add some database files which are created by pkg triggers;
+		# at some point in the future the tools which create these
+		# files should probably learn how to record them in METALOG
+		# (which would simplify no-root installworld as well).
+		metalog_add_data ./etc/login.conf.db
+		metalog_add_data ./etc/passwd
+		metalog_add_data ./etc/pwd.db
+		metalog_add_data ./etc/spwd.db 600
+		metalog_add_data ./var/db/services.db
+	fi
+
+	if [ -n "${MISSING_METALOGS}" ]; then
+		# Hack to allow VM configurations to add files which
+		# weren't being added to METALOG appropriately.  This
+		# is mainly a workaround for the @sample bug and it
+		# should go away before FreeBSD 15.1 ships.
+		for P in ${MISSING_METALOGS}; do
+			metalog_add_data ${P}
+		done
+	fi
+
+	# Sort METALOG file; makefs produces directories with 000 permissions
+	# if their contents are seen before the directories themselves.
+	env -i LC_COLLATE=C sort -u ${DESTDIR}/METALOG > ${DESTDIR}/METALOG.sorted
+	mv ${DESTDIR}/METALOG.sorted ${DESTDIR}/METALOG
+
 	case "${VMFS}" in
 	ufs)
 		cd ${DESTDIR} && ${MAKEFS} ${MAKEFSARGS} -o label=rootfs -o version=2 -o softupdates=1 \
-			${VMBASE} .${NO_ROOT:+/METALOG}
+			${VMBASE} ./METALOG
 		;;
 	zfs)
 		cd ${DESTDIR} && ${MAKEFS} -t zfs ${MAKEFSARGS} \
@@ -230,7 +337,7 @@ buildfs() {
 			-o fs=zroot/var/log\;setuid=off\;exec=off \
 			-o fs=zroot/var/mail\;atime=on \
 			-o fs=zroot/var/tmp\;setuid=off \
-			${VMBASE} .${NO_ROOT:+/METALOG}
+			${VMBASE} ./METALOG
 		;;
 	*)
 		echo "Unexpected VMFS value '${VMFS}'"
@@ -258,10 +365,14 @@ umount_loop() {
 }
 
 vm_create_disk() {
-	local BOOTFILES BOOTPARTSOFFSET FSPARTTYPE X86GPTBOOTFILE
+	local BOOTFILES BOOTPARTSOFFSET FSPARTTYPE PARTALIGN X86GPTBOOTFILE
+
+	if [ -n "${VM_PARTALIGN}" ]; then
+		PARTALIGN="%${VM_PARTALIGN}"
+	fi
 
 	if [ -z "${NOSWAP}" ]; then
-		SWAPOPT="-p freebsd-swap/swapfs::${SWAPSIZE}"
+		SWAPOPT="-p freebsd-swap/swapfs::${SWAPSIZE}${PARTALIGN}"
 	fi
 
 	if [ -n "${VM_BOOTPARTSOFFSET}" ]; then
@@ -269,7 +380,7 @@ vm_create_disk() {
 	fi
 
 	if [ -n "${CONFIG_DRIVE}" ]; then
-		CONFIG_DRIVE="-p freebsd/config-drive::${CONFIG_DRIVE_SIZE}"
+		CONFIG_DRIVE="-p freebsd/config-drive::${CONFIG_DRIVE_SIZE}${PARTALIGN}"
 	fi
 
 	case "${VMFS}" in
@@ -294,26 +405,26 @@ vm_create_disk() {
 		WITH_UNIFIED_OBJDIR=yes \
 		make -C ${WORLDDIR}/stand -V .OBJDIR)"
 	BOOTFILES="$(realpath ${BOOTFILES})"
-	MAKEFSARGS="-s ${VMSIZE} -D"
+	MAKEFSARGS="-s ${VMSIZE} -D -N ${DESTDIR}/etc"
 
 	case "${TARGET}:${TARGET_ARCH}" in
 		amd64:amd64 | i386:i386)
 			ESP=yes
 			BOOTPARTS="-b ${BOOTFILES}/i386/pmbr/pmbr \
 				   -p freebsd-boot/bootfs:=${BOOTFILES}/${X86GPTBOOTFILE}${BOOTPARTSOFFSET}"
-			ROOTFSPART="-p ${FSPARTTYPE}/rootfs:=${VMBASE}"
+			ROOTFSPART="-p ${FSPARTTYPE}/rootfs:=${VMBASE}${PARTALIGN}"
 			MAKEFSARGS="$MAKEFSARGS -B little"
 			;;
 		arm:armv7 | arm64:aarch64 | riscv:riscv64*)
 			ESP=yes
 			BOOTPARTS=
-			ROOTFSPART="-p ${FSPARTTYPE}/rootfs:=${VMBASE}"
+			ROOTFSPART="-p ${FSPARTTYPE}/rootfs:=${VMBASE}${PARTALIGN}"
 			MAKEFSARGS="$MAKEFSARGS -B little"
 			;;
 		powerpc:powerpc*)
 			ESP=no
 			BOOTPARTS="-p prepboot:=${BOOTFILES}/powerpc/boot1.chrp/boot1.elf -a 1"
-			ROOTFSPART="-p freebsd:=${VMBASE}"
+			ROOTFSPART="-p freebsd:=${VMBASE}${PARTALIGN}"
 			if [ ${TARGET_ARCH} = powerpc64le ]; then
 				MAKEFSARGS="$MAKEFSARGS -B little"
 			else
@@ -330,13 +441,22 @@ vm_create_disk() {
 		# Create an ESP
 		espfilename=$(mktemp /tmp/efiboot.XXXXXX)
 		make_esp_file ${espfilename} ${fat32min} ${BOOTFILES}/efi/loader_lua/loader_lua.efi
-		BOOTPARTS="${BOOTPARTS} -p efi/efiboot0:=${espfilename}"
+		espsuffix=""
+		if [ -z "${BOOTPARTS}" ]; then
+			espsuffix="${BOOTPARTSOFFSET}"
+		fi
+		BOOTPARTS="${BOOTPARTS} -p efi/efiboot0:=${espfilename}${espsuffix}${PARTALIGN}"
 
 		# Add this to fstab
 		mkdir -p ${DESTDIR}/boot/efi
 		echo "/dev/${ROOTLABEL}/efiboot0	/boot/efi       msdosfs     rw      2       2" \
 			>> ${DESTDIR}/etc/fstab
 	fi
+
+	# Add a marker file which indicates that this image has never
+	# been booted.  Some services run only upon the first boot.
+	touch ${DESTDIR}/firstboot
+	metalog_add_data ./firstboot
 
 	echo "Building filesystem...  Please wait."
 	buildfs
@@ -361,9 +481,4 @@ vm_create_disk() {
 vm_extra_create_disk() {
 
 	return 0
-}
-
-touch_firstboot() {
-	touch ${DESTDIR}/firstboot
-	metalog_add_data ./firstboot
 }

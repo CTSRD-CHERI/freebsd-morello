@@ -50,12 +50,12 @@ extern int nfsrv_useacl;
 extern uid_t nfsrv_defaultuid;
 extern gid_t nfsrv_defaultgid;
 
-NFSD_VNET_DECLARE(struct nfsclienthashhead *, nfsclienthash);
-NFSD_VNET_DECLARE(struct nfslockhashhead *, nfslockhash);
-NFSD_VNET_DECLARE(struct nfssessionhash *, nfssessionhash);
-NFSD_VNET_DECLARE(int, nfs_rootfhset);
-NFSD_VNET_DECLARE(uid_t, nfsrv_defaultuid);
-NFSD_VNET_DECLARE(gid_t, nfsrv_defaultgid);
+VNET_DECLARE(struct nfsclienthashhead *, nfsclienthash);
+VNET_DECLARE(struct nfslockhashhead *, nfslockhash);
+VNET_DECLARE(struct nfssessionhash *, nfssessionhash);
+VNET_DECLARE(int, nfs_rootfhset);
+VNET_DECLARE(uid_t, nfsrv_defaultuid);
+VNET_DECLARE(gid_t, nfsrv_defaultgid);
 
 char nfs_v2pubfh[NFSX_V2FH];
 struct nfsdontlisthead nfsrv_dontlisthead;
@@ -1347,7 +1347,7 @@ nfsrv_adj(struct mbuf *mp, int len, int nul)
 			m->m_epg_last_len = plen;
 			m->m_len = lastlen;
 		}
-		cp = (char *)(void *)PHYS_TO_DMAP(m->m_epg_pa[pgno]);
+		cp = PHYS_TO_DMAP(m->m_epg_pa[pgno]);
 		cp += off + plen - nul;
 	} else {
 		m->m_len = lastlen;
@@ -1618,10 +1618,10 @@ nfsrv_checkuidgid(struct nfsrv_descript *nd, struct nfsvattr *nvap)
 	if (NFSVNO_NOTSETUID(nvap) && NFSVNO_NOTSETGID(nvap))
 		goto out;
 	if ((NFSVNO_ISSETUID(nvap) &&
-	     nvap->na_uid == NFSD_VNET(nfsrv_defaultuid) &&
+	     nvap->na_uid == VNET(nfsrv_defaultuid) &&
              enable_nobodycheck == 1) ||
 	    (NFSVNO_ISSETGID(nvap) &&
-	     nvap->na_gid == NFSD_VNET(nfsrv_defaultgid) &&
+	     nvap->na_gid == VNET(nfsrv_defaultgid) &&
              enable_nogroupcheck == 1)) {
 		error = NFSERR_BADOWNER;
 		goto out;
@@ -1644,8 +1644,8 @@ out:
  */
 void
 nfsrv_fixattr(struct nfsrv_descript *nd, vnode_t vp,
-    struct nfsvattr *nvap, NFSACL_T *aclp, NFSPROC_T *p, nfsattrbit_t *attrbitp,
-    struct nfsexstuff *exp)
+    struct nfsvattr *nvap, NFSACL_T *aclp, NFSACL_T *daclp, NFSPROC_T *p,
+    nfsattrbit_t *attrbitp, bool atime_done)
 {
 	int change = 0;
 	struct nfsvattr nva;
@@ -1675,7 +1675,7 @@ nfsrv_fixattr(struct nfsrv_descript *nd, vnode_t vp,
 		}
 	}
 	if (NFSISSET_ATTRBIT(attrbitp, NFSATTRBIT_TIMEACCESSSET) &&
-	    NFSVNO_ISSETATIME(nvap)) {
+	    !atime_done && NFSVNO_ISSETATIME(nvap)) {
 		nva.na_atime = nvap->na_atime;
 		change++;
 		NFSSETBIT_ATTRBIT(&nattrbits, NFSATTRBIT_TIMEACCESSSET);
@@ -1697,8 +1697,46 @@ nfsrv_fixattr(struct nfsrv_descript *nd, vnode_t vp,
 			NFSCLRBIT_ATTRBIT(attrbitp, NFSATTRBIT_OWNERGROUP);
 		}
 	}
+
+	/*
+	 * For archive, ZFS sets it by default for new files,
+	 * so if specified, it must be set or cleared.
+	 * For hidden and system, no file system sets them
+	 * by default upon creation, so they only need to be
+	 * set and not cleared.
+	 */
+	if (NFSISSET_ATTRBIT(attrbitp, NFSATTRBIT_ARCHIVE)) {
+		if (nva.na_flags == VNOVAL)
+			nva.na_flags = 0;
+		if ((nvap->na_flags & UF_ARCHIVE) != 0)
+			nva.na_flags |= UF_ARCHIVE;
+		change++;
+		NFSSETBIT_ATTRBIT(&nattrbits, NFSATTRBIT_ARCHIVE);
+	}
+	if (NFSISSET_ATTRBIT(attrbitp, NFSATTRBIT_HIDDEN)) {
+		if ((nvap->na_flags & UF_HIDDEN) != 0) {
+			if (nva.na_flags == VNOVAL)
+				nva.na_flags = 0;
+			nva.na_flags |= UF_HIDDEN;
+			change++;
+			NFSSETBIT_ATTRBIT(&nattrbits, NFSATTRBIT_HIDDEN);
+		} else {
+			NFSCLRBIT_ATTRBIT(attrbitp, NFSATTRBIT_HIDDEN);
+		}
+	}
+	if (NFSISSET_ATTRBIT(attrbitp, NFSATTRBIT_SYSTEM)) {
+		if ((nvap->na_flags & UF_SYSTEM) != 0) {
+			if (nva.na_flags == VNOVAL)
+				nva.na_flags = 0;
+			nva.na_flags |= UF_SYSTEM;
+			change++;
+			NFSSETBIT_ATTRBIT(&nattrbits, NFSATTRBIT_SYSTEM);
+		} else {
+			NFSCLRBIT_ATTRBIT(attrbitp, NFSATTRBIT_SYSTEM);
+		}
+	}
 	if (change) {
-		error = nfsvno_setattr(vp, &nva, nd->nd_cred, p, exp);
+		error = nfsvno_setattr(vp, &nva, nd->nd_cred, p, NULL);
 		if (error) {
 			NFSCLRALL_ATTRBIT(attrbitp, &nattrbits);
 		}
@@ -1709,16 +1747,34 @@ nfsrv_fixattr(struct nfsrv_descript *nd, vnode_t vp,
 	}
 #ifdef NFS4_ACL_EXTATTR_NAME
 	if (NFSISSET_ATTRBIT(attrbitp, NFSATTRBIT_ACL) &&
-	    nfsrv_useacl != 0 && aclp != NULL) {
-		if (aclp->acl_cnt > 0) {
-			error = nfsrv_setacl(vp, aclp, nd->nd_cred, p);
-			if (error) {
-				NFSCLRBIT_ATTRBIT(attrbitp, NFSATTRBIT_ACL);
-			}
-		}
+	    nfsrv_useacl != 0 && aclp != NULL && aclp->acl_cnt > 0) {
+		error = nfsrv_setacl(vp, aclp, ACL_TYPE_NFS4,
+		    nd->nd_cred, p);
+		if (error != 0)
+			NFSCLRBIT_ATTRBIT(attrbitp, NFSATTRBIT_ACL);
 	} else
-#endif
+		NFSCLRBIT_ATTRBIT(attrbitp, NFSATTRBIT_ACL);
+	if (NFSISSET_ATTRBIT(attrbitp, NFSATTRBIT_POSIXACCESSACL) &&
+	    nfsrv_useacl != 0 && aclp != NULL && aclp->acl_cnt > 0) {
+		error = nfsrv_setacl(vp, aclp, ACL_TYPE_ACCESS,
+		    nd->nd_cred, p);
+		if (error != 0)
+			NFSCLRBIT_ATTRBIT(attrbitp, NFSATTRBIT_POSIXACCESSACL);
+	} else
+		NFSCLRBIT_ATTRBIT(attrbitp, NFSATTRBIT_POSIXACCESSACL);
+	if (NFSISSET_ATTRBIT(attrbitp, NFSATTRBIT_POSIXDEFAULTACL) &&
+	    nfsrv_useacl != 0 && daclp != NULL && daclp->acl_cnt > 0) {
+		error = nfsrv_setacl(vp, daclp, ACL_TYPE_DEFAULT,
+		    nd->nd_cred, p);
+		if (error != 0)
+			NFSCLRBIT_ATTRBIT(attrbitp, NFSATTRBIT_POSIXDEFAULTACL);
+	} else
+		NFSCLRBIT_ATTRBIT(attrbitp, NFSATTRBIT_POSIXDEFAULTACL);
+#else
 	NFSCLRBIT_ATTRBIT(attrbitp, NFSATTRBIT_ACL);
+	NFSCLRBIT_ATTRBIT(attrbitp, NFSATTRBIT_POSIXACCESSACL);
+	NFSCLRBIT_ATTRBIT(attrbitp, NFSATTRBIT_POSIXDEFAULTACL);
+#endif
 	nd->nd_cred->cr_uid = tuid;
 
 out:
@@ -2097,20 +2153,20 @@ nfsd_init(void)
 	 * Initialize client queues. Don't free/reinitialize
 	 * them when nfsds are restarted.
 	 */
-	NFSD_VNET(nfsclienthash) = malloc(sizeof(struct nfsclienthashhead) *
+	VNET(nfsclienthash) = malloc(sizeof(struct nfsclienthashhead) *
 	    nfsrv_clienthashsize, M_NFSDCLIENT, M_WAITOK | M_ZERO);
 	for (i = 0; i < nfsrv_clienthashsize; i++)
-		LIST_INIT(&NFSD_VNET(nfsclienthash)[i]);
-	NFSD_VNET(nfslockhash) = malloc(sizeof(struct nfslockhashhead) *
+		LIST_INIT(&VNET(nfsclienthash)[i]);
+	VNET(nfslockhash) = malloc(sizeof(struct nfslockhashhead) *
 	    nfsrv_lockhashsize, M_NFSDLOCKFILE, M_WAITOK | M_ZERO);
 	for (i = 0; i < nfsrv_lockhashsize; i++)
-		LIST_INIT(&NFSD_VNET(nfslockhash)[i]);
-	NFSD_VNET(nfssessionhash) = malloc(sizeof(struct nfssessionhash) *
+		LIST_INIT(&VNET(nfslockhash)[i]);
+	VNET(nfssessionhash) = malloc(sizeof(struct nfssessionhash) *
 	    nfsrv_sessionhashsize, M_NFSDSESSION, M_WAITOK | M_ZERO);
 	for (i = 0; i < nfsrv_sessionhashsize; i++) {
-		mtx_init(&NFSD_VNET(nfssessionhash)[i].mtx, "nfssm", NULL,
+		mtx_init(&VNET(nfssessionhash)[i].mtx, "nfssm", NULL,
 		    MTX_DEF);
-		LIST_INIT(&NFSD_VNET(nfssessionhash)[i].list);
+		LIST_INIT(&VNET(nfssessionhash)[i].list);
 	}
 	LIST_INIT(&nfsrv_dontlisthead);
 	TAILQ_INIT(&nfsrv_recalllisthead);
@@ -2127,7 +2183,7 @@ int
 nfsd_checkrootexp(struct nfsrv_descript *nd)
 {
 
-	if (NFSD_VNET(nfs_rootfhset) == 0)
+	if (VNET(nfs_rootfhset) == 0)
 		return (NFSERR_AUTHERR | AUTH_FAILED);
 	/*
 	 * For NFSv4.1/4.2, if the client specifies SP4_NONE, then these

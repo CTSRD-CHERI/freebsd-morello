@@ -69,7 +69,7 @@
 static char static_kenv[4096];
 #endif
 
-extern int *end;
+extern char end[];
 
 static uint32_t board_revision;
 /* hex representation of uint64_t */
@@ -165,7 +165,7 @@ cmdline_set_env(char *cmdline, const char *guard)
 }
 
 /*
- * Called for armv6 and newer.
+ * Called for armv7 and newer.
  */
 void arm_parse_fdt_bootargs(void)
 {

@@ -66,6 +66,24 @@
 #include <sys/epoch.h>
 
 #ifdef _KERNEL
+/*
+ * For IPv6 pseudo header checksum; to be used by TCP-MD5,
+ * and for OCF source level compatibility with OpenBSD.
+ */
+struct ip6_hdr_pseudo {
+	struct in6_addr ip6ph_src;
+	struct in6_addr ip6ph_dst;
+	uint32_t	ip6ph_len;
+	uint8_t		ip6ph_zero[3];
+	uint8_t		ip6ph_nxt;
+} __aligned(4);
+
+#ifdef INVARIANTS
+/* Aligned size of pseudo-header must equal size of IPv6 header. */
+_Static_assert(sizeof(struct ip6_hdr_pseudo) == 40,
+    "IPv6 pseudo-header alignment failure");
+#endif
+
 struct ip6asfrag;		/* frag6.c */
 TAILQ_HEAD(ip6fraghead, ip6asfrag);
 
@@ -95,21 +113,6 @@ struct ip6_direct_ctx {
 	uint32_t	ip6dc_off;	/* offset to next header */
 };
 
-#if defined(_NETINET6_IN6_VAR_H_) && defined(_KERNEL)
-/*
- * Structure attached to inpcb.in6p_moptions and
- * passed to ip6_output when IPv6 multicast options are in use.
- * This structure is lazy-allocated.
- */
-struct ip6_moptions {
-	struct	ifnet *im6o_multicast_ifp; /* ifp for outgoing multicasts */
-	u_char	im6o_multicast_hlim;	/* hoplimit for outgoing multicasts */
-	u_char	im6o_multicast_loop;	/* 1 >= hear sends if a member */
-	struct ip6_mfilter_head im6o_head; /* group membership list */
-};
-#else
-struct ip6_moptions;
-#endif
 /*
  * Control options for outgoing packets
  */
@@ -309,7 +312,6 @@ VNET_DECLARE(int, ip6_v6only);
 #define	V_ip6_mcast_pmtu		VNET(ip6_mcast_pmtu)
 #define	V_ip6_v6only			VNET(ip6_v6only)
 
-VNET_DECLARE(struct socket *, ip6_mrouter);	/* multicast routing daemon */
 VNET_DECLARE(int, ip6_sendredirects);	/* send IP redirects when forwarding? */
 VNET_DECLARE(int, ip6_accept_rtadv);	/* Acts as a host not a router */
 VNET_DECLARE(int, ip6_no_radr);		/* No defroute from RA */
@@ -320,7 +322,7 @@ VNET_DECLARE(int, ip6_rfc6204w3);	/* Accept defroute from RA even when
 VNET_DECLARE(int, ip6_hdrnestlimit);	/* upper limit of # of extension
 					 * headers */
 VNET_DECLARE(int, ip6_dad_count);	/* DupAddrDetectionTransmits */
-#define	V_ip6_mrouter			VNET(ip6_mrouter)
+VNET_DECLARE(int, ip6_grand_count);	/* Gratuitous ND Transmits */
 #define	V_ip6_sendredirects		VNET(ip6_sendredirects)
 #define	V_ip6_accept_rtadv		VNET(ip6_accept_rtadv)
 #define	V_ip6_no_radr			VNET(ip6_no_radr)
@@ -328,6 +330,7 @@ VNET_DECLARE(int, ip6_dad_count);	/* DupAddrDetectionTransmits */
 #define	V_ip6_rfc6204w3			VNET(ip6_rfc6204w3)
 #define	V_ip6_hdrnestlimit		VNET(ip6_hdrnestlimit)
 #define	V_ip6_dad_count			VNET(ip6_dad_count)
+#define	V_ip6_grand_count		VNET(ip6_grand_count)
 
 VNET_DECLARE(int, ip6_auto_flowlabel);
 VNET_DECLARE(int, ip6_auto_linklocal);
@@ -338,8 +341,20 @@ VNET_DECLARE(int, ip6_use_tempaddr);	/* Whether to use temporary addresses */
 VNET_DECLARE(int, ip6_prefer_tempaddr);	/* Whether to prefer temporary
 					 * addresses in the source address
 					 * selection */
+VNET_DECLARE(bool, ip6_use_stableaddr);	/* Whether to use stable address generation (RFC 7217) */
 #define	V_ip6_use_tempaddr		VNET(ip6_use_tempaddr)
 #define	V_ip6_prefer_tempaddr		VNET(ip6_prefer_tempaddr)
+#define	V_ip6_use_stableaddr		VNET(ip6_use_stableaddr)
+
+#define IP6_IDGEN_RETRIES		3 /* RFC 7217 section 7 default max retries */
+VNET_DECLARE(u_int, ip6_stableaddr_maxretries);
+#define	V_ip6_stableaddr_maxretries	VNET(ip6_stableaddr_maxretries)
+
+#define IP6_STABLEADDR_NETIFSRC_NAME	0
+#define IP6_STABLEADDR_NETIFSRC_ID	1
+#define IP6_STABLEADDR_NETIFSRC_MAC	2
+VNET_DECLARE(int, ip6_stableaddr_netifsource);
+#define	V_ip6_stableaddr_netifsource	VNET(ip6_stableaddr_netifsource)
 
 VNET_DECLARE(int, ip6_use_defzone);	/* Whether to use the default scope
 					 * zone when unspecified */
@@ -361,11 +376,11 @@ VNET_DECLARE(int, ip6stealth);
 VNET_DECLARE(bool, ip6_log_cannot_forward);
 #define	V_ip6_log_cannot_forward	VNET(ip6_log_cannot_forward)
 
-extern struct	pr_usrreqs rip6_usrreqs;
-struct sockopt;
-
 struct inpcb;
+struct socket;
+struct sockopt;
 struct ucred;
+struct ip6_moptions;
 
 int	icmp6_ctloutput(struct socket *, struct sockopt *sopt);
 
@@ -381,8 +396,7 @@ int	ip6_lasthdr(const struct mbuf *, int, int, int *);
 extern int	(*ip6_mforward)(struct ip6_hdr *, struct ifnet *,
     struct mbuf *);
 
-int	ip6_process_hopopts(struct mbuf *, u_int8_t *, int, u_int32_t *,
-				 u_int32_t *);
+int	ip6_process_hopopts(struct mbuf *, u_int8_t *, int, u_int32_t *);
 struct mbuf	**ip6_savecontrol_v4(struct inpcb *, struct mbuf *,
 	    struct mbuf **, int *);
 void	ip6_savecontrol(struct inpcb *, struct mbuf *, struct mbuf **);
@@ -428,6 +442,8 @@ int	in6_selectsrc_socket(struct sockaddr_in6 *, struct ip6_pktopts *,
     struct inpcb *, struct ucred *, int, struct in6_addr *, int *);
 int	in6_selectsrc_addr(uint32_t, const struct in6_addr *,
     uint32_t, struct ifnet *, struct in6_addr *, int *);
+int	in6_selectsrc_nbr(uint32_t, const struct in6_addr *,
+    struct ip6_moptions *, struct ifnet *, struct in6_addr *);
 int in6_selectroute(struct sockaddr_in6 *, struct ip6_pktopts *,
 	struct ip6_moptions *, struct route_in6 *, struct ifnet **,
 	struct nhop_object **, u_int, uint32_t);

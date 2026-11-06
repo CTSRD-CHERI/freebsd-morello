@@ -641,8 +641,8 @@ handle_ddp_data_aio(struct toepcb *toep, __be32 ddp_report, __be32 rcv_nxt,
 	uint32_t report = be32toh(ddp_report);
 	unsigned int db_idx;
 	struct inpcb *inp = toep->inp;
+	struct tcpcb *tp = intotcpcb(inp);
 	struct ddp_buffer *db;
-	struct tcpcb *tp;
 	struct socket *so;
 	struct sockbuf *sb;
 	struct kaiocb *job;
@@ -664,13 +664,13 @@ handle_ddp_data_aio(struct toepcb *toep, __be32 ddp_report, __be32 rcv_nxt,
 	db = &toep->ddp.db[db_idx];
 	job = db->job;
 
-	if (__predict_false(inp->inp_flags & INP_DROPPED)) {
+	if (__predict_false(tp->t_flags & TF_DISCONNECTED)) {
 		/*
 		 * This can happen due to an administrative tcpdrop(8).
 		 * Just fail the request with ECONNRESET.
 		 */
-		CTR5(KTR_CXGBE, "%s: tid %u, seq 0x%x, len %d, inp_flags 0x%x",
-		    __func__, toep->tid, be32toh(rcv_nxt), len, inp->inp_flags);
+		CTR5(KTR_CXGBE, "%s: tid %u, seq 0x%x, len %d, t_flags 0x%x",
+		    __func__, toep->tid, be32toh(rcv_nxt), len, tp->t_flags);
 		if (aio_clear_cancel_function(job))
 			ddp_complete_one(job, ECONNRESET);
 		goto completed;
@@ -859,7 +859,7 @@ handle_ddp_data_rcvbuf(struct toepcb *toep, __be32 ddp_report, __be32 rcv_nxt,
 {
 	uint32_t report = be32toh(ddp_report);
 	struct inpcb *inp = toep->inp;
-	struct tcpcb *tp;
+	struct tcpcb *tp = intotcpcb(inp);
 	struct socket *so;
 	struct sockbuf *sb;
 	struct ddp_buffer *db;
@@ -881,19 +881,17 @@ handle_ddp_data_rcvbuf(struct toepcb *toep, __be32 ddp_report, __be32 rcv_nxt,
 	    toep->ddp.active_id, toep->tid));
 	db = &toep->ddp.db[db_idx];
 
-	if (__predict_false(inp->inp_flags & INP_DROPPED)) {
+	if (__predict_false(tp->t_flags & TF_DISCONNECTED)) {
 		/*
 		 * This can happen due to an administrative tcpdrop(8).
 		 * Just ignore the received data.
 		 */
-		CTR5(KTR_CXGBE, "%s: tid %u, seq 0x%x, len %d, inp_flags 0x%x",
-		    __func__, toep->tid, be32toh(rcv_nxt), len, inp->inp_flags);
+		CTR5(KTR_CXGBE, "%s: tid %u, seq 0x%x, len %d, t_flags 0x%x",
+		    __func__, toep->tid, be32toh(rcv_nxt), len, tp->t_flags);
 		if (invalidated)
 			complete_ddp_buffer(toep, db, db_idx);
 		goto out;
 	}
-
-	tp = intotcpcb(inp);
 
 	/*
 	 * For RX_DDP_COMPLETE, len will be zero and rcv_nxt is the
@@ -1655,7 +1653,10 @@ t4_write_page_pods_for_ps(struct adapter *sc, struct sge_wrq *wrq, int tid,
 
 		INIT_ULPTX_WR(ulpmc, len, 0, 0);
 		ulpmc->cmd = cmd;
-		ulpmc->dlen = htobe32(V_ULP_MEMIO_DATA_LEN(chunk / 32));
+		if (chip_id(sc) >= CHELSIO_T7)
+			ulpmc->dlen = htobe32(V_T7_ULP_MEMIO_DATA_LEN(chunk >> 5));
+		else
+			ulpmc->dlen = htobe32(V_ULP_MEMIO_DATA_LEN(chunk >> 5));
 		ulpmc->len16 = htobe32(howmany(len - sizeof(ulpmc->wr), 16));
 		ulpmc->lock_addr = htobe32(V_ULP_MEMIO_ADDR(ppod_addr >> 5));
 
@@ -1785,7 +1786,7 @@ t4_write_page_pods_for_rcvbuf(struct adapter *sc, struct sge_wrq *wrq, int tid,
 	return (0);
 }
 
-static struct mbuf *
+struct mbuf *
 alloc_raw_wr_mbuf(int len)
 {
 	struct mbuf *m;
@@ -1842,7 +1843,10 @@ t4_write_page_pods_for_bio(struct adapter *sc, struct toepcb *toep,
 		ulpmc = mtod(m, struct ulp_mem_io *);
 		INIT_ULPTX_WR(ulpmc, len, 0, toep->tid);
 		ulpmc->cmd = cmd;
-		ulpmc->dlen = htobe32(V_ULP_MEMIO_DATA_LEN(chunk / 32));
+		if (chip_id(sc) >= CHELSIO_T7)
+			ulpmc->dlen = htobe32(V_T7_ULP_MEMIO_DATA_LEN(chunk >> 5));
+		else
+			ulpmc->dlen = htobe32(V_ULP_MEMIO_DATA_LEN(chunk >> 5));
 		ulpmc->len16 = htobe32(howmany(len - sizeof(ulpmc->wr), 16));
 		ulpmc->lock_addr = htobe32(V_ULP_MEMIO_ADDR(ppod_addr >> 5));
 
@@ -1922,7 +1926,10 @@ t4_write_page_pods_for_buf(struct adapter *sc, struct toepcb *toep,
 
 		INIT_ULPTX_WR(ulpmc, len, 0, toep->tid);
 		ulpmc->cmd = cmd;
-		ulpmc->dlen = htobe32(V_ULP_MEMIO_DATA_LEN(chunk / 32));
+		if (chip_id(sc) >= CHELSIO_T7)
+			ulpmc->dlen = htobe32(V_T7_ULP_MEMIO_DATA_LEN(chunk >> 5));
+		else
+			ulpmc->dlen = htobe32(V_ULP_MEMIO_DATA_LEN(chunk >> 5));
 		ulpmc->len16 = htobe32(howmany(len - sizeof(ulpmc->wr), 16));
 		ulpmc->lock_addr = htobe32(V_ULP_MEMIO_ADDR(ppod_addr >> 5));
 
@@ -2013,7 +2020,10 @@ t4_write_page_pods_for_sgl(struct adapter *sc, struct toepcb *toep,
 
 		INIT_ULPTX_WR(ulpmc, len, 0, toep->tid);
 		ulpmc->cmd = cmd;
-		ulpmc->dlen = htobe32(V_ULP_MEMIO_DATA_LEN(chunk / 32));
+		if (chip_id(sc) >= CHELSIO_T7)
+			ulpmc->dlen = htobe32(V_T7_ULP_MEMIO_DATA_LEN(chunk >> 5));
+		else
+			ulpmc->dlen = htobe32(V_ULP_MEMIO_DATA_LEN(chunk >> 5));
 		ulpmc->len16 = htobe32(howmany(len - sizeof(ulpmc->wr), 16));
 		ulpmc->lock_addr = htobe32(V_ULP_MEMIO_ADDR(ppod_addr >> 5));
 

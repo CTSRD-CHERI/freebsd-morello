@@ -49,8 +49,11 @@
 #include <assert.h>
 #include <libgeom.h>
 #include <geom.h>
+#include <libxo/xo.h>
 
 #include "misc/subr.h"
+
+#define GEOM_XO_VERSION "1"
 
 #ifdef STATIC_GEOM_CLASSES
 extern uint32_t gpart_version;
@@ -198,7 +201,7 @@ load_module(void)
 		/* Not present in kernel, try loading it. */
 		if (kldload(name2) < 0 || modfind(name1) < 0) {
 			if (errno != EEXIST) {
-				err(EXIT_FAILURE, "cannot load %s", name2);
+				xo_err(EXIT_FAILURE, "cannot load %s", name2);
 			}
 		}
 	}
@@ -256,7 +259,8 @@ set_option(struct gctl_req *req, struct g_option *opt, const char *val)
 		size_t optnamesize;
 
 		if (G_OPT_NUM(opt) == UCHAR_MAX)
-			errx(EXIT_FAILURE, "Too many -%c options.", opt->go_char);
+			xo_errx(EXIT_FAILURE, "Too many -%c options.",
+			    opt->go_char);
 
 		/*
 		 * Base option name length plus 3 bytes for option number
@@ -265,7 +269,7 @@ set_option(struct gctl_req *req, struct g_option *opt, const char *val)
 		optnamesize = strlen(opt->go_name) + 3 + 1;
 		ptr = malloc(optnamesize);
 		if (ptr == NULL)
-			errx(EXIT_FAILURE, "No memory.");
+			xo_errx(EXIT_FAILURE, "No memory.");
 		snprintf(ptr, optnamesize, "%s%u", opt->go_name, G_OPT_NUM(opt));
 		G_OPT_NUMINC(opt);
 		optname = ptr;
@@ -275,12 +279,12 @@ set_option(struct gctl_req *req, struct g_option *opt, const char *val)
 
 	if (G_OPT_TYPE(opt) == G_TYPE_NUMBER) {
 		if (expand_number(val, &number) == -1) {
-			err(EXIT_FAILURE, "Invalid value for '%c' argument",
+			xo_err(EXIT_FAILURE, "Invalid value for '%c' argument",
 			    opt->go_char);
 		}
 		ptr = malloc(sizeof(intmax_t));
 		if (ptr == NULL)
-			errx(EXIT_FAILURE, "No memory.");
+			xo_errx(EXIT_FAILURE, "No memory.");
 		*(intmax_t *)ptr = number;
 		opt->go_val = ptr;
 		gctl_ro_param(req, optname, sizeof(intmax_t), opt->go_val);
@@ -289,7 +293,7 @@ set_option(struct gctl_req *req, struct g_option *opt, const char *val)
 	} else if (G_OPT_TYPE(opt) == G_TYPE_BOOL) {
 		ptr = malloc(sizeof(int));
 		if (ptr == NULL)
-			errx(EXIT_FAILURE, "No memory.");
+			xo_errx(EXIT_FAILURE, "No memory.");
 		*(int *)ptr = *val - '0';
 		opt->go_val = ptr;
 		gctl_ro_param(req, optname, sizeof(int), opt->go_val);
@@ -343,16 +347,16 @@ parse_arguments(struct g_command *cmd, struct gctl_req *req, int *argc,
 		/* Options passed to kernel. */
 		opt = find_option(cmd, ch);
 		if (opt == NULL) {
-			if (ch == 'v' && (cmd->gc_flags & G_FLAG_VERBOSE) != 0){
+			if (ch == 'v' && (cmd->gc_flags & G_FLAG_VERBOSE) != 0) {
 				if (++vcount < 2)
 					continue;
 				else
-					warnx("Option 'v' specified twice.");
+					xo_warnx("Option 'v' specified twice.");
 			}
 			usage();
 		}
 		if (!G_OPT_ISMULTI(opt) && G_OPT_ISDONE(opt)) {
-			warnx("Option '%c' specified twice.", opt->go_char);
+			xo_warnx("Option '%c' specified twice.", opt->go_char);
 			usage();
 		}
 		G_OPT_DONE(opt);
@@ -380,7 +384,7 @@ parse_arguments(struct g_command *cmd, struct gctl_req *req, int *argc,
 			set_option(req, opt, "0");
 		} else {
 			if (opt->go_val == NULL) {
-				warnx("Option '%c' not specified.",
+				xo_warnx("Option '%c' not specified.",
 				    opt->go_char);
 				usage();
 			} else if (opt->go_val == G_VAL_OPTIONAL) {
@@ -467,14 +471,12 @@ run_command(int argc, char *argv[])
 		/* Now, try to find a standard command. */
 		cmd = find_command(argv[0], GEOM_STD_CMDS);
 		if (cmd == NULL) {
-			warnx("Unknown command: %s.", argv[0]);
+			xo_warnx("Unknown command: %s.", argv[0]);
 			usage();
 		}
-		if (!std_available(cmd->gc_name)) {
-			warnx("Command '%s' not available; "
+		if (!std_available(cmd->gc_name))
+			xo_errx(EXIT_FAILURE, "Command '%s' not available; "
 			    "try 'load' first.", argv[0]);
-			exit(EXIT_FAILURE);
-		}
 	}
 	if ((cmd->gc_flags & G_FLAG_LOADKLD) != 0)
 		load_module();
@@ -499,7 +501,7 @@ run_command(int argc, char *argv[])
 		errstr = gctl_issue(req);
 	}
 	if (errstr != NULL && errstr[0] != '\0') {
-		warnx("%s", errstr);
+		xo_warnx("%s", errstr);
 		/* Suppress EXIT_FAILURE for warnings */
 		if (strncmp(errstr, "warning: ", strlen("warning: ")) == 0)
 			req->nerror = 0;
@@ -513,6 +515,7 @@ run_command(int argc, char *argv[])
 	gctl_free(req);
 	if (verbose)
 		printf("Done.\n");
+	xo_finish();
 	exit(EXIT_SUCCESS);
 }
 
@@ -539,7 +542,7 @@ load_library(void)
 	ret = 0;
 	tofree = totalpath = strdup(library_path());
 	if (totalpath == NULL)
-		err(EXIT_FAILURE, "Not enough memory for library path");
+		xo_err(EXIT_FAILURE, "Not enough memory for library path");
 
 	if (strchr(totalpath, ':') != NULL)
 		curpath = strsep(&totalpath, ":");
@@ -559,7 +562,7 @@ load_library(void)
 				curpath = strsep(&totalpath, ":");
 				continue;
 			}
-			err(EXIT_FAILURE, "Cannot access library");
+			xo_err(EXIT_FAILURE, "Cannot access library");
 		}
 		break;
 	}
@@ -569,27 +572,28 @@ load_library(void)
 		return;
 	dlh = dlopen(path, RTLD_NOW);
 	if (dlh == NULL)
-		errx(EXIT_FAILURE, "Cannot open library: %s.", dlerror());
+		xo_errx(EXIT_FAILURE, "Cannot open library: %s.", dlerror());
 	lib_version = dlsym(dlh, "lib_version");
 	if (lib_version == NULL) {
-		warnx("Cannot find symbol %s: %s.", "lib_version", dlerror());
+		xo_warnx("Cannot find symbol %s: %s.", "lib_version",
+		    dlerror());
 		dlclose(dlh);
 		exit(EXIT_FAILURE);
 	}
 	if (*lib_version != G_LIB_VERSION) {
 		dlclose(dlh);
-		errx(EXIT_FAILURE, "%s and %s are not synchronized.",
+		xo_errx(EXIT_FAILURE, "%s and %s are not synchronized.",
 		    getprogname(), path);
 	}
 	version = dlsym(dlh, "version");
 	if (version == NULL) {
-		warnx("Cannot find symbol %s: %s.", "version", dlerror());
+		xo_warnx("Cannot find symbol %s: %s.", "version", dlerror());
 		dlclose(dlh);
 		exit(EXIT_FAILURE);
 	}
 	class_commands = dlsym(dlh, "class_commands");
 	if (class_commands == NULL) {
-		warnx("Cannot find symbol %s: %s.", "class_commands",
+		xo_warnx("Cannot find symbol %s: %s.", "class_commands",
 		    dlerror());
 		dlclose(dlh);
 		exit(EXIT_FAILURE);
@@ -610,7 +614,7 @@ set_class_name(void)
 		*s1 = tolower(*s1);
 	gclass_name = malloc(strlen(class_name) + 1);
 	if (gclass_name == NULL)
-		errx(EXIT_FAILURE, "No memory");
+		xo_errx(EXIT_FAILURE, "No memory");
 	s1 = gclass_name;
 	s2 = class_name;
 	for (; *s2 != '\0'; s2++)
@@ -641,7 +645,7 @@ get_class(int *argc, char ***argv)
 		*argc -= 1;
 		*argv += 1;
 	} else {
-		errx(EXIT_FAILURE, "Invalid utility name.");
+		xo_errx(EXIT_FAILURE, "Invalid utility name.");
 	}
 
 #ifndef STATIC_GEOM_CLASSES
@@ -660,7 +664,7 @@ get_class(int *argc, char ***argv)
 
 	/* If we can't load or list, it's not a class. */
 	if (!std_load_available() && !std_list_available())
-		errx(EXIT_FAILURE, "Invalid class name '%s'.", class_name);
+		xo_errx(EXIT_FAILURE, "Invalid class name '%s'.", class_name);
 
 	if (*argc < 1)
 		usage();
@@ -782,7 +786,7 @@ show_tree(void)
 
 	error = geom_gettree(&mesh);
 	if (error != 0)
-		errc(EXIT_FAILURE, error, "Cannot get GEOM tree");
+		xo_errc(EXIT_FAILURE, error, "Cannot get GEOM tree");
 
 	width = compute_tree_width(&mesh);
 
@@ -810,13 +814,17 @@ main(int argc, char *argv[])
 	provider_name = NULL;
 	tflag = false;
 
+	argc = xo_parse_args(argc, argv);
+	if (argc < 0)
+		return (argc);
+
 	if (strcmp(getprogname(), "geom") == 0) {
 		while ((ch = getopt(argc, argv, "hp:t")) != -1) {
 			switch (ch) {
 			case 'p':
 				provider_name = strdup(optarg);
 				if (provider_name == NULL)
-					err(1, "strdup");
+					xo_err(1, "strdup");
 				break;
 			case 't':
 				tflag = true;
@@ -831,14 +839,16 @@ main(int argc, char *argv[])
 		 * Don't adjust argc and argv, it would break get_class().
 		 */
 	}
+	xo_set_version(GEOM_XO_VERSION);
 
 	if (tflag && provider_name != NULL) {
-		errx(EXIT_FAILURE,
+		xo_errx(EXIT_FAILURE,
 		    "At most one of -P and -t may be specified.");
 	}
 
 	if (provider_name != NULL) {
 		list_one_geom_by_provider(provider_name);
+		xo_finish();
 		return (0);
 	}
 
@@ -882,29 +892,37 @@ find_geom(struct gclass *classp, const char *name)
 }
 
 static void
-list_one_provider(struct gprovider *pp, const char *prefix)
+list_one_provider(struct gprovider *pp, const char *padding)
 {
 	struct gconfig *conf;
 	char buf[5];
 
-	printf("Name: %s\n", pp->lg_name);
+	xo_emit("{Lcw:Name}{:name}\n", pp->lg_name);
 	humanize_number(buf, sizeof(buf), (int64_t)pp->lg_mediasize, "",
 	    HN_AUTOSCALE, HN_B | HN_NOSPACE | HN_DECIMAL);
-	printf("%sMediasize: %jd (%s)\n", prefix, (intmax_t)pp->lg_mediasize,
-	    buf);
-	printf("%sSectorsize: %u\n", prefix, pp->lg_sectorsize);
+	xo_emit("{P:/%s}{Lcw:Mediasize}{:mediasize/%jd} ({N:/%s})\n",
+	    padding, (intmax_t)pp->lg_mediasize, buf);
+	xo_emit("{P:/%s}{Lcw:Sectorsize}{:sectorsize/%u}\n",
+	    padding, pp->lg_sectorsize);
 	if (pp->lg_stripesize > 0 || pp->lg_stripeoffset > 0) {
-		printf("%sStripesize: %ju\n", prefix, pp->lg_stripesize);
-		printf("%sStripeoffset: %ju\n", prefix, pp->lg_stripeoffset);
+		xo_emit("{P:/%s}{Lcw:Stripesize}{:stripesize/%ju}\n",
+		    padding, pp->lg_stripesize);
+		xo_emit("{P:/%s}{Lcw:Stripeoffset}{:stripeoffset/%ju}\n",
+		    padding, pp->lg_stripeoffset);
 	}
-	printf("%sMode: %s\n", prefix, pp->lg_mode);
+	xo_emit("{P:/%s}{Lcw:Mode}{:mode}\n", padding, pp->lg_mode);
 	LIST_FOREACH(conf, &pp->lg_config, lg_config) {
-		printf("%s%s: %s\n", prefix, conf->lg_name, conf->lg_val);
+		if (strcmp(conf->lg_name, "attrib") != 0)
+			xo_emit("{P:/%s}{Lcwa:}{a:}\n", padding, conf->lg_name,
+			    conf->lg_name, conf->lg_val ? conf->lg_val : "");
+		else
+			xo_emit("{P:/%s}{Lcw:attrib}{l:attribute}\n", padding,
+			    conf->lg_val ? conf->lg_val : "");
 	}
 }
 
 static void
-list_one_consumer(struct gconsumer *cp, const char *prefix)
+list_one_consumer(struct gconsumer *cp, const char *padding)
 {
 	struct gprovider *pp;
 	struct gconfig *conf;
@@ -915,20 +933,24 @@ list_one_consumer(struct gconsumer *cp, const char *prefix)
 	else {
 		char buf[5];
 
-		printf("Name: %s\n", pp->lg_name);
+		xo_emit("{Lcw:Name}{:name}\n", pp->lg_name);
 		humanize_number(buf, sizeof(buf), (int64_t)pp->lg_mediasize, "",
 		    HN_AUTOSCALE, HN_B | HN_NOSPACE | HN_DECIMAL);
-		printf("%sMediasize: %jd (%s)\n", prefix,
-		    (intmax_t)pp->lg_mediasize, buf);
-		printf("%sSectorsize: %u\n", prefix, pp->lg_sectorsize);
+		xo_emit("{P:/%s}{Lcw:Mediasize}{:mediasize/%jd} ({N:/%s})\n",
+		    padding, (intmax_t)pp->lg_mediasize, buf);
+		xo_emit("{P:/%s}{Lcw:Sectorsize}{:sectorsize/%u}\n",
+		    padding, pp->lg_sectorsize);
 		if (pp->lg_stripesize > 0 || pp->lg_stripeoffset > 0) {
-			printf("%sStripesize: %ju\n", prefix, pp->lg_stripesize);
-			printf("%sStripeoffset: %ju\n", prefix, pp->lg_stripeoffset);
+			xo_emit("{P:/%s}{Lcw:Stripesize}{:stripesize/%ju}\n",
+			    padding, pp->lg_stripesize);
+			xo_emit("{P:/%s}{Lcw:Stripeoffset}{:stripeoffset/%ju}\n",
+			    padding, pp->lg_stripeoffset);
 		}
-		printf("%sMode: %s\n", prefix, cp->lg_mode);
+		xo_emit("{P:/%s}{Lcw:Mode}{:mode}\n", padding, pp->lg_mode);
 	}
 	LIST_FOREACH(conf, &cp->lg_config, lg_config) {
-		printf("%s%s: %s\n", prefix, conf->lg_name, conf->lg_val);
+		xo_emit("{P:/%s}{Lcwa:}{a:}\n", padding, conf->lg_name,
+		    conf->lg_name, conf->lg_val ? conf->lg_val : "");
 	}
 }
 
@@ -940,27 +962,36 @@ list_one_geom(struct ggeom *gp)
 	struct gconfig *conf;
 	unsigned n;
 
-	printf("Geom name: %s\n", gp->lg_name);
+	xo_emit("{Lcw:Geom name}{:name}\n", gp->lg_name);
 	LIST_FOREACH(conf, &gp->lg_config, lg_config) {
-		printf("%s: %s\n", conf->lg_name, conf->lg_val);
+		xo_emit("{Lcwa:}{a:}\n", conf->lg_name, conf->lg_name,
+		    conf->lg_val ? conf->lg_val : "");
 	}
 	if (!LIST_EMPTY(&gp->lg_provider)) {
-		printf("Providers:\n");
+		xo_open_list("providers");
+		xo_emit("{Tc:Providers}\n");
 		n = 1;
 		LIST_FOREACH(pp, &gp->lg_provider, lg_provider) {
-			printf("%u. ", n++);
+			xo_emit("{T:/%u}. ", n++);
+			xo_open_instance("provider");
 			list_one_provider(pp, "   ");
+			xo_close_instance("provider");
 		}
+		xo_close_list("providers");
 	}
 	if (!LIST_EMPTY(&gp->lg_consumer)) {
-		printf("Consumers:\n");
+		xo_open_list("consumers");
+		xo_emit("{Tc:Consumers}\n");
 		n = 1;
 		LIST_FOREACH(cp, &gp->lg_consumer, lg_consumer) {
-			printf("%u. ", n++);
+			xo_emit("{T:/%u}. ", n++);
+			xo_open_instance("consumer");
 			list_one_consumer(cp, "   ");
+			xo_close_instance("consumer");
 		}
+		xo_close_list("consumers");
 	}
-	printf("\n");
+	xo_emit("\n");
 }
 
 static void
@@ -972,14 +1003,16 @@ list_one_geom_by_provider(const char *provider_name)
 
 	error = geom_gettree(&mesh);
 	if (error != 0)
-		errc(EXIT_FAILURE, error, "Cannot get GEOM tree");
+		xo_errc(EXIT_FAILURE, error, "Cannot get GEOM tree");
 
 	gp = find_geom_by_provider(&mesh, provider_name);
 	if (gp == NULL)
-		errx(EXIT_FAILURE, "Cannot find provider '%s'.", provider_name);
+		xo_errx(EXIT_FAILURE, "Cannot find provider '%s'.", provider_name);
 
-	printf("Geom class: %s\n", gp->lg_class->lg_name);
+	xo_open_container(provider_name);
+	xo_emit("{Lwc:Geom class}{:class}\n", gp->lg_class->lg_name);
 	list_one_geom(gp);
+	xo_close_container(provider_name);
 }
 
 static void
@@ -998,7 +1031,7 @@ std_list_available(void)
 
 	error = geom_gettree_geom(&mesh, gclass_name, "", 0);
 	if (error != 0)
-		errc(EXIT_FAILURE, error, "Cannot get GEOM tree");
+		xo_errc(EXIT_FAILURE, error, "Cannot get GEOM tree");
 	classp = find_class(&mesh, gclass_name);
 	geom_deletetree(&mesh);
 	if (classp != NULL)
@@ -1022,11 +1055,11 @@ std_list(struct gctl_req *req, unsigned flags __unused)
 	} else
 		error = geom_gettree(&mesh);
 	if (error != 0)
-		errc(EXIT_FAILURE, error, "Cannot get GEOM tree");
+		xo_errc(EXIT_FAILURE, error, "Cannot get GEOM tree");
 	classp = find_class(&mesh, gclass_name);
 	if (classp == NULL) {
 		geom_deletetree(&mesh);
-		errx(EXIT_FAILURE, "Class '%s' not found.", gclass_name);
+		xo_errx(EXIT_FAILURE, "Class '%s' not found.", gclass_name);
 	}
 	all = gctl_get_int(req, "all");
 	if (nargs > 0) {
@@ -1034,18 +1067,24 @@ std_list(struct gctl_req *req, unsigned flags __unused)
 			name = gctl_get_ascii(req, "arg%d", i);
 			gp = find_geom(classp, name);
 			if (gp == NULL) {
-				errx(EXIT_FAILURE, "Class '%s' does not have "
+				xo_errx(EXIT_FAILURE, "Class '%s' does not have "
 				    "an instance named '%s'.",
 				    gclass_name, name);
 			}
+			xo_open_container(gclass_name);
 			list_one_geom(gp);
+			xo_close_container(gclass_name);
 		}
 	} else {
+		xo_open_list(gclass_name);
 		LIST_FOREACH(gp, &classp->lg_geom, lg_geom) {
 			if (LIST_EMPTY(&gp->lg_provider) && !all)
 				continue;
+			xo_open_instance("geom");
 			list_one_geom(gp);
+			xo_close_instance("geom");
 		}
+		xo_close_list(gclass_name);
 	}
 	geom_deletetree(&mesh);
 }
@@ -1115,34 +1154,24 @@ status_update_len_prs(struct ggeom *gp, int *name_len, int *status_len)
 }
 
 static char *
-status_one_consumer(struct gconsumer *cp)
+status_one_consumer(struct gconsumer *cp, const char *value)
 {
-	static char buf[256];
 	struct gprovider *pp;
 	struct gconfig *conf;
-	const char *state, *syncr;
+	char *ret;
 
 	pp = cp->lg_provider;
 	if (pp == NULL)
 		return (NULL);
-	state = NULL;
-	syncr = NULL;
+	ret = NULL;
 	LIST_FOREACH(conf, &cp->lg_config, lg_config) {
-		if (strcasecmp(conf->lg_name, "state") == 0)
-			state = conf->lg_val;
-		if (strcasecmp(conf->lg_name, "synchronized") == 0)
-			syncr = conf->lg_val;
+		if (strcasecmp(conf->lg_name, value) == 0)
+			ret = conf->lg_val;
 	}
-	if (state == NULL && syncr == NULL)
-		snprintf(buf, sizeof(buf), "%s", pp->lg_name);
-	else if (state != NULL && syncr != NULL) {
-		snprintf(buf, sizeof(buf), "%s (%s, %s)", pp->lg_name,
-		    state, syncr);
-	} else {
-		snprintf(buf, sizeof(buf), "%s (%s)", pp->lg_name,
-		    state ? state : syncr);
-	}
-	return (buf);
+
+	if (ret == NULL)
+		return (NULL);
+	return (ret);
 }
 
 static void
@@ -1150,8 +1179,9 @@ status_one_geom(struct ggeom *gp, int script, int name_len, int status_len)
 {
 	struct gconsumer *cp;
 	struct gconfig *conf;
-	const char *name, *status, *component;
-	int gotone;
+	char fmt[64];
+	const char *name, *status, *cstate, *csyncr;
+	int gotone, len;
 
 	name = gp->lg_name;
 	status = "N/A";
@@ -1161,21 +1191,59 @@ status_one_geom(struct ggeom *gp, int script, int name_len, int status_len)
 			break;
 		}
 	}
-	gotone = 0;
+	gotone = len = 0;
+	xo_open_instance("status");
 	LIST_FOREACH(cp, &gp->lg_consumer, lg_consumer) {
-		component = status_one_consumer(cp);
-		if (component == NULL)
+		if (cp->lg_provider == NULL)
 			continue;
+
+		cstate = status_one_consumer(cp, "state");
+		csyncr = status_one_consumer(cp, "synchronized");
+		if (!gotone || script) {
+			if (!gotone) {
+				xo_emit("{t:name/%*s}  {t:status/%*s}  ",
+				    name_len, name, status_len, status);
+				xo_open_list("components");
+			} else {
+				/*
+				 * XXX: running the same xo_emit() as above or
+				 * variations of it will cause the XML/JSON to
+				 * produce extra "components" lists in script
+				 * mode
+				 */
+
+				snprintf(fmt, sizeof(fmt), "%*s  %*s  ",
+				    name_len, name, status_len, status);
+				xo_emit(fmt);
+			}
+		}
+
+		xo_open_instance("components");
+		if (cstate != NULL && csyncr != NULL) {
+			xo_emit("{P:/%*s}{:component} ({:state}, {:synchronized})\n",
+			    len, "", cp->lg_provider->lg_name, cstate, csyncr);
+		} else if (cstate != NULL) {
+			xo_emit("{P:/%*s}{:component} ({:state})\n",
+			    len, "", cp->lg_provider->lg_name, cstate);
+		} else if (csyncr != NULL) {
+			xo_emit("{P:/%*s}{:component} ({:synchronized})\n",
+			    len, "", cp->lg_provider->lg_name, csyncr);
+		} else {
+			xo_emit("{P:/%*s}{:component}\n",
+			    len, "", cp->lg_provider->lg_name);
+		}
+		xo_close_instance("components");
 		gotone = 1;
-		printf("%*s  %*s  %s\n", name_len, name, status_len, status,
-		    component);
-		if (!script)
-			name = status = "";
+		if (!len && !script)
+			len = name_len + status_len + 4;
 	}
 	if (!gotone) {
-		printf("%*s  %*s  %s\n", name_len, name, status_len, status,
-		    "N/A");
+		xo_emit("{t:name/%*s}  {t:status/%*s}  N/A\n",
+		    name_len, name, status_len, status);
+	} else {
+		xo_close_list("components");
 	}
+	xo_close_instance("status");
 }
 
 static void
@@ -1184,9 +1252,11 @@ status_one_geom_prs(struct ggeom *gp, int script, int name_len, int status_len)
 	struct gprovider *pp;
 	struct gconsumer *cp;
 	struct gconfig *conf;
-	const char *name, *status, *component;
-	int gotone;
+	const char *name, *status, *cstate, *csyncr;
+	char fmt[64];
+	int gotone, len;
 
+	xo_open_instance("status");
 	LIST_FOREACH(pp, &gp->lg_provider, lg_provider) {
 		name = pp->lg_name;
 		status = "N/A";
@@ -1202,22 +1272,60 @@ status_one_geom_prs(struct ggeom *gp, int script, int name_len, int status_len)
 				break;
 			}
 		}
-		gotone = 0;
+		gotone = len = 0;
 		LIST_FOREACH(cp, &gp->lg_consumer, lg_consumer) {
-			component = status_one_consumer(cp);
-			if (component == NULL)
+			if (cp->lg_provider == NULL)
 				continue;
+
+			cstate = status_one_consumer(cp, "state");
+			csyncr = status_one_consumer(cp, "synchronized");
+			if (!gotone || script) {
+				if (!gotone) {
+					xo_emit("{t:name/%*s}  {t:status/%*s}  ",
+					    name_len, name, status_len, status);
+					xo_open_list("components");
+				} else {
+					/*
+					 * XXX: running the same xo_emit() as
+					 * above or variations of it will
+					 * cause the XML/JSON to produce
+					 * extra "components" lists in
+					 * script mode
+					 */
+
+					snprintf(fmt, sizeof(fmt), "%*s  %*s  ",
+					    name_len, name, status_len, status);
+					xo_emit(fmt);
+				}
+			}
+
+			xo_open_instance("component");
+			if (cstate != NULL && csyncr != NULL) {
+				xo_emit("{P:/%*s}{:component} ({:state}, {:synchronized})\n",
+				    len, "", cp->lg_provider->lg_name, cstate, csyncr);
+			} else if (cstate != NULL) {
+				xo_emit("{P:/%*s}{:component} ({:state})\n",
+				    len, "", cp->lg_provider->lg_name, cstate);
+			} else if (csyncr != NULL) {
+				xo_emit("{P:/%*s}{:component} ({:synchronized})\n",
+				    len, "", cp->lg_provider->lg_name, csyncr);
+			} else {
+				xo_emit("{P:/%*s}{:component}\n",
+				    len, "", cp->lg_provider->lg_name);
+			}
+			xo_close_instance("component");
 			gotone = 1;
-			printf("%*s  %*s  %s\n", name_len, name,
-			    status_len, status, component);
-			if (!script)
-				name = status = "";
+			if (!len && !script)
+				len = name_len + status_len + 4;
 		}
 		if (!gotone) {
-			printf("%*s  %*s  %s\n", name_len, name,
-			    status_len, status, "N/A");
+			xo_emit("{t:name/%*s}  {t:status/%*s}  N/A\n",
+			    name_len, name, status_len, status);
+		} else {
+			xo_close_list("components");
 		}
 	}
+	xo_close_instance("status");
 }
 
 static void
@@ -1232,27 +1340,24 @@ std_status(struct gctl_req *req, unsigned flags __unused)
 
 	error = geom_gettree(&mesh);
 	if (error != 0)
-		errc(EXIT_FAILURE, error, "Cannot get GEOM tree");
+		xo_errc(EXIT_FAILURE, error, "Cannot get GEOM tree");
 	classp = find_class(&mesh, gclass_name);
 	if (classp == NULL)
-		errx(EXIT_FAILURE, "Class %s not found.", gclass_name);
+		xo_errx(EXIT_FAILURE, "Class %s not found.", gclass_name);
 	nargs = gctl_get_int(req, "nargs");
 	all = gctl_get_int(req, "all");
 	geoms = gctl_get_int(req, "geoms");
 	script = gctl_get_int(req, "script");
-	if (script) {
-		name_len = 0;
-		status_len = 0;
-	} else {
-		name_len = strlen("Name");
-		status_len = strlen("Status");
-	}
+	name_len = strlen("Name");
+	status_len = strlen("Status");
+
 	if (nargs > 0) {
 		for (i = 0, n = 0; i < nargs; i++) {
 			name = gctl_get_ascii(req, "arg%d", i);
 			gp = find_geom(classp, name);
 			if (gp == NULL)
-				errx(EXIT_FAILURE, "No such geom: %s.", name);
+				xo_errx(EXIT_FAILURE, "No such geom: %s.",
+				    name);
 			if (geoms) {
 				status_update_len(gp,
 				    &name_len, &status_len);
@@ -1282,9 +1387,10 @@ std_status(struct gctl_req *req, unsigned flags __unused)
 			goto end;
 	}
 	if (!script) {
-		printf("%*s  %*s  %s\n", name_len, "Name", status_len, "Status",
-		    "Components");
+		xo_emit("{T:/%*s}  {T:/%*s}  {T:Components}\n",
+		    name_len, "Name", status_len, "Status");
 	}
+	xo_open_list(gclass_name);
 	if (nargs > 0) {
 		for (i = 0; i < nargs; i++) {
 			name = gctl_get_ascii(req, "arg%d", i);
@@ -1312,6 +1418,7 @@ std_status(struct gctl_req *req, unsigned flags __unused)
 			}
 		}
 	}
+	xo_close_list(gclass_name);
 end:
 	geom_deletetree(&mesh);
 }
@@ -1332,7 +1439,7 @@ std_load_available(void)
 	bzero(paths, sizeof(paths));
 	len = sizeof(paths);
 	if (sysctlbyname("kern.module_path", paths, &len, NULL, 0) < 0)
-		err(EXIT_FAILURE, "sysctl(kern.module_path)");
+		xo_err(EXIT_FAILURE, "sysctl(kern.module_path)");
 	for (p = strtok(paths, ";"); p != NULL; p = strtok(NULL, ";")) {
 		snprintf(name, sizeof(name), "%s/geom_%s.ko", p, class_name);
 		/*

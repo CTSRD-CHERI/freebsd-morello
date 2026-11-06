@@ -1,5 +1,5 @@
 #
-# SPDX-License-Idendifier: BSD-2-Clause
+# SPDX-License-Identifier: BSD-2-Clause
 #
 # Copyright (c) 2025 FreeBSD Foundation
 #
@@ -13,7 +13,7 @@
 
 LIB=		kdc_j_encode
 LIBDIR=		${PLUGINSDIR}/audit
-LDFLAGS=-Wl,--no-undefined
+LDFLAGS+=-Wl,--no-undefined
 VERSION_MAP=	${.CURDIR}/version.map
 
 .PATH:	${KRB5_DIR}/plugins/audit
@@ -21,6 +21,7 @@ VERSION_MAP=	${.CURDIR}/version.map
 SRCS=	kdc_j_encode.c
 
 CFLAGS+=-I${KRB5_DIR}/plugins/audit
+CFLAGS+=-I${KRB5_OBJTOP}/util/profile
 
 .include <bsd.lib.mk>
 

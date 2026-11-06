@@ -350,6 +350,60 @@ test_archive_string_sprintf(void)
 	archive_string_sprintf(&s, "%d", 1234567890);
 	assertExactString(10, 8 * EXTENT, "1234567890", s);
 
+	archive_string_empty(&s);
+	archive_string_sprintf(&s, "%u", 1000000000);
+	assertExactString(10, 8 * EXTENT, "1000000000", s);
+
+	archive_string_empty(&s);
+	archive_string_sprintf(&s, "%o", 0777);
+	assertExactString(3, 8 * EXTENT, "777", s);
+
+	archive_string_empty(&s);
+	archive_string_sprintf(&s, "%x", 0xdeadbeef);
+	assertExactString(8, 8 * EXTENT, "deadbeef", s);
+
+	archive_string_empty(&s);
+	archive_string_sprintf(&s, "%X", 0xdeadbeef);
+	assertExactString(8, 8 * EXTENT, "DEADBEEF", s);
+
+	archive_string_free(&s);
+}
+
+static void
+test_archive_string_dirname(void)
+{
+	static struct pair { const char *str, *exp; } pairs[] = {
+		{ "",		"." },
+		{ "/",		"/" },
+		{ "//",		"/" },
+		{ "///",	"/" },
+		{ "./",		"." },
+		{ ".",		"." },
+		{ "..",		"." },
+		{ "foo",	"." },
+		{ "foo/",	"." },
+		{ "foo//",	"." },
+		{ "foo/bar",	"foo" },
+		{ "foo/bar/",	"foo" },
+		{ "foo/bar//",	"foo" },
+		{ "foo//bar",	"foo" },
+		{ "foo//bar/",	"foo" },
+		{ "foo//bar//",	"foo" },
+		{ "/foo",	"/" },
+		{ "//foo",	"/" },
+		{ "//foo/",	"/" },
+		{ "//foo//",	"/" },
+		{ 0 },
+	};
+	struct pair *pair;
+	struct archive_string s;
+
+	archive_string_init(&s);
+	for (pair = pairs; pair->str; pair++) {
+		archive_strcpy(&s, pair->str);
+		archive_string_dirname(&s);
+		assertEqualString(pair->exp, s.s);
+	}
 	archive_string_free(&s);
 }
 
@@ -364,6 +418,7 @@ DEFINE_TEST(test_archive_string)
 	test_archive_string_concat();
 	test_archive_string_copy();
 	test_archive_string_sprintf();
+	test_archive_string_dirname();
 }
 
 static const char *strings[] =

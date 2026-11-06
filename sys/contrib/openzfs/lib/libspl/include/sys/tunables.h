@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -25,7 +15,8 @@
  */
 
 #ifndef _SYS_TUNABLES_H
-#define	_SYS_TUNABLES_H
+//#define	_SYS_TUNABLES_H extern __attribute__((visibility("hidden")))
+#define _SYS_TUNABLES_H extern
 
 typedef enum {
 	ZFS_TUNABLE_TYPE_INT,
@@ -49,12 +40,14 @@ typedef struct zfs_tunable {
 	const char		*zt_desc;
 } zfs_tunable_t;
 
-int zfs_tunable_set(const zfs_tunable_t *tunable, const char *val);
-int zfs_tunable_get(const zfs_tunable_t *tunable, char *val, size_t valsz);
+_SYS_TUNABLES_H int zfs_tunable_set(const zfs_tunable_t *tunable,
+    const char *val);
+_SYS_TUNABLES_H int zfs_tunable_get(const zfs_tunable_t *tunable, char *val,
+    size_t valsz);
 
-const zfs_tunable_t *zfs_tunable_lookup(const char *name);
+_SYS_TUNABLES_H const zfs_tunable_t *zfs_tunable_lookup(const char *name);
 
 typedef int (*zfs_tunable_iter_t)(const zfs_tunable_t *tunable, void *arg);
-void zfs_tunable_iter(zfs_tunable_iter_t cb, void *arg);
+_SYS_TUNABLES_H void zfs_tunable_iter(zfs_tunable_iter_t cb, void *arg);
 
 #endif

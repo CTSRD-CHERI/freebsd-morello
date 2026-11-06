@@ -42,10 +42,9 @@
  */
 .macro	save_registers_head el
 .if \el == 1
-	mov	x18, sp
-	stp	x0,  x1,  [sp, #(TF_X - TF_SIZE - 128)]!
+	stp	x0,  x1,  [sp, #-(TF_SIZE - TF_X + 128)]!
 .else
-	stp	x0,  x1,  [sp, #(TF_X - TF_SIZE)]!
+	stp	x0,  x1,  [sp, #-(TF_SIZE - TF_X)]!
 .endif
 	stp	x2,  x3,  [sp, #(2  * 8)]
 	stp	x4,  x5,  [sp, #(4  * 8)]
@@ -61,7 +60,9 @@
 	stp	x24, x25, [sp, #(24 * 8)]
 	stp	x26, x27, [sp, #(26 * 8)]
 	stp	x28, x29, [sp, #(28 * 8)]
-.if \el == 0
+.if \el == 1
+	add	x18, sp, #(TF_SIZE - TF_X + 128)
+.else
 	mrs	x18, sp_el0
 .endif
 	mrs	x10, elr_el1
@@ -91,10 +92,34 @@
 	blr	x1
 1:
 
-	ldr	x0, [x18, #PC_CURTHREAD]
+	ldr	x19, [x18, #PC_CURTHREAD]
+
+	ldr	x1, [x19, #TD_MD_SCTLR]
+	/*
+	 * If the upper bit in SCTLR_EL1.TCF0 is set we are either in async
+	 * or asym modes. Either of which could set TFSRE0_EL1.
+	 */
+	tbz	x1, #(SCTLR_TCF0_SHIFT + 1), 2f
+	/* Check for a tag fault */
+	mrs	x1, TFSRE0_EL1_REG
+	tbz	x1, #TFSRE0_TF0_SHIFT, 2f
+
+	/*
+	 * A fault has happened, set MD_FLAG_MTE_ASYNC_FAULT. As FEAT_LSE
+	 * is a required feature where FEAT_MTE_ASYNC could be implemented
+	 * we can depend on it being present to set the flag.
+	 */
+	ldr	w1, =MD_FLAG_MTE_ASYNC_FAULT
+	add	x2, x19, #TD_MD_FLAGS
+.arch_extension lse
+	stset	w1, [x2]
+.arch_extension nolse
+
+2:
+	mov	x0, x19
 	bl	ptrauth_exit_el0
 
-	ldr	x0, [x18, #(PC_CURTHREAD)]
+	mov	x0, x19
 	bl	dbg_monitor_enter
 
 	/* Unmask debug and SError exceptions */
@@ -117,6 +142,14 @@
 	msr	daifset, #(DAIF_ALL)
 .if \el == 0
 	ldr	x0, [x18, #PC_CURTHREAD]
+
+	ldr	x1, [x0, #TD_MD_SCTLR]
+	/* See above for why we check this field */
+	tbz	x1, #(SCTLR_TCF0_SHIFT + 1), 1f
+	dsb	ish
+	msr	TFSRE0_EL1_REG, xzr
+1:
+
 	mov	x1, sp
 	bl	dbg_monitor_exit
 

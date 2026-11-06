@@ -41,6 +41,8 @@
 
 #include "smbus_if.h"
 
+#define ICHSMB_FEATURE_BLOCK_BUFFER 0x01	/* supports 32 byte block buffer */
+
 /* Per-device private info */
 struct ichsmb_softc {
 
@@ -52,6 +54,7 @@ struct ichsmb_softc {
 	struct resource		*irq_res;       /* interrupt resource */
 	int			irq_rid;        /* interrupt bus id */
 	void			*irq_handle;    /* handle for interrupt code */
+	uint32_t		features;	/* supported device features */
 
 	/* Device state */
 	int			ich_cmd;	/* ich command, or -1 */
@@ -77,6 +80,7 @@ extern smbus_readw_t	ichsmb_readw;
 extern smbus_pcall_t	ichsmb_pcall;	
 extern smbus_bwrite_t	ichsmb_bwrite;	
 extern smbus_bread_t	ichsmb_bread;	
+extern smbus_bpcall_t	ichsmb_bpcall;
 
 /* Other functions */
 extern void	ichsmb_device_intr(void *cookie);
@@ -84,6 +88,7 @@ extern void	ichsmb_release_resources(sc_p sc);
 extern int	ichsmb_probe(device_t dev);
 extern int	ichsmb_attach(device_t dev);
 extern int	ichsmb_detach(device_t dev);
+extern int	ichsmb_shutdown(device_t dev);
 
 #endif /* _DEV_ICHSMB_ICHSMB_VAR_H */
 

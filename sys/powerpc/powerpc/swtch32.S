@@ -56,7 +56,6 @@
  */
 
 #include "assym.inc"
-#include "opt_sched.h"
 
 #include <sys/syscall.h>
 
@@ -119,17 +118,22 @@ ENTRY(cpu_switch)
 	bl	save_vec
 	
 .L2:
-#if defined(__SPE__)
-	mfspr	%r3,SPR_SPEFSCR
-	stw	%r3,PCB_VSCR(%r17)
-#endif
 	mr	%r3,%r14		/* restore old thread ptr */
 	bl	pmap_deactivate		/* Deactivate the current pmap */
 
 	sync				/* Make sure all of that finished */
 
 cpu_switchin:
-#if defined(SMP) && defined(SCHED_ULE)
+	/*
+	 * Release the old thread before waiting for the new one.  Two CPUs
+	 * may exchange threads, so waiting first would leave each CPU waiting
+	 * for the other to perform this store.
+	 */
+	cmpwi	%r14,0
+	beq-	1f
+	stw	%r16,TD_LOCK(%r14)	/* ULE:	update old thread's lock */
+1:
+#if defined(SMP)
 	/* Wait for the new thread to become unblocked */
 	bl	1f
 1:
@@ -142,18 +146,13 @@ blocked_loop:
 	lwz	%r7,TD_LOCK(%r2)
 	cmpw	%r6,%r7 
 	beq-	blocked_loop
-	isync
+	isync				/* Acquire thread state. */
 #endif
 
 	lwz	%r17,TD_PCB(%r2)	/* Get new current PCB */
 	lwz	%r1,PCB_SP(%r17)	/* Load new stack pointer */
 
-	/* Release old thread now that we have a stack pointer set up */
-	cmpwi	%r14,0
-	beq-	1f
-	stw	%r16,TD_LOCK(%r14)	/* ULE:	update old thread's lock */
-
-1:	mfsprg	%r7,0			/* Get the pcpu pointer */
+	mfsprg	%r7,0			/* Get the pcpu pointer */
 	stw	%r2,PC_CURTHREAD(%r7)	/* Store new current thread */
 	lwz	%r17,TD_PCB(%r2)	/* Store new current PCB */
 	stw	%r17,PC_CURPCB(%r7)
@@ -176,10 +175,6 @@ blocked_loop:
 	bl	enable_vec
 
 .L4:
-#if defined(__SPE__)
-	lwz	%r3,PCB_VSCR(%r17)
-	mtspr	SPR_SPEFSCR,%r3
-#endif
 	/* thread to restore is in r3 */
 	mr	%r3,%r17		/* Recover PCB ptr */
 	lmw	%r12,PCB_CONTEXT(%r3)	/* Load the non-volatile GP regs */
@@ -224,9 +219,5 @@ ENTRY(fork_trampoline)
 					   trapframe to simulate FRAME_SETUP
 					   does when allocating space for
 					   a frame pointer/saved LR */
-#ifdef __SPE__
-	li	%r3,SPEFSCR_DFLT
-	mtspr	SPR_SPEFSCR, %r3
-#endif
 	b	trapexit
 END(fork_trampoline)

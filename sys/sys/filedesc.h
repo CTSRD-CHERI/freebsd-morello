@@ -103,7 +103,8 @@ typedef SMR_POINTER(struct pwd *) smrpwd_t;
 struct pwddesc {
 	struct mtx	pd_lock;	/* protects members of this struct */
 	smrpwd_t	pd_pwd;		/* directories */
-	u_int		pd_refcount;
+	u_int		pd_refcount;	/* lifetime */
+	u_int		pd_sharecount;	/* processes sharing the descriptor */
 	u_short		pd_cmask;	/* mask for file creation */
 };
 
@@ -212,6 +213,8 @@ struct filedesc_to_leader {
 
 #ifdef _KERNEL
 
+#include <machine/atomic.h>
+
 /* Operation types for kern_dup(). */
 enum {
 	FDDUP_NORMAL,		/* dup() behavior. */
@@ -241,7 +244,10 @@ filecaps_init(struct filecaps *fcaps)
 bool	filecaps_copy(const struct filecaps *src, struct filecaps *dst,
 	    bool locked);
 void	filecaps_move(struct filecaps *src, struct filecaps *dst);
+void	filecaps_fill(struct filecaps *fcaps);
 void	filecaps_free(struct filecaps *fcaps);
+bool	filecaps_full(const struct filecaps *fcaps);
+void	filecaps_intersect(struct filecaps *src, struct filecaps *dst);
 
 int	closef(struct file *fp, struct thread *td);
 void	closef_nothread(struct file *fp);
@@ -265,7 +271,7 @@ int	fdcheckstd(struct thread *td);
 void	fdclose(struct thread *td, struct file *fp, int idx);
 void	fdcloseexec(struct thread *td);
 void	fdsetugidsafety(struct thread *td);
-struct	filedesc *fdcopy(struct filedesc *fdp);
+struct	filedesc *fdcopy(struct filedesc *fdp, struct proc *p1);
 void	fdunshare(struct thread *td);
 void	fdescfree(struct thread *td);
 int	fdlastfile(struct filedesc *fdp);
@@ -302,6 +308,21 @@ int	fget_only_user(struct filedesc *fdp, int fd,
 	MPASS(FILEDESC_IS_ONLY_USER(fdp));				\
 	MPASS(refcount_load(&fp->f_count) > 0);				\
 })
+
+/*
+ * Look up a file description without requiring a lock.  In general the result
+ * may be immediately invalidated after the function returns, the caller must
+ * handle this.
+ */
+static inline struct file *
+fget_noref_unlocked(struct filedesc *fdp, int fd)
+{
+	if (__predict_false(
+	    (u_int)fd >= (u_int)atomic_load_int(&fdp->fd_nfiles)))
+		return (NULL);
+
+	return (atomic_load_ptr(&fdp->fd_ofiles[fd].fde_file));
+}
 
 /* Requires a FILEDESC_{S,X}LOCK held and returns without a ref. */
 static __inline struct file *

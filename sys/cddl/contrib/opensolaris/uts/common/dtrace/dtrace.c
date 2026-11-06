@@ -707,6 +707,31 @@ dtrace_error(uint32_t *counter)
 	} while (dtrace_cas32(counter, oval, nval) != oval);
 }
 
+void
+dtrace_xcall(processorid_t cpu, dtrace_xcall_t func, void *arg)
+{
+	cpuset_t cpus;
+
+	if (cpu == DTRACE_CPUALL)
+		cpus = all_cpus;
+	else
+		CPU_SETOF(cpu, &cpus);
+
+	smp_rendezvous_cpus(cpus, smp_no_rendezvous_barrier, func,
+	    smp_no_rendezvous_barrier, arg);
+}
+
+static void
+dtrace_sync_func(void)
+{
+}
+
+void
+dtrace_sync(void)
+{
+	dtrace_xcall(DTRACE_CPUALL, (dtrace_xcall_t)dtrace_sync_func, NULL);
+}
+
 /*
  * Use the DTRACE_LOADFUNC macro to define functions for each of loading a
  * uint8_t, a uint16_t, a uint32_t and a uint64_t.
@@ -7761,7 +7786,8 @@ dtrace_probe(dtrace_id_t id, uintptr_t arg0, uintptr_t arg1,
 				uintptr_t *memref = (uintptr_t *)(uintptr_t) val;
 
 				if (!DTRACE_INSCRATCHPTR(&mstate,
-				    (uintptr_t)memref, 2 * sizeof(uintptr_t))) {
+				    (uintptr_t) memref,
+				    sizeof (uintptr_t) + sizeof (size_t))) {
 					*flags |= CPU_DTRACE_BADADDR;
 					continue;
 				}
@@ -7773,21 +7799,21 @@ dtrace_probe(dtrace_id_t id, uintptr_t arg0, uintptr_t arg1,
 				 * Check if the size exceeds the allocated
 				 * buffer size.
 				 */
-				if (size + sizeof(uintptr_t) > dp->dtdo_rtype.dtdt_size) {
+				if (size + sizeof (size_t) >
+				    dp->dtdo_rtype.dtdt_size) {
 					/* Flag a drop! */
 					*flags |= CPU_DTRACE_DROP;
 					continue;
 				}
 
 				/* Store the size in the buffer first. */
-				DTRACE_STORE(uintptr_t, tomax,
-				    valoffs, size);
+				DTRACE_STORE(size_t, tomax, valoffs, size);
 
 				/*
 				 * Offset the buffer address to the start
 				 * of the data.
 				 */
-				valoffs += sizeof(uintptr_t);
+				valoffs += sizeof(size_t);
 
 				/*
 				 * Reset to the memory address rather than
@@ -14175,8 +14201,8 @@ dtrace_dof_slurp(dof_hdr_t *dof, dtrace_vstate_t *vstate, cred_t *cr,
 		return (-1);
 	}
 
-	if (dof->dofh_secsize == 0) {
-		dtrace_dof_error(dof, "zero section header size");
+	if (dof->dofh_secsize < sizeof (dof_sec_t)) {
+		dtrace_dof_error(dof, "invalid section header size");
 		return (-1);
 	}
 
@@ -14250,8 +14276,21 @@ dtrace_dof_slurp(dof_hdr_t *dof, dtrace_vstate_t *vstate, cred_t *cr,
 			return (-1);
 		}
 
-		if (sec->dofs_type == DOF_SECT_STRTAB && *((char *)daddr +
-		    sec->dofs_offset + sec->dofs_size - 1) != '\0') {
+		if (sec->dofs_offset < sizeof (dof_hdr_t)) {
+			dtrace_dof_error(dof, "section overlaps header");
+			return (-1);
+		}
+
+		if (sec->dofs_offset + sec->dofs_size > dof->dofh_secoff &&
+		    sec->dofs_offset < dof->dofh_secoff +
+		    dof->dofh_secnum * dof->dofh_secsize) {
+			dtrace_dof_error(dof, "invalid section offset");
+			return (-1);
+		}
+
+		if (sec->dofs_type == DOF_SECT_STRTAB && (sec->dofs_size == 0 ||
+		    *((char *)daddr + sec->dofs_offset + sec->dofs_size - 1) !=
+		    '\0')) {
 			dtrace_dof_error(dof, "non-terminating string table");
 			return (-1);
 		}
@@ -16221,7 +16260,8 @@ dtrace_helper_provider_validate(dof_hdr_t *dof, dof_sec_t *sec)
 	}
 
 	if (prb_sec->dofs_entsize == 0 ||
-	    prb_sec->dofs_entsize > prb_sec->dofs_size) {
+	    prb_sec->dofs_entsize > prb_sec->dofs_size ||
+	    prb_sec->dofs_entsize < sizeof (dof_probe_t)) {
 		dtrace_dof_error(dof, "invalid entry size");
 		return (-1);
 	}
@@ -16242,6 +16282,11 @@ dtrace_helper_provider_validate(dof_hdr_t *dof, dof_sec_t *sec)
 	}
 
 	if (arg_sec->dofs_entsize != sizeof (uint8_t)) {
+		dtrace_dof_error(dof, "invalid entry size");
+		return (-1);
+	}
+
+	if (enoff_sec != NULL && enoff_sec->dofs_entsize != sizeof (uint32_t)) {
 		dtrace_dof_error(dof, "invalid entry size");
 		return (-1);
 	}
@@ -16286,7 +16331,7 @@ dtrace_helper_provider_validate(dof_hdr_t *dof, dof_sec_t *sec)
 		if (probe->dofpr_offidx + probe->dofpr_noffs <
 		    probe->dofpr_offidx ||
 		    (probe->dofpr_offidx + probe->dofpr_noffs) *
-		    off_sec->dofs_entsize > off_sec->dofs_size) {
+		    (uint64_t) off_sec->dofs_entsize > off_sec->dofs_size) {
 			dtrace_dof_error(dof, "invalid probe offset");
 			return (-1);
 		}
@@ -16308,7 +16353,8 @@ dtrace_helper_provider_validate(dof_hdr_t *dof, dof_sec_t *sec)
 			} else if (probe->dofpr_enoffidx +
 			    probe->dofpr_nenoffs < probe->dofpr_enoffidx ||
 			    (probe->dofpr_enoffidx + probe->dofpr_nenoffs) *
-			    enoff_sec->dofs_entsize > enoff_sec->dofs_size) {
+			    (uint64_t) enoff_sec->dofs_entsize >
+			    enoff_sec->dofs_size) {
 				dtrace_dof_error(dof, "invalid is-enabled "
 				    "offset");
 				return (-1);
@@ -16327,13 +16373,17 @@ dtrace_helper_provider_validate(dof_hdr_t *dof, dof_sec_t *sec)
 		if (probe->dofpr_argidx + probe->dofpr_xargc <
 		    probe->dofpr_argidx ||
 		    (probe->dofpr_argidx + probe->dofpr_xargc) *
-		    arg_sec->dofs_entsize > arg_sec->dofs_size) {
+		    (uint64_t) arg_sec->dofs_entsize > arg_sec->dofs_size) {
 			dtrace_dof_error(dof, "invalid args");
 			return (-1);
 		}
 
 		typeidx = probe->dofpr_nargv;
-		typestr = strtab + probe->dofpr_nargv;
+		if (typeidx >= str_sec->dofs_size) {
+			dtrace_dof_error(dof, "bad native argument type");
+			return (-1);
+		}
+		typestr = strtab + typeidx;
 		for (k = 0; k < probe->dofpr_nargc; k++) {
 			if (typeidx >= str_sec->dofs_size) {
 				dtrace_dof_error(dof, "bad "
@@ -16352,9 +16402,14 @@ dtrace_helper_provider_validate(dof_hdr_t *dof, dof_sec_t *sec)
 		}
 
 		typeidx = probe->dofpr_xargv;
-		typestr = strtab + probe->dofpr_xargv;
+		if (typeidx >= str_sec->dofs_size) {
+			dtrace_dof_error(dof, "bad native argument type");
+			return (-1);
+		}
+		typestr = strtab + typeidx;
 		for (k = 0; k < probe->dofpr_xargc; k++) {
-			if (arg[probe->dofpr_argidx + k] > probe->dofpr_nargc) {
+			if (arg[probe->dofpr_argidx + k] >=
+			    probe->dofpr_nargc) {
 				dtrace_dof_error(dof, "bad "
 				    "native argument index");
 				return (-1);

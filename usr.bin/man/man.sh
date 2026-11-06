@@ -418,7 +418,7 @@ man_display_page() {
 # Usage: man_display_page_groff
 # Display the manpage using groff
 man_display_page_groff() {
-	local EQN NROFF PIC TBL TROFF REFER VGRIND
+	local EQN NROFF PIC TBL TROFF REFER
 	local IFS l nroff_dev pipeline preproc_arg tool
 
 	# So, we really do need to parse the manpage. First, figure out the
@@ -456,7 +456,7 @@ man_display_page_groff() {
 		# Allow language specific calls to override the default
 		# set of utilities.
 		l=$(echo $man_lang | tr [:lower:] [:upper:])
-		for tool in EQN NROFF PIC TBL TROFF REFER VGRIND; do
+		for tool in EQN NROFF PIC TBL TROFF REFER; do
 			eval "$tool=\${${tool}_$l:-\$$tool}"
 		done
 		;;
@@ -483,7 +483,6 @@ man_display_page_groff() {
 			p)	pipeline="$pipeline | $PIC" ;;
 			r)	pipeline="$pipeline | $REFER" ;;
 			t)	pipeline="$pipeline | $TBL" ;;
-			v)	pipeline="$pipeline | $VGRIND" ;;
 			*)	usage ;;
 			esac
 		done
@@ -511,13 +510,21 @@ man_display_page_groff() {
 # Usage: man_find_and_display page
 # Search through the manpaths looking for the given page.
 man_find_and_display() {
-	local found_page locpath p path sect
+	local found_page has_slash locpath p path sect
 
 	# Check to see if it's a file. But only if it has a '/' in
-	# the filename.
+	# the filename or if -l was specified.
 	case "$1" in
-	*/*)	if [ -f "$1" -a -r "$1" ]; then
+	*/*)	has_slash=yes
+		;;
+	esac
+	if [ -n "$has_slash" -o -n "$lflag" ]; then
+		if [ -f "$1" -a -r "$1" ]; then
 			decho "Found a usable page, displaying that"
+			if [ -z "$lflag" ]; then
+				echo "Opening a file directly is deprecated," \
+				    "use -l instead." >&2
+			fi
 			unset use_cat
 			manpage="$1"
 			setup_cattool "$manpage"
@@ -531,9 +538,12 @@ man_find_and_display() {
 				man_display_page
 			fi
 			return
+		elif [ -n "$lflag" ]; then
+			echo "Cannot read $1" >&2
+			ret=1
+			return
 		fi
-		;;
-	esac
+	fi
 
 	IFS=:
 	for sect in $MANSECT; do
@@ -601,7 +611,7 @@ man_parse_opts() {
 	local cmd_arg
 
 	OPTIND=1
-	while getopts 'K:M:P:S:adfhkm:op:tw' cmd_arg; do
+	while getopts 'K:M:P:S:adfhklm:op:tw' cmd_arg; do
 		case "${cmd_arg}" in
 		K)	Kflag=Kflag
 			REGEXP=$OPTARG ;;
@@ -613,6 +623,7 @@ man_parse_opts() {
 		f)	fflag=fflag ;;
 		h)	man_usage 0 ;;
 		k)	kflag=kflag ;;
+		l)	lflag=lflag ;;
 		m)	mflag=$OPTARG ;;
 		o)	oflag=oflag ;;
 		p)	MANROFFSEQ=$OPTARG ;;
@@ -625,16 +636,19 @@ man_parse_opts() {
 	shift $(( $OPTIND - 1 ))
 
 	# Check the args for incompatible options.
-
-	case "${Kflag}${fflag}${kflag}${tflag}${wflag}" in
+	case "${Kflag}${fflag}${kflag}${lflag}${tflag}${wflag}" in
 	Kflagfflag*)	echo "Incompatible options: -K and -f"; man_usage ;;
 	Kflag*kflag*)	echo "Incompatible options: -K and -k"; man_usage ;;
+	Kflag*lflag*)	echo "Incompatible options: -K and -l"; man_usage ;;
 	Kflag*tflag)	echo "Incompatible options: -K and -t"; man_usage ;;
 	fflagkflag*)	echo "Incompatible options: -f and -k"; man_usage ;;
+	fflag*lflag*)	echo "Incompatible options: -f and -l"; man_usage ;;
 	fflag*tflag*)	echo "Incompatible options: -f and -t"; man_usage ;;
 	fflag*wflag)	echo "Incompatible options: -f and -w"; man_usage ;;
-	*kflagtflag*)	echo "Incompatible options: -k and -t"; man_usage ;;
+	*kflaglflag*)	echo "Incompatible options: -k and -l"; man_usage ;;
+	*kflag*tflag*)	echo "Incompatible options: -k and -t"; man_usage ;;
 	*kflag*wflag)	echo "Incompatible options: -k and -w"; man_usage ;;
+	*lflag*wflag)	echo "Incompatible options: -l and -w"; man_usage ;;
 	*tflagwflag)	echo "Incompatible options: -t and -w"; man_usage ;;
 	esac
 
@@ -733,7 +747,7 @@ man_setup_locale() {
 				man_country="${lang_cc#*_}"
 				man_charset="${locstr#*.}"
 				locpaths="$locstr"
-				locpaths="$locpaths:$man_lang.$man_charset"
+				locpaths="$locpaths:$man_lang.$man_charset:$man_lang"
 				if [ "$man_lang" != "en" ]; then
 					locpaths="$locpaths:en.$man_charset"
 				fi
@@ -751,7 +765,7 @@ man_setup_locale() {
 # Display usage for the man utility.
 man_usage() {
 	echo 'Usage:'
-	echo ' man [-adho] [-t | -w] [-M manpath] [-P pager] [-S mansect]'
+	echo ' man [-adhlo] [-t | -w] [-M manpath] [-P pager] [-S mansect]'
 	echo '     [-m arch[:machine]] [-p [eprtv]] [mansect] page [...]'
 	echo ' man -K | -f | -k expression [...] -- Search manual pages'
 
@@ -1114,7 +1128,6 @@ PIC=pic
 REFER=refer
 TBL=tbl
 TROFF='groff -S -mandoc'
-VGRIND=vgrind
 
 LOCALE=/usr/bin/locale
 STTY=/bin/stty

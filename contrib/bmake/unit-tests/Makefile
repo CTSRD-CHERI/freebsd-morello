@@ -1,6 +1,6 @@
-# $Id: Makefile,v 1.245 2025/08/05 16:18:07 sjg Exp $
+# $Id: Makefile,v 1.260 2026/03/10 15:45:51 sjg Exp $
 #
-# $NetBSD: Makefile,v 1.372 2025/08/04 22:44:49 sjg Exp $
+# $NetBSD: Makefile,v 1.383 2026/03/10 15:38:26 sjg Exp $
 #
 # Unit tests for make(1)
 #
@@ -403,6 +403,7 @@ TESTS+=		varmod-shell
 TESTS+=		varmod-subst
 TESTS+=		varmod-subst-regex
 TESTS+=		varmod-sun-shell
+TESTS+=		varmod-sun-shell1
 TESTS+=		varmod-sysv
 TESTS+=		varmod-tail
 TESTS+=		varmod-to-abs
@@ -519,6 +520,14 @@ BROKEN_TESTS+= \
 
 .endif
 
+.if ${.MAKE.OS:NMINGW*} == ""
+BROKEN_TESTS+= \
+	cmdline \
+	objdir-writable \
+	varname-dot-make-level \
+
+.endif
+
 .if ${.MAKE.OS} == "SCO_SV"
 BROKEN_TESTS+= \
 	opt-debug-graph[23] \
@@ -594,8 +603,12 @@ SED_CMDS.directive-include-guard= \
 	-e '/^ParseEOF:/d'
 SED_CMDS.export=	-e '/^[^=_A-Za-z0-9]*=/d'
 SED_CMDS.export+=	-e '/^DIFF/d'
-.if ${.MAKE.OS:NCygwin} == ""
-SED_CMDS.export+=	-e '/^WINDIR=/d' -e '/^SYSTEMROOT=/d'
+.if ${.MAKE.OS:NCygwin:NMINGW*} == ""
+SED_CMDS.export+= \
+	-e '/MSYSTEM=/d' \
+	-e '/^SYSTEMROOT=/d' \
+	-e '/^WINDIR=/d' \
+
 .endif
 SED_CMDS.export-all=	${SED_CMDS.export}
 SED_CMDS.export-env=	${SED_CMDS.export}
@@ -616,6 +629,9 @@ SED_CMDS.opt-chdir=		-e 's,\(nonexistent\).[1-9][0-9]*,\1,' \
 	-e 's,no such,No such,' \
 	-e 's,Filename,File name,'
 
+SED_CMDS.gnode-submake=		${STD_SED_CMDS.dj}
+SED_CMDS.gnode-submake=		${STD_SED_CMDS.dg2}
+
 # meta line numbers can vary based on filemon implementation
 SED_CMDS.meta-ignore= -e 's,\(\.meta:\)[1-9][0-9]*:,\1<line>:,'
 
@@ -629,6 +645,7 @@ SED_CMDS.opt-debug-lint+=	${STD_SED_CMDS.regex}
 SED_CMDS.opt-jobs-no-action=	${STD_SED_CMDS.hide-from-output}
 SED_CMDS.opt-no-action-runflags= ${STD_SED_CMDS.hide-from-output}
 SED_CMDS.opt-where-am-i=	-e '/usr.obj/d'
+SED_CMDS.opt-where-am-i+=	-e '/\/\//d'
 # For Compat_RunCommand, useShell == false.
 SED_CMDS.sh-dots=		-e 's,^.*\.\.\.:.*,<not found: ...>,'
 # For Compat_RunCommand, useShell == true.
@@ -649,6 +666,7 @@ SED_CMDS.var-op-shell+=		-e '/command/s,No such.*,not found,'
 SED_CMDS.var-op-shell+=		${STD_SED_CMDS.white-space}
 SED_CMDS.vardebug+=		-e 's,${.SHELL},</path/to/shell>,'
 SED_CMDS.varmod-mtime+=		-e "s,\(mtime for .*\): .*,\1: <ENOENT>,"
+SED_CMDS.varmod-subst+=		${STD_SED_CMDS.regex}
 SED_CMDS.varmod-subst-regex+=	${STD_SED_CMDS.regex}
 SED_CMDS.varparse-errors+=	${STD_SED_CMDS.timestamp}
 SED_CMDS.varname-dot-make-meta-ignore_filter+= ${SED_CMDS.meta-ignore}
@@ -664,7 +682,10 @@ SED_CMDS.varname-empty=		${.OBJDIR .PARSEDIR .PATH .SHELL .SYSPATH:L:@v@-e '/\\$
 # Some tests need an additional round of postprocessing.
 POSTPROC.depsrc-wait=		sed -e '/^---/d' -e 's,^\(: Making 3[abc]\)[123]$$,\1,'
 POSTPROC.deptgt-suffixes=	awk '/^\#\*\*\* Suffixes/,/^never-stop/'
-POSTPROC.gnode-submake=		awk '/Begin input graph/, /^$$/'
+POSTPROC.gnode-submake=		\
+	awk '/Begin input graph/, /^\# \.END/ { \
+		if (/made,/) print $$0 \
+	}'
 POSTPROC.varname-dot-make-mode=	sed 's,^\(: Making [abc]\)[123]$$,\1,'
 
 # Some tests reuse other tests, which makes them unnecessarily fragile.
@@ -687,6 +708,7 @@ STD_SED_CMDS.dg1=	-e '/\#.* \.$$/d'
 STD_SED_CMDS.dg1+=	-e '/\.MAKE.PATH_FILEMON/d'
 STD_SED_CMDS.dg1+=	-e '/^\#.*\/mk/d'
 STD_SED_CMDS.dg1+=	-e 's,  ${DEFSYSPATH:U/usr/share/mk}$$,  <defsyspath>,'
+STD_SED_CMDS.dg1+=	-e '/^\.MAKE\.PATH_FILEMON/d'
 STD_SED_CMDS.dg1+=	-e 's,^\(\.MAKE *=\) .*,\1 <details omitted>,'
 STD_SED_CMDS.dg1+=	-e 's,^\(\.MAKE\.[A-Z_]* *=\) .*,\1 <details omitted>,'
 STD_SED_CMDS.dg1+=	-e 's,^\(\.MAKE\.JOBS\.C *=\) .*,\1 <details omitted>,'
@@ -697,6 +719,7 @@ STD_SED_CMDS.dg1+=	-e '/\.SYSPATH/d'
 
 STD_SED_CMDS.dg2=	${STD_SED_CMDS.dg1}
 STD_SED_CMDS.dg2+=	-e 's,\(last modified\) ..:..:.. ... ..\, ....,\1 <timestamp>,'
+
 STD_SED_CMDS.dg3=	${STD_SED_CMDS.dg2}
 
 # Omit details such as process IDs from the output of the -dj option.
@@ -779,6 +802,16 @@ clean:
 	rm -f ${CLEANFILES}
 
 TEST_MAKE?=	${.MAKE}
+.if ${TEST_MAKE:M/*} == ""
+# we want an absolute path for TEST_MAKE
+tm!= for d in ${PATH:S,:, ,g:M/*}; do \
+	test -x $$d/${TEST_MAKE} || continue; \
+	echo $$d/${TEST_MAKE}; break; done
+.if ${tm:M/*}
+TEST_MAKE:= ${tm}
+.endif
+.endif
+
 TOOL_SED?=	sed
 TOOL_TR?=	tr
 TOOL_DIFF?=	diff
@@ -818,7 +851,7 @@ LIMIT_RESOURCES?=	:
 # each other, and because they use different environment variables and
 # command line options.
 .SUFFIXES: .mk .rawout .out
-.mk.rawout:
+.mk.rawout:	.META
 	@${_MKMSG_TEST:Uecho '#      test '} ${.PREFIX}
 	@set -eu; \
 	${LIMIT_RESOURCES}; \
@@ -847,6 +880,12 @@ _SED_CMDS+=	-e 's,${.CURDIR},<curdir>,g'
 # which we get depending on how MAKEOBJDIR is set.
 _SED_CMDS+=	-e 's,${.OBJDIR},<curdir>,g' -e 's,${.OBJDIR:tA},<curdir>,g'
 .endif
+
+# At the end, make sure we cleanup any dregs...
+.for d in ${MAKEOBJDIRPREFIX:S,/$,,} /usr/obj
+_SED_CMDS_LAST+=	-e 's,$d,,'
+.endfor
+
 # always pretend .MAKE was called 'make'
 _SED_CMDS+=	-e 's,^${TEST_MAKE:T:S,.,\\.,g}[][0-9]*:,make:,'
 _SED_CMDS+=	-e 's,${TEST_MAKE:S,.,\\.,g},make,'
@@ -854,7 +893,8 @@ _SED_CMDS+=	-e 's,^usage: ${TEST_MAKE:T:S,.,\\.,g} ,usage: make ,'
 _SED_CMDS+=	-e 's,${TEST_MAKE:T:S,.,\\.,g}\(\[[1-9][0-9]*\][: ]\),make\1,'
 _SED_CMDS+=	-e 's,<curdir>/,,g'
 _SED_CMDS+=	-e 's,${UNIT_TESTS:S,.,\\.,g}/,,g'
-_SED_CMDS+=	-e '/MAKE_VERSION/d'
+_SED_CMDS+=	-e 's,\(\.make\)[1-9][0-9]*,\1,g'
+_SED_CMDS+=	-e '/MAKE.VERSION/d'
 _SED_CMDS+=	-e '/EGREP=/d'
 
 # on AT&T derived systems: false exits 255 not 1
@@ -867,8 +907,8 @@ SED_CMDS.opt-debug-jobs+= -e 's,Command: ksh -v,Command: <shell>,'
 SED_CMDS.opt-debug-jobs+= -e 's,Command: <shell> -v,Command: <shell>,'
 .endif
 
-.rawout.out:
-	@${TOOL_SED} ${_SED_CMDS} ${SED_CMDS.${.PREFIX:T}} \
+.rawout.out:	.META
+	@${TOOL_SED} ${_SED_CMDS} ${SED_CMDS.${.PREFIX:T}} ${_SED_CMDS_LAST} \
 	  < ${.IMPSRC} > ${.TARGET}.tmp
 	@${POSTPROC.${.PREFIX:T}:D \
 	    ${POSTPROC.${.PREFIX:T}} < ${.TARGET}.tmp > ${.TARGET}.post \
@@ -895,7 +935,7 @@ test:	${OUTFILES} .PHONY
 	  echo "Failed tests: $${failed}" ; false ; \
 	else \
 	  echo "All tests passed" ; \
-	  lua=${LUA:Ulua} ; \
+	  lua=${LUA} ; lua=$${lua:-lua}; \
 	  have_lua=$$("$$lua" -e 'print "yes"' 2>&1) ; \
 	  if [ "$$have_lua" = "yes" -a -s ${.CURDIR}/check-expect.lua ]; then \
 	    (cd ${.CURDIR} && "$$lua" ./check-expect.lua *.mk); \

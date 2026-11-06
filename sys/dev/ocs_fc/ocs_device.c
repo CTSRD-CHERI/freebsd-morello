@@ -74,6 +74,8 @@ ocs_d_send_prli_rsp(ocs_io_t *io, uint16_t ox_id)
 				FC_EXPL_REQUEST_NOT_SUPPORTED, 0, NULL, NULL);
 		node->shutdown_reason = OCS_NODE_SHUTDOWN_DEFAULT;
 		ocs_node_transition(node, __ocs_d_initiate_shutdown, NULL);
+		/* Send only one response per PRLI; the LS_RJT owns the IO */
+		return;
 	}
 
 	/* If the back-end doesn't want to talk to this initiator, we send an LS_RJT */
@@ -825,7 +827,7 @@ __ocs_d_init(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 			ocs_node_transition(node, __ocs_d_wait_topology_notify, NULL);
 			break;
 		default:
-			node_printf(node, "received PLOGI, with unexpectd topology %d\n",
+			node_printf(node, "received PLOGI, with unexpected topology %d\n",
 				    node->sport->topology);
 			ocs_assert(FALSE, NULL);
 			break;

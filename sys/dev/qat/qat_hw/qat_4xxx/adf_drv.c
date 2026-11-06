@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
-/* Copyright(c) 2007-2025 Intel Corporation */
+/* Copyright(c) 2007-2026 Intel Corporation */
 #include "qat_freebsd.h"
 #include "adf_cfg.h"
 #include "adf_common_drv.h"
@@ -22,12 +22,14 @@ static MALLOC_DEFINE(M_QAT_4XXX, "qat_4xxx", "qat_4xxx");
 		PCI_VENDOR_ID_INTEL, device_id                                 \
 	}
 
-static const struct pci_device_id adf_pci_tbl[] =
-    { ADF_SYSTEM_DEVICE(ADF_4XXX_PCI_DEVICE_ID),
-      ADF_SYSTEM_DEVICE(ADF_401XX_PCI_DEVICE_ID),
-      {
-	  0,
-      } };
+static const struct pci_device_id adf_pci_tbl[] = {
+	ADF_SYSTEM_DEVICE(ADF_4XXX_PCI_DEVICE_ID),
+	ADF_SYSTEM_DEVICE(ADF_401XX_PCI_DEVICE_ID),
+	ADF_SYSTEM_DEVICE(ADF_402XX_PCI_DEVICE_ID),
+	{
+	    0,
+	}
+};
 
 static int
 adf_probe(device_t dev)
@@ -135,6 +137,7 @@ adf_cleanup_accel(struct adf_accel_dev *accel_dev)
 		switch (pci_get_device(accel_pci_dev->pci_dev)) {
 		case ADF_4XXX_PCI_DEVICE_ID:
 		case ADF_401XX_PCI_DEVICE_ID:
+		case ADF_402XX_PCI_DEVICE_ID:
 			adf_clean_hw_data_4xxx(accel_dev->hw_device);
 			break;
 		default:
@@ -207,7 +210,7 @@ adf_attach(device_t dev)
 	accel_pci_dev->sku = hw_data->get_sku(hw_data);
 	/* If the device has no acceleration engines then ignore it. */
 	if (!hw_data->accel_mask || !hw_data->ae_mask ||
-	    (~hw_data->ae_mask & 0x01)) {
+	    (~hw_data->ae_mask & 0x01ULL)) {
 		device_printf(dev, "No acceleration units found\n");
 		ret = ENXIO;
 		goto out_err;

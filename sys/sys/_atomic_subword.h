@@ -201,6 +201,58 @@ atomic_load_acq_16(const volatile uint16_t *p)
 }
 #endif
 
+#ifndef atomic_set_8
+static __inline void
+atomic_set_8(volatile uint8_t *p, uint8_t bit)
+{
+	uint32_t *addr;
+	int shift;
+
+	addr = _ATOMIC_WORD_ALIGNED(p);
+	shift = _ATOMIC_BYTE_SHIFT(p);
+	atomic_set_32(addr, (uint32_t)bit << shift);
+}
+#endif
+
+#ifndef atomic_set_16
+static __inline void
+atomic_set_16(volatile uint16_t *p, uint16_t bit)
+{
+	uint32_t *addr;
+	int shift;
+
+	addr = _ATOMIC_WORD_ALIGNED(p);
+	shift = _ATOMIC_HWORD_SHIFT(p);
+	atomic_set_32(addr, (uint32_t)bit << shift);
+}
+#endif
+
+#ifndef atomic_clear_8
+static __inline void
+atomic_clear_8(volatile uint8_t *p, uint8_t bit)
+{
+	uint32_t *addr;
+	int shift;
+
+	addr = _ATOMIC_WORD_ALIGNED(p);
+	shift = _ATOMIC_BYTE_SHIFT(p);
+	atomic_clear_32(addr, (uint32_t)bit << shift);
+}
+#endif
+
+#ifndef atomic_clear_16
+static __inline void
+atomic_clear_16(volatile uint16_t *p, uint16_t bit)
+{
+	uint32_t *addr;
+	int shift;
+
+	addr = _ATOMIC_WORD_ALIGNED(p);
+	shift = _ATOMIC_HWORD_SHIFT(p);
+	atomic_clear_32(addr, (uint32_t)bit << shift);
+}
+#endif
+
 #undef _ATOMIC_WORD_ALIGNED
 #undef _ATOMIC_BYTE_SHIFT
 #undef _ATOMIC_HWORD_SHIFT

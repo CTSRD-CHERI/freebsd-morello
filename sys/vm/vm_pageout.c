@@ -120,7 +120,7 @@
 
 /* the kernel process "vm_pageout"*/
 static void vm_pageout(void);
-static void vm_pageout_init(void);
+static void vm_pageout_init(void *);
 static int vm_pageout_clean(vm_page_t m, int *numpagedout);
 static int vm_pageout_cluster(vm_page_t m);
 static void vm_pageout_mightbe_oom(struct vm_domain *vmd, int page_shortage,
@@ -1683,7 +1683,7 @@ reinsert:
  * results to present a coherent view of paging activity on this domain.
  */
 static int
-vm_pageout_inactive_dispatch(struct vm_domain *vmd, int shortage)
+vm_pageout_inactive_dispatch(struct vm_domain *vmd, u_int shortage)
 {
 	u_int freed, pps, slop, threads, us;
 
@@ -1795,6 +1795,12 @@ vm_pageout_inactive(struct vm_domain *vmd, int shortage, int *addl_shortage)
 	 * target, kill the largest process.
 	 */
 	vm_pageout_mightbe_oom(vmd, page_shortage, starting_page_shortage);
+
+	/*
+	 * Kick the swapout thread to enforce RSS limits.
+	 */
+	if (page_shortage > 0)
+		vm_swapout_run();
 
 	/*
 	 * See the description of addl_page_shortage above.
@@ -2333,7 +2339,7 @@ vm_pageout_init_domain(int domain)
 }
 
 static void
-vm_pageout_init(void)
+vm_pageout_init(void *dummy __unused)
 {
 	u_long freecount;
 	int i;

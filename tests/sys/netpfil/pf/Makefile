@@ -5,6 +5,8 @@ TESTS_SUBDIRS+=	ioctl
 
 ATF_TESTS_SH+=	altq \
 		anchor \
+		authpf \
+		counters \
 		debug \
 		divert-to \
 		dup \
@@ -18,6 +20,7 @@ ATF_TESTS_SH+=	altq \
 		icmp6 \
 		if_enc \
 		limits \
+		limiters \
 		loginterface \
 		killstate \
 		macro \
@@ -30,6 +33,8 @@ ATF_TESTS_SH+=	altq \
 		names \
 		nat \
 		nat64 \
+		once \
+		osfp \
 		pass_block \
 		pflog \
 		pflow \
@@ -53,7 +58,8 @@ ATF_TESTS_SH+=	altq \
 		synproxy \
 		table \
 		tcp \
-		tos
+		tos \
+		unmapped_mbuf
 
 ATF_TESTS_PYTEST+=	frag4.py
 ATF_TESTS_PYTEST+=	frag6.py
@@ -61,6 +67,7 @@ ATF_TESTS_PYTEST+=	header.py
 ATF_TESTS_PYTEST+=	icmp.py
 ATF_TESTS_PYTEST+=	igmp.py
 ATF_TESTS_PYTEST+=	mld.py
+ATF_TESTS_PYTEST+=	nat44.py
 ATF_TESTS_PYTEST+=	nat64.py
 ATF_TESTS_PYTEST+=	nat66.py
 ATF_TESTS_PYTEST+=	return.py
@@ -69,7 +76,7 @@ ATF_TESTS_PYTEST+=	tcp.py
 
 # Allow tests to run in parallel in their own jails
 TEST_METADATA+= execenv="jail"
-TEST_METADATA+= execenv_jail_params="vnet allow.raw_sockets"
+TEST_METADATA+= execenv_jail_params="vnet allow.raw_sockets allow.read_msgbuf"
 
 ${PACKAGE}FILES+=	\
 			bsnmpd.conf \
@@ -83,10 +90,13 @@ ${PACKAGE}FILES+=	\
 			frag-overreplace.py \
 			frag-overhole.py \
 			frag-adjhole.py \
+			pfctl_adopt.py \
 			pfsync_defer.py \
 			pft_ether.py \
 			pft_read_ipfix.py \
 			rdr-srcport.py \
+			tftpd_inetd.conf \
+			tftpd_proxy_inetd.conf \
 			utils.subr \
 			utils.py
 
@@ -99,6 +109,7 @@ ${PACKAGE}FILESMODE_frag-overlimit.py=	0555
 ${PACKAGE}FILESMODE_frag-overreplace.py=	0555
 ${PACKAGE}FILESMODE_frag-overhole.py=	0555
 ${PACKAGE}FILESMODE_frag-adjhole.py=	0555
+${PACKAGE}FILESMODE_pfctl_adopt.py=	0555
 ${PACKAGE}FILESMODE_pfsync_defer.py=	0555
 ${PACKAGE}FILESMODE_pft_ether.py=	0555
 ${PACKAGE}FILESMODE_pft_read_ipfix.py=	0555

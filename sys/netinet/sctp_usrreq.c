@@ -1099,6 +1099,10 @@ sctp_fill_up_addresses_vrf(struct sctp_inpcb *inp,
 						    &sin->sin_addr) != 0) {
 							continue;
 						}
+						if (loopback_scope == 0 &&
+						    (IN4_ISLOOPBACK_ADDRESS(&sin->sin_addr))) {
+							continue;
+						}
 						if ((ipv4_local_scope == 0) &&
 						    (IN4_ISPRIVATE_ADDRESS(&sin->sin_addr))) {
 							continue;
@@ -1145,6 +1149,10 @@ sctp_fill_up_addresses_vrf(struct sctp_inpcb *inp,
 						}
 						if (prison_check_ip6(inp->ip_inp.inp.inp_cred,
 						    &sin6->sin6_addr) != 0) {
+							continue;
+						}
+						if (loopback_scope == 0 &&
+						    (IN6_IS_ADDR_LOOPBACK(&sin6->sin6_addr))) {
 							continue;
 						}
 						if (IN6_IS_ADDR_LINKLOCAL(&sin6->sin6_addr)) {
@@ -4683,23 +4691,20 @@ sctp_setopt(struct socket *so, int optname, void *optval, size_t optsize,
 				break;
 			}
 			if (send_out) {
-				int cnt;
 				uint16_t strm;
 
 				if (strrst->srs_number_streams) {
-					for (i = 0, cnt = 0; i < strrst->srs_number_streams; i++) {
+					for (i = 0; i < strrst->srs_number_streams; i++) {
 						strm = strrst->srs_stream_list[i];
 						if (stcb->asoc.strmout[strm].state == SCTP_STREAM_OPEN) {
 							stcb->asoc.strmout[strm].state = SCTP_STREAM_RESET_PENDING;
-							cnt++;
 						}
 					}
 				} else {
 					/* Its all */
-					for (i = 0, cnt = 0; i < stcb->asoc.streamoutcnt; i++) {
+					for (i = 0; i < stcb->asoc.streamoutcnt; i++) {
 						if (stcb->asoc.strmout[i].state == SCTP_STREAM_OPEN) {
 							stcb->asoc.strmout[i].state = SCTP_STREAM_RESET_PENDING;
-							cnt++;
 						}
 					}
 				}
@@ -6872,15 +6877,23 @@ sctp_ctloutput(struct socket *so, struct sockopt *sopt)
 
 	if ((sopt->sopt_level == SOL_SOCKET) &&
 	    (sopt->sopt_name == SO_SETFIB)) {
+		int optval;
+
+		error = sooptcopyin(sopt, &optval, sizeof(optval),
+		    sizeof(optval));
+		if (error != 0)
+			return (error);
 		inp = (struct sctp_inpcb *)so->so_pcb;
 		if (inp == NULL) {
 			SCTP_LTRACE_ERR_RET(so->so_pcb, NULL, NULL, SCTP_FROM_SCTP_USRREQ, ENOBUFS);
 			return (EINVAL);
 		}
 		SCTP_INP_WLOCK(inp);
-		inp->fibnum = so->so_fibnum;
+		error = sosetfib(so, optval);
+		if (error == 0)
+			inp->fibnum = optval;
 		SCTP_INP_WUNLOCK(inp);
-		return (0);
+		return (error);
 	}
 	if (sopt->sopt_level != IPPROTO_SCTP) {
 		/* wrong proto level... send back up to IP */

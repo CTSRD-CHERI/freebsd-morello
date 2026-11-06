@@ -35,7 +35,7 @@ test_read_format_cab_filename_CP932_eucJP(const char *refname)
 	/*
 	 * Read CAB filename in ja_JP.eucJP with "hdrcharset=CP932" option.
 	 */
-	if (NULL == setlocale(LC_ALL, "ja_JP.eucJP")) {
+	if (!setCheckedLocale("ja_JP.eucJP", "\xA4\xA2", L'\x3042')) {
 		skipping("ja_JP.eucJP locale not available on this system.");
 		return;
 	}
@@ -79,7 +79,7 @@ test_read_format_cab_filename_CP932_eucJP(const char *refname)
 
 	/* Close the archive. */
 cleanup:
-	assertEqualInt(ARCHIVE_OK, archive_read_close(a));
+	assertEqualIntA(a, ARCHIVE_OK, archive_read_close(a));
 	assertEqualInt(ARCHIVE_OK, archive_read_free(a));
 }
 
@@ -92,7 +92,7 @@ test_read_format_cab_filename_CP932_UTF8(const char *refname)
 	/*
 	 * Read CAB filename in en_US.UTF-8 with "hdrcharset=CP932" option.
 	 */
-	if (NULL == setlocale(LC_ALL, "en_US.UTF-8")) {
+	if (!setCheckedLocale("en_US.UTF-8", "\xC3\xA4", L'\x00E4')) {
 		skipping("en_US.UTF-8 locale not available on this system.");
 		return;
 	}
@@ -157,7 +157,7 @@ test_read_format_cab_filename_CP932_UTF8(const char *refname)
 
 	/* Close the archive. */
 cleanup:
-	assertEqualInt(ARCHIVE_OK, archive_read_close(a));
+	assertEqualIntA(a, ARCHIVE_OK, archive_read_close(a));
 	assertEqualInt(ARCHIVE_OK, archive_read_free(a));
 }
 

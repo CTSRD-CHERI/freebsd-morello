@@ -1,5 +1,5 @@
 #
-# SPDX-License-Idendifier: BSD-2-Clause
+# SPDX-License-Identifier: BSD-2-Clause
 #
 # Copyright (c) 2025 FreeBSD Foundation
 #
@@ -13,7 +13,7 @@
 
 LIB=	kprop_util
 INTERNALLIB=
-LDFLAGS=-Wl,--no-undefined
+LDFLAGS+=-Wl,--no-undefined
 INCS=	
 
 SRCS=	kprop_util.c
@@ -21,6 +21,7 @@ SRCS=	kprop_util.c
 CFLAGS+=-I${KRB5_DIR}/lib/krad \
 	-I${KRB5_DIR}/include \
 	-I${KRB5_SRCTOP}/include \
+	-I${KRB5_OBJTOP}/util/profile \
 	-I${.OBJDIR}
 
 .include <bsd.lib.mk>

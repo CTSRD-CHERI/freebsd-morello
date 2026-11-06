@@ -165,6 +165,28 @@ _ATOMIC_ADD(long)
  * { *p &= ~v; }
  */
 
+#ifdef	ISA_206_ATOMICS
+#define __atomic_clear_char(p, v, t)				\
+    __asm __volatile(						\
+	"1:	lbarx	%0, 0, %2\n"				\
+	"	andc	%0, %0, %3\n"				\
+	"	stbcx.	%0, 0, %2\n"				\
+	"	bne-	1b\n"					\
+	: "=&r" (t), "=m" (*p)					\
+	: "r" (p), "r" (v), "m" (*p)				\
+	: "cr0", "memory")					\
+    /* __atomic_clear_short */
+#define __atomic_clear_short(p, v, t)				\
+    __asm __volatile(						\
+	"1:	lharx	%0, 0, %2\n"				\
+	"	andc	%0, %0, %3\n"				\
+	"	sthcx.	%0, 0, %2\n"				\
+	"	bne-	1b\n"					\
+	: "=&r" (t), "=m" (*p)					\
+	: "r" (p), "r" (v), "m" (*p)				\
+	: "cr0", "memory")					\
+    /* __atomic_clear_short */
+#endif
 #define __atomic_clear_int(p, v, t)				\
     __asm __volatile(						\
 	"1:	lwarx	%0, 0, %2\n"				\
@@ -222,6 +244,11 @@ _ATOMIC_ADD(long)
     }								\
     /* _ATOMIC_CLEAR */
 
+#ifdef	ISA_206_ATOMICS
+_ATOMIC_CLEAR(char)
+_ATOMIC_CLEAR(short)
+#endif
+
 _ATOMIC_CLEAR(int)
 _ATOMIC_CLEAR(long)
 
@@ -265,6 +292,28 @@ _ATOMIC_CLEAR(long)
  * atomic_set(p, v)
  * { *p |= v; }
  */
+#ifdef	ISA_206_ATOMICS
+#define __atomic_set_char(p, v, t)				\
+    __asm __volatile(						\
+	"1:	lbarx	%0, 0, %2\n"				\
+	"	or	%0, %3, %0\n"				\
+	"	stbcx.	%0, 0, %2\n"				\
+	"	bne-	1b\n"					\
+	: "=&r" (t), "=m" (*p)					\
+	: "r" (p), "r" (v), "m" (*p)				\
+	: "cr0", "memory")					\
+    /* __atomic_set_char */
+#define __atomic_set_short(p, v, t)				\
+    __asm __volatile(						\
+	"1:	lharx	%0, 0, %2\n"				\
+	"	or	%0, %3, %0\n"				\
+	"	sthcx.	%0, 0, %2\n"				\
+	"	bne-	1b\n"					\
+	: "=&r" (t), "=m" (*p)					\
+	: "r" (p), "r" (v), "m" (*p)				\
+	: "cr0", "memory")					\
+    /* __atomic_set_short */
+#endif
 
 #define __atomic_set_int(p, v, t)				\
     __asm __volatile(						\
@@ -322,6 +371,11 @@ _ATOMIC_CLEAR(long)
 	__atomic_set_##type(p, v, t);				\
     }								\
     /* _ATOMIC_SET */
+
+#ifdef	ISA_206_ATOMICS
+_ATOMIC_SET(char)
+_ATOMIC_SET(short)
+#endif
 
 _ATOMIC_SET(int)
 _ATOMIC_SET(long)
@@ -1137,7 +1191,14 @@ atomic_thread_fence_seq_cst(void)
 #define	atomic_cmpset_short	atomic_cmpset_16
 #define	atomic_fcmpset_char	atomic_fcmpset_8
 #define	atomic_fcmpset_short	atomic_fcmpset_16
-#endif
+#define	atomic_set_short	atomic_set_16
+#define	atomic_clear_short	atomic_clear_16
+#else
+#define	atomic_set_8		atomic_set_char
+#define	atomic_clear_8		atomic_clear_char
+#define	atomic_set_16		atomic_set_short
+#define	atomic_clear_16		atomic_clear_short
+#endif	/* ISA_206_ATOMICS */
 
 /* These need sys/_atomic_subword.h on non-ISA-2.06-atomic platforms. */
 ATOMIC_CMPSET_ACQ_REL(char);

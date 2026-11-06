@@ -1,5 +1,5 @@
 #
-# SPDX-License-Idendifier: BSD-2-Clause
+# SPDX-License-Identifier: BSD-2-Clause
 #
 # Copyright (c) 2025 FreeBSD Foundation
 #
@@ -14,7 +14,7 @@
 LIBDIR=		${PLUGINSDIR}/tls
 SHLIBDIR=	${LIBDIR}
 LIB=		k5tls
-LDFLAGS=-Wl,--no-undefined
+LDFLAGS+=-Wl,--no-undefined
 LIBADD=	krb5 krb5profile krb5support ssl crypto k5crypto com_err sys
 VERSION_MAP=	${.CURDIR}/version.map
 
@@ -23,7 +23,8 @@ SRCS=	notls.c \
 
 CFLAGS+=-I${KRB5_DIR}/plugins/tls/k5tls \
 	-I${KRB5_DIR}/include \
-	-I${KRB5_SRCTOP}/include
+	-I${KRB5_SRCTOP}/include \
+	-I${KRB5_OBJTOP}/util/profile
 
 .include <bsd.lib.mk>
 

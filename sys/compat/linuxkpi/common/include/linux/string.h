@@ -31,6 +31,8 @@
 
 #include <sys/ctype.h>
 
+#include <linux/args.h>
+#include <linux/array_size.h>
 #include <linux/types.h>
 #include <linux/gfp.h>
 #include <linux/slab.h>
@@ -72,6 +74,21 @@ memdup_user(const void *ptr, size_t len)
 }
 
 static inline void *
+vmemdup_user(const void *ptr, size_t len)
+{
+	void *retval;
+	int error;
+
+	retval = malloc(len, M_KMALLOC, M_WAITOK);
+	error = linux_copyin(ptr, retval, len);
+	if (error != 0) {
+		free(retval, M_KMALLOC);
+		return (ERR_PTR(error));
+	}
+	return (retval);
+}
+
+static inline void *
 memdup_user_nul(const void *ptr, size_t len)
 {
 	char *retval;
@@ -88,6 +105,28 @@ memdup_user_nul(const void *ptr, size_t len)
 }
 
 static inline void *
+memdup_array_user(const void *src, size_t n, size_t size)
+{
+	size_t len;
+
+	if (check_mul_overflow(n, size, &len))
+		return (ERR_PTR(-EOVERFLOW));
+
+	return (memdup_user(src, len));
+}
+
+static inline void *
+vmemdup_array_user(const void *src, size_t n, size_t size)
+{
+	size_t len;
+
+	if (check_mul_overflow(n, size, &len))
+		return (ERR_PTR(-EOVERFLOW));
+
+	return (vmemdup_user(src, len));
+}
+
+static inline void *
 kmemdup(const void *src, size_t len, gfp_t gfp)
 {
 	void *dst;
@@ -96,6 +135,12 @@ kmemdup(const void *src, size_t len, gfp_t gfp)
 	if (dst != NULL)
 		memcpy(dst, src, len);
 	return (dst);
+}
+
+static inline void *
+kmemdup_array(const void *src, size_t count, size_t element_size, gfp_t gfp)
+{
+	return (kmemdup(src, size_mul(count, element_size), gfp));
 }
 
 /* See slab.h for kvmalloc/kvfree(). */
@@ -198,6 +243,12 @@ memchr_inv(const void *start, int c, size_t length)
 	return (NULL);
 }
 
+static inline bool
+mem_is_zero(const void *start, size_t length)
+{
+	return (memchr_inv(start, 0, length) == NULL);
+}
+
 static inline size_t
 str_has_prefix(const char *str, const char *prefix)
 {
@@ -221,7 +272,7 @@ strreplace(char *str, char old, char new)
 }
 
 static inline ssize_t
-strscpy(char* dst, const char* src, size_t len)
+sized_strscpy(char* dst, const char* src, size_t len)
 {
 	size_t i;
 
@@ -236,14 +287,24 @@ strscpy(char* dst, const char* src, size_t len)
 	return (-E2BIG);
 }
 
+#define	__strscpy0(dst, src, ...)	sized_strscpy(dst, src, sizeof(dst))
+#define	__strscpy1(dst, src, len)	sized_strscpy(dst, src, len)
+#define	strscpy(dst, src, ...)		\
+    CONCATENATE(__strscpy, COUNT_ARGS(__VA_ARGS__))(dst, src, __VA_ARGS__)
+
 static inline ssize_t
-strscpy_pad(char* dst, const char* src, size_t len)
+sized_strscpy_pad(char* dst, const char* src, size_t len)
 {
 
 	bzero(dst, len);
 
 	return (strscpy(dst, src, len));
 }
+
+#define	__strscpy_pad0(dst, src, ...)	sized_strscpy_pad(dst, src, sizeof(dst))
+#define	__strscpy_pad1(dst, src, len)	sized_strscpy_pad(dst, src, len)
+#define	strscpy_pad(dst, src, ...)	\
+    CONCATENATE(__strscpy_pad, COUNT_ARGS(__VA_ARGS__))(dst, src, __VA_ARGS__)
 
 static inline char *
 strnchr(const char *cp, size_t n, int ch)
@@ -302,6 +363,22 @@ memcpy_and_pad(void *dst, size_t dstlen, const void *src, size_t len, int ch)
 		memset((char *)dst + len, ch, dstlen - len);
 	}
 }
+
+#define strtomem(dst, src)	do {					\
+	size_t dstlen = ARRAY_SIZE(dst);				\
+	size_t srclen = __builtin_object_size(src, 1);			\
+	srclen = MIN(srclen, dstlen);					\
+	srclen = strnlen(src, srclen);					\
+	memcpy(dst, src, srclen);					\
+} while (0)
+
+#define strtomem_pad(dst, src, pad)	do {				\
+	size_t dstlen = ARRAY_SIZE(dst);				\
+	size_t srclen = __builtin_object_size(src, 1);			\
+	srclen = MIN(srclen, dstlen);					\
+	srclen = strnlen(src, srclen);					\
+	memcpy_and_pad(dst, dstlen, src, srclen, pad);			\
+} while (0)
 
 #define	memset_startat(ptr, bytepat, smember)				\
 ({									\

@@ -155,7 +155,7 @@ static int	link_elf_search_symbol(linker_file_t, caddr_t,
 		    c_linker_sym_t *, long *);
 
 static void	link_elf_unload_file(linker_file_t);
-static void	link_elf_unload_preload(linker_file_t);
+static void	link_elf_unload_preload(elf_file_t);
 static int	link_elf_lookup_set(linker_file_t, const char *,
 		    void ***, void ***, int *);
 static int	link_elf_each_function_name(linker_file_t,
@@ -518,9 +518,15 @@ link_elf_init(void* arg)
 	(void)link_elf_link_common_finish(linker_kernel_file);
 	linker_kernel_file->flags |= LINKER_FILE_LINKED;
 	TAILQ_INIT(&set_pcpu_list);
+	ef->pcpu_start = DPCPU_START;
+	ef->pcpu_stop = DPCPU_STOP;
+	ef->pcpu_base = DPCPU_START;
 #ifdef VIMAGE
 	TAILQ_INIT(&set_vnet_list);
 	vnet_save_init((void *)VNET_START, VNET_STOP - VNET_START);
+	ef->vnet_start = VNET_START;
+	ef->vnet_stop = VNET_STOP;
+	ef->vnet_base = VNET_START;
 #endif
 }
 
@@ -793,10 +799,10 @@ parse_vnet(elf_file_t ef)
 
 /*
  * Apply the specified protection to the loadable segments of a preloaded linker
- * file.
+ * file.  If "reset" is not set, the original segment protections are ORed in.
  */
 static int
-preload_protect(elf_file_t ef, vm_prot_t prot)
+preload_protect1(elf_file_t ef, vm_prot_t prot, bool reset)
 {
 #if defined(__aarch64__) || defined(__amd64__)
 	Elf_Ehdr *hdr;
@@ -812,13 +818,16 @@ preload_protect(elf_file_t ef, vm_prot_t prot)
 		if (phdr->p_type != PT_LOAD)
 			continue;
 
-		nprot = prot | VM_PROT_READ;
-		if ((phdr->p_flags & PF_W) != 0)
-			nprot |= VM_PROT_WRITE;
-		if ((phdr->p_flags & PF_X) != 0)
-			nprot |= VM_PROT_EXECUTE;
-		error = pmap_change_prot((vm_offset_t)ef->address +
-		    phdr->p_vaddr, round_page(phdr->p_memsz), nprot);
+		nprot = VM_PROT_NONE;
+		if (!reset) {
+			nprot = VM_PROT_READ;
+			if ((phdr->p_flags & PF_W) != 0)
+				nprot |= VM_PROT_WRITE;
+			if ((phdr->p_flags & PF_X) != 0)
+				nprot |= VM_PROT_EXECUTE;
+		}
+		error = pmap_change_prot(ef->address + phdr->p_vaddr,
+		    round_page(phdr->p_memsz), prot | nprot);
 		if (error != 0)
 			break;
 	}
@@ -826,6 +835,18 @@ preload_protect(elf_file_t ef, vm_prot_t prot)
 #else
 	return (0);
 #endif
+}
+
+static int
+preload_protect(elf_file_t ef, vm_prot_t prot)
+{
+	return (preload_protect1(ef, prot, false));
+}
+
+static int
+preload_protect_reset(elf_file_t ef, vm_prot_t prot)
+{
+	return (preload_protect1(ef, prot, true));
 }
 
 #ifdef __arm__
@@ -1065,8 +1086,11 @@ link_elf_load_file(linker_class_t cls, const char* filename,
 	 */
 	if (!((hdr->e_phentsize == sizeof(Elf_Phdr)) &&
 	      (hdr->e_phoff + hdr->e_phnum*sizeof(Elf_Phdr) <= PAGE_SIZE) &&
-	      (hdr->e_phoff + hdr->e_phnum*sizeof(Elf_Phdr) <= nbytes)))
+	      (hdr->e_phoff + hdr->e_phnum*sizeof(Elf_Phdr) <= nbytes))) {
 		link_elf_error(filename, "Unreadable program headers");
+		error = ENOEXEC;
+		goto out;
+	}
 
 	/*
 	 * Scan the program header entries, and save key information.
@@ -1086,6 +1110,14 @@ link_elf_load_file(linker_class_t cls, const char* filename,
 				error = ENOEXEC;
 				goto out;
 			}
+
+			if (phdr->p_memsz < phdr->p_filesz) {
+				link_elf_error(filename,
+				    "Invalid program header");
+				error = ENOEXEC;
+				goto out;
+			}
+
 			/*
 			 * XXX: We just trust they come in right order ??
 			 */
@@ -1285,8 +1317,9 @@ link_elf_load_file(linker_class_t cls, const char* filename,
 		if (shdr[i].sh_type == SHT_SYMTAB) {
 			symtabindex = i;
 			symstrindex = shdr[i].sh_link;
-		} else if (shstrs != NULL && shdr[i].sh_name != 0 &&
-		    strcmp(shstrs + shdr[i].sh_name, ".ctors") == 0) {
+		} else if ((shstrs != NULL && shdr[i].sh_name != 0 &&
+		    strcmp(shstrs + shdr[i].sh_name, ".ctors") == 0) ||
+		    shdr[i].sh_type == SHT_INIT_ARRAY) {
 			/* Record relocated address and size of .ctors. */
 			lf->ctors_addr = mapbase + shdr[i].sh_addr - base_vaddr;
 			lf->ctors_size = shdr[i].sh_size;
@@ -1390,7 +1423,7 @@ link_elf_unload_file(linker_file_t file)
 	elf_cpu_unload_file(file);
 
 	if (ef->preloaded) {
-		link_elf_unload_preload(file);
+		link_elf_unload_preload(ef);
 		return;
 	}
 
@@ -1411,11 +1444,16 @@ link_elf_unload_file(linker_file_t file)
 }
 
 static void
-link_elf_unload_preload(linker_file_t file)
+link_elf_unload_preload(elf_file_t ef)
 {
+	/*
+	 * Reset mapping protections to their original state.  This affects the
+	 * direct map alias of the module mapping as well.
+	 */
+	preload_protect_reset(ef, VM_PROT_RW);
 
-	if (file->pathname != NULL)
-		preload_delete_name(file->pathname);
+	if (ef->lf.pathname != NULL)
+		preload_delete_name(ef->lf.pathname);
 }
 
 static const char *
@@ -2015,7 +2053,6 @@ link_elf_propagate_vnets(linker_file_t lf)
 }
 #endif
 
-#if defined(__i386__) || defined(__amd64__) || defined(__aarch64__) || defined(__powerpc__)
 /*
  * Use this lookup routine when performing relocations early during boot.
  * The generic lookup routine depends on kobj, which is not initialized
@@ -2077,5 +2114,4 @@ link_elf_late_ireloc(void)
 
 	relocate_file1(ef, elf_lookup_ifunc, elf_reloc_late, true);
 }
-#endif
 #endif

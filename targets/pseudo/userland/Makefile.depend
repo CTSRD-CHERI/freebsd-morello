@@ -128,7 +128,6 @@ DIRDEPS+= \
 	sbin/sysctl \
 	sbin/tunefs \
 	sbin/umount \
-	usr.bin/alias \
 	usr.bin/apply \
 	usr.bin/ar \
 	usr.bin/asa \
@@ -238,7 +237,6 @@ DIRDEPS+= \
 	usr.bin/leave \
 	usr.bin/less \
 	usr.bin/lessecho \
-	usr.bin/lesskey \
 	usr.bin/lex/lib \
 	usr.bin/limits \
 	usr.bin/locale \
@@ -363,7 +361,6 @@ DIRDEPS+= \
 	usr.bin/usbhidctl \
 	usr.bin/users \
 	usr.bin/vacation \
-	usr.bin/vgrind \
 	usr.bin/vi \
 	usr.bin/vi/catalog \
 	usr.bin/vis \
@@ -777,7 +774,6 @@ DIRDEPS.i386= \
 	sbin/fdisk \
 	sbin/nvmecontrol \
 	usr.sbin/apm \
-	usr.sbin/apmd \
 	usr.sbin/btxld \
 	usr.sbin/cpucontrol \
 	usr.sbin/hyperv/tools \
@@ -804,6 +800,12 @@ DIRDEPS.powerpc= \
 DIRDEPS+= \
 	usr.sbin/blacklistctl \
 	usr.sbin/blacklistd
+.endif
+
+.if ${MK_BLOCKLIST_SUPPORT} != "no"
+DIRDEPS+= \
+	usr.sbin/blocklistctl \
+	usr.sbin/blocklistd
 .endif
 
 .if ${MK_CXGBETOOL} != "no"

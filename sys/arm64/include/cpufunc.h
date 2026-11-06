@@ -96,6 +96,13 @@ serror_enable(void)
 	__asm __volatile("msr daifclr, #(" __XSTRING(DAIF_A) ")");
 }
 
+static __inline void
+serror_disable(void)
+{
+
+	__asm __volatile("msr daifset, #(" __XSTRING(DAIF_A) ")");
+}
+
 static __inline register_t
 get_midr(void)
 {
@@ -159,6 +166,12 @@ invalidate_local_icache(void)
 }
 
 static __inline void
+wfe(void)
+{
+	__asm __volatile("wfe");
+}
+
+static __inline void
 wfet(uint64_t val)
 {
 	__asm __volatile(
@@ -189,8 +202,6 @@ extern int64_t dczva_line_size;
 #define	cpu_nullop()			arm64_nullop()
 #define	cpufunc_nullop()		arm64_nullop()
 
-#define	cpu_tlb_flushID()		arm64_tlb_flushID()
-
 #define	cpu_dcache_wbinv_range(a, s)	arm64_dcache_wbinv_range((a), (s))
 #define	cpu_dcache_inv_range(a, s)	arm64_dcache_inv_range((a), (s))
 #define	cpu_dcache_wb_range(a, s)	arm64_dcache_wb_range((a), (s))
@@ -201,10 +212,11 @@ extern void (*arm64_icache_sync_range)(void *, vm_size_t);
 #define cpu_icache_sync_range_checked(a, s) arm64_icache_sync_range_checked((a), (s))
 
 void arm64_nullop(void);
-void arm64_tlb_flushID(void);
 void arm64_dic_idc_icache_sync_range(void *, vm_size_t);
 void arm64_idc_aliasing_icache_sync_range(void *, vm_size_t);
+void arm64_idc_pipt_icache_sync_range(void *, vm_size_t);
 void arm64_aliasing_icache_sync_range(void *, vm_size_t);
+void arm64_pipt_icache_sync_range(void *, vm_size_t);
 int arm64_icache_sync_range_checked(void *, vm_size_t);
 void arm64_dcache_wbinv_range(void *, vm_size_t);
 void arm64_dcache_inv_range(void *, vm_size_t);

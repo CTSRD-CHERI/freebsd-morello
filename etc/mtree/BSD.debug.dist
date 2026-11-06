@@ -9,6 +9,8 @@
         ..
         boot
             kernel
+                gdb
+                ..
             ..
             modules
             ..
@@ -28,7 +30,7 @@
             ..
             lib
                 clang
-                    19
+                    21
                         lib
                             freebsd
                             ..
@@ -45,18 +47,30 @@
                 ..
                 i18n
                 ..
+                krb5
+                    plugins
+                        kdb
+                        ..
+                        preauth
+                        ..
+                        tls
+                        ..
+                    ..
+                ..
                 libxo
                     encoder
                     ..
                 ..
                 ossl-modules
                 ..
+                virtual_oss
+                ..
             ..
             libexec
                 bsdinstall
                 ..
-                lpr
-                    ru
+                lpr		tags=package=lp
+                    ru		tags=package=lp
                     ..
                 ..
                 sendmail

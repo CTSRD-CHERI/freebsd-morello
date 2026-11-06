@@ -459,7 +459,7 @@ static const struct ieee80211_authenticator auth_internal = {
  * Setup internal authenticators once; they are never unregistered.
  */
 static void
-ieee80211_auth_setup(void)
+ieee80211_auth_setup(void *dummy __unused)
 {
 	ieee80211_authenticator_register(IEEE80211_AUTH_OPEN, &auth_internal);
 	ieee80211_authenticator_register(IEEE80211_AUTH_SHARED, &auth_internal);
@@ -747,8 +747,8 @@ ieee80211_fix_rate(struct ieee80211_node *ni,
 	    ((flags & (IEEE80211_F_DOFRATE|IEEE80211_F_DOFMCS)) &&
 	     fixedrate != ucastrate)) {
 		IEEE80211_NOTE(vap, IEEE80211_MSG_XRATE | IEEE80211_MSG_11N, ni,
-		    "%s: flags 0x%x okrate %d error %d fixedrate 0x%x "
-		    "ucastrate %x\n", __func__, fixedrate, ucastrate, flags);
+		    "%s: flags 0x%x okrate %d error %d fixedrate 0x%x ucastrate 0x%x\n",
+		    __func__, flags, okrate, error, fixedrate, ucastrate);
 		return badrate | IEEE80211_RATE_BASIC;
 	} else
 		return IEEE80211_RV(okrate);

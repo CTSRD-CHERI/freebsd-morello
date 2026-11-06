@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
  * Copyright (c) 2013,2014 Juniper Networks, Inc.
  * All rights reserved.
  *
@@ -142,23 +144,28 @@ static void
 usage(const char *why)
 {
 
-	warnx("error: %s", why);
-	fputc('\n', stderr);
+	if (why != NULL) {
+		warnx("error: %s", why);
+		fputc('\n', stderr);
+	}
 	fprintf(stderr, "usage: %s <options>\n", getprogname());
 
 	fprintf(stderr, "    options:\n");
 	fprintf(stderr, "\t--formats\t-  list image formats\n");
 	fprintf(stderr, "\t--schemes\t-  list partition schemes\n");
 	fprintf(stderr, "\t--version\t-  show version information\n");
+	fprintf(stderr, "\t--capacity\t-  minimum and maximum capacity (in bytes)\n");
 	fputc('\n', stderr);
 	fprintf(stderr, "\t-a <num>\t-  mark num'th partition as active\n");
 	fprintf(stderr, "\t-b <file>\t-  file containing boot code\n");
 	fprintf(stderr, "\t-c <num>\t-  minimum capacity (in bytes) of the disk\n");
 	fprintf(stderr, "\t-C <num>\t-  maximum capacity (in bytes) of the disk\n");
 	fprintf(stderr, "\t-f <format>\n");
+	fprintf(stderr, "\t-h\t\t-  show this usage information\n");
 	fprintf(stderr, "\t-o <file>\t-  file to write image into\n");
 	fprintf(stderr, "\t-p <partition>\n");
 	fprintf(stderr, "\t-s <scheme>\n");
+	fprintf(stderr, "\t-t <num>\t-  set timestamp (seconds since epoch)\n");
 	fprintf(stderr, "\t-v\t\t-  increase verbosity\n");
 	fprintf(stderr, "\t-y\t\t-  [developers] enable unit test\n");
 	fprintf(stderr, "\t-H <num>\t-  number of heads to simulate\n");
@@ -171,19 +178,21 @@ usage(const char *why)
 	print_schemes(1);
 	fputc('\n', stderr);
 	fprintf(stderr, "    partition specification:\n");
-	fprintf(stderr, "\t<t>[/<l>]::<size>[:[+]<offset>]\t-  "
-	    "empty partition of given size and\n\t\t\t\t\t"
-	    "   optional relative or absolute offset\n");
-	fprintf(stderr, "\t<t>[/<l>]:=<file>[:[+]offset]\t-  partition "
-	    "content and size are\n\t\t\t\t\t"
-	    "   determined by the named file and\n"
-	    "\t\t\t\t\t   optional relative or absolute offset\n");
-	fprintf(stderr, "\t<t>[/<l>]:-<cmd>\t\t-  partition content and size "
+	fprintf(stderr, "\t<type>[/<label>]::<size>[:[+]<offset>][%%<align>]\n"
+	    "\t\t\t\t\t-  empty partition of given size and\n"
+	    "\t\t\t\t\t   optional relative or absolute offset\n"
+	    "\t\t\t\t\t   and alignment\n");
+	fprintf(stderr, "\t<type>[/<label>]:=<file>[:[+]<offset>][%%<align>]\n"
+	    "\t\t\t\t\t-  partition content and size are\n"
+	    "\t\t\t\t\t   determined by the named file and\n"
+	    "\t\t\t\t\t   optional relative or absolute offset\n"
+	    "\t\t\t\t\t   and alignment\n");
+	fprintf(stderr, "\t<type>[/<label>]:-<cmd>\t\t-  partition content and size "
 	    "are taken\n\t\t\t\t\t   from the output of the command to run\n");
 	fprintf(stderr, "\t-\t\t\t\t-  unused partition entry\n");
 	fprintf(stderr, "\t    where:\n");
-	fprintf(stderr, "\t\t<t>\t-  scheme neutral partition type\n");
-	fprintf(stderr, "\t\t<l>\t-  optional scheme-dependent partition "
+	fprintf(stderr, "\t\t<type>\t-  scheme neutral partition type\n");
+	fprintf(stderr, "\t\t<label>\t-  optional scheme-dependent partition "
 	    "label\n");
 
 	exit(EX_USAGE);
@@ -241,7 +250,8 @@ static int
 parse_part(const char *spec)
 {
 	struct part *part;
-	char *sep;
+	const char *sep;
+	char *asep;
 	size_t len;
 	int error;
 
@@ -294,15 +304,14 @@ parse_part(const char *spec)
 		goto errout;
 	}
 
-	spec = part->alias;
-	sep = strchr(spec, '/');
-	if (sep != NULL) {
-		*sep++ = '\0';
-		if (strlen(part->alias) == 0 || strlen(sep) == 0) {
+	asep = strchr(part->alias, '/');
+	if (asep != NULL) {
+		*asep++ = '\0';
+		if (strlen(part->alias) == 0 || strlen(asep) == 0) {
 			error = EINVAL;
 			goto errout;
 		}
-		part->label = strdup(sep);
+		part->label = strdup(asep);
 		if (part->label == NULL) {
 			error = ENOMEM;
 			goto errout;
@@ -439,9 +448,11 @@ mkimg(void)
 {
 	FILE *fp;
 	struct part *part;
-	lba_t block, blkoffset;
-	uint64_t bytesize, byteoffset;
-	char *size, *offset;
+	struct stat sb;
+	char *p;
+	lba_t block, blkoffset, blkalign;
+	uint64_t bytesize, byteoffset, bytealign;
+	char *size, *offset, *align;
 	bool abs_offset;
 	int error, fd;
 
@@ -453,39 +464,96 @@ mkimg(void)
 	}
 
 	block = scheme_metadata(SCHEME_META_IMG_START, 0);
-	abs_offset = false;
 	TAILQ_FOREACH(part, &partlist, link) {
 		byteoffset = blkoffset = 0;
 		abs_offset = false;
+		align = NULL;
 
 		/* Look for an offset. Set size too if we can. */
 		switch (part->kind) {
 		case PART_KIND_SIZE:
-		case PART_KIND_FILE:
+			p = strrchr(part->contents, '%');
+			if (p != NULL) {
+				*p = '\0';
+				align = p + 1;
+			}
 			offset = part->contents;
 			size = strsep(&offset, ":");
-			if (part->kind == PART_KIND_SIZE &&
-			    expand_number(size, &bytesize) == -1)
+			if (expand_number(size, &bytesize) == -1)
 				error = errno;
-			if (offset != NULL) {
-				if (*offset != '+')
-					abs_offset = true;
-				else
-					offset++;
-				if (expand_number(offset, &byteoffset) == -1)
-					error = errno;
+			break;
+		case PART_KIND_FILE:
+			size = part->contents;
+			if (stat(part->contents, &sb) == -1) {
+				p = strrchr(part->contents, '%');
+				if (p != NULL) {
+					*p = '\0';
+					align = p + 1;
+				}
+			}
+			if (stat(part->contents, &sb) == 0) {
+				if (S_ISDIR(sb.st_mode)) {
+					errc(EX_IOERR, EISDIR, "partition %d",
+					    part->index + 1);
+				}
+				offset = NULL;
+			} else {
+				p = strrchr(part->contents, ':');
+				if (p != NULL) {
+					*p = '\0';
+					offset = p + 1;
+				} else {
+					offset = NULL;
+				}
 			}
 			break;
+		default:
+			offset = NULL;
+			break;
+		}
+
+		if (align != NULL) {
+			if (expand_number(align, &bytealign) == -1)
+				err(EX_DATAERR, "partition %d",
+				    part->index + 1);
+			if (bytealign == 0)
+				errx(EX_DATAERR, "partition %d: "
+				    "invalid alignment", part->index + 1);
+			if (secsz % bytealign == 0) {
+				warnx("partition %d: ignoring "
+				    "redundant alignment", part->index + 1);
+				bytealign = secsz;
+			}
+			if (bytealign % secsz != 0)
+				errx(EX_DATAERR, "partition %d: "
+				    "invalid alignment", part->index + 1);
+			blkalign = bytealign / secsz;
+		} else {
+			blkalign = 1;
+		}
+
+		if (offset != NULL) {
+			if (*offset != '+')
+				abs_offset = true;
+			else
+				offset++;
+			if (expand_number(offset, &byteoffset) == -1)
+				err(EX_IOERR, "partition %d", part->index + 1);
 		}
 
 		/* Work out exactly where the partition starts. */
 		blkoffset = (byteoffset + secsz - 1) / secsz;
-		if (abs_offset)
+		if (abs_offset) {
 			block = scheme_metadata(SCHEME_META_PART_ABSOLUTE,
 			    blkoffset);
-		else
+			if (block % blkalign)
+				errx(EX_DATAERR, "partition %d: absolute "
+				    "offset incompatible with alignment",
+				    part->index + 1);
+		} else
 			block = scheme_metadata(SCHEME_META_PART_BEFORE,
 			    block + blkoffset);
+		block = ((block + blkalign - 1) / blkalign) * blkalign;
 		part->block = block;
 
 		if (verbose)
@@ -530,6 +598,12 @@ mkimg(void)
 				    (long long)byteoffset,
 				    (long long)blkoffset);
 			}
+			if (blkalign > 1) {
+				fprintf(stderr,
+				    "    alignment %llu bytes (%llu blocks)\n",
+				    (long long)bytealign,
+				    (long long)blkalign);
+			}
 		}
 		block = scheme_metadata(SCHEME_META_PART_AFTER,
 		    part->block + part->size);
@@ -564,7 +638,7 @@ main(int argc, char *argv[])
 
 	bcfd = -1;
 	outfd = 1;	/* Write to stdout by default */
-	while ((c = getopt_long(argc, argv, "a:b:c:C:f:o:p:s:t:vyH:P:S:T:",
+	while ((c = getopt_long(argc, argv, "a:b:c:C:f:ho:p:s:t:vyH:P:S:T:",
 	    longopts, NULL)) != -1) {
 		switch (c) {
 		case 'a':	/* ACTIVE PARTITION, if supported */
@@ -595,6 +669,9 @@ main(int argc, char *argv[])
 			error = format_select(optarg);
 			if (error)
 				errc(EX_DATAERR, error, "format");
+			break;
+		case 'h':	/* HELP */
+			usage(NULL);
 			break;
 		case 'o':	/* OUTPUT FILE */
 			if (outfd != 1)

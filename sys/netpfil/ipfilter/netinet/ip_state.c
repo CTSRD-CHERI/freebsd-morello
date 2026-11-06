@@ -709,6 +709,7 @@ ipf_state_ioctl(ipf_main_softc_t *softc, caddr_t data, ioctlcmd_t cmd,
 				   IPFOBJ_STATESTAT);
 		break;
 
+#ifdef IPFILTER_IPFS
 	/*
 	 * Lock/Unlock the state table.  (Locking prevents any changes, which
 	 * means no packets match).
@@ -745,6 +746,7 @@ ipf_state_ioctl(ipf_main_softc_t *softc, caddr_t data, ioctlcmd_t cmd,
 		}
 		error = ipf_state_getent(softc, softs, data);
 		break;
+#endif /* IPFILTER_IPFS */
 
 	case SIOCGENITER :
 	    {
@@ -801,6 +803,7 @@ ipf_state_ioctl(ipf_main_softc_t *softc, caddr_t data, ioctlcmd_t cmd,
 }
 
 
+#ifdef IPFILTER_IPFS
 /* ------------------------------------------------------------------------ */
 /* Function:    ipf_state_getent                                            */
 /* Returns:     int - 0 == success, != 0 == failure                         */
@@ -1005,6 +1008,7 @@ ipf_state_putent(ipf_main_softc_t *softc, ipf_state_softc_t *softs,
 
 	return (error);
 }
+#endif /* IPFILTER_IPFS */
 
 
 /* ------------------------------------------------------------------------ */
@@ -4360,9 +4364,13 @@ ipf_checkicmp6matchingstate(fr_info_t *fin)
 	}
 
 	ic6 = fin->fin_dp;
+	if (ic6 == NULL) {
+		SBUMPD(ipf_state_stats, iss_icmp6_miss);
+		return (NULL);
+	}
 
 	oip6 = (ip6_t *)((char *)ic6 + ICMPERR_ICMPHLEN);
-	if (fin->fin_plen < sizeof(*oip6)) {
+	if (fin->fin_dlen < ICMPERR_ICMPHLEN + sizeof(*oip6)) {
 		SBUMPD(ipf_state_stats, iss_icmp_short);
 		return (NULL);
 	}
@@ -4404,6 +4412,10 @@ ipf_checkicmp6matchingstate(fr_info_t *fin)
 
 	if (oip6->ip6_nxt == IPPROTO_ICMPV6) {
 		oic = ofin.fin_dp;
+		if (oic == NULL) {
+			SBUMPD(ipf_state_stats, iss_icmp6_miss);
+			return (NULL);
+		}
 		/*
 		 * an ICMP error can only be generated as a result of an
 		 * ICMP query, not as the response on an ICMP error
@@ -4906,7 +4918,7 @@ ipf_state_matchflush(ipf_main_softc_t *softc, caddr_t data)
 static int
 ipf_state_matcharray(ipstate_t *state, int *array, u_long ticks)
 {
-	int i, n, *x, rv, p;
+	u_int i, n, *x, rv, p;
 	ipfexp_t *e;
 
 	rv = 0;

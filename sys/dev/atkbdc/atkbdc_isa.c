@@ -50,7 +50,7 @@ static int	atkbdc_isa_attach(device_t dev);
 static device_t	atkbdc_isa_add_child(device_t bus, u_int order, const char *name,
 		    int unit);
 static struct resource *atkbdc_isa_alloc_resource(device_t dev, device_t child,
-		    int type, int *rid, rman_res_t start, rman_res_t end,
+		    int type, int rid, rman_res_t start, rman_res_t end,
 		    rman_res_t count, u_int flags);
 static int	atkbdc_isa_release_resource(device_t dev, device_t child,
 		    struct resource *r);
@@ -75,7 +75,7 @@ static device_method_t atkbdc_isa_methods[] = {
 	DEVMETHOD(bus_delete_resource,	bus_generic_rl_delete_resource),
 	DEVMETHOD(bus_setup_intr,	bus_generic_setup_intr),
 	DEVMETHOD(bus_teardown_intr,	bus_generic_teardown_intr),
-	{ 0, 0 }
+	DEVMETHOD_END
 };
 
 static driver_t atkbdc_isa_driver = {
@@ -293,13 +293,13 @@ atkbdc_isa_add_child(device_t bus, u_int order, const char *name, int unit)
 }
 
 struct resource *
-atkbdc_isa_alloc_resource(device_t dev, device_t child, int type, int *rid,
+atkbdc_isa_alloc_resource(device_t dev, device_t child, int type, int rid,
     rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
 {
 	atkbdc_softc_t	*sc;
 
 	sc = *(atkbdc_softc_t **)device_get_softc(dev);
-	if (type == SYS_RES_IRQ && *rid == KBDC_RID_KBD && sc->irq != NULL)
+	if (type == SYS_RES_IRQ && rid == KBDC_RID_KBD && sc->irq != NULL)
 		return (sc->irq);
 	return (bus_generic_rl_alloc_resource(dev, child, type, rid, start,
 	    end, count, flags));

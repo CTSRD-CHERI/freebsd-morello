@@ -142,6 +142,7 @@ int	intr_add_handler(struct intsrc *isrc, const char *name,
 int	intr_config_intr(struct intsrc *isrc, enum intr_trigger trig,
     enum intr_polarity pol);
 int	intr_describe(struct intsrc *isrc, void *ih, const char *descr);
+void	intr_disable_all(void);
 void	intr_execute_handlers(struct intsrc *isrc, struct trapframe *frame);
 u_int	intr_next_cpu(int domain);
 struct intsrc *intr_lookup_source(int vector);
@@ -150,6 +151,7 @@ int	intr_register_source(struct intsrc *isrc);
 int	intr_remove_handler(void *cookie);
 void	intr_resume(bool suspend_cancelled);
 void	intr_suspend(void);
+void	intr_enable_src(u_int irq);
 void	intr_reprogram(void);
 void	intrcnt_add(const char *name, u_long **countp);
 void	nexus_add_irq(u_long irq);

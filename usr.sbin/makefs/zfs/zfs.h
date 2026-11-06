@@ -79,6 +79,9 @@ typedef struct {
 	/* Pool parameters. */
 	const char	*poolname;
 	char		*rootpath;	/* implicit mount point prefix */
+	char		*vdevpath;	/* vdev path, pool property */
+	char		*autotrim;	/* "on" or "off", pool property */
+	spa_autotrim_t	autotrimval;	/* parsed autotrim value */
 	char		*bootfs;	/* bootable dataset, pool property */
 	int		ashift;		/* vdev block size */
 	uint64_t	mssize;		/* metaslab size */

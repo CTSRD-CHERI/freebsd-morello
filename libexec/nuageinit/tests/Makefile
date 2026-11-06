@@ -15,7 +15,12 @@ ${PACKAGE}FILES+=	adduser_passwd.lua
 ${PACKAGE}FILES+=	dirname.lua
 ${PACKAGE}FILES+=	err.lua
 ${PACKAGE}FILES+=	sethostname.lua
+${PACKAGE}FILES+=	settimezone.lua
 ${PACKAGE}FILES+=	warn.lua
 ${PACKAGE}FILES+=	addfile.lua
+${PACKAGE}FILES+=	decode_base64.lua
+${PACKAGE}FILES+=	addsudo.lua
+${PACKAGE}FILES+=	adddoas.lua
+${PACKAGE}FILES+=	update_sshd_config.lua
 
 .include <bsd.test.mk>

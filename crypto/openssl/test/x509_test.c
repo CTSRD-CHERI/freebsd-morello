@@ -1,5 +1,5 @@
 /*
- * Copyright 2022-2024 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2022-2026 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -10,6 +10,7 @@
 #define OPENSSL_SUPPRESS_DEPRECATED /* EVP_PKEY_get1/set1_RSA */
 
 #include <openssl/x509.h>
+#include <openssl/x509v3.h>
 #include <openssl/asn1.h>
 #include <openssl/evp.h>
 #include <openssl/rsa.h>
@@ -96,9 +97,24 @@ static int test_x509_tbs_cache(void)
     const unsigned char *p = certdata;
 
     ret = TEST_ptr(x = d2i_X509(NULL, &p, sizeof(certdata)))
-          && TEST_int_gt(X509_sign(x, privkey, signmd), 0)
-          && TEST_int_eq(X509_verify(x, pubkey), 1);
+        && TEST_int_gt(X509_sign(x, privkey, signmd), 0)
+        && TEST_int_eq(X509_verify(x, pubkey), 1);
     X509_free(x);
+    return ret;
+}
+
+static int test_x509_verify_with_new(void)
+{
+    int ret;
+    EVP_PKEY *pkey = NULL;
+    X509 *x = NULL;
+
+    ret = TEST_ptr(x = X509_new())
+        && TEST_ptr(pkey = EVP_PKEY_new())
+        && TEST_int_eq(X509_verify(x, pkey), -1)
+        && TEST_int_eq(X509_verify(x, pubkey), -1);
+    X509_free(x);
+    EVP_PKEY_free(pkey);
     return ret;
 }
 
@@ -114,8 +130,8 @@ static int test_x509_crl_tbs_cache(void)
     const unsigned char *p = crldata;
 
     ret = TEST_ptr(crl = d2i_X509_CRL(NULL, &p, sizeof(crldata)))
-          && TEST_int_gt(X509_CRL_sign(crl, privkey, signmd), 0)
-          && TEST_int_eq(X509_CRL_verify(crl, pubkey), 1);
+        && TEST_int_gt(X509_CRL_sign(crl, privkey, signmd), 0)
+        && TEST_int_eq(X509_CRL_verify(crl, pubkey), 1);
 
     X509_CRL_free(crl);
     return ret;
@@ -152,14 +168,16 @@ static int test_asn1_item_verify(void)
     X509_get0_signature(&sig, &alg, x509);
 
     if (!TEST_int_gt(ASN1_item_verify(ASN1_ITEM_rptr(X509_CINF),
-                                      (X509_ALGOR *)alg, (ASN1_BIT_STRING *)sig,
-                                      &x509->cert_info, pkey), 0))
+                         (X509_ALGOR *)alg, (ASN1_BIT_STRING *)sig,
+                         &x509->cert_info, pkey),
+            0))
         goto err;
 
     ERR_set_mark();
     if (!TEST_int_lt(ASN1_item_verify(ASN1_ITEM_rptr(X509_CINF),
-                                     (X509_ALGOR *)alg, (ASN1_BIT_STRING *)sig,
-                                     NULL, pkey), 0)) {
+                         (X509_ALGOR *)alg, (ASN1_BIT_STRING *)sig,
+                         NULL, pkey),
+            0)) {
         ERR_clear_last_mark();
         goto err;
     }
@@ -167,13 +185,214 @@ static int test_asn1_item_verify(void)
 
     ret = 1;
 
- err:
+err:
 #ifndef OPENSSL_NO_DEPRECATED_3_0
     RSA_free(rsa);
 #endif
     X509_free(x509);
     BIO_free(bio);
     return ret;
+}
+
+static int test_x509_delete_last_extension(void)
+{
+    int ret = 0;
+    X509 *x509 = NULL;
+    X509_EXTENSION *ext = NULL;
+    ASN1_OBJECT *obj = NULL;
+
+    if (!TEST_ptr((x509 = X509_new()))
+        /* Initially, there are no extensions and thus no extension list. */
+        || !TEST_ptr_null(X509_get0_extensions(x509))
+        /* Add an extension. */
+        || !TEST_ptr((ext = X509_EXTENSION_new()))
+        || !TEST_ptr((obj = OBJ_nid2obj(NID_subject_key_identifier)))
+        || !TEST_int_eq(X509_EXTENSION_set_object(ext, obj), 1)
+        || !TEST_int_eq(X509_add_ext(x509, ext, -1), 1)
+        /* There should now be an extension list. */
+        || !TEST_ptr(X509_get0_extensions(x509))
+        || !TEST_int_eq(sk_X509_EXTENSION_num(X509_get0_extensions(x509)), 1))
+        goto err;
+
+    /* Delete the extension. */
+    X509_EXTENSION_free(X509_delete_ext(x509, 0));
+
+    /* The extension list should be NULL again. */
+    if (!TEST_ptr_null(X509_get0_extensions(x509)))
+        goto err;
+
+    ret = 1;
+
+err:
+    X509_free(x509);
+    X509_EXTENSION_free(ext);
+    return ret;
+}
+
+static int test_x509_crl_delete_last_extension(void)
+{
+    int ret = 0;
+    X509_CRL *crl = NULL;
+    X509_EXTENSION *ext = NULL;
+    ASN1_OBJECT *obj = NULL;
+
+    if (!TEST_ptr((crl = X509_CRL_new()))
+        /* Initially, there are no extensions and thus no extension list. */
+        || !TEST_ptr_null(X509_CRL_get0_extensions(crl))
+        /* Add an extension. */
+        || !TEST_ptr((ext = X509_EXTENSION_new()))
+        || !TEST_ptr((obj = OBJ_nid2obj(NID_subject_key_identifier)))
+        || !TEST_int_eq(X509_EXTENSION_set_object(ext, obj), 1)
+        || !TEST_int_eq(X509_CRL_add_ext(crl, ext, -1), 1)
+        /* There should now be an extension list. */
+        || !TEST_ptr(X509_CRL_get0_extensions(crl))
+        || !TEST_int_eq(sk_X509_EXTENSION_num(X509_CRL_get0_extensions(crl)),
+            1))
+        goto err;
+
+    /* Delete the extension. */
+    X509_EXTENSION_free(X509_CRL_delete_ext(crl, 0));
+
+    /* The extension list should be NULL again. */
+    if (!TEST_ptr_null(X509_CRL_get0_extensions(crl)))
+        goto err;
+
+    ret = 1;
+
+err:
+    X509_CRL_free(crl);
+    X509_EXTENSION_free(ext);
+    return ret;
+}
+
+static int test_x509_revoked_delete_last_extension(void)
+{
+    int ret = 0;
+    X509_REVOKED *rev = NULL;
+    X509_EXTENSION *ext = NULL;
+    ASN1_OBJECT *obj = NULL;
+
+    if (!TEST_ptr((rev = X509_REVOKED_new()))
+        /* Initially, there are no extensions and thus no extension list. */
+        || !TEST_ptr_null(X509_REVOKED_get0_extensions(rev))
+        /* Add an extension. */
+        || !TEST_ptr((ext = X509_EXTENSION_new()))
+        || !TEST_ptr((obj = OBJ_nid2obj(NID_subject_key_identifier)))
+        || !TEST_int_eq(X509_EXTENSION_set_object(ext, obj), 1)
+        || !TEST_int_eq(X509_REVOKED_add_ext(rev, ext, -1), 1)
+        /* There should now be an extension list. */
+        || !TEST_ptr(X509_REVOKED_get0_extensions(rev))
+        || !TEST_int_eq(sk_X509_EXTENSION_num(X509_REVOKED_get0_extensions(rev)), 1))
+        goto err;
+
+    /* Delete the extension. */
+    X509_EXTENSION_free(X509_REVOKED_delete_ext(rev, 0));
+
+    /* The extension list should be NULL again. */
+    if (!TEST_ptr_null(X509_REVOKED_get0_extensions(rev)))
+        goto err;
+
+    ret = 1;
+
+err:
+    X509_REVOKED_free(rev);
+    X509_EXTENSION_free(ext);
+    return ret;
+}
+
+/*
+ * nameConstraints extnValue contents with one empty directoryName subtree.
+ * Empty X509_NAME has canon_enc == NULL / canon_enclen == 0.
+ *
+ *   SEQUENCE { [0|1] { SEQUENCE { [4] { SEQUENCE {} } } } }
+ */
+static const unsigned char nc_excluded_empty_dirname[] = {
+    0x30, 0x08, 0xa1, 0x06, 0x30, 0x04, 0xa4, 0x02, 0x30, 0x00
+};
+static const unsigned char nc_permitted_empty_dirname[] = {
+    0x30, 0x08, 0xa0, 0x06, 0x30, 0x04, 0xa4, 0x02, 0x30, 0x00
+};
+
+/* Decode a raw nameConstraints extnValue into a NAME_CONSTRAINTS object. */
+static NAME_CONSTRAINTS *nc_empty_dirname_from_der(const unsigned char *der,
+    unsigned int der_len)
+{
+    NAME_CONSTRAINTS *nc = NULL;
+    ASN1_OCTET_STRING *os = NULL;
+    X509_EXTENSION *ext = NULL;
+
+    os = ASN1_OCTET_STRING_new();
+    if (!TEST_ptr(os)
+        || !TEST_true(ASN1_OCTET_STRING_set(os, der, der_len)))
+        goto end;
+    ext = X509_EXTENSION_create_by_NID(NULL, NID_name_constraints,
+        1 /* critical */, os);
+    if (!TEST_ptr(ext))
+        goto end;
+    nc = X509V3_EXT_d2i(ext);
+
+end:
+    X509_EXTENSION_free(ext);
+    ASN1_OCTET_STRING_free(os);
+    return nc;
+}
+
+/* Build a minimal certificate with a non-empty subject DN. */
+static X509 *nc_empty_dirname_subject(const char *cn)
+{
+    X509 *x = NULL;
+    X509_NAME *nm = NULL;
+
+    if (!TEST_ptr(x = X509_new()))
+        goto err;
+    nm = X509_NAME_new();
+    if (!TEST_ptr(nm)
+        || !TEST_true(X509_NAME_add_entry_by_txt(nm, "CN", MBSTRING_ASC,
+            (const unsigned char *)cn, -1, -1, 0))
+        || !TEST_true(X509_set_subject_name(x, nm)))
+        goto err;
+    X509_NAME_free(nm);
+    return x;
+
+err:
+    X509_NAME_free(nm);
+    X509_free(x);
+    return NULL;
+}
+
+/* Check an empty directoryName constraint against a non-empty subject DN. */
+static int nc_check_empty_dirname(const unsigned char *der, unsigned int der_len,
+    int expected)
+{
+    int ok = 0;
+    NAME_CONSTRAINTS *nc = NULL;
+    X509 *x = NULL;
+
+    if (!TEST_ptr(nc = nc_empty_dirname_from_der(der, der_len))
+        || !TEST_ptr(x = nc_empty_dirname_subject("leaf.example"))
+        || !TEST_int_eq(NAME_CONSTRAINTS_check(x, nc), expected))
+        goto end;
+
+    ok = 1;
+
+end:
+    X509_free(x);
+    NAME_CONSTRAINTS_free(nc);
+    return ok;
+}
+
+/* Empty excluded directoryName matches the subject DN: excluded violation. */
+static int test_nc_empty_dirname_excluded(void)
+{
+    return nc_check_empty_dirname(nc_excluded_empty_dirname,
+        sizeof(nc_excluded_empty_dirname), X509_V_ERR_EXCLUDED_VIOLATION);
+}
+
+/* Empty permitted directoryName matches the subject DN: permitted. */
+static int test_nc_empty_dirname_permitted(void)
+{
+    return nc_check_empty_dirname(nc_permitted_empty_dirname,
+        sizeof(nc_permitted_empty_dirname), X509_V_OK);
 }
 
 OPT_TEST_DECLARE_USAGE("<pss-self-signed-cert.pem>\n")
@@ -210,6 +429,12 @@ int setup_tests(void)
     ADD_TEST(test_x509_tbs_cache);
     ADD_TEST(test_x509_crl_tbs_cache);
     ADD_TEST(test_asn1_item_verify);
+    ADD_TEST(test_x509_delete_last_extension);
+    ADD_TEST(test_x509_crl_delete_last_extension);
+    ADD_TEST(test_x509_revoked_delete_last_extension);
+    ADD_TEST(test_x509_verify_with_new);
+    ADD_TEST(test_nc_empty_dirname_excluded);
+    ADD_TEST(test_nc_empty_dirname_permitted);
     return 1;
 }
 

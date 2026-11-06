@@ -480,7 +480,8 @@ static struct rk_clk rk3568_clks[] = {
 	/* 7 Reserved */
 	MUX(0, "bclk_emmc_sel", gpll200_gpll150_cpll125_p, 0, 28, 8, 2),
 	/* 10:11 Reserved */
-	MUX(0, "cclk_emmc_sel", cclk_emmc_p, 0, 28, 12, 3),
+	MUX(0, "cclk_emmc_sel", cclk_emmc_p,
+	    RK_CLK_MUX_ROUND_PARENT, 28, 12, 3),
 	/* 15 Reserved */
 
 	/*  CRU_CLKSEL_CON29 */
@@ -497,9 +498,11 @@ static struct rk_clk rk3568_clks[] = {
 	MUX(0, "aclk_php_sel", gpll300_gpll200_gpll100_xin24m_p, 0, 30, 0, 2),
 	MUX(0, "hclk_php_sel", gpll150_gpll100_gpll75_xin24m_p, 0, 30, 2, 2),
 	CDIV(0, "pclk_php_div", "aclk_php", 0, 30, 4, 4),
-	MUX(0, "clk_sdmmc0_sel", clk_sdmmc_p, 0, 30, 8, 3),
+	MUX(0, "clk_sdmmc0_sel", clk_sdmmc_p,
+	    RK_CLK_MUX_ROUND_PARENT, 30, 8, 3),
 	/* 11 Reserved */
-	MUX(0, "clk_sdmmc1_sel", clk_sdmmc_p, 0, 30, 12, 3),
+	MUX(0, "clk_sdmmc1_sel", clk_sdmmc_p,
+	    RK_CLK_MUX_ROUND_PARENT, 30, 12, 3),
 	/* 15 Reserved */
 
 	/*  CRU_CLKSEL_CON31 */
@@ -523,7 +526,8 @@ static struct rk_clk rk3568_clks[] = {
 	MUX(0, "aclk_usb_sel", gpll300_gpll200_gpll100_xin24m_p, 0, 32, 0, 2),
 	MUX(0, "hclk_usb_sel", gpll150_gpll100_gpll75_xin24m_p, 0, 32, 4, 2),
 	CDIV(0, "pclk_usb_div", "aclk_usb", 0, 32, 4, 4),
-	MUX(0, "clk_sdmmc2_sel", clk_sdmmc_p, 0, 32, 8, 3),
+	MUX(0, "clk_sdmmc2_sel", clk_sdmmc_p,
+	    RK_CLK_MUX_ROUND_PARENT, 32, 8, 3),
 	/* 11:15 Reserved */
 
 	/*  CRU_CLKSEL_CON33 */
@@ -776,20 +780,20 @@ static struct rk_clk rk3568_clks[] = {
 	CDIV(0, "clk_cpll_div_500m_div", "cpll", 0, 78, 8, 5),
 
 	/*  CRU_CLKSEL_CON79 */
-	CDIV(0, "clk_cpll_div_333m_div", "cpll", 0, 79, 0, 6),
+	CDIV(0, "clk_cpll_div_333m_div", "cpll", 0, 79, 0, 5),
 	CDIV(0, "clk_cpll_div_250m_div", "cpll", 0, 79, 8, 5),
 
 	/*  CRU_CLKSEL_CON80 */
-	CDIV(0, "clk_cpll_div_125m_div", "cpll", 0, 80, 0, 6),
+	CDIV(0, "clk_cpll_div_125m_div", "cpll", 0, 80, 0, 5),
 	CDIV(0, "clk_cpll_div_62P5m_div", "cpll", 0, 80, 8, 5),
 
 	/*  CRU_CLKSEL_CON81 */
-	CDIV(0, "clk_cpll_div_50m_div", "cpll", 0, 81, 0, 6),
-	CDIV(0, "clk_cpll_div_25m_div", "cpll", 0, 81, 8, 5),
+	CDIV(0, "clk_cpll_div_50m_div", "cpll", 0, 81, 0, 5),
+	CDIV(0, "clk_cpll_div_25m_div", "cpll", 0, 81, 8, 6),
 
 	/*  CRU_CLKSEL_CON82 */
-	CDIV(0, "clk_cpll_div_100m_div", "cpll", 0, 82, 0, 6),
-	CDIV(0, "clk_osc0_div_750k_div", "xin24m", 0, 82, 8, 5),
+	CDIV(0, "clk_cpll_div_100m_div", "cpll", 0, 82, 0, 5),
+	CDIV(0, "clk_osc0_div_750k_div", "xin24m", 0, 82, 8, 6),
 
 	/*  CRU_CLKSEL_CON83 */
 	CDIV(0, "clk_i2s3_2ch_rx_src_div", "clk_i2s3_2ch_rx_src_sel", 0, 83, 0, 7),

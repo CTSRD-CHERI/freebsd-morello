@@ -104,7 +104,17 @@ void mi_startup(void);				/* Should be elsewhere */
 static struct session session0;
 static struct pgrp pgrp0;
 struct	proc proc0;
-struct thread0_storage thread0_st __aligned(32);
+struct thread0_storage thread0_st __aligned(32) = {
+	.t0st_thread = {
+		/*
+		 * thread0.td_pflags is set with TDP_NOFAULTING to
+		 * short-cut the vm page fault handler until it is
+		 * ready.  It is cleared in vm_init() after VM
+		 * initialization.
+		 */
+		.td_pflags = TDP_NOFAULTING,
+	},
+};
 struct	vmspace vmspace0;
 struct	proc *initproc;
 
@@ -143,13 +153,6 @@ int	verbose_sysinit = VERBOSE_SYSINIT;
 #ifdef INVARIANTS
 FEATURE(invariants, "Kernel compiled with INVARIANTS, may affect performance");
 #endif
-
-/*
- * This ensures that there is at least one entry so that the sysinit_set
- * symbol is not undefined.  A sybsystem ID of SI_SUB_DUMMY is never
- * executed.
- */
-SYSINIT(placeholder, SI_SUB_DUMMY, SI_ORDER_ANY, NULL, NULL);
 
 /*
  * The sysinit linker set compiled into the kernel.  These are placed onto the
@@ -296,7 +299,7 @@ mi_startup(void)
 			BOOTTRACE_INIT("sysinit 0x%7x", sip->subsystem);
 
 #if defined(VERBOSE_SYSINIT)
-		if (sip->subsystem > last && verbose_sysinit != 0) {
+		if (sip->subsystem != last && verbose_sysinit != 0) {
 			verbose = 1;
 			printf("subsystem %x\n", sip->subsystem);
 		}
@@ -343,7 +346,7 @@ mi_startup(void)
 	 * the need arises.
 	 */
 	for (;;)
-		tsleep(__builtin_frame_address(0), PNOLOCK, "parked", 0);
+		tsleep(__builtin_frame_address(0), PNOLOCK, "-", 0);
 }
 
 static void
@@ -391,7 +394,7 @@ C_SYSINIT(diagwarn2, SI_SUB_LAST, SI_ORDER_FIFTH,
 
 #if __SIZEOF_LONG__ == 4
 static const char ilp32_warn[] =
-    "WARNING: 32-bit kernels are deprecated and may be removed in FreeBSD 15.0.\n";
+    "WARNING: 32-bit kernels are deprecated and may be removed in FreeBSD 16.0.\n";
 C_SYSINIT(ilp32warn, SI_SUB_COPYRIGHT, SI_ORDER_FIFTH,
     print_caddr_t, ilp32_warn);
 C_SYSINIT(ilp32warn2, SI_SUB_LAST, SI_ORDER_FIFTH,
@@ -490,10 +493,10 @@ proc0_init(void *dummy __unused)
 	 * Initialise scheduler resources.
 	 * Add scheduler specific parts to proc, thread as needed.
 	 */
-	schedinit();	/* scheduler gets its house in order */
+	sched_init();	/* scheduler gets its house in order */
 
 	/*
-	 * Create process 0 (the swapper).
+	 * Create process 0.
 	 */
 	LIST_INSERT_HEAD(&allproc, p, p_list);
 	LIST_INSERT_HEAD(PIDHASH(0), p, p_hash);
@@ -538,7 +541,7 @@ proc0_init(void *dummy __unused)
 	LIST_INIT(&p->p_reaplist);
 
 	strncpy(p->p_comm, "kernel", sizeof (p->p_comm));
-	strncpy(td->td_name, "swapper", sizeof (td->td_name));
+	strncpy(td->td_name, "kernel", sizeof (td->td_name));
 
 	callout_init_mtx(&p->p_itcallout, &p->p_mtx, 0);
 	callout_init_mtx(&p->p_limco, &p->p_mtx, 0);
@@ -567,7 +570,7 @@ proc0_init(void *dummy __unused)
 	audit_cred_kproc0(newcred);
 #endif
 #ifdef MAC
-	mac_cred_create_swapper(newcred);
+	mac_cred_create_kproc0(newcred);
 #endif
 	/* Create sigacts. */
 	p->p_sigacts = sigacts_alloc();
@@ -650,12 +653,12 @@ static void
 proc0_post(void *dummy __unused)
 {
 	struct proc *p;
-	struct rusage ru;
 	struct thread *td;
 
 	/*
 	 * Now we can look at the time, having had a chance to verify the
-	 * time from the filesystem.  Pretend that proc0 started now.
+	 * time from the filesystem.  Pretend that all current threads
+	 * started now.
 	 */
 	sx_slock(&allproc_lock);
 	FOREACH_PROC_IN_SYSTEM(p) {
@@ -666,15 +669,19 @@ proc0_post(void *dummy __unused)
 		}
 		microuptime(&p->p_stats->p_start);
 		PROC_STATLOCK(p);
-		rufetch(p, &ru);	/* Clears thread stats */
-		p->p_rux.rux_runtime = 0;
-		p->p_rux.rux_uticks = 0;
-		p->p_rux.rux_sticks = 0;
-		p->p_rux.rux_iticks = 0;
-		PROC_STATUNLOCK(p);
+		ruxreset(&p->p_rux);
 		FOREACH_THREAD_IN_PROC(p, td) {
+			thread_lock(td);
+			td->td_incruntime = 0;
 			td->td_runtime = 0;
+			td->td_pticks = 0;
+			td->td_sticks = 0;
+			td->td_iticks = 0;
+			td->td_uticks = 0;
+			ruxreset(&td->td_rux);
+			thread_unlock(td);
 		}
+		PROC_STATUNLOCK(p);
 		PROC_UNLOCK(p);
 	}
 	sx_sunlock(&allproc_lock);
@@ -702,7 +709,7 @@ static char init_path[MAXPATHLEN] =
     "/sbin/init:/sbin/oinit:/sbin/init.bak:/rescue/init";
 #endif
 SYSCTL_STRING(_kern, OID_AUTO, init_path, CTLFLAG_RD, init_path, 0,
-	"Path used to search the init process");
+    "Path used to search for the init binary");
 
 /*
  * Shutdown timeout of init(8).

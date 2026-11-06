@@ -49,7 +49,7 @@
 
 #define	ZSTD_STATIC_LINKING_ONLY
 #include "lib/zstd.h"
-#include "lib/common/zstd_errors.h"
+#include "lib/zstd_errors.h"
 
 #ifndef IN_LIBSA
 static uint_t zstd_earlyabort_pass = 1;
@@ -274,6 +274,8 @@ static struct zstd_pool *zstd_mempool_dctx;
 #if defined(ZFS_ASAN_ENABLED)
 #define	ADDRESS_SANITIZER 1
 #endif
+
+/* Kernel space. */
 #if defined(_KERNEL) && defined(ADDRESS_SANITIZER)
 void __asan_unpoison_memory_region(void const volatile *addr, size_t size);
 void __asan_poison_memory_region(void const volatile *addr, size_t size);
@@ -281,6 +283,16 @@ void __asan_unpoison_memory_region(void const volatile *addr, size_t size) {};
 void __asan_poison_memory_region(void const volatile *addr, size_t size) {};
 #endif
 
+/* User space. */
+#if defined(ADDRESS_SANITIZER) && !defined(_KERNEL)
+void __asan_unpoison_memory_region(void const volatile *addr, size_t size);
+void __asan_poison_memory_region(void const volatile *addr, size_t size);
+#define	ZSTD_ASAN_POISON(p, n)   __asan_poison_memory_region((p), (n))
+#define	ZSTD_ASAN_UNPOISON(p, n) __asan_unpoison_memory_region((p), (n))
+#else
+#define	ZSTD_ASAN_POISON(p, n)   do { } while (0)
+#define	ZSTD_ASAN_UNPOISON(p, n) do { } while (0)
+#endif
 
 static void
 zstd_mempool_reap(struct zstd_pool *zstd_mempool)
@@ -418,6 +430,10 @@ zstd_mempool_alloc(struct zstd_pool *zstd_mempool, size_t size)
 static void
 zstd_mempool_free(struct zstd_kmem *z)
 {
+	/* Poison only the user-visible region (exclude header). */
+	ZSTD_ASAN_POISON((char *)z + sizeof (struct zstd_kmem),
+	    z->kmem_size - sizeof (struct zstd_kmem));
+
 	mutex_exit(&z->pool->barrier);
 }
 
@@ -441,64 +457,6 @@ zstd_enum_to_level(enum zio_zstd_levels level, int16_t *zstd_level)
 }
 
 #ifndef IN_LIBSA
-static size_t
-zfs_zstd_compress_wrap(void *s_start, void *d_start, size_t s_len, size_t d_len,
-    int level)
-{
-	int16_t zstd_level;
-	if (zstd_enum_to_level(level, &zstd_level)) {
-		ZSTDSTAT_BUMP(zstd_stat_com_inval);
-		return (s_len);
-	}
-	/*
-	 * A zstd early abort heuristic.
-	 *
-	 * - Zeroth, if this is <= zstd-3, or < zstd_abort_size (currently
-	 *   128k), don't try any of this, just go.
-	 *   (because experimentally that was a reasonable cutoff for a perf win
-	 *   with tiny ratio change)
-	 * - First, we try LZ4 compression, and if it doesn't early abort, we
-	 *   jump directly to whatever compression level we intended to try.
-	 * - Second, we try zstd-1 - if that errors out (usually, but not
-	 *   exclusively, if it would overflow), we give up early.
-	 *
-	 *   If it works, instead we go on and compress anyway.
-	 *
-	 * Why two passes? LZ4 alone gets you a lot of the way, but on highly
-	 * compressible data, it was losing up to 8.5% of the compressed
-	 * savings versus no early abort, and all the zstd-fast levels are
-	 * worse indications on their own than LZ4, and don't improve the LZ4
-	 * pass noticably if stacked like this.
-	 */
-	size_t actual_abort_size = zstd_abort_size;
-	if (zstd_earlyabort_pass > 0 && zstd_level >= zstd_cutoff_level &&
-	    s_len >= actual_abort_size) {
-		int pass_len = 1;
-		pass_len = zfs_lz4_compress(s_start, d_start, s_len, d_len, 0);
-		if (pass_len < d_len) {
-			ZSTDSTAT_BUMP(zstd_stat_lz4pass_allowed);
-			goto keep_trying;
-		}
-		ZSTDSTAT_BUMP(zstd_stat_lz4pass_rejected);
-
-		pass_len = zfs_zstd_compress(s_start, d_start, s_len, d_len,
-		    ZIO_ZSTD_LEVEL_1);
-		if (pass_len == s_len || pass_len <= 0 || pass_len > d_len) {
-			ZSTDSTAT_BUMP(zstd_stat_zstdpass_rejected);
-			return (s_len);
-		}
-		ZSTDSTAT_BUMP(zstd_stat_zstdpass_allowed);
-	} else {
-		ZSTDSTAT_BUMP(zstd_stat_passignored);
-		if (s_len < actual_abort_size) {
-			ZSTDSTAT_BUMP(zstd_stat_passignored_size);
-		}
-	}
-keep_trying:
-	return (zfs_zstd_compress(s_start, d_start, s_len, d_len, level));
-
-}
-
 /* Compress block using zstd */
 static size_t
 zfs_zstd_compress_impl(void *s_start, void *d_start, size_t s_len, size_t d_len,
@@ -737,6 +695,15 @@ zfs_zstd_decompress_level_buf(void *s_start, void *d_start, size_t s_len,
 		return (1);
 	}
 
+	/*
+	 * An OpenZFS compressed block must expand to exactly d_len bytes.
+	 * ZSTD_decompressDCtx returns the decompressed size on success.
+	 */
+	if (result != d_len) {
+		ZSTDSTAT_BUMP(zstd_stat_dec_fail);
+		return (1);
+	}
+
 	if (level) {
 		*level = curlevel;
 	}
@@ -784,7 +751,9 @@ zstd_alloc(void *opaque __maybe_unused, size_t size)
 		return (NULL);
 	}
 
-	return ((void*)z + (sizeof (struct zstd_kmem)));
+	void *p = (char *)z + sizeof (struct zstd_kmem);
+	ZSTD_ASAN_UNPOISON(p, size);
+	return (p);
 }
 
 #endif
@@ -800,15 +769,15 @@ zstd_dctx_alloc(void *opaque __maybe_unused, size_t size)
 	enum zstd_kmem_type type = ZSTD_KMEM_DEFAULT;
 
 	z = (struct zstd_kmem *)zstd_mempool_alloc(zstd_mempool_dctx, nbytes);
-	if (!z) {
+	if (z) {
+		type = ZSTD_KMEM_POOL;
+	} else {
 		/* Try harder, decompression shall not fail */
 		z = vmem_alloc(nbytes, KM_SLEEP);
 		if (z) {
 			z->pool = NULL;
 		}
 		ZSTDSTAT_BUMP(zstd_stat_alloc_fail);
-	} else {
-		return ((void*)z + (sizeof (struct zstd_kmem)));
 	}
 
 	/* Fallback if everything fails */
@@ -833,14 +802,17 @@ zstd_dctx_alloc(void *opaque __maybe_unused, size_t size)
 	z->kmem_type = type;
 	z->kmem_size = nbytes;
 
-	return ((void*)z + (sizeof (struct zstd_kmem)));
+	void *p = (char *)z + sizeof (struct zstd_kmem);
+	ZSTD_ASAN_UNPOISON(p, size);
+	return (p);
 }
 
 /* Free allocated memory by its specific type */
 static void
 zstd_free(void *opaque __maybe_unused, void *ptr)
 {
-	struct zstd_kmem *z = (ptr - sizeof (struct zstd_kmem));
+	struct zstd_kmem *z =
+	    (struct zstd_kmem *)((char *)ptr - sizeof (struct zstd_kmem));
 	enum zstd_kmem_type type;
 
 	ASSERT3U(z->kmem_type, <, ZSTD_KMEM_COUNT);
@@ -855,6 +827,8 @@ zstd_free(void *opaque __maybe_unused, void *ptr)
 		zstd_mempool_free(z);
 		break;
 	case ZSTD_KMEM_DCTX:
+		/* Poison fallback user region on release. */
+		ZSTD_ASAN_POISON(ptr, z->kmem_size - sizeof (struct zstd_kmem));
 		mutex_exit(&zstd_dctx_fallback.barrier);
 		break;
 	default:
@@ -876,9 +850,9 @@ static void __init
 zstd_mempool_init(void)
 {
 	zstd_mempool_cctx =
-	    kmem_zalloc(ZSTD_POOL_MAX * sizeof (struct zstd_pool), KM_SLEEP);
+	    vmem_zalloc(ZSTD_POOL_MAX * sizeof (struct zstd_pool), KM_SLEEP);
 	zstd_mempool_dctx =
-	    kmem_zalloc(ZSTD_POOL_MAX * sizeof (struct zstd_pool), KM_SLEEP);
+	    vmem_zalloc(ZSTD_POOL_MAX * sizeof (struct zstd_pool), KM_SLEEP);
 
 	for (int i = 0; i < ZSTD_POOL_MAX; i++) {
 		mutex_init(&zstd_mempool_cctx[i].barrier, NULL,
@@ -924,8 +898,8 @@ zstd_mempool_deinit(void)
 		release_pool(&zstd_mempool_dctx[i]);
 	}
 
-	kmem_free(zstd_mempool_dctx, ZSTD_POOL_MAX * sizeof (struct zstd_pool));
-	kmem_free(zstd_mempool_cctx, ZSTD_POOL_MAX * sizeof (struct zstd_pool));
+	vmem_free(zstd_mempool_dctx, ZSTD_POOL_MAX * sizeof (struct zstd_pool));
+	vmem_free(zstd_mempool_cctx, ZSTD_POOL_MAX * sizeof (struct zstd_pool));
 	zstd_mempool_dctx = NULL;
 	zstd_mempool_cctx = NULL;
 }

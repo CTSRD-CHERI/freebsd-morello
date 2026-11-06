@@ -74,6 +74,7 @@ bectl_create_head()
 {
 	atf_set "descr" "Check the various forms of bectl create"
 	atf_set "require.user" root
+	atf_set "require.progs" bectl
 }
 bectl_create_body()
 {
@@ -126,6 +127,14 @@ bectl_create_body()
 		zfs list "${zpool}/ROOT/recursive/usr"
 	atf_check -o not-empty \
 		zfs list "${zpool}/ROOT/recursive-snap/usr"
+
+	# Test creation of an empty BE.
+	atf_check bectl -r ${zpool}/ROOT create -E empty
+	atf_check -o inline:"-\n" zfs get -H -o value origin ${zpool}/ROOT/empty
+	atf_check -e match:"cannot be combined" -s not-exit:0 \
+		bectl -r ${zpool}/ROOT create -E -e not-allowed empty-existing
+	atf_check -e match:"cannot be combined" -s not-exit:0 \
+		bectl -r ${zpool}/ROOT create -E -r empty-recursive
 }
 bectl_create_cleanup()
 {
@@ -137,6 +146,7 @@ bectl_destroy_head()
 {
 	atf_set "descr" "Check bectl destroy"
 	atf_set "require.user" root
+	atf_set "require.progs" bectl
 }
 bectl_destroy_body()
 {
@@ -225,6 +235,7 @@ bectl_export_import_head()
 {
 	atf_set "descr" "Check bectl export and import"
 	atf_set "require.user" root
+	atf_set "require.progs" bectl
 }
 bectl_export_import_body()
 {
@@ -261,6 +272,7 @@ bectl_list_head()
 {
 	atf_set "descr" "Check bectl list"
 	atf_set "require.user" root
+	atf_set "require.progs" bectl
 }
 bectl_list_body()
 {
@@ -304,6 +316,7 @@ bectl_mount_head()
 {
 	atf_set "descr" "Check bectl mount/unmount"
 	atf_set "require.user" root
+	atf_set "require.progs" bectl
 }
 bectl_mount_body()
 {
@@ -346,6 +359,7 @@ bectl_rename_head()
 {
 	atf_set "descr" "Check bectl rename"
 	atf_set "require.user" root
+	atf_set "require.progs" bectl
 }
 bectl_rename_body()
 {
@@ -380,7 +394,7 @@ bectl_jail_head()
 {
 	atf_set "descr" "Check bectl rename"
 	atf_set "require.user" root
-	atf_set "require.progs" jail
+	atf_set "require.progs" jail bectl
 }
 bectl_jail_body()
 {
@@ -496,6 +510,7 @@ bectl_promotion_head()
 {
 	atf_set "descr" "Check bectl promotion upon activation"
 	atf_set "require.user" root
+	atf_set "require.progs" bectl
 }
 bectl_promotion_body()
 {
@@ -549,6 +564,7 @@ bectl_destroy_bootonce_head()
 {
 	atf_set "descr" "Check bectl destroy (bootonce)"
 	atf_set "require.user" root
+	atf_set "require.progs" bectl
 }
 bectl_destroy_bootonce_body()
 {
@@ -593,6 +609,7 @@ bectl_rename_bootonce_head()
 {
 	atf_set "descr" "Check bectl destroy (bootonce)"
 	atf_set "require.user" root
+	atf_set "require.progs" bectl
 }
 bectl_rename_bootonce_body()
 {

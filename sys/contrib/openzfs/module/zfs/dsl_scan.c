@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2008, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -26,6 +16,7 @@
  * Copyright (c) 2017, 2019, Datto Inc. All rights reserved.
  * Copyright (c) 2015, Nexenta Systems, Inc. All rights reserved.
  * Copyright 2019 Joyent, Inc.
+ * Copyright 2026 ConnectWise
  */
 
 #include <sys/dsl_scan.h>
@@ -56,9 +47,6 @@
 #include <sys/abd.h>
 #include <sys/range_tree.h>
 #include <sys/dbuf.h>
-#ifdef _KERNEL
-#include <sys/zfs_vfsops.h>
-#endif
 
 /*
  * Grand theory statement on scan queue sorting
@@ -189,16 +177,16 @@ static uint_t zfs_scan_mem_lim_fact = 20;
 static uint_t zfs_scan_mem_lim_soft_fact = 20;
 
 /* minimum milliseconds to scrub per txg */
-static uint_t zfs_scrub_min_time_ms = 1000;
+static uint_t zfs_scrub_min_time_ms = 750;
 
 /* minimum milliseconds to obsolete per txg */
 static uint_t zfs_obsolete_min_time_ms = 500;
 
 /* minimum milliseconds to free per txg */
-static uint_t zfs_free_min_time_ms = 1000;
+static uint_t zfs_free_min_time_ms = 500;
 
 /* minimum milliseconds to resilver per txg */
-static uint_t zfs_resilver_min_time_ms = 3000;
+static uint_t zfs_resilver_min_time_ms = 1500;
 
 static uint_t zfs_scan_checkpoint_intval = 7200; /* in seconds */
 int zfs_scan_suspend_progress = 0; /* set to prevent scans from progressing */
@@ -208,7 +196,13 @@ static const ddt_class_t zfs_scrub_ddt_class_max = DDT_CLASS_DUPLICATE;
 /* max number of blocks to free in a single TXG */
 static uint64_t zfs_async_block_max_blocks = UINT64_MAX;
 /* max number of dedup blocks to free in a single TXG */
-static uint64_t zfs_max_async_dedup_frees = 100000;
+static uint64_t zfs_max_async_dedup_frees = 250000;
+
+/*
+ * After freeing this many async ZIOs (dedup, clone, gang blocks), wait for
+ * them to complete before continuing.  This prevents unbounded I/O queueing.
+ */
+static uint64_t zfs_async_free_zio_wait_interval = 2000;
 
 /* set to disable resilver deferring */
 static int zfs_resilver_disable_defer = B_FALSE;
@@ -217,16 +211,14 @@ static int zfs_resilver_disable_defer = B_FALSE;
 static uint_t zfs_resilver_defer_percent = 10;
 
 /*
- * We wait a few txgs after importing a pool to begin scanning so that
- * the import / mounting code isn't held up by scrub / resilver IO.
- * Unfortunately, it is a bit difficult to determine exactly how long
- * this will take since userspace will trigger fs mounts asynchronously
- * and the kernel will create zvol minors asynchronously. As a result,
- * the value provided here is a bit arbitrary, but represents a
- * reasonable estimate of how many txgs it will take to finish fully
- * importing a pool
+ * Number of TXGs to wait after importing before starting background
+ * work (async destroys, scan/scrub/resilver operations). This allows
+ * the import command and filesystem mounts to complete quickly without
+ * being delayed by background activities. The value is somewhat arbitrary
+ * since userspace triggers filesystem mounts asynchronously, but 5 TXGs
+ * provides a reasonable window for import completion in most cases.
  */
-#define	SCAN_IMPORT_WAIT_TXGS 		5
+static uint_t zfs_import_defer_txgs = 5;
 
 #define	DSL_SCAN_IS_SCRUB_RESILVER(scn) \
 	((scn)->scn_phys.scn_func == POOL_SCAN_SCRUB || \
@@ -279,45 +271,58 @@ typedef enum {
  * zio for sequential scanning. This is useful because many of these will
  * accumulate in the sequential IO queues before being issued, so saving
  * memory matters here.
+ *
+ * A thorough scrub decrypts blocks as it reads them, so encrypted blocks must
+ * preserve the salt/IV from blk_dva[2]. Rather than grow every queued sio to
+ * include salt/IV we use the compact scan_io_t for the common case and the
+ * larger scan_io_ext_t only for encrypted blocks in thorough scrubs
+ * (non-thorough scrubs issue ZIO_FLAG_RAW reads and never need salt/IV).
+ * Encrypted blkptrs store salt/IV in blk_dva[2], so scan_io_ext_t never
+ * carries three DVAs.
+ * The two layouts share the same leading SCAN_IO_COMMON_FIELDS.
  */
-typedef struct scan_io {
-	/* fields from blkptr_t */
-	uint64_t		sio_blk_prop;
-	uint64_t		sio_phys_birth;
-	uint64_t		sio_birth;
-	zio_cksum_t		sio_cksum;
-	uint32_t		sio_nr_dvas;
-
-	/* fields from zio_t */
-	uint32_t		sio_flags;
-	zbookmark_phys_t	sio_zb;
-
-	/* members for queue sorting */
-	union {
-		avl_node_t	sio_addr_node; /* link into issuing queue */
-		list_node_t	sio_list_node; /* link for issuing to disk */
+#define	SCAN_IO_COMMON_FIELDS						\
+	/* fields from blkptr_t */					\
+	uint64_t		sio_blk_prop;				\
+	uint64_t		sio_phys_birth;				\
+	uint64_t		sio_birth;				\
+	zio_cksum_t		sio_cksum;				\
+	uint32_t		sio_nr_dvas;				\
+	boolean_t		sio_ext;				\
+									\
+	/* fields from zio_t */						\
+	uint32_t		sio_flags;				\
+	zbookmark_phys_t	sio_zb;					\
+									\
+	/* members for queue sorting */					\
+	union {								\
+		avl_node_t	sio_addr_node; /* link into issuing queue */  \
+		list_node_t	sio_list_node; /* link for issuing to disk */ \
 	} sio_nodes;
 
-	/*
-	 * There may be up to SPA_DVAS_PER_BP DVAs here from the bp,
-	 * depending on how many were in the original bp. Only the
-	 * first DVA is really used for sorting and issuing purposes.
-	 * The other DVAs (if provided) simply exist so that the zio
-	 * layer can find additional copies to repair from in the
-	 * event of an error. This array must go at the end of the
-	 * struct to allow this for the variable number of elements.
-	 */
+/*
+ * There may be up to SPA_DVAS_PER_BP DVAs in sio_dva here from the bp,
+ * depending on how many were in the original bp. Only the first DVA is
+ * really used for sorting and issuing purposes. The other DVAs (if provided)
+ * simply exist so that the zio layer can find additional copies to repair
+ * from in the event of an error. Therefore the sio_dva array must go at the
+ * end of the struct since it potentially has variable number of elements.
+ */
+typedef struct scan_io {
+	SCAN_IO_COMMON_FIELDS
 	dva_t			sio_dva[];
 } scan_io_t;
 
-#define	SIO_SET_OFFSET(sio, x)		DVA_SET_OFFSET(&(sio)->sio_dva[0], x)
-#define	SIO_SET_ASIZE(sio, x)		DVA_SET_ASIZE(&(sio)->sio_dva[0], x)
-#define	SIO_GET_OFFSET(sio)		DVA_GET_OFFSET(&(sio)->sio_dva[0])
-#define	SIO_GET_ASIZE(sio)		DVA_GET_ASIZE(&(sio)->sio_dva[0])
-#define	SIO_GET_END_OFFSET(sio)		\
-	(SIO_GET_OFFSET(sio) + SIO_GET_ASIZE(sio))
-#define	SIO_GET_MUSED(sio)		\
-	(sizeof (scan_io_t) + ((sio)->sio_nr_dvas * sizeof (dva_t)))
+/*
+ * Like scan_io_t, but also carries the salt/IV of an encrypted blkptr.
+ */
+typedef struct scan_io_ext {
+	SCAN_IO_COMMON_FIELDS
+	uint64_t		sio_salt;
+	uint64_t		sio_iv1;
+	uint32_t		sio_iv2;
+	dva_t			sio_dva[];
+} scan_io_ext_t;
 
 struct dsl_scan_io_queue {
 	dsl_scan_t	*q_scn; /* associated dsl_scan_t */
@@ -342,6 +347,36 @@ struct dsl_scan_io_queue {
 	uint64_t	q_total_zio_size_this_txg;
 	uint64_t	q_zios_this_txg;
 };
+
+/*
+ * scan_io_t and scan_io_ext_t share the same leading SCAN_IO_COMMON_FIELDS,
+ * so a scan_io_t pointer can access those fields for either layout.  Only
+ * the salt/IV fields and the offset of the trailing sio_dva[] differ.
+ */
+static inline dva_t *
+sio_dvas(scan_io_t *sio)
+{
+	if (sio->sio_ext)
+		return (((scan_io_ext_t *)sio)->sio_dva);
+	return (sio->sio_dva);
+}
+
+static inline const dva_t *
+sio_dvas_const(const scan_io_t *sio)
+{
+	if (sio->sio_ext)
+		return (((const scan_io_ext_t *)sio)->sio_dva);
+	return (sio->sio_dva);
+}
+
+#define	SIO_SET_OFFSET(sio, x)		DVA_SET_OFFSET(sio_dvas(sio), x)
+#define	SIO_GET_OFFSET(sio)		DVA_GET_OFFSET(sio_dvas_const(sio))
+#define	SIO_GET_ASIZE(sio)		DVA_GET_ASIZE(sio_dvas_const(sio))
+#define	SIO_GET_END_OFFSET(sio)		\
+	(SIO_GET_OFFSET(sio) + SIO_GET_ASIZE(sio))
+#define	SIO_GET_MUSED(sio)		\
+	(((sio)->sio_ext ? offsetof(scan_io_ext_t, sio_dva) :		\
+	offsetof(scan_io_t, sio_dva)) + ((sio)->sio_nr_dvas * sizeof (dva_t)))
 
 /* private data for dsl_scan_prefetch_cb() */
 typedef struct scan_prefetch_ctx {
@@ -368,26 +403,36 @@ static void scan_io_queue_insert_impl(dsl_scan_io_queue_t *queue,
 static dsl_scan_io_queue_t *scan_io_queue_create(vdev_t *vd);
 static void scan_io_queues_destroy(dsl_scan_t *scn);
 
-static kmem_cache_t *sio_cache[SPA_DVAS_PER_BP];
+static kmem_cache_t *sio_cache_compact[SPA_DVAS_PER_BP];
+static kmem_cache_t *sio_cache_ext[SPA_DVAS_PER_BP];
 
 /* sio->sio_nr_dvas must be set so we know which cache to free from */
 static void
 sio_free(scan_io_t *sio)
 {
+	kmem_cache_t **cache = sio->sio_ext ? sio_cache_ext :
+	    sio_cache_compact;
+
 	ASSERT3U(sio->sio_nr_dvas, >, 0);
 	ASSERT3U(sio->sio_nr_dvas, <=, SPA_DVAS_PER_BP);
 
-	kmem_cache_free(sio_cache[sio->sio_nr_dvas - 1], sio);
+	kmem_cache_free(cache[sio->sio_nr_dvas - 1], sio);
 }
 
 /* It is up to the caller to set sio->sio_nr_dvas for freeing */
 static scan_io_t *
-sio_alloc(unsigned short nr_dvas)
+sio_alloc(unsigned short nr_dvas, boolean_t ext)
 {
+	kmem_cache_t **cache = ext ? sio_cache_ext : sio_cache_compact;
+	scan_io_t *sio;
+
 	ASSERT3U(nr_dvas, >, 0);
 	ASSERT3U(nr_dvas, <=, SPA_DVAS_PER_BP);
+	ASSERT(!ext || nr_dvas < SPA_DVAS_PER_BP);
 
-	return (kmem_cache_alloc(sio_cache[nr_dvas - 1], KM_SLEEP));
+	sio = kmem_cache_alloc(cache[nr_dvas - 1], KM_SLEEP);
+	sio->sio_ext = ext;
+	return (sio);
 }
 
 void
@@ -403,13 +448,30 @@ scan_init(void)
 	 */
 	fill_weight = zfs_scan_fill_weight;
 
-	for (int i = 0; i < SPA_DVAS_PER_BP; i++) {
-		char name[36];
+	/*
+	 * The common fields (and thus the sio_nodes used for AVL/list links)
+	 * must sit at the same offset in both layouts so the shared code path
+	 * can treat either as a scan_io_t.
+	 */
+	ASSERT3U(offsetof(scan_io_t, sio_nodes), ==,
+	    offsetof(scan_io_ext_t, sio_nodes));
 
-		(void) snprintf(name, sizeof (name), "sio_cache_%d", i);
-		sio_cache[i] = kmem_cache_create(name,
-		    (sizeof (scan_io_t) + ((i + 1) * sizeof (dva_t))),
+	for (int i = 0; i < SPA_DVAS_PER_BP; i++) {
+		char name[40];
+
+		(void) snprintf(name, sizeof (name), "sio_cache_compact_%d", i);
+		sio_cache_compact[i] = kmem_cache_create(name,
+		    (offsetof(scan_io_t, sio_dva) + ((i + 1) * sizeof (dva_t))),
 		    0, NULL, NULL, NULL, NULL, NULL, 0);
+
+		if (i < SPA_DVAS_PER_BP - 1) {
+			(void) snprintf(name, sizeof (name),
+			    "sio_cache_ext_%d", i);
+			sio_cache_ext[i] = kmem_cache_create(name,
+			    (offsetof(scan_io_ext_t, sio_dva) +
+			    ((i + 1) * sizeof (dva_t))),
+			    0, NULL, NULL, NULL, NULL, NULL, 0);
+		}
 	}
 }
 
@@ -417,7 +479,9 @@ void
 scan_fini(void)
 {
 	for (int i = 0; i < SPA_DVAS_PER_BP; i++) {
-		kmem_cache_destroy(sio_cache[i]);
+		kmem_cache_destroy(sio_cache_compact[i]);
+		if (i < SPA_DVAS_PER_BP - 1)
+			kmem_cache_destroy(sio_cache_ext[i]);
 	}
 }
 
@@ -435,29 +499,54 @@ dsl_scan_resilvering(dsl_pool_t *dp)
 }
 
 static inline void
-sio2bp(const scan_io_t *sio, blkptr_t *bp)
+sio2bp(scan_io_t *sio, blkptr_t *bp)
 {
 	memset(bp, 0, sizeof (*bp));
 	bp->blk_prop = sio->sio_blk_prop;
 	BP_SET_PHYSICAL_BIRTH(bp, sio->sio_phys_birth);
 	BP_SET_LOGICAL_BIRTH(bp, sio->sio_birth);
 	bp->blk_fill = 1;	/* we always only work with data pointers */
+	/*
+	 * An extended sio carries the salt/IV that an encrypted blkptr keeps
+	 * in blk_dva[2], so restore it before the real DVAs are copied in
+	 * below.
+	 */
+	if (sio->sio_ext) {
+		scan_io_ext_t *esio = (scan_io_ext_t *)sio;
+
+		ASSERT(BP_IS_ENCRYPTED(bp));
+		ASSERT3U(sio->sio_nr_dvas, <, SPA_DVAS_PER_BP);
+		bp->blk_dva[2].dva_word[0] = esio->sio_salt;
+		bp->blk_dva[2].dva_word[1] = esio->sio_iv1;
+		BP_SET_IV2(bp, esio->sio_iv2);
+	}
 	bp->blk_cksum = sio->sio_cksum;
 
 	ASSERT3U(sio->sio_nr_dvas, >, 0);
 	ASSERT3U(sio->sio_nr_dvas, <=, SPA_DVAS_PER_BP);
 
-	memcpy(bp->blk_dva, sio->sio_dva, sio->sio_nr_dvas * sizeof (dva_t));
+	memcpy(bp->blk_dva, sio_dvas(sio), sio->sio_nr_dvas * sizeof (dva_t));
 }
 
 static inline void
 bp2sio(const blkptr_t *bp, scan_io_t *sio, int dva_i)
 {
+	dva_t *dvas = sio_dvas(sio);
+
 	sio->sio_blk_prop = bp->blk_prop;
 	sio->sio_phys_birth = BP_GET_RAW_PHYSICAL_BIRTH(bp);
 	sio->sio_birth = BP_GET_LOGICAL_BIRTH(bp);
 	sio->sio_cksum = bp->blk_cksum;
 	sio->sio_nr_dvas = BP_GET_NDVAS(bp);
+	if (sio->sio_ext) {
+		scan_io_ext_t *esio = (scan_io_ext_t *)sio;
+
+		ASSERT(BP_IS_ENCRYPTED(bp));
+		ASSERT3U(sio->sio_nr_dvas, <, SPA_DVAS_PER_BP);
+		esio->sio_salt = bp->blk_dva[2].dva_word[0];
+		esio->sio_iv1 = bp->blk_dva[2].dva_word[1];
+		esio->sio_iv2 = (uint32_t)BP_GET_IV2(bp);
+	}
 
 	/*
 	 * Copy the DVAs to the sio. We need all copies of the block so
@@ -466,7 +555,7 @@ bp2sio(const blkptr_t *bp, scan_io_t *sio, int dva_i)
 	 * in the sio since this is the primary one that we want to issue.
 	 */
 	for (int i = 0, j = dva_i; i < sio->sio_nr_dvas; i++, j++) {
-		sio->sio_dva[i] = bp->blk_dva[j % sio->sio_nr_dvas];
+		dvas[i] = bp->blk_dva[j % sio->sio_nr_dvas];
 	}
 }
 
@@ -555,7 +644,7 @@ dsl_scan_init(dsl_pool_t *dp, uint64_t txg)
 			if (err == 0) {
 				uint64_t overflow = zaptmp[SCAN_PHYS_NUMINTS];
 
-				if (overflow & ~DSL_SCAN_FLAGS_MASK ||
+				if (overflow & ~DSF_VISIT_DS_AGAIN ||
 				    scn->scn_async_destroying) {
 					spa->spa_errata =
 					    ZPOOL_ERRATA_ZOL_2094_ASYNC_DESTROY;
@@ -582,10 +671,12 @@ dsl_scan_init(dsl_pool_t *dp, uint64_t txg)
 		/*
 		 * We might be restarting after a reboot, so jump the issued
 		 * counter to how far we've scanned. We know we're consistent
-		 * up to here.
+		 * up to here. scn_phys is on disk, so an older version may
+		 * have left scn_skipped above scn_examined.
 		 */
-		scn->scn_issued_before_pass = scn->scn_phys.scn_examined -
-		    scn->scn_phys.scn_skipped;
+		scn->scn_issued_before_pass =
+		    scn->scn_phys.scn_examined > scn->scn_phys.scn_skipped ?
+		    scn->scn_phys.scn_examined - scn->scn_phys.scn_skipped : 0;
 
 		if (dsl_scan_is_running(scn) &&
 		    spa_prev_software_version(dp->dp_spa) < SPA_VERSION_SCAN) {
@@ -713,6 +804,13 @@ dsl_scan_is_paused_scrub(const dsl_scan_t *scn)
 {
 	return (dsl_scan_scrubbing(scn->scn_dp) &&
 	    scn->scn_phys.scn_flags & DSF_SCRUB_PAUSED);
+}
+
+static boolean_t
+dsl_scan_is_thorough_scrub(const dsl_scan_t *scn)
+{
+	return (dsl_scan_scrubbing(scn->scn_dp) &&
+	    scn->scn_phys.scn_flags & DSF_SCRUB_THOROUGH);
 }
 
 static void
@@ -882,6 +980,7 @@ dsl_scan_setup_sync(void *arg, dmu_tx_t *tx)
 	dsl_errorscrub_sync_state(scn, tx);
 
 	scn->scn_phys.scn_func = setup_sync_arg->func;
+	scn->scn_phys.scn_flags = setup_sync_arg->flags;
 	scn->scn_phys.scn_state = DSS_SCANNING;
 	scn->scn_phys.scn_min_txg = setup_sync_arg->txgstart;
 	if (setup_sync_arg->txgend == 0) {
@@ -986,7 +1085,7 @@ dsl_scan_setup_sync(void *arg, dmu_tx_t *tx)
  */
 int
 dsl_scan(dsl_pool_t *dp, pool_scan_func_t func, uint64_t txgstart,
-    uint64_t txgend)
+    uint64_t txgend, dsl_scan_flags_t flags)
 {
 	spa_t *spa = dp->dp_spa;
 	dsl_scan_t *scn = dp->dp_scan;
@@ -1019,6 +1118,9 @@ dsl_scan(dsl_pool_t *dp, pool_scan_func_t func, uint64_t txgstart,
 			/*
 			 * got error scrub start cmd, resume paused error scrub.
 			 */
+			if (flags != 0)
+				return (SET_ERROR(ENOTSUP));
+
 			int err = dsl_scrub_set_pause_resume(scn->scn_dp,
 			    POOL_SCRUB_NORMAL);
 			if (err == 0) {
@@ -1036,6 +1138,16 @@ dsl_scan(dsl_pool_t *dp, pool_scan_func_t func, uint64_t txgstart,
 
 	if (func == POOL_SCAN_SCRUB && dsl_scan_is_paused_scrub(scn)) {
 		/* got scrub start cmd, resume paused scrub */
+		if ((flags & DSF_SCRUB_THOROUGH) == 0 && flags != 0)
+			return (SET_ERROR(ENOTSUP));
+		if ((flags & DSF_SCRUB_THOROUGH) != 0 &&
+		    !dsl_scan_is_thorough_scrub(scn))
+			return (SET_ERROR(ENOTSUP));
+		/*
+		 * Thorough vs normal is fixed when the scrub begins (recorded
+		 * as DSF_SCRUB_THOROUGH in scn_phys.scn_flags), so resume does
+		 * not change the scrub type regardless of the flags passed.
+		 */
 		int err = dsl_scrub_set_pause_resume(scn->scn_dp,
 		    POOL_SCRUB_NORMAL);
 		if (err == 0) {
@@ -1048,6 +1160,7 @@ dsl_scan(dsl_pool_t *dp, pool_scan_func_t func, uint64_t txgstart,
 	setup_sync_arg.func = func;
 	setup_sync_arg.txgstart = txgstart;
 	setup_sync_arg.txgend = txgend;
+	setup_sync_arg.flags = flags;
 
 	return (dsl_sync_task(spa_name(spa), dsl_scan_setup_check,
 	    dsl_scan_setup_sync, &setup_sync_arg, 0,
@@ -1196,6 +1309,12 @@ dsl_scan_done(dsl_scan_t *scn, boolean_t complete, dmu_tx_t *tx)
 		scn->scn_phys.scn_state = complete ? DSS_FINISHED :
 		    DSS_CANCELED;
 		scn->scn_phys.scn_end_time = gethrestime_sec();
+		/*
+		 * The new state, and the config and labels updated above,
+		 * reach disk when this txg syncs.  Note it so that
+		 * "zpool wait" does not return before then.
+		 */
+		scn->scn_finished_txg = tx->tx_txg;
 		spa->spa_scrub_started = B_FALSE;
 
 		/*
@@ -1229,6 +1348,7 @@ dsl_scan_done(dsl_scan_t *scn, boolean_t complete, dmu_tx_t *tx)
 		scn->scn_phys.scn_state = complete ? DSS_FINISHED :
 		    DSS_CANCELED;
 		scn->scn_phys.scn_end_time = gethrestime_sec();
+		scn->scn_finished_txg = tx->tx_txg;
 	}
 
 	spa_notify_waiters(spa);
@@ -1276,6 +1396,7 @@ dsl_errorscrub_pause_resume_sync(void *arg, dmu_tx_t *tx)
 		spa->spa_scan_pass_errorscrub_pause = gethrestime_sec();
 		scn->errorscrub_phys.dep_paused_flags = B_TRUE;
 		dsl_errorscrub_sync_state(scn, tx);
+		zap_cursor_fini(&scn->errorscrub_cursor);
 		spa_event_notify(spa, NULL, NULL, ESC_ZFS_ERRORSCRUB_PAUSED);
 	} else {
 		ASSERT3U(*cmd, ==, POOL_SCRUB_NORMAL);
@@ -1469,12 +1590,7 @@ static int
 scan_ds_queue_compare(const void *a, const void *b)
 {
 	const scan_ds_t *sds_a = a, *sds_b = b;
-
-	if (sds_a->sds_dsobj < sds_b->sds_dsobj)
-		return (-1);
-	if (sds_a->sds_dsobj == sds_b->sds_dsobj)
-		return (0);
-	return (1);
+	return (TREE_CMP(sds_a->sds_dsobj, sds_b->sds_dsobj));
 }
 
 static void
@@ -1665,7 +1781,7 @@ dsl_scan_check_suspend(dsl_scan_t *scn, const zbookmark_phys_t *zb)
 	 *  or
 	 *  - the scan queue has reached its memory use limit
 	 */
-	uint64_t curr_time_ns = gethrtime();
+	uint64_t curr_time_ns = getlrtime();
 	uint64_t scan_time_ns = curr_time_ns - scn->scn_sync_start_time;
 	uint64_t sync_time_ns = curr_time_ns -
 	    scn->scn_dp->dp_spa->spa_sync_starttime;
@@ -1727,7 +1843,7 @@ dsl_error_scrub_check_suspend(dsl_scan_t *scn, const zbookmark_phys_t *zb)
 	 *  - the spa is shutting down because this pool is being exported
 	 *    or the machine is rebooting.
 	 */
-	uint64_t curr_time_ns = gethrtime();
+	uint64_t curr_time_ns = getlrtime();
 	uint64_t error_scrub_time_ns = curr_time_ns - scn->scn_sync_start_time;
 	uint64_t sync_time_ns = curr_time_ns -
 	    scn->scn_dp->dp_spa->spa_sync_starttime;
@@ -3239,7 +3355,7 @@ static boolean_t
 scan_io_queue_check_suspend(dsl_scan_t *scn)
 {
 	/* See comment in dsl_scan_check_suspend() */
-	uint64_t curr_time_ns = gethrtime();
+	uint64_t curr_time_ns = getlrtime();
 	uint64_t scan_time_ns = curr_time_ns - scn->scn_sync_start_time;
 	uint64_t sync_time_ns = curr_time_ns -
 	    scn->scn_dp->dp_spa->spa_sync_starttime;
@@ -3307,7 +3423,7 @@ scan_io_queue_gather(dsl_scan_io_queue_t *queue, zfs_range_seg_t *rs,
 	ASSERT(rs != NULL);
 	ASSERT(MUTEX_HELD(&queue->q_vd->vdev_scan_io_queue_lock));
 
-	srch_sio = sio_alloc(1);
+	srch_sio = sio_alloc(1, B_FALSE);
 	srch_sio->sio_nr_dvas = 1;
 	SIO_SET_OFFSET(srch_sio, zfs_rs_get_start(rs, queue->q_exts_by_addr));
 
@@ -3592,12 +3708,26 @@ dsl_scan_async_block_should_pause(dsl_scan_t *scn)
 	}
 
 	if (zfs_max_async_dedup_frees != 0 &&
-	    scn->scn_dedup_frees_this_txg >= zfs_max_async_dedup_frees) {
+	    scn->scn_async_frees_this_txg >= zfs_max_async_dedup_frees) {
 		return (B_TRUE);
 	}
 
-	elapsed_nanosecs = gethrtime() - scn->scn_sync_start_time;
-	return (elapsed_nanosecs / NANOSEC > zfs_txg_timeout ||
+	/*
+	 * Async frees of deduplicated or cloned blocks dirty DDT/BRT
+	 * ZAPs in this txg's sync context, which is not limited by the
+	 * write throttle.  Pause if this txg has already accumulated too
+	 * much dirty data, including the reservations for DDT/BRT updates
+	 * that have not been applied yet at this point of the sync.
+	 */
+	dsl_pool_t *dp = scn->scn_dp;
+	uint64_t txg = spa_syncing_txg(dp->dp_spa) & TXG_MASK;
+	if (dp->dp_dirty_pertxg[txg] + dp->dp_sync_reserve_pertxg[txg] >
+	    zfs_dirty_data_max / 2) {
+		return (B_TRUE);
+	}
+
+	elapsed_nanosecs = getlrtime() - scn->scn_sync_start_time;
+	return (elapsed_nanosecs / (NANOSEC / 2) > zfs_txg_timeout ||
 	    (NSEC2MSEC(elapsed_nanosecs) > scn->scn_async_block_min_time_ms &&
 	    txg_sync_waiting(scn->scn_dp)) ||
 	    spa_shutting_down(scn->scn_dp->dp_spa));
@@ -3614,14 +3744,46 @@ dsl_scan_free_block_cb(void *arg, const blkptr_t *bp, dmu_tx_t *tx)
 			return (SET_ERROR(ERESTART));
 	}
 
-	zio_nowait(zio_free_sync(scn->scn_zio_root, scn->scn_dp->dp_spa,
-	    dmu_tx_get_txg(tx), bp, 0));
+	zio_t *zio = zio_free_sync(scn->scn_zio_root, scn->scn_dp->dp_spa,
+	    dmu_tx_get_txg(tx), bp, 0);
 	dsl_dir_diduse_space(tx->tx_pool->dp_free_dir, DD_USED_HEAD,
 	    -bp_get_dsize_sync(scn->scn_dp->dp_spa, bp),
 	    -BP_GET_PSIZE(bp), -BP_GET_UCSIZE(bp), tx);
 	scn->scn_visited_this_txg++;
-	if (BP_GET_DEDUP(bp))
-		scn->scn_dedup_frees_this_txg++;
+	if (zio != NULL) {
+		/*
+		 * zio_free_sync() returned a ZIO, meaning this is an
+		 * async I/O (dedup, clone or gang block).
+		 */
+		scn->scn_async_frees_this_txg++;
+
+		/*
+		 * Reserve dirty space for the DDT/BRT ZAP updates this
+		 * free will produce later in this txg's sync, providing
+		 * feedback for the pause check above.
+		 */
+		spa_t *spa = scn->scn_dp->dp_spa;
+		uint64_t space = 0;
+		if (BP_GET_DEDUP(bp))
+			space = ddt_sync_dirty_est(spa);
+		else if (brt_maybe_exists(spa, bp))
+			space = brt_sync_dirty_est(spa);
+		dsl_pool_sync_reserve(scn->scn_dp, space, tx);
+
+		zio_nowait(zio);
+
+		/*
+		 * After issuing N async ZIOs, wait for them to complete.
+		 * This makes time limits work with actual I/O completion
+		 * times, not just queuing times.
+		 */
+		uint64_t i = zfs_async_free_zio_wait_interval;
+		if (i != 0 && (scn->scn_async_frees_this_txg % i) == 0) {
+			VERIFY0(zio_wait(scn->scn_zio_root));
+			scn->scn_zio_root = zio_root(scn->scn_dp->dp_spa, NULL,
+			    NULL, ZIO_FLAG_MUSTSUCCEED);
+		}
+	}
 	return (0);
 }
 
@@ -3865,10 +4027,10 @@ dsl_process_async_destroys(dsl_pool_t *dp, dmu_tx_t *tx)
 		    "free_bpobj/bptree on %s in txg %llu; err=%u",
 		    (longlong_t)scn->scn_visited_this_txg,
 		    (longlong_t)
-		    NSEC2MSEC(gethrtime() - scn->scn_sync_start_time),
+		    NSEC2MSEC(getlrtime() - scn->scn_sync_start_time),
 		    spa->spa_name, (longlong_t)tx->tx_txg, err);
 		scn->scn_visited_this_txg = 0;
-		scn->scn_dedup_frees_this_txg = 0;
+		scn->scn_async_frees_this_txg = 0;
 
 		/*
 		 * Write out changes to the DDT and the BRT that may be required
@@ -4013,8 +4175,15 @@ read_by_block_level(dsl_scan_t *scn, zbookmark_phys_t zb)
 		return;
 	}
 
-	int zio_flags = ZIO_FLAG_SCAN_THREAD | ZIO_FLAG_RAW |
-	    ZIO_FLAG_CANFAIL | ZIO_FLAG_SCRUB;
+	int zio_flags = ZIO_FLAG_SCAN_THREAD | ZIO_FLAG_CANFAIL |
+	    ZIO_FLAG_SCRUB;
+
+	/*
+	 * A normal scrub reads raw blocks, but a thorough scrub
+	 * must decrypt/decompress, so it does not set ZIO_FLAG_RAW.
+	 */
+	if (!dsl_scan_is_thorough_scrub(scn))
+		zio_flags |= ZIO_FLAG_RAW;
 
 	/* If it's an intent log block, failure is expected. */
 	if (zb.zb_level == ZB_ZIL_LEVEL)
@@ -4196,14 +4365,14 @@ dsl_errorscrub_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 	}
 
 	spa->spa_scrub_active = B_TRUE;
-	scn->scn_sync_start_time = gethrtime();
+	scn->scn_sync_start_time = getlrtime();
 
 	/*
 	 * zfs_scan_suspend_progress can be set to disable scrub progress.
 	 * See more detailed comment in dsl_scan_sync().
 	 */
 	if (zfs_scan_suspend_progress) {
-		uint64_t scan_time_ns = gethrtime() - scn->scn_sync_start_time;
+		uint64_t scan_time_ns = getlrtime() - scn->scn_sync_start_time;
 		int mintime = zfs_scrub_min_time_ms;
 
 		while (zfs_scan_suspend_progress &&
@@ -4211,7 +4380,7 @@ dsl_errorscrub_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		    !spa_shutting_down(scn->scn_dp->dp_spa) &&
 		    NSEC2MSEC(scan_time_ns) < mintime) {
 			delay(hz);
-			scan_time_ns = gethrtime() - scn->scn_sync_start_time;
+			scan_time_ns = getlrtime() - scn->scn_sync_start_time;
 		}
 		return;
 	}
@@ -4347,8 +4516,10 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		 * See print_scan_scrub_resilver_status() issued/total_i
 		 * @ cmd/zpool/zpool_main.c
 		 */
-		to_issue =
-		    scn->scn_phys.scn_to_examine - scn->scn_phys.scn_skipped;
+		/* scn_to_examine is sampled once; scn_skipped keeps growing. */
+		to_issue = scn->scn_phys.scn_to_examine >
+		    scn->scn_phys.scn_skipped ? scn->scn_phys.scn_to_examine -
+		    scn->scn_phys.scn_skipped : 0;
 		issued =
 		    scn->scn_issued_before_pass + spa->spa_scan_pass_issued;
 		restart_early =
@@ -4395,6 +4566,14 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		return;
 
 	/*
+	 * Wait a few txgs after importing before doing background work
+	 * (async destroys and scanning).  This should help the import
+	 * command to complete quickly.
+	 */
+	if (spa->spa_syncing_txg < spa->spa_first_txg + zfs_import_defer_txgs)
+		return;
+
+	/*
 	 * If the scan is inactive due to a stalled async destroy, try again.
 	 */
 	if (!scn->scn_async_stalled && !dsl_scan_active(scn))
@@ -4402,7 +4581,7 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 
 	/* reset scan statistics */
 	scn->scn_visited_this_txg = 0;
-	scn->scn_dedup_frees_this_txg = 0;
+	scn->scn_async_frees_this_txg = 0;
 	scn->scn_holes_this_txg = 0;
 	scn->scn_lt_min_this_txg = 0;
 	scn->scn_gt_max_this_txg = 0;
@@ -4413,8 +4592,9 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 	scn->scn_avg_zio_size_this_txg = 0;
 	scn->scn_zios_this_txg = 0;
 	scn->scn_suspending = B_FALSE;
-	scn->scn_sync_start_time = gethrtime();
-	spa->spa_scrub_active = B_TRUE;
+	scn->scn_sync_start_time = getlrtime();
+	if (dsl_scan_is_running(scn))
+		spa->spa_scrub_active = B_TRUE;
 
 	/*
 	 * First process the async destroys.  If we suspend, don't do
@@ -4431,20 +4611,13 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		return;
 
 	/*
-	 * Wait a few txgs after importing to begin scanning so that
-	 * we can get the pool imported quickly.
-	 */
-	if (spa->spa_syncing_txg < spa->spa_first_txg + SCAN_IMPORT_WAIT_TXGS)
-		return;
-
-	/*
 	 * zfs_scan_suspend_progress can be set to disable scan progress.
 	 * We don't want to spin the txg_sync thread, so we add a delay
 	 * here to simulate the time spent doing a scan. This is mostly
 	 * useful for testing and debugging.
 	 */
 	if (zfs_scan_suspend_progress) {
-		uint64_t scan_time_ns = gethrtime() - scn->scn_sync_start_time;
+		uint64_t scan_time_ns = getlrtime() - scn->scn_sync_start_time;
 		uint_t mintime = (scn->scn_phys.scn_func ==
 		    POOL_SCAN_RESILVER) ? zfs_resilver_min_time_ms :
 		    zfs_scrub_min_time_ms;
@@ -4454,7 +4627,7 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		    !spa_shutting_down(scn->scn_dp->dp_spa) &&
 		    NSEC2MSEC(scan_time_ns) < mintime) {
 			delay(hz);
-			scan_time_ns = gethrtime() - scn->scn_sync_start_time;
+			scan_time_ns = getlrtime() - scn->scn_sync_start_time;
 		}
 		return;
 	}
@@ -4584,7 +4757,7 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		    "%llu in ddt, %llu > maxtxg)",
 		    (longlong_t)scn->scn_visited_this_txg,
 		    spa->spa_name,
-		    (longlong_t)NSEC2MSEC(gethrtime() -
+		    (longlong_t)NSEC2MSEC(getlrtime() -
 		    scn->scn_sync_start_time),
 		    (longlong_t)scn->scn_objsets_visited_this_txg,
 		    (longlong_t)scn->scn_holes_this_txg,
@@ -4625,7 +4798,7 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		    (longlong_t)scn->scn_zios_this_txg,
 		    spa->spa_name,
 		    (longlong_t)scn->scn_segs_this_txg,
-		    (longlong_t)NSEC2MSEC(gethrtime() -
+		    (longlong_t)NSEC2MSEC(getlrtime() -
 		    scn->scn_sync_start_time),
 		    (longlong_t)scn->scn_avg_zio_size_this_txg,
 		    (longlong_t)scn->scn_avg_seg_size_this_txg);
@@ -4752,7 +4925,9 @@ static void
 scan_io_queue_insert(dsl_scan_io_queue_t *queue, const blkptr_t *bp, int dva_i,
     int zio_flags, const zbookmark_phys_t *zb)
 {
-	scan_io_t *sio = sio_alloc(BP_GET_NDVAS(bp));
+	boolean_t ext = dsl_scan_is_thorough_scrub(queue->q_scn) &&
+	    BP_IS_ENCRYPTED(bp);
+	scan_io_t *sio = sio_alloc(BP_GET_NDVAS(bp), ext);
 
 	ASSERT0(BP_IS_GANG(bp));
 	ASSERT(MUTEX_HELD(&queue->q_vd->vdev_scan_io_queue_lock));
@@ -4814,11 +4989,19 @@ dsl_scan_scrub_cb(dsl_pool_t *dp,
 	uint64_t phys_birth = BP_GET_PHYSICAL_BIRTH(bp);
 	size_t psize = BP_GET_PSIZE(bp);
 	boolean_t needs_io = B_FALSE;
-	int zio_flags = ZIO_FLAG_SCAN_THREAD | ZIO_FLAG_RAW | ZIO_FLAG_CANFAIL;
+	int zio_flags = ZIO_FLAG_SCAN_THREAD | ZIO_FLAG_CANFAIL;
+
+	/* A thorough scrub decrypts/decompresses, so it must not read raw. */
+	if (!dsl_scan_is_thorough_scrub(scn))
+		zio_flags |= ZIO_FLAG_RAW;
 
 	count_block(dp->dp_blkstats, bp);
 	if (phys_birth <= scn->scn_phys.scn_min_txg ||
 	    phys_birth >= scn->scn_phys.scn_max_txg) {
+		/* Traversed but not scrubbed; both counters must see it. */
+		uint64_t asize = BP_GET_ASIZE(bp);
+		scn->scn_phys.scn_examined += asize;
+		spa->spa_scan_pass_exam += asize;
 		count_block_skipped(scn, bp, B_TRUE);
 		return (0);
 	}
@@ -4871,27 +5054,41 @@ static void
 dsl_scan_scrub_done(zio_t *zio)
 {
 	spa_t *spa = zio->io_spa;
-	blkptr_t *bp = zio->io_bp;
 	dsl_scan_io_queue_t *queue = zio->io_private;
 
 	abd_free(zio->io_abd);
 
 	if (queue == NULL) {
 		mutex_enter(&spa->spa_scrub_lock);
-		ASSERT3U(spa->spa_scrub_inflight, >=, BP_GET_PSIZE(bp));
-		spa->spa_scrub_inflight -= BP_GET_PSIZE(bp);
+		ASSERT3U(spa->spa_scrub_inflight, >=, zio->io_size);
+		spa->spa_scrub_inflight -= zio->io_size;
 		cv_broadcast(&spa->spa_scrub_io_cv);
 		mutex_exit(&spa->spa_scrub_lock);
 	} else {
 		mutex_enter(&queue->q_vd->vdev_scan_io_queue_lock);
-		ASSERT3U(queue->q_inflight_bytes, >=, BP_GET_PSIZE(bp));
-		queue->q_inflight_bytes -= BP_GET_PSIZE(bp);
+		ASSERT3U(queue->q_inflight_bytes, >=, zio->io_size);
+		queue->q_inflight_bytes -= zio->io_size;
 		cv_broadcast(&queue->q_zio_cv);
 		mutex_exit(&queue->q_vd->vdev_scan_io_queue_lock);
 	}
 
+	/*
+	 * A normal scrub issues ZIO_FLAG_RAW reads which are never decrypted
+	 * and so can never produce EACCES here.
+	 */
+	ASSERT(zio->io_error != EACCES || !(zio->io_flags & ZIO_FLAG_SCRUB) ||
+	    !(zio->io_flags & ZIO_FLAG_RAW));
+	/*
+	 * During a thorough scrub we read blocks without ZIO_FLAG_RAW. If the
+	 * dataset's key is not loaded the decryption (or MAC verification)
+	 * fails with EACCES (see spa_do_crypt_abd() and the MAC helpers).
+	 * The checksum has already been verified, so this is as much as we
+	 * can do for the block without keys; treat it as success.
+	 */
 	if (zio->io_error && (zio->io_error != ECKSUM ||
-	    !(zio->io_flags & ZIO_FLAG_SPECULATIVE))) {
+	    !(zio->io_flags & ZIO_FLAG_SPECULATIVE)) &&
+	    !(zio->io_error == EACCES && (zio->io_flags & ZIO_FLAG_SCRUB) &&
+	    !(zio->io_flags & ZIO_FLAG_RAW))) {
 		if (dsl_errorscrubbing(spa->spa_dsl_pool) &&
 		    !dsl_errorscrub_is_paused(spa->spa_dsl_pool->dp_scan)) {
 			atomic_inc_64(&spa->spa_dsl_pool->dp_scan
@@ -4916,7 +5113,11 @@ scan_exec_io(dsl_pool_t *dp, const blkptr_t *bp, int zio_flags,
 {
 	spa_t *spa = dp->dp_spa;
 	dsl_scan_t *scn = dp->dp_scan;
-	size_t size = BP_GET_PSIZE(bp);
+	/*
+	 * If raw flags is not set - this is a thorough scrub.
+	 */
+	size_t size = (zio_flags & ZIO_FLAG_RAW) ?
+	    BP_GET_PSIZE(bp) : BP_GET_LSIZE(bp);
 	abd_t *data = abd_alloc_for_io(size, B_FALSE);
 	zio_t *pio;
 
@@ -4925,7 +5126,7 @@ scan_exec_io(dsl_pool_t *dp, const blkptr_t *bp, int zio_flags,
 		mutex_enter(&spa->spa_scrub_lock);
 		while (spa->spa_scrub_inflight >= scn->scn_maxinflight_bytes)
 			cv_wait(&spa->spa_scrub_io_cv, &spa->spa_scrub_lock);
-		spa->spa_scrub_inflight += BP_GET_PSIZE(bp);
+		spa->spa_scrub_inflight += size;
 		mutex_exit(&spa->spa_scrub_lock);
 		pio = scn->scn_zio_root;
 	} else {
@@ -4935,7 +5136,7 @@ scan_exec_io(dsl_pool_t *dp, const blkptr_t *bp, int zio_flags,
 		mutex_enter(q_lock);
 		while (queue->q_inflight_bytes >= queue->q_maxinflight_bytes)
 			cv_wait(&queue->q_zio_cv, q_lock);
-		queue->q_inflight_bytes += BP_GET_PSIZE(bp);
+		queue->q_inflight_bytes += size;
 		pio = queue->q_zio;
 		mutex_exit(q_lock);
 	}
@@ -5066,7 +5267,8 @@ static const zfs_range_tree_ops_t ext_size_ops = {
 
 /*
  * Comparator for the q_sios_by_addr tree. Sorting is simply performed
- * based on LBA-order (from lowest to highest).
+ * based on LBA-order (from lowest to highest). The tree can contain compact
+ * and extended sios, so use the per-sio DVA helper.
  */
 static int
 sio_addr_compare(const void *x, const void *y)
@@ -5091,8 +5293,8 @@ scan_io_queue_create(vdev_t *vd)
 	q->q_exts_by_addr = zfs_range_tree_create_gap(&ext_size_ops,
 	    ZFS_RANGE_SEG_GAP, &q->q_exts_by_size, 0, vd->vdev_ashift,
 	    zfs_scan_max_ext_gap);
-	avl_create(&q->q_sios_by_addr, sio_addr_compare,
-	    sizeof (scan_io_t), offsetof(scan_io_t, sio_nodes.sio_addr_node));
+	avl_create(&q->q_sios_by_addr, sio_addr_compare, sizeof (scan_io_t),
+	    offsetof(scan_io_t, sio_nodes.sio_addr_node));
 
 	return (q);
 }
@@ -5190,7 +5392,7 @@ dsl_scan_freed_dva(spa_t *spa, const blkptr_t *bp, int dva_i)
 		return;
 	}
 
-	srch_sio = sio_alloc(BP_GET_NDVAS(bp));
+	srch_sio = sio_alloc(BP_GET_NDVAS(bp), B_FALSE);
 	bp2sio(bp, srch_sio, dva_i);
 	start = SIO_GET_OFFSET(srch_sio);
 	size = SIO_GET_ASIZE(srch_sio);
@@ -5319,7 +5521,10 @@ ZFS_MODULE_PARAM(zfs, zfs_, async_block_max_blocks, U64, ZMOD_RW,
 	"Max number of blocks freed in one txg");
 
 ZFS_MODULE_PARAM(zfs, zfs_, max_async_dedup_frees, U64, ZMOD_RW,
-	"Max number of dedup blocks freed in one txg");
+	"Max number of dedup, clone or gang blocks freed in one txg");
+
+ZFS_MODULE_PARAM(zfs, zfs_, async_free_zio_wait_interval, U64, ZMOD_RW,
+	"Wait for pending free I/Os after issuing this many asynchronously");
 
 ZFS_MODULE_PARAM(zfs, zfs_, free_bpobj_enabled, INT, ZMOD_RW,
 	"Enable processing of the free_bpobj");
@@ -5335,6 +5540,9 @@ ZFS_MODULE_PARAM(zfs, zfs_, scan_issue_strategy, UINT, ZMOD_RW,
 
 ZFS_MODULE_PARAM(zfs, zfs_, scan_legacy, INT, ZMOD_RW,
 	"Scrub using legacy non-sequential method");
+
+ZFS_MODULE_PARAM(zfs, zfs_, import_defer_txgs, UINT, ZMOD_RW,
+	"Number of TXGs to defer background work after pool import");
 
 ZFS_MODULE_PARAM(zfs, zfs_, scan_checkpoint_intval, UINT, ZMOD_RW,
 	"Scan progress on-disk checkpointing interval");

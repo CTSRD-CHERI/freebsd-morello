@@ -375,8 +375,10 @@ show_lifetime(struct ifa_cacheinfo *ci)
 	vl = (ci->ifa_valid == ND6_INFINITE_LIFETIME) ? 0 : ci->ifa_valid;
 
 	clock_gettime(CLOCK_MONOTONIC_FAST, &now);
-	print_lifetime("pltime", pl + now.tv_sec, &now);
-	print_lifetime("vltime", vl + now.tv_sec, &now);
+	print_lifetime("pltime",
+	    pl + (ip6lifetime ? ci->tstamp / 1000 : now.tv_sec), &now);
+	print_lifetime("vltime",
+	    vl + (ip6lifetime ? ci->tstamp / 1000 : now.tv_sec), &now);
 }
 
 static void
@@ -726,10 +728,8 @@ static struct cmd inet6_cmds[] = {
 	DEF_CMD_ARG("pltime",        			setip6pltime),
 	DEF_CMD_ARG("vltime",        			setip6vltime),
 	DEF_CMD("eui64",	0,			setip6eui64),
-#ifdef EXPERIMENTAL
-	DEF_CMD("ipv6_only",	ND6_IFF_IPV6_ONLY_MANUAL,setnd6flags),
-	DEF_CMD("-ipv6_only",	-ND6_IFF_IPV6_ONLY_MANUAL,setnd6flags),
-#endif
+	DEF_CMD("stableaddr",	ND6_IFF_STABLEADDR,	setnd6flags),
+	DEF_CMD("-stableaddr",	-ND6_IFF_STABLEADDR,	setnd6flags),
 };
 
 static struct afswtch af_inet6 = {
@@ -753,7 +753,7 @@ static struct afswtch af_inet6 = {
 #ifdef WITHOUT_NETLINK
 	.af_difaddr	= SIOCDIFADDR_IN6,
 	.af_aifaddr	= SIOCAIFADDR_IN6,
-	.af_ridreq	= &in6_addreq,
+	.af_ridreq	= &in6_ridreq,
 	.af_addreq	= &in6_addreq,
 	.af_exec	= af_exec_ioctl,
 #else

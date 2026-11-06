@@ -193,7 +193,6 @@ fuse_interrupt_send(struct fuse_ticket *otick, int err)
 	struct fuse_data *data = otick->tk_data;
 	struct fuse_ticket *tick, *xtick;
 	struct ucred reused_creds;
-	gid_t reused_groups[1];
 
 	if (otick->irq_unique == 0) {
 		/* 
@@ -237,8 +236,7 @@ fuse_interrupt_send(struct fuse_ticket *otick, int err)
 		 */
 		ftick_hdr = fticket_in_header(otick);
 		reused_creds.cr_uid = ftick_hdr->uid;
-		reused_groups[0] = ftick_hdr->gid;
-		reused_creds.cr_groups = reused_groups;
+		reused_creds.cr_gid = ftick_hdr->gid;
 		fdisp_init(&fdi, sizeof(*fii));
 		fdisp_make_pid(&fdi, FUSE_INTERRUPT, data, ftick_hdr->nodeid,
 			ftick_hdr->pid, &reused_creds);
@@ -552,7 +550,6 @@ fdata_alloc(struct cdev *fdev, struct ucred *cred)
 	TAILQ_INIT(&data->aw_head);
 	data->daemoncred = crhold(cred);
 	data->daemon_timeout = FUSE_DEFAULT_DAEMON_TIMEOUT;
-	sx_init(&data->rename_lock, "fuse rename lock");
 	data->ref = 1;
 
 	return data;
@@ -567,7 +564,6 @@ fdata_trydestroy(struct fuse_data *data)
 		return;
 
 	/* Driving off stage all that stuff thrown at device... */
-	sx_destroy(&data->rename_lock);
 	crfree(data->daemoncred);
 	mtx_destroy(&data->aw_mtx);
 	knlist_delete(&data->ks_rsel.si_note, curthread, 0);
@@ -592,28 +588,6 @@ fdata_set_dead(struct fuse_data *data)
 	wakeup(&data->ticketer);
 	fuse_lck_mtx_unlock(data->ms_mtx);
 	FUSE_UNLOCK();
-}
-
-struct fuse_ticket *
-fuse_ticket_fetch(struct fuse_data *data)
-{
-	int err = 0;
-	struct fuse_ticket *ftick;
-
-	ftick = fticket_alloc(data);
-
-	if (!(data->dataflags & FSESS_INITED)) {
-		/* Sleep until get answer for INIT message */
-		FUSE_LOCK();
-		if (!(data->dataflags & FSESS_INITED) && data->ticketer > 2) {
-			err = msleep(&data->ticketer, &fuse_mtx, PCATCH | PDROP,
-			    "fu_ini", 0);
-			if (err)
-				fdata_set_dead(data);
-		} else
-			FUSE_UNLOCK();
-	}
-	return ftick;
 }
 
 int
@@ -696,7 +670,7 @@ fuse_body_audit(struct fuse_ticket *ftick, size_t blen)
 		break;
 
 	case FUSE_FORGET:
-		panic("FUSE: a handler has been intalled for FUSE_FORGET");
+		panic("FUSE: a handler has been installed for FUSE_FORGET");
 		break;
 
 	case FUSE_GETATTR:
@@ -837,6 +811,10 @@ fuse_body_audit(struct fuse_ticket *ftick, size_t blen)
 		err = (blen == 0) ? 0 : EINVAL;
 		break;
 
+	case FUSE_IOCTL:
+		err = (blen >= sizeof(struct fuse_ioctl_out)) ? 0 : EINVAL;
+		break;
+
 	case FUSE_FALLOCATE:
 		err = (blen == 0) ? 0 : EINVAL;
 		break;
@@ -924,7 +902,7 @@ fdisp_make_pid(struct fuse_dispatcher *fdip, enum fuse_opcode op,
 	if (fdip->tick) {
 		fticket_refresh(fdip->tick);
 	} else {
-		fdip->tick = fuse_ticket_fetch(data);
+		fdip->tick = fticket_alloc(data);
 	}
 
 	/* FUSE_DIMALLOC will bzero the fiovs when it enlarges them */

@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -33,6 +23,7 @@
 #include <sys/vdev_raidz_impl.h>
 #include <assert.h>
 #include <stdio.h>
+#include <libzpool.h>
 #include "raidz_test.h"
 
 static int *rand_data;
@@ -265,8 +256,20 @@ cmp_data(raidz_test_opts_t *opts, raidz_map_t *rm)
 static int
 init_rand(void *data, size_t size, void *private)
 {
+	size_t *offsetp = (size_t *)private;
+	size_t offset = *offsetp;
+
+	VERIFY3U(offset + size, <=, SPA_MAXBLOCKSIZE);
+	memcpy(data, (char *)rand_data + offset, size);
+	*offsetp = offset + size;
+	return (0);
+}
+
+static int
+corrupt_rand_fill(void *data, size_t size, void *private)
+{
 	(void) private;
-	memcpy(data, rand_data, size);
+	memset(data, 0xAA, size);
 	return (0);
 }
 
@@ -278,7 +281,7 @@ corrupt_colums(raidz_map_t *rm, const int *tgts, const int cnt)
 		for (int i = 0; i < cnt; i++) {
 			raidz_col_t *col = &rr->rr_col[tgts[i]];
 			abd_iterate_func(col->rc_abd, 0, col->rc_size,
-			    init_rand, NULL);
+			    corrupt_rand_fill, NULL);
 		}
 	}
 }
@@ -286,7 +289,8 @@ corrupt_colums(raidz_map_t *rm, const int *tgts, const int cnt)
 void
 init_zio_abd(zio_t *zio)
 {
-	abd_iterate_func(zio->io_abd, 0, zio->io_size, init_rand, NULL);
+	size_t offset = 0;
+	abd_iterate_func(zio->io_abd, 0, zio->io_size, init_rand, &offset);
 }
 
 static void
@@ -373,7 +377,7 @@ init_raidz_map(raidz_test_opts_t *opts, zio_t **zio, const int parity)
 
 	*zio = umem_zalloc(sizeof (zio_t), UMEM_NOFAIL);
 
-	(*zio)->io_offset = 0;
+	(*zio)->io_offset = opts->rto_offset;
 	(*zio)->io_size = alloc_dsize;
 	(*zio)->io_abd = raidz_alloc(alloc_dsize);
 	init_zio_abd(*zio);
@@ -833,6 +837,8 @@ main(int argc, char **argv)
 	} else {
 		err = run_test(NULL);
 	}
+
+	mprotect(rand_data, SPA_MAXBLOCKSIZE, PROT_READ | PROT_WRITE);
 
 	umem_free(rand_data, SPA_MAXBLOCKSIZE);
 	kernel_fini();

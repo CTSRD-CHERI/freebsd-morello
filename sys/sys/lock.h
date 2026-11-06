@@ -161,6 +161,16 @@ struct lock_class {
 
 #define	lock_initialized(lo)	((lo)->lo_flags & LO_INITIALIZED)
 
+/*
+ * The lk2lo() macro is used to extract lock_object from various lock types
+ * that embed lock_object for purpose of writing a _Generic() macro that would
+ * allow to create a single KPI for different kinds of locks.
+ * The NOLOCK is lock-typed NULL pointer, to be used as no-lock argument in
+ * such _Generic() macros.
+ */
+#define	lk2lo(lk)	(&(lk)->lock_object)
+#define	NOLOCK		((struct mtx *)0)
+
 extern struct lock_class lock_class_mtx_sleep;
 extern struct lock_class lock_class_mtx_spin;
 extern struct lock_class lock_class_sx;
@@ -247,7 +257,7 @@ const char *witness_file(struct lock_object *);
 void	witness_thread_exit(struct thread *);
 
 #ifdef	WITNESS
-int	witness_startup_count(void);
+u_long	witness_startup_count(u_long);
 void	witness_startup(void *);
 
 /* Flags for witness_warn(). */

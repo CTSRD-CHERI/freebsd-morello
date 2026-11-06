@@ -1059,6 +1059,9 @@ ifinfo(char *ifname, int argc, char **argv)
 #ifdef ND6_IFF_NO_PREFER_IFACE
 		SETFLAG("no_prefer_iface", ND6_IFF_NO_PREFER_IFACE);
 #endif
+#ifdef ND6_IFF_STABLEADDR
+		SETFLAG("stableaddr", ND6_IFF_STABLEADDR);
+#endif
 		SETVALUE("basereachable", ND.basereachable);
 		SETVALUE("retrans", ND.retrans);
 		SETVALUE("curhlim", ND.chlim);
@@ -1144,6 +1147,10 @@ ifinfo(char *ifname, int argc, char **argv)
 		if ((ND.flags & ND6_IFF_AUTO_LINKLOCAL))
 			xo_emit("{l:%s} ", "auto_linklocal");
 #endif
+#ifdef ND6_IFF_STABLEADDR
+		if ((ND.flags & ND6_IFF_STABLEADDR))
+			xo_emit("{l:%s} ", "stableaddr");
+#endif
 #ifdef ND6_IFF_NO_PREFER_IFACE
 		if ((ND.flags & ND6_IFF_NO_PREFER_IFACE))
 			xo_emit("{l:%s} ", "no_prefer_iface");
@@ -1218,12 +1225,7 @@ rtrlist(void)
 			*pflags++ = 'O';
 			xo_emit("{el:%s}", "other");
 		}
-#ifdef DRAFT_IETF_6MAN_IPV6ONLY_FLAG
-		if (p->flags & ND_RA_FLAG_IPV6_ONLY) {
-			*pflags++ = 'S';
-			xo_emit("{el:%s}", "ipv6only");
-		}
-#endif
+
 		xo_close_list("flags_pretty");
 		xo_emit(", flags={:flags/%s}", rflags);
 

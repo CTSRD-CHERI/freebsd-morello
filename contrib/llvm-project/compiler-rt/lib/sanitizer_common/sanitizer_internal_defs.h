@@ -102,13 +102,10 @@
 // We can use .preinit_array section on Linux to call sanitizer initialization
 // functions very early in the process startup (unless PIC macro is defined).
 //
-// On FreeBSD, .preinit_array functions are called with rtld_bind_lock writer
-// lock held. It will lead to dead lock if unresolved PLT functions (which helds
-// rtld_bind_lock reader lock) are called inside .preinit_array functions.
-//
 // FIXME: do we have anything like this on Mac?
 #ifndef SANITIZER_CAN_USE_PREINIT_ARRAY
-#if (SANITIZER_LINUX || SANITIZER_FUCHSIA || SANITIZER_NETBSD) && !defined(PIC)
+#if (SANITIZER_LINUX || SANITIZER_FUCHSIA || SANITIZER_NETBSD || \
+    SANITIZER_FREEBSD) && !defined(PIC)
 #define SANITIZER_CAN_USE_PREINIT_ARRAY 1
 // Before Solaris 11.4, .preinit_array is fully supported only with GNU ld.
 // FIXME: Check for those conditions.
@@ -138,19 +135,25 @@
 // in a portable way by the language itself.
 namespace __sanitizer {
 
-#if defined(_WIN64)
+#if defined(__UINTPTR_TYPE__)
+#  if defined(__arm__) && defined(__linux__)
+// Linux Arm headers redefine __UINTPTR_TYPE__ and disagree with clang/gcc.
+typedef unsigned int uptr;
+typedef int sptr;
+#  else
+typedef __UINTPTR_TYPE__ uptr;
+typedef __INTPTR_TYPE__ sptr;
+#  endif
+#elif defined(_WIN64)
 // 64-bit Windows uses LLP64 data model.
 typedef unsigned long long uptr;
 typedef signed long long sptr;
-#else
-#  if (SANITIZER_WORDSIZE == 64) || SANITIZER_APPLE || SANITIZER_WINDOWS
-typedef unsigned long uptr;
-typedef signed long sptr;
-#  else
+#elif defined(_WIN32)
 typedef unsigned int uptr;
 typedef signed int sptr;
-#  endif
-#endif  // defined(_WIN64)
+#else
+#  error Unsupported compiler, missing __UINTPTR_TYPE__
+#endif  // defined(__UINTPTR_TYPE__)
 #if defined(__x86_64__)
 // Since x32 uses ILP32 data model in 64-bit hardware mode, we must use
 // 64-bit pointer to unwind stack frame.
@@ -194,16 +197,13 @@ typedef u64  OFF64_T;
 #ifdef __SIZE_TYPE__
 typedef __SIZE_TYPE__ usize;
 #else
-// Since we use this for operator new, usize must match the real size_t, but on
-// 32-bit Windows the definition of uptr does not actually match uintptr_t or
-// size_t because we are working around typedef mismatches for the (S)SIZE_T
-// types used in interception.h.
-// Until the definition of uptr has been fixed we have to special case Win32.
-#  if SANITIZER_WINDOWS && SANITIZER_WORDSIZE == 32
-typedef unsigned int usize;
-#  else
 typedef uptr usize;
-#  endif
+#endif
+
+#if defined(__s390__) && !defined(__s390x__)
+typedef long ssize;
+#else
+typedef sptr ssize;
 #endif
 
 typedef u64 tid_t;
@@ -464,6 +464,9 @@ namespace __lsan {
 using namespace __sanitizer;
 }
 namespace __msan {
+using namespace __sanitizer;
+}
+namespace __nsan {
 using namespace __sanitizer;
 }
 namespace __hwasan {

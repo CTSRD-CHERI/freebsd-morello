@@ -41,13 +41,13 @@
 
 #include <dev/hwt/hwt_context.h>
 
-#define	ARM_SPE_DEBUG
+#define        ARM_SPE_DEBUG
 #undef ARM_SPE_DEBUG
 
 #ifdef ARM_SPE_DEBUG
-#define	dprintf(fmt, ...)	printf(fmt, ##__VA_ARGS__)
+#define		dprintf(fmt, ...)	printf(fmt, ##__VA_ARGS__)
 #else
-#define	dprintf(fmt, ...)
+#define		dprintf(fmt, ...)
 #endif
 
 DECLARE_CLASS(arm_spe_driver);
@@ -59,104 +59,107 @@ extern bool arm64_pid_in_contextidr;
 
 int spe_register(device_t dev);
 void arm_spe_disable(void *arg __unused);
-void spe_backend_disable_smp(struct hwt_context *ctx);
+int spe_backend_disable_smp(struct hwt_context *ctx);
 void arm_spe_send_buffer(void *arg, int pending __unused);
 
 /*
   PSB CSYNC is a Profiling Synchronization Barrier encoded in the hint space
  * so it is a NOP on earlier architecture.
  */
-#define	psb_csync()	__asm __volatile("hint #17" ::: "memory");
+#define		psb_csync()	__asm __volatile("hint #17" ::: "memory");
 
 struct arm_spe_softc {
-	device_t		dev;
+	device_t                dev;
 
-	struct resource		*sc_irq_res;
-	void			*sc_irq_cookie;
-	struct cdev		*sc_cdev;
-	struct mtx		sc_lock;
-	struct task		task;
+	struct resource         *sc_irq_res;
+	void                    *sc_irq_cookie;
+	struct cdev             *sc_cdev;
+	struct mtx              sc_lock;
+	struct task             task;
 
-	uint64_t		sc_pmsidr;
-	int			kqueue_fd;
-	struct thread		*hwt_td;
-	struct arm_spe_info	*spe_info;
-	struct hwt_context	*ctx;
+	int64_t                sc_pmsidr;
+	int                     kqueue_fd;
+	struct thread           *hwt_td;
+	struct arm_spe_info     **spe_info;
+	struct hwt_context      *ctx;
 	STAILQ_HEAD(, arm_spe_queue) pending;
-	uint64_t		npending;
+	uint64_t                npending;
 
-	uint64_t		pmbidr;
-	uint64_t		pmsidr;
+	uint64_t                pmbidr;
+	uint64_t                pmsidr;
 
-	uint16_t		kva_align;
+	uint16_t                kva_align;
 };
 
 struct arm_spe_buf_info {
-	struct arm_spe_info	*info;
-	uint64_t		pmbptr;
-	uint8_t			buf_idx : 1;
-	bool			buf_svc : 1;
-	bool			buf_wait : 1;
-	bool			partial_rec : 1;
+	struct arm_spe_info     *info;
+	uint64_t                pmbptr;
+	uint8_t                 buf_idx : 1;
+	bool                    buf_svc : 1;
+	bool                    buf_wait : 1;
+	bool                    partial_rec : 1;
 };
 
 struct arm_spe_info {
-	int			ident; /* tid or cpu_id */
-	struct mtx		lock;
-	struct arm_spe_softc	*sc;
-	struct task		task[2];
-	bool			enabled : 1;
+	int                     ident; /* tid or cpu_id */
+	struct mtx              lock;
+	struct arm_spe_softc    *sc;
+	struct task             task[2];
+	struct task             flush_task;
+	bool                    enabled : 1;
+	bool                    stopped : 1;
 
 	/* buffer is split in half as a ping-pong buffer */
-	vm_object_t		bufobj;
-	vm_offset_t		kvaddr;
-	size_t			buf_size;
-	uint8_t			buf_idx : 1; /* 0 = first half of buf, 1 = 2nd half */
+	vm_object_t             bufobj;
+	char			*kvaddr;
+	size_t                  buf_size;
+	uint8_t                 buf_idx : 1; /* 0 = first half of buf, 1 = 2nd half */
 	struct arm_spe_buf_info buf_info[2];
 
 	/* config */
 	enum arm_spe_profiling_level level;
-	enum arm_spe_ctx_field	ctx_field;
+	enum arm_spe_ctx_field  ctx_field;
 	/* filters */
-	uint64_t		pmsfcr;
-	uint64_t		pmsevfr;
-	uint64_t		pmslatfr;
+	uint64_t                pmsfcr;
+	uint64_t                pmsevfr;
+	uint64_t                pmslatfr;
 	/* interval */
-	uint64_t		pmsirr;
-	uint64_t		pmsicr;
+	uint64_t                pmsirr;
+	uint64_t                pmsicr;
 	/* control */
-	uint64_t		pmscr;
+	uint64_t                pmscr;
 };
 
 struct arm_spe_queue {
-	int		ident;
-	u_int		buf_idx  : 1;
-	bool		partial_rec : 1;
-	bool		final_buf : 1;
-	vm_offset_t	offset;
+	int             ident;
+	u_int           buf_idx  : 1;
+	bool            partial_rec : 1;
+	bool            final_buf : 1;
+	vm_offset_t     offset;
 	STAILQ_ENTRY(arm_spe_queue) next;
 };
 
 static inline vm_offset_t buf_start_addr(u_int buf_idx, struct arm_spe_info *info)
 {
-	vm_offset_t addr;
+	char *addr;
 	if (buf_idx == 0)
 		addr = info->kvaddr;
 	if (buf_idx == 1)
 		addr = info->kvaddr + (info->buf_size/2);
 
-	return addr;
+	return ((vm_offset_t)addr);
 }
 
 static inline vm_offset_t buf_end_addr(u_int buf_idx, struct arm_spe_info *info)
 {
-	vm_offset_t addr;
+	char *addr;
+
 	if (buf_idx == 0)
 		addr = info->kvaddr + (info->buf_size/2);
 	if (buf_idx == 1)
 		addr = info->kvaddr + info->buf_size;
 
-	return addr;
+	return ((vm_offset_t)addr);
 }
 
 #endif /* _ARM64_ARM_SPE_DEV_H_ */

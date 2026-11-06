@@ -116,6 +116,12 @@ pci_create_iov_child_t	pci_create_iov_child_method;
 
 void		pci_add_children(device_t dev, int domain, int busno);
 void		pci_add_child(device_t bus, struct pci_devinfo *dinfo);
+#ifdef PCI_IOV
+void		pci_reserve_iov_buses(device_t dev, int busno);
+#endif
+/* Call after cold enumeration and before attaching the bus's children. */
+void		pcie_reconcile_link_mps(device_t bus);
+device_t	pci_iov_get_pf(device_t dev);
 device_t	pci_add_iov_child(device_t bus, device_t pf, uint16_t rid,
 		    uint16_t vid, uint16_t did);
 void		pci_add_resources(device_t bus, device_t dev, int force,
@@ -147,15 +153,15 @@ struct pci_map *pci_add_bar(device_t dev, int reg, pci_addr_t value,
 		    pci_addr_t size);
 
 struct resource *pci_reserve_map(device_t dev, device_t child, int type,
-		    int *rid, rman_res_t start, rman_res_t end,
+		    int rid, rman_res_t start, rman_res_t end,
 		    rman_res_t count, u_int num, u_int flags);
 
 struct resource *pci_alloc_multi_resource(device_t dev, device_t child,
-		    int type, int *rid, rman_res_t start, rman_res_t end,
+		    int type, int rid, rman_res_t start, rman_res_t end,
 		    rman_res_t count, u_long num, u_int flags);
 
 struct resource *pci_vf_alloc_mem_resource(device_t dev, device_t child,
-		    int *rid, rman_res_t start, rman_res_t end,
+		    int rid, rman_res_t start, rman_res_t end,
 		    rman_res_t count, u_int flags);
 int		pci_vf_release_mem_resource(device_t dev, device_t child,
 		    struct resource *r);

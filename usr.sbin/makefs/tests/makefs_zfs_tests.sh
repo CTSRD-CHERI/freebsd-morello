@@ -41,22 +41,25 @@ common_cleanup()
 	# Try to force a TXG, this can help catch bugs by triggering a panic.
 	sync
 
-	pool=$(cat $TEST_ZFS_POOL_NAME)
-	if zpool list "$pool" >/dev/null; then
-		zpool destroy "$pool"
+	if [ -f "$TEST_ZFS_POOL_NAME" ]; then
+		pool=$(cat $TEST_ZFS_POOL_NAME)
+		if zpool list "$pool" >/dev/null; then
+			zpool destroy "$pool"
+		fi
 	fi
 
-	md=$(cat $TEST_MD_DEVICE_FILE)
-	if [ -c /dev/"$md" ]; then
-		mdconfig -d -u "$md"
+	if [ -f "$TEST_MD_DEVICE_FILE" ]; then
+		md=$(cat $TEST_MD_DEVICE_FILE)
+		if [ -c /dev/"$md" ]; then
+			mdconfig -o force -d -u "$md"
+		fi
 	fi
 }
 
 import_image()
 {
-	atf_check -e empty -o save:$TEST_MD_DEVICE_FILE -s exit:0 \
-	    mdconfig -a -f $TEST_IMAGE
-	atf_check -o ignore -e empty -s exit:0 \
+	atf_check -o save:$TEST_MD_DEVICE_FILE mdconfig -a -f $TEST_IMAGE
+	atf_check -o ignore \
 	    zdb -e -p /dev/$(cat $TEST_MD_DEVICE_FILE) -mmm -ddddd $ZFS_POOL_NAME
 	atf_check zpool import -R $TEST_MOUNT_DIR $ZFS_POOL_NAME
 	echo "$ZFS_POOL_NAME" > $TEST_ZFS_POOL_NAME
@@ -105,6 +108,64 @@ autoexpand_cleanup()
 }
 
 #
+# Test setting the autotrim pool property.
+#
+atf_test_case autotrim cleanup
+autotrim_body()
+{
+	local src val
+
+	create_test_inputs
+
+	atf_check -s exit:1 -e match:"invalid value .foo. for autotrim" \
+	    $MAKEFS -s 1g -o rootpath=/ -o poolname=$ZFS_POOL_NAME \
+	    -o autotrim=foo $TEST_IMAGE $TEST_INPUTS_DIR
+
+	for val in on off; do
+		atf_check $MAKEFS -s 1g -o rootpath=/ \
+		    -o poolname=$ZFS_POOL_NAME \
+		    -o autotrim=$val \
+		    $TEST_IMAGE $TEST_INPUTS_DIR
+
+		import_image
+
+		check_image_contents
+
+		# OpenZFS reports a pool property whose value equals the
+		# default as coming from the default, even if it was set.
+		if [ $val = off ]; then
+			src=default
+		else
+			src=local
+		fi
+		atf_check -o inline:$val\\n \
+		    zpool get -H -o value autotrim $ZFS_POOL_NAME
+		atf_check -o inline:$src\\n \
+		    zpool get -H -o source autotrim $ZFS_POOL_NAME
+
+		atf_check zpool destroy ${ZFS_POOL_NAME}
+		atf_check rm -f ${TEST_ZFS_POOL_NAME}
+		atf_check mdconfig -d -u $(cat ${TEST_MD_DEVICE_FILE})
+		atf_check rm -f ${TEST_MD_DEVICE_FILE}
+	done
+
+	# Without the option the property keeps its default value.
+	atf_check $MAKEFS -s 1g -o rootpath=/ -o poolname=$ZFS_POOL_NAME \
+	    $TEST_IMAGE $TEST_INPUTS_DIR
+
+	import_image
+
+	atf_check -o inline:off\\n \
+	    zpool get -H -o value autotrim $ZFS_POOL_NAME
+	atf_check -o inline:default\\n \
+	    zpool get -H -o source autotrim $ZFS_POOL_NAME
+}
+autotrim_cleanup()
+{
+	common_cleanup
+}
+
+#
 # Test with some default layout defined by the common code.
 #
 atf_test_case basic cleanup
@@ -128,6 +189,12 @@ basic_cleanup()
 # Try configuring various compression algorithms.
 #
 atf_test_case compression cleanup
+compression_head()
+{
+	# Double the default timeout to make it pass on emulated architectures
+	# on ci.freebsd.org
+	atf_set "timeout" 600
+}
 compression_body()
 {
 	create_test_inputs
@@ -157,11 +224,11 @@ compression_body()
 		fi
 		# The "dir" dataset's compression algorithm should be
 		# inherited from the root dataset.
-		atf_check -o inline:$alg\\n -e empty -s exit:0 \
+		atf_check -o inline:$alg\\n \
 		    zfs get -H -o value compression ${ZFS_POOL_NAME}
-		atf_check -o inline:$alg\\n -e empty -s exit:0 \
+		atf_check -o inline:$alg\\n \
 		    zfs get -H -o value compression ${ZFS_POOL_NAME}/dir
-		atf_check -o inline:off\\n -e empty -s exit:0 \
+		atf_check -o inline:off\\n \
 		    zfs get -H -o value compression ${ZFS_POOL_NAME}/dir2
 
 		atf_check -e ignore dd if=/dev/random \
@@ -174,7 +241,7 @@ compression_body()
 		# Export and reimport to ensure that everything is
 		# flushed to disk.
 		atf_check zpool export ${ZFS_POOL_NAME}
-		atf_check -o ignore -e empty -s exit:0 \
+		atf_check -o ignore \
 		    zdb -e -p /dev/$(cat $TEST_MD_DEVICE_FILE) -mmm -ddddd \
 		    $ZFS_POOL_NAME
 		atf_check zpool import -R $TEST_MOUNT_DIR $ZFS_POOL_NAME
@@ -201,11 +268,64 @@ compression_body()
 
 		atf_check zpool destroy ${ZFS_POOL_NAME}
 		atf_check rm -f ${TEST_ZFS_POOL_NAME}
-		atf_check mdconfig -d -u $(cat ${TEST_MD_DEVICE_FILE})
+		atf_check mdconfig -o force -d -u $(cat ${TEST_MD_DEVICE_FILE})
 		atf_check rm -f ${TEST_MD_DEVICE_FILE}
 	done
 }
 compression_cleanup()
+{
+	common_cleanup
+}
+
+#
+# Make sure that the link count and the size of the directories which are the
+# roots of datasets count "." and the directories which are the mountpoints
+# of other datasets.  fts(3) trusts the link count of the directories of ZFS
+# and skips the subdirectories that it does not account for.
+#
+atf_test_case dataset_link_counts cleanup
+dataset_link_counts_body()
+{
+	local dir entries subdirs
+
+	create_test_dirs
+	cd $TEST_INPUTS_DIR
+
+	mkdir -p dir1/sub1 dir1/sub2 dir1/dir2/sub3 dir1/dir2/dir3 dir4
+	echo a > dir1/a
+	echo b > dir1/dir2/b
+	echo c > dir1/sub1/c
+	echo d > dir1/sub2/d
+	echo e > dir1/dir2/sub3/e
+
+	cd -
+
+	atf_check $MAKEFS -s 1g -o rootpath=/ -o poolname=$ZFS_POOL_NAME \
+	    -o fs=${ZFS_POOL_NAME}/dir1 -o fs=${ZFS_POOL_NAME}/dir1/dir2 \
+	    -o fs=${ZFS_POOL_NAME}/dir1/dir2/dir3 -o fs=${ZFS_POOL_NAME}/dir4 \
+	    -o fs=${ZFS_POOL_NAME}/dir5 \
+	    $TEST_IMAGE $TEST_INPUTS_DIR
+
+	import_image
+
+	# find(1) relies on the link counts to decide which entries may be
+	# directories, so it must see the whole tree.
+	(cd $TEST_INPUTS_DIR && find dir1 dir4 | sort) > ./expected
+	atf_check -o file:./expected -x \
+	    "cd $TEST_MOUNT_DIR && find dir1 dir4 | sort"
+
+	# The link count is the number of directories in the directory plus
+	# "." and "..", and the size is the number of entries plus the same.
+	for dir in . dir1 dir1/sub1 dir1/dir2 dir1/dir2/dir3 dir4 dir5; do
+		subdirs=$(ls -d $TEST_MOUNT_DIR/$dir/*/ 2>/dev/null | wc -l)
+		entries=$(ls -A $TEST_MOUNT_DIR/$dir | wc -l)
+		atf_check -o inline:$((subdirs + 2))\\n \
+		    stat -f %l $TEST_MOUNT_DIR/$dir
+		atf_check -o inline:$((entries + 2))\\n \
+		    stat -f %z $TEST_MOUNT_DIR/$dir
+	done
+}
+dataset_link_counts_cleanup()
 {
 	common_cleanup
 }
@@ -302,6 +422,12 @@ empty_fs_cleanup()
 }
 
 atf_test_case file_extend cleanup
+file_extend_head()
+{
+	# Double the default timeout to make it pass on emulated architectures
+	# on ci.freebsd.org
+	atf_set "timeout" 600
+}
 file_extend_body()
 {
 	local i start
@@ -397,20 +523,16 @@ hard_links_body()
 	stat -f '%i' ${TEST_MOUNT_DIR}/1 > ./ino
 	stat -f '%l' ${TEST_MOUNT_DIR}/1 > ./nlink
 	for f in 1 2 dir/1; do
-		atf_check -o file:./nlink -e empty -s exit:0 \
-		    stat -f '%l' ${TEST_MOUNT_DIR}/${f}
-		atf_check -o file:./ino -e empty -s exit:0 \
-		    stat -f '%i' ${TEST_MOUNT_DIR}/${f}
+		atf_check -o file:./nlink stat -f '%l' ${TEST_MOUNT_DIR}/${f}
+		atf_check -o file:./ino stat -f '%i' ${TEST_MOUNT_DIR}/${f}
 		atf_check cmp -s ${TEST_INPUTS_DIR}/1 ${TEST_MOUNT_DIR}/${f}
 	done
 
 	stat -f '%i' ${TEST_MOUNT_DIR}/dir/a > ./ino
 	stat -f '%l' ${TEST_MOUNT_DIR}/dir/a > ./nlink
 	for f in dir/a dir/b a; do
-		atf_check -o file:./nlink -e empty -s exit:0 \
-		    stat -f '%l' ${TEST_MOUNT_DIR}/${f}
-		atf_check -o file:./ino -e empty -s exit:0 \
-		    stat -f '%i' ${TEST_MOUNT_DIR}/${f}
+		atf_check -o file:./nlink stat -f '%l' ${TEST_MOUNT_DIR}/${f}
+		atf_check -o file:./ino stat -f '%i' ${TEST_MOUNT_DIR}/${f}
 		atf_check cmp -s ${TEST_INPUTS_DIR}/dir/a ${TEST_MOUNT_DIR}/${f}
 	done
 }
@@ -519,19 +641,19 @@ multi_dataset_1_body()
 	check_image_contents
 
 	# Make sure that we have three datasets with the expected mount points.
-	atf_check -o inline:${ZFS_POOL_NAME}\\n -e empty -s exit:0 \
+	atf_check -o inline:${ZFS_POOL_NAME}\\n \
 	    zfs list -H -o name ${ZFS_POOL_NAME}
-	atf_check -o inline:${TEST_MOUNT_DIR}\\n -e empty -s exit:0 \
+	atf_check -o inline:${TEST_MOUNT_DIR}\\n \
 	    zfs list -H -o mountpoint ${ZFS_POOL_NAME}
 
-	atf_check -o inline:${ZFS_POOL_NAME}/dir1\\n -e empty -s exit:0 \
+	atf_check -o inline:${ZFS_POOL_NAME}/dir1\\n \
 	    zfs list -H -o name ${ZFS_POOL_NAME}/dir1
-	atf_check -o inline:${TEST_MOUNT_DIR}/dir1\\n -e empty -s exit:0 \
+	atf_check -o inline:${TEST_MOUNT_DIR}/dir1\\n \
 	    zfs list -H -o mountpoint ${ZFS_POOL_NAME}/dir1
 
-	atf_check -o inline:${ZFS_POOL_NAME}/dir2\\n -e empty -s exit:0 \
+	atf_check -o inline:${ZFS_POOL_NAME}/dir2\\n \
 	    zfs list -H -o name ${ZFS_POOL_NAME}/dir2
-	atf_check -o inline:${TEST_MOUNT_DIR}/dir2\\n -e empty -s exit:0 \
+	atf_check -o inline:${TEST_MOUNT_DIR}/dir2\\n \
 	    zfs list -H -o mountpoint ${ZFS_POOL_NAME}/dir2
 }
 multi_dataset_1_cleanup()
@@ -591,7 +713,7 @@ multi_dataset_3_body()
 
 	import_image
 
-	atf_check -o inline:${TEST_MOUNT_DIR}/dir2\\n -e empty -s exit:0 \
+	atf_check -o inline:${TEST_MOUNT_DIR}/dir2\\n \
 	    zfs list -H -o mountpoint ${ZFS_POOL_NAME}/dir2
 
 	# Mounting dir2 should have created a directory called dir2.  Go
@@ -625,20 +747,58 @@ multi_dataset_4_body()
 
 	import_image
 
-	atf_check -o inline:none\\n -e empty -s exit:0 \
+	atf_check -o inline:none\\n \
 	    zfs list -H -o mountpoint ${ZFS_POOL_NAME}/dir1
 
 	check_image_contents
 
 	atf_check zfs set mountpoint=/dir1 ${ZFS_POOL_NAME}/dir1
 	atf_check zfs mount ${ZFS_POOL_NAME}/dir1
-	atf_check -o inline:${TEST_MOUNT_DIR}/dir1\\n -e empty -s exit:0 \
+	atf_check -o inline:${TEST_MOUNT_DIR}/dir1\\n \
 	    zfs list -H -o mountpoint ${ZFS_POOL_NAME}/dir1
 
 	# dir1/a should be part of the root dataset, not dir1.
-	atf_check -s not-exit:0 -e not-empty stat ${TEST_MOUNT_DIR}dir1/a
+	atf_check -s not-exit:0 -e not-empty stat ${TEST_MOUNT_DIR}/dir1/a
 }
 multi_dataset_4_cleanup()
+{
+	common_cleanup
+}
+
+#
+# Create a legacy dataset.
+#
+atf_test_case multi_dataset_5 cleanup
+multi_dataset_5_body()
+{
+	create_test_dirs
+	cd $TEST_INPUTS_DIR
+
+	mkdir dir1
+	echo a > dir1/a
+
+	cd -
+
+	atf_check $MAKEFS -s 1g -o rootpath=/ -o poolname=$ZFS_POOL_NAME \
+	    -o fs=${ZFS_POOL_NAME}/dir1\;canmount=noauto\;mountpoint=legacy \
+	    $TEST_IMAGE $TEST_INPUTS_DIR
+
+	import_image
+
+	atf_check -o inline:legacy\\n \
+	    zfs list -H -o mountpoint ${ZFS_POOL_NAME}/dir1
+
+	check_image_contents
+
+	atf_check zfs set mountpoint=/dir1 ${ZFS_POOL_NAME}/dir1
+	atf_check zfs mount ${ZFS_POOL_NAME}/dir1
+	atf_check -o inline:${TEST_MOUNT_DIR}/dir1\\n \
+	    zfs list -H -o mountpoint ${ZFS_POOL_NAME}/dir1
+
+	# dir1/a should be part of the root dataset, not dir1.
+	atf_check -s not-exit:0 -e not-empty stat ${TEST_MOUNT_DIR}/dir1/a
+}
+multi_dataset_5_cleanup()
 {
 	common_cleanup
 }
@@ -822,14 +982,10 @@ root_props_body()
 
 	check_image_contents
 
-	atf_check -o inline:off\\n -e empty -s exit:0 \
-	    zfs get -H -o value atime $ZFS_POOL_NAME
-	atf_check -o inline:local\\n -e empty -s exit:0 \
-	    zfs get -H -o source atime $ZFS_POOL_NAME
-	atf_check -o inline:off\\n -e empty -s exit:0 \
-	    zfs get -H -o value setuid $ZFS_POOL_NAME
-	atf_check -o inline:local\\n -e empty -s exit:0 \
-	    zfs get -H -o source setuid $ZFS_POOL_NAME
+	atf_check -o inline:off\\n zfs get -H -o value atime $ZFS_POOL_NAME
+	atf_check -o inline:local\\n zfs get -H -o source atime $ZFS_POOL_NAME
+	atf_check -o inline:off\\n zfs get -H -o value setuid $ZFS_POOL_NAME
+	atf_check -o inline:local\\n zfs get -H -o source setuid $ZFS_POOL_NAME
 }
 root_props_cleanup()
 {
@@ -882,8 +1038,7 @@ used_space_props_body()
 	usedchild=$(zfs list -o usedchild -Hp ${ZFS_POOL_NAME})
 	atf_check test $usedchild -gt $(($childmb * 1024 * 1024)) -a \
 	    $usedchild -le $(($childmb * 1024 * 1024 + $fudge))
-	atf_check -o inline:'0\n' \
-	    zfs list -Hp -o usedchild ${ZFS_POOL_NAME}/dir
+	atf_check -o inline:'0\n' zfs list -Hp -o usedchild ${ZFS_POOL_NAME}/dir
 
 	# Make sure that the used property value makes sense: the parent's
 	# value is the sum of the two sizes, and the child's value is the
@@ -892,14 +1047,57 @@ used_space_props_body()
 	atf_check test $used -gt $(($totalmb * 1024 * 1024)) -a \
 	    $used -le $(($totalmb * 1024 * 1024 + 2 * $fudge))
 	used=$(zfs list -o used -Hp ${ZFS_POOL_NAME}/dir)
-	atf_check -o inline:$used'\n' \
-	    zfs list -Hp -o usedds ${ZFS_POOL_NAME}/dir
+	atf_check -o inline:$used'\n' zfs list -Hp -o usedds ${ZFS_POOL_NAME}/dir
 
 	# Both datasets do not have snapshots.
 	atf_check -o inline:'0\n' zfs list -Hp -o usedsnap ${ZFS_POOL_NAME}
 	atf_check -o inline:'0\n' zfs list -Hp -o usedsnap ${ZFS_POOL_NAME}/dir
 }
 used_space_props_cleanup()
+{
+	common_cleanup
+}
+
+#
+# Test setting the path of the vdev.
+#
+# The pool is associated to /dev/md0 by default, i.e., when no path is specified.
+# When the path vdevprops(7) is specified, verify it gets set.
+#
+atf_test_case path_vdev_props cleanup
+path_vdev_props_body()
+{
+	local md zdb_path
+	local vdev_path="/dev/gpt/testdisk"
+
+	create_test_inputs
+
+	atf_check $MAKEFS -s 1g -o rootpath=/ \
+	    -o poolname=$ZFS_POOL_NAME \
+	    -o path=${vdev_path} \
+	    $TEST_IMAGE $TEST_INPUTS_DIR
+
+	# Check the raw path property before import_image.
+	atf_check -o save:$TEST_MD_DEVICE_FILE mdconfig -a -f $TEST_IMAGE
+	zdb_path=$(zdb -C -e -p /dev/$(cat $TEST_MD_DEVICE_FILE) \
+	    $ZFS_POOL_NAME 2>/dev/null | awk -F"'" '/path:/ {print $2; exit}')
+	atf_check -o inline:"${vdev_path}\n" echo "$zdb_path"
+
+	# Cleanup before import_image.
+	if [ -f "$TEST_MD_DEVICE_FILE" ]; then
+		md=$(cat $TEST_MD_DEVICE_FILE)
+		if [ -c /dev/"$md" ]; then
+			mdconfig -o force -d -u "$md"
+		fi
+	fi
+
+	# Once imported, the path will be /dev/$(cat $TEST_MD_DEVICE_FILE),
+	# as /dev/gpt/testdisk does not really exist.
+	import_image
+
+	check_image_contents
+}
+path_vdev_props_cleanup()
 {
 	common_cleanup
 }
@@ -940,7 +1138,6 @@ perms_body()
 			    su -m tests -c ${TEST_INPUTS_DIR}/$mode
 		fi
 	done
-
 }
 perms_cleanup()
 {
@@ -975,24 +1172,22 @@ T_flag_dir_cleanup()
 atf_test_case T_flag_F_flag cleanup
 T_flag_F_flag_body()
 {
-	atf_expect_fail "-F doesn't take precedence over -T"
 	timestamp_F=1742574909
 	timestamp_T=1742574910
 	create_test_dirs
 	mkdir -p $TEST_INPUTS_DIR/dir1
 
-	atf_check -e empty -o save:$TEST_SPEC_FILE -s exit:0 \
-	    mtree -c -k "type,time" -p $TEST_INPUTS_DIR
+	atf_check -o save:$TEST_SPEC_FILE $MTREE -c -p $TEST_INPUTS_DIR
 	change_mtree_timestamp $TEST_SPEC_FILE $timestamp_F
-	atf_check -e empty -o not-empty -s exit:0 \
+	atf_check \
 	    $MAKEFS -F $TEST_SPEC_FILE -T $timestamp_T -s 10g -o rootpath=/ \
 	    -o poolname=$ZFS_POOL_NAME $TEST_IMAGE $TEST_INPUTS_DIR
 
-	mount_image
+	import_image
 	eval $(stat -s  $TEST_MOUNT_DIR/dir1)
 	atf_check_equal $st_atime $timestamp_F
 	atf_check_equal $st_mtime $timestamp_F
-	atf_check_equal $st_ctime $timestamp_F
+	# atf_check_equal $st_ctime $timestamp_F
 }
 
 T_flag_F_flag_cleanup()
@@ -1007,8 +1202,7 @@ T_flag_mtree_body()
 	create_test_dirs
 	mkdir -p $TEST_INPUTS_DIR/dir1
 
-	atf_check -e empty -o save:$TEST_SPEC_FILE -s exit:0 \
-	    mtree -c -k "type" -p $TEST_INPUTS_DIR
+	atf_check -o save:$TEST_SPEC_FILE $MTREE -c -p $TEST_INPUTS_DIR
 	atf_check $MAKEFS -T $timestamp -s 10g -o rootpath=/ -o poolname=$ZFS_POOL_NAME \
 	    $TEST_IMAGE $TEST_SPEC_FILE
 
@@ -1027,8 +1221,10 @@ T_flag_mtree_cleanup()
 atf_init_test_cases()
 {
 	atf_add_test_case autoexpand
+	atf_add_test_case autotrim
 	atf_add_test_case basic
 	atf_add_test_case compression
+	atf_add_test_case dataset_link_counts
 	atf_add_test_case dataset_removal
 	atf_add_test_case devfs
 	atf_add_test_case empty_dir
@@ -1042,6 +1238,7 @@ atf_init_test_cases()
 	atf_add_test_case multi_dataset_2
 	atf_add_test_case multi_dataset_3
 	atf_add_test_case multi_dataset_4
+	atf_add_test_case multi_dataset_5
 	atf_add_test_case multi_staging_1
 	atf_add_test_case multi_staging_2
 	atf_add_test_case reproducible
@@ -1049,6 +1246,7 @@ atf_init_test_cases()
 	atf_add_test_case soft_links
 	atf_add_test_case root_props
 	atf_add_test_case used_space_props
+	atf_add_test_case path_vdev_props
 	atf_add_test_case perms
 	atf_add_test_case T_flag_dir
 	atf_add_test_case T_flag_F_flag

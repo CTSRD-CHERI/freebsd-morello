@@ -1,10 +1,13 @@
+# SPDX-License-Identifier: CDDL-1.0
 if CONFIG_KERNEL
 kernel_linuxdir = $(kerneldir)/linux
 kernel_linux_HEADERS = \
 	%D%/kernel/linux/blkdev_compat.h \
 	%D%/kernel/linux/compiler_compat.h \
 	%D%/kernel/linux/dcache_compat.h \
+	%D%/kernel/linux/idmap_compat.h \
 	%D%/kernel/linux/kmap_compat.h \
+	%D%/kernel/linux/kthread_compat.h \
 	%D%/kernel/linux/mm_compat.h \
 	%D%/kernel/linux/mod_compat.h \
 	%D%/kernel/linux/page_compat.h \
@@ -16,6 +19,7 @@ kernel_linux_HEADERS = \
 	%D%/kernel/linux/simd_x86.h \
 	%D%/kernel/linux/utsname_compat.h \
 	%D%/kernel/linux/vfs_compat.h \
+	%D%/kernel/linux/workqueue_compat.h \
 	%D%/kernel/linux/xattr_compat.h
 
 kernel_sysdir = $(kerneldir)/sys
@@ -38,13 +42,16 @@ kernel_sys_HEADERS = \
 	%D%/zfs/sys/trace_zil.h \
 	%D%/zfs/sys/trace_zio.h \
 	%D%/zfs/sys/trace_zrlock.h \
+	%D%/zfs/sys/zfs_acl_impl.h \
 	%D%/zfs/sys/zfs_bootenv_os.h \
 	%D%/zfs/sys/zfs_context_os.h \
 	%D%/zfs/sys/zfs_ctldir.h \
+	%D%/zfs/sys/zfs_debug_os.h \
 	%D%/zfs/sys/zfs_dir.h \
 	%D%/zfs/sys/zfs_vfsops_os.h \
 	%D%/zfs/sys/zfs_vnops_os.h \
 	%D%/zfs/sys/zfs_znode_impl.h \
+	%D%/zfs/sys/zio_crypt_os.h \
 	%D%/zfs/sys/zpl.h
 
 kernel_spl_rpcdir = $(kerneldir)/spl/rpc
@@ -97,7 +104,6 @@ kernel_spl_sys_HEADERS = \
 	%D%/spl/sys/time.h \
 	%D%/spl/sys/timer.h \
 	%D%/spl/sys/trace.h \
-	%D%/spl/sys/trace_spl.h \
 	%D%/spl/sys/trace_taskq.h \
 	%D%/spl/sys/tsd.h \
 	%D%/spl/sys/types.h \

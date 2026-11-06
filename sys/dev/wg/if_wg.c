@@ -43,6 +43,7 @@
 #include <netinet6/in6_var.h>
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
+#include <netinet/ip_encap.h>
 #include <netinet/ip_icmp.h>
 #include <netinet/icmp6.h>
 #include <netinet/udp_var.h>
@@ -532,12 +533,10 @@ wg_peer_get_endpoint(struct wg_peer *peer, struct wg_endpoint *e)
 static int
 wg_aip_addrinfo(struct wg_aip *aip, const void *baddr, uint8_t cidr)
 {
-#if defined(INET) || defined(INET6)
 	struct aip_addr *addr, *mask;
 
 	addr = &aip->a_addr;
 	mask = &aip->a_mask;
-#endif
 	switch (aip->a_af) {
 #ifdef INET
 	case AF_INET:
@@ -1833,6 +1832,8 @@ wg_deliver_in(struct wg_peer *peer)
 
 		CURVNET_SET(if_getvnet(ifp));
 		M_SETFIB(m, if_getfib(ifp));
+		if (V_encap_hash_inbound)
+			encap_set_flowid(m, af);
 #ifdef DEV_NETMAP
 		if ((if_getcapenable(ifp) & IFCAP_NETMAP) != 0)
 			wg_deliver_netmap(ifp, m, af);
@@ -3033,8 +3034,8 @@ wg_clone_create(struct if_clone *ifc, char *name, size_t len,
 	if_attach(ifp);
 	bpfattach(ifp, DLT_NULL, sizeof(uint32_t));
 #ifdef INET6
-	ND_IFINFO(ifp)->flags &= ~ND6_IFF_AUTO_LINKLOCAL;
-	ND_IFINFO(ifp)->flags |= ND6_IFF_NO_DAD;
+	if_getinet6(ifp)->nd_flags &= ~ND6_IFF_AUTO_LINKLOCAL;
+	if_getinet6(ifp)->nd_flags |= ND6_IFF_NO_DAD;
 #endif
 	sx_xlock(&wg_sx);
 	LIST_INSERT_HEAD(&wg_list, sc, sc_entry);
@@ -3241,7 +3242,7 @@ wg_module_init(void)
 	wg_packet_zone = uma_zcreate("wg packet", sizeof(struct wg_packet),
 	     NULL, NULL, NULL, NULL, 0, 0);
 
-	ret = crypto_init();
+	ret = wg_crypto_init();
 	if (ret != 0)
 		return (ret);
 	ret = cookie_init();
@@ -3274,7 +3275,7 @@ wg_module_deinit(void)
 	if (wg_osd_jail_slot != 0)
 		osd_jail_deregister(wg_osd_jail_slot);
 	cookie_deinit();
-	crypto_deinit();
+	wg_crypto_deinit();
 	if (wg_packet_zone != NULL)
 		uma_zdestroy(wg_packet_zone);
 }

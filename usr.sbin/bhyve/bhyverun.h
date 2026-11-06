@@ -34,6 +34,16 @@
 #define	VMEXIT_CONTINUE		(0)
 #define	VMEXIT_ABORT		(-1)
 
+/*
+ * Exit status codes as described in the bhyve(8) manpage.
+ */
+#define BHYVE_EXIT_RESET	0
+#define BHYVE_EXIT_POWEROFF	1
+#define BHYVE_EXIT_HALT		2
+#define BHYVE_EXIT_TRIPLEFAULT	3
+#define BHYVE_EXIT_ERROR	4
+#define BHYVE_EXIT_SUSPEND	5
+
 extern int guest_ncpus;
 extern uint16_t cpu_cores, cpu_sockets, cpu_threads;
 
@@ -74,6 +84,7 @@ void bhyve_parse_gdb_options(const char *opt);
 int bhyve_pincpu_parse(const char *opt);
 int bhyve_topology_parse(const char *opt);
 int bhyve_numa_parse(const char *opt);
+void bhyve_cfg_warn(const char *old, const char *new);
 
 void bhyve_init_vcpu(struct vcpu *vcpu);
 void bhyve_start_vcpu(struct vcpu *vcpu, bool bsp);

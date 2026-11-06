@@ -129,7 +129,7 @@ static struct ieee80211_node *mwl_node_alloc(struct ieee80211vap *,
 static void	mwl_node_cleanup(struct ieee80211_node *);
 static void	mwl_node_drain(struct ieee80211_node *);
 static void	mwl_node_getsignal(const struct ieee80211_node *,
-			int8_t *, int8_t *);
+			net80211_rssi_t *, int8_t *);
 static void	mwl_node_getmimoinfo(const struct ieee80211_node *,
 			struct ieee80211_mimo_info *);
 static int	mwl_rxbuf_init(struct mwl_softc *, struct mwl_rxbuf *);
@@ -432,6 +432,8 @@ mwl_attach(uint16_t devid, struct mwl_softc *sc)
 		| IEEE80211_HTC_AMSDU		/* tx A-MSDU */
 		| IEEE80211_HTC_SMPS		/* SMPS available */
 		;
+
+	ic->ic_flags_ext |= IEEE80211_FEXT_SEQNO_OFFLOAD;
 
 	/*
 	 * Mark h/w crypto support.
@@ -1636,28 +1638,43 @@ _mwl_key_set(struct ieee80211vap *vap, const struct ieee80211_key *k,
 	switch (cip->ic_cipher) {
 	case IEEE80211_CIPHER_WEP:
 		hk.keyTypeId = KEY_TYPE_ID_WEP;
-		hk.keyLen = k->wk_keylen;
+		hk.keyLen = ieee80211_crypto_get_key_len(k);
 		if (k->wk_keyix == vap->iv_def_txkey)
 			hk.keyFlags = KEY_FLAG_WEP_TXKEY;
 		if (!IEEE80211_IS_STATICKEY(k)) {
 			/* NB: WEP is never used for the PTK */
 			(void) addgroupflags(&hk, k);
 		}
+		memcpy(hk.key.aes, ieee80211_crypto_get_key_data(k),
+		    ieee80211_crypto_get_key_len(k));
 		break;
 	case IEEE80211_CIPHER_TKIP:
 		hk.keyTypeId = KEY_TYPE_ID_TKIP;
 		hk.key.tkip.tsc.high = (uint32_t)(k->wk_keytsc >> 16);
 		hk.key.tkip.tsc.low = (uint16_t)k->wk_keytsc;
 		hk.keyFlags = KEY_FLAG_TSC_VALID | KEY_FLAG_MICKEY_VALID;
-		hk.keyLen = k->wk_keylen + IEEE80211_MICBUF_SIZE;
+		hk.keyLen = ieee80211_crypto_get_key_len(k)
+		    + IEEE80211_MICBUF_SIZE;
 		if (!addgroupflags(&hk, k))
 			hk.keyFlags |= KEY_FLAG_PAIRWISE;
+
+		/* Copy in TKIP MIC after the 16 byte main key */
+		memcpy(hk.key.aes, ieee80211_crypto_get_key_data(k),
+		    ieee80211_crypto_get_key_len(k));
+		memcpy(hk.key.aes + IEEE80211_KEYBUF_128_SIZE,
+		    ieee80211_crypto_get_key_txmic_data(k),
+		    8);
+		memcpy(hk.key.aes + IEEE80211_KEYBUF_128_SIZE + 8,
+		    ieee80211_crypto_get_key_rxmic_data(k),
+		    8);
 		break;
 	case IEEE80211_CIPHER_AES_CCM:
 		hk.keyTypeId = KEY_TYPE_ID_AES;
-		hk.keyLen = k->wk_keylen;
+		hk.keyLen = ieee80211_crypto_get_key_len(k);
 		if (!addgroupflags(&hk, k))
 			hk.keyFlags |= KEY_FLAG_PAIRWISE;
+		memcpy(hk.key.aes, ieee80211_crypto_get_key_data(k),
+		    ieee80211_crypto_get_key_len(k));
 		break;
 	default:
 		/* XXX should not happen */
@@ -1665,11 +1682,6 @@ _mwl_key_set(struct ieee80211vap *vap, const struct ieee80211_key *k,
 		    __func__, k->wk_cipher->ic_cipher);
 		return 0;
 	}
-	/*
-	 * NB: tkip mic keys get copied here too; the layout
-	 *     just happens to match that in ieee80211_key.
-	 */
-	memcpy(hk.key.aes, k->wk_key, hk.keyLen);
 
 	/*
 	 * Locate address of sta db entry for writing key;
@@ -1797,7 +1809,7 @@ mwl_updateslot(struct ieee80211com *ic)
 		return;
 
 	/*
-	 * Calculate the ERP flags.  The firwmare will use
+	 * Calculate the ERP flags.  The firmware will use
 	 * this to carry out the appropriate measures.
 	 */
 	prot = 0;
@@ -2153,7 +2165,7 @@ mwl_rxdma_setup(struct mwl_softc *sc)
 	bf = malloc(bsize, M_MWLDEV, M_NOWAIT | M_ZERO);
 	if (bf == NULL) {
 		device_printf(sc->sc_dev, "malloc of %u rx buffers failed\n", bsize);
-		return error;
+		return ENOMEM;
 	}
 	sc->sc_rxdma.dd_bufptr = bf;
 
@@ -2378,7 +2390,7 @@ mwl_node_drain(struct ieee80211_node *ni)
 }
 
 static void
-mwl_node_getsignal(const struct ieee80211_node *ni, int8_t *rssi, int8_t *noise)
+mwl_node_getsignal(const struct ieee80211_node *ni, net80211_rssi_t *rssi, int8_t *noise)
 {
 	*rssi = ni->ni_ic->ic_node_getrssi(ni);
 #ifdef MWL_ANT_INFO_SUPPORT
@@ -3086,6 +3098,8 @@ mwl_tx_start(struct mwl_softc *sc, struct ieee80211_node *ni, struct mwl_txbuf *
 		qos = *(uint16_t *)ieee80211_getqos(wh);
 	} else
 		qos = 0;
+
+	ieee80211_output_seqno_assign(ni, -1, m0);
 
 	if (iswep) {
 		const struct ieee80211_cipher *cip;
@@ -4017,7 +4031,7 @@ mkpeerinfo(MWL_HAL_PEERINFO *pi, const struct ieee80211_node *ni)
 			pi->HTCapabilitiesInfo &= ~IEEE80211_HTCAP_SHORTGI40;
 		if ((vap->iv_flags_ht & IEEE80211_FHT_SHORTGI20) == 0)
 			pi->HTCapabilitiesInfo &= ~IEEE80211_HTCAP_SHORTGI20;
-		if (ni->ni_chw != IEEE80211_STA_RX_BW_40)
+		if (ni->ni_chw != NET80211_STA_RX_BW_40)
 			pi->HTCapabilitiesInfo &= ~IEEE80211_HTCAP_CHWIDTH40;
 	}
 	return pi;

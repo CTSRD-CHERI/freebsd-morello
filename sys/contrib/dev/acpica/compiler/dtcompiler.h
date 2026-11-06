@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2025, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2026, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -610,6 +610,10 @@ DtCompileDrtm (
     void                    **PFieldList);
 
 ACPI_STATUS
+DtCompileDtpr (
+    void                    **PFieldList);
+
+ACPI_STATUS
 DtCompileEinj (
     void                    **PFieldList);
 
@@ -644,6 +648,10 @@ DtCompileHmat (
 ACPI_STATUS
 DtCompileIort (
     void                    **PFieldList);
+
+ACPI_STATUS
+DtCompileIovt (
+    void                    **List);
 
 ACPI_STATUS
 DtCompileIvrs (
@@ -754,6 +762,10 @@ DtCompileSvkl (
     void                    **PFieldList);
 
 ACPI_STATUS
+DtCompileSwft (
+    void                    **PFieldList);
+
+ACPI_STATUS
 DtCompileTcpa (
     void                    **PFieldList);
 
@@ -811,6 +823,7 @@ extern const unsigned char  TemplateDbg2[];
 extern const unsigned char  TemplateDbgp[];
 extern const unsigned char  TemplateDmar[];
 extern const unsigned char  TemplateDrtm[];
+extern const unsigned char  TemplateDtpr[];
 extern const unsigned char  TemplateEcdt[];
 extern const unsigned char  TemplateEinj[];
 extern const unsigned char  TemplateErdt[];
@@ -822,6 +835,7 @@ extern const unsigned char  TemplateHest[];
 extern const unsigned char  TemplateHmat[];
 extern const unsigned char  TemplateHpet[];
 extern const unsigned char  TemplateIort[];
+extern const unsigned char  TemplateIovt[];
 extern const unsigned char  TemplateIvrs[];
 extern const unsigned char  TemplateLpit[];
 extern const unsigned char  TemplateMadt[];
@@ -856,6 +870,7 @@ extern const unsigned char  TemplateSpmi[];
 extern const unsigned char  TemplateSrat[];
 extern const unsigned char  TemplateStao[];
 extern const unsigned char  TemplateSvkl[];
+extern const unsigned char  TemplateSwft[];
 extern const unsigned char  TemplateTcpa[];
 extern const unsigned char  TemplateTdel[];
 extern const unsigned char  TemplateTpm2[];

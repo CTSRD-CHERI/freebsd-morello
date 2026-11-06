@@ -1,3 +1,4 @@
+dnl # SPDX-License-Identifier: CDDL-1.0
 dnl #
 dnl # Certain kernel build options are not supported.  These must be
 dnl # detected at configure time and cause a build failure.  Otherwise
@@ -61,7 +62,7 @@ dnl # Since we plan to pursue making mutex_lock_nested() a non-GPL symbol
 dnl # with the upstream community we add a check to detect this case.
 dnl #
 AC_DEFUN([ZFS_AC_KERNEL_SRC_CONFIG_DEBUG_LOCK_ALLOC], [
-	ZFS_LINUX_TEST_SRC([config_debug_lock_alloc], [
+	ZFS_LINUX_TEST_SRC([config_debug_lock_alloc_license], [
 		#include <linux/mutex.h>
 	],[
 		struct mutex lock;

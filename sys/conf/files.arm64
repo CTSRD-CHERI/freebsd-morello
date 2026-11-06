@@ -9,6 +9,7 @@ kern/subr_devmap.c				standard
 kern/subr_efi_map.c				standard
 kern/subr_intr.c				optional intrng
 kern/subr_physmem.c				standard
+kern/subr_busdma_bufalloc.c			standard
 libkern/strlen.c		standard
 libkern/arm64/crc32c_armv8.S			standard
 
@@ -36,6 +37,7 @@ arm64/arm64/busdma_bounce.c			standard
 arm64/arm64/busdma_machdep.c			standard
 arm64/arm64/clock.c				standard
 arm64/arm64/copyinout.S				standard
+arm64/arm64/copyinout_ifunc.c			standard
 arm64/arm64/cpu_errata.c			standard
 arm64/arm64/cpu_feat.c				standard
 arm64/arm64/cpufunc_asm.S			standard
@@ -57,8 +59,14 @@ arm64/arm64/gicv3_its.c				optional intrng fdt
 arm64/arm64/gic_v3.c				standard
 arm64/arm64/gic_v3_acpi.c			optional acpi
 arm64/arm64/gic_v3_fdt.c			optional fdt
+arm64/arm64/gicv5.c				standard
+arm64/arm64/gicv5_acpi.c			optional acpi
+arm64/arm64/gicv5_fdt.c				optional fdt
+arm64/arm64/gicv5_its.c				standard
+arm64/arm64/gicv5_iwb.c				standard
 arm64/arm64/hyp_stub.S				standard
 arm64/arm64/identcpu.c				standard
+arm64/arm64/kexec_support.c			standard
 arm64/arm64/locore.S				standard no-obj
 arm64/arm64/machdep.c				standard
 arm64/arm64/machdep_boot.c			standard
@@ -73,10 +81,13 @@ arm64/arm64/ofw_machdep.c			optional fdt
 arm64/arm64/pl031_rtc.c				optional fdt pl031
 arm64/arm64/ptrauth.c				standard \
 	compile-with	"${NORMAL_C:N-mbranch-protection*} -mbranch-protection=bti"
+arm64/arm64/mte.c				standard
 arm64/arm64/pmap.c				standard
 arm64/arm64/ptrace_machdep.c			standard
+arm64/arm64/rsi.c				standard
 arm64/arm64/sdt_machdep.c			optional kdtrace_hooks
 arm64/arm64/sigtramp.S				standard
+arm64/arm64/spec_workaround.c			standard
 arm64/arm64/stack_machdep.c			optional ddb | stack
 arm64/arm64/strcmp.S				standard
 arm64/arm64/strncmp.S				standard
@@ -130,11 +141,22 @@ arm64/vmm/vmm_arm64.c				optional vmm
 arm64/vmm/vmm_reset.c				optional vmm
 arm64/vmm/vmm_handlers.c			optional vmm
 arm64/vmm/vmm_call.S				optional vmm
+arm64/vmm/hyp_genassym.c			optional vmm		\
+	dependency  "offset.inc"					\
+	compile-with "${NOSAN_C:N-flto*:N-fno-common} -fcommon"		\
+	no-obj
+hyp_assym.h					optional vmm		\
+	dependency  "hyp_genassym.o"					\
+	compile-with "sh $S/kern/genassym.sh hyp_genassym.o > ${.TARGET}" \
+	no-obj no-implicit-rule before-depend
 arm64/vmm/vmm_nvhe_exception.S			optional vmm		\
+	dependency	"hyp_assym.h"					\
+	dependency	"$S/arm64/vmm/vmm_hyp_exception.S"		\
 	compile-with "${NOSAN_C} -fpie"					\
 	no-obj
 arm64/vmm/vmm_nvhe.c				optional vmm		\
-	compile-with "${NOSAN_C} -fpie"					\
+	dependency	"$S/arm64/vmm/vmm_hyp.c"			\
+	compile-with "${NOSAN_C:N-fstack-protector*} -fpie"		\
 	no-obj
 vmm_hyp_blob.elf.full				optional vmm		\
 	dependency	"vmm_nvhe.o vmm_nvhe_exception.o"			\
@@ -152,7 +174,9 @@ arm64/vmm/vmm_hyp_el2.S				optional vmm		\
 	dependency	vmm_hyp_blob.bin
 arm64/vmm/vmm_mmu.c				optional vmm
 arm64/vmm/vmm_vhe.c				optional vmm
-arm64/vmm/vmm_vhe_exception.S			optional vmm
+arm64/vmm/vmm_vhe_exception.S			optional vmm		\
+	dependency	"hyp_assym.h"					\
+	dependency	"$S/arm64/vmm/vmm_hyp_exception.S"
 arm64/vmm/io/vgic.c				optional vmm
 arm64/vmm/io/vgic_v3.c				optional vmm
 arm64/vmm/io/vgic_if.m				optional vmm
@@ -160,6 +184,7 @@ arm64/vmm/io/vtimer.c				optional vmm
 dev/vmm/vmm_dev.c				optional vmm
 dev/vmm/vmm_mem.c				optional vmm
 dev/vmm/vmm_stat.c				optional vmm
+dev/vmm/vmm_vm.c				optional vmm
 
 crypto/armv8/armv8_crypto.c			optional armv8crypto
 armv8_crypto_wrap.o				optional armv8crypto	\
@@ -172,15 +197,24 @@ aesv8-armx.o					optional armv8crypto | ossl	\
 	compile-with	"${CC} -c ${CFLAGS:C/^-O2$/-O3/:N-nostdinc:N-mgeneral-regs-only} -I$S/crypto/armv8 -I$S/crypto/openssl ${WERROR} ${NO_WCAST_QUAL} ${CFLAGS:M-march=*:S/^$/-march=armv8-a/}+crypto ${.IMPSRC}" \
 	no-implicit-rule						\
 	clean		"aesv8-armx.o"
-ghashv8-armx.o					optional armv8crypto	\
+ghashv8-armx.o					optional armv8crypto | ossl \
 	dependency	"$S/crypto/openssl/aarch64/ghashv8-armx.S"	\
 	compile-with	"${CC} -c ${CFLAGS:C/^-O2$/-O3/:N-nostdinc:N-mgeneral-regs-only} -I$S/crypto/armv8 -I$S/crypto/openssl ${WERROR} ${NO_WCAST_QUAL} ${CFLAGS:M-march=*:S/^$/-march=armv8-a/}+crypto ${.IMPSRC}" \
 	no-implicit-rule						\
 	clean		"ghashv8-armx.o"
 
+aes-gcm-armv8_64.o				optional ossl		\
+	dependency	"$S/crypto/openssl/aarch64/aes-gcm-armv8_64.S" \
+	compile-with	"${CC} -c ${CFLAGS:N-nostdinc:N-mgeneral-regs-only} -I$S/crypto/openssl ${WERROR} ${NO_WCAST_QUAL} ${CFLAGS:M-march=*:S/^$/-march=armv8-a/}+crypto ${.IMPSRC}" \
+	no-implicit-rule						\
+	clean		"aes-gcm-armv8_64.o"
+
 crypto/des/des_enc.c				optional netsmb
 crypto/openssl/ossl_aarch64.c			optional ossl
+crypto/openssl/ossl_aes_gcm.c			optional ossl
 crypto/openssl/aarch64/chacha-armv8.S		optional ossl		\
+	compile-with	"${CC} -c ${CFLAGS:N-mgeneral-regs-only} -I$S/crypto/openssl ${WERROR} ${.IMPSRC}"
+crypto/openssl/aarch64/chacha-armv8-sve.S	optional ossl		\
 	compile-with	"${CC} -c ${CFLAGS:N-mgeneral-regs-only} -I$S/crypto/openssl ${WERROR} ${.IMPSRC}"
 crypto/openssl/aarch64/poly1305-armv8.S		optional ossl		\
 	compile-with	"${CC} -c ${CFLAGS:N-mgeneral-regs-only} -I$S/crypto/openssl ${WERROR} ${.IMPSRC}"
@@ -199,9 +233,11 @@ dev/acpica/acpi_pci.c				optional acpi pci
 dev/acpica/acpi_pci_link.c			optional acpi pci
 dev/acpica/acpi_pcib.c				optional acpi pci
 dev/acpica/acpi_pxm.c				optional acpi
+dev/acpi_support/acpi_wmi_if.m			optional acpi acpi_wmi
 dev/ahci/ahci_generic.c				optional ahci
 
 cddl/dev/dtrace/aarch64/dtrace_asm.S		optional dtrace compile-with "${DTRACE_S}"
+cddl/dev/dtrace/aarch64/dtrace_isa.c		optional dtrace compile-with "${DTRACE_C}"
 cddl/dev/dtrace/aarch64/dtrace_subr.c		optional dtrace compile-with "${DTRACE_C}"
 cddl/dev/fbt/aarch64/fbt_isa.c			optional dtrace_fbt | dtraceall compile-with "${FBT_C}"
 
@@ -253,6 +289,7 @@ dev/dpaa2/dpaa2_channel.c			optional soc_nxp_ls dpaa2
 dev/dpaa2/dpaa2_cmd_if.m			optional soc_nxp_ls dpaa2
 dev/dpaa2/dpaa2_con.c				optional soc_nxp_ls dpaa2
 dev/dpaa2/dpaa2_console.c			optional soc_nxp_ls dpaa2 fdt
+dev/dpaa2/dpaa2_frame.c				optional soc_nxp_ls dpaa2
 dev/dpaa2/dpaa2_io.c				optional soc_nxp_ls dpaa2
 dev/dpaa2/dpaa2_mac.c				optional soc_nxp_ls dpaa2
 dev/dpaa2/dpaa2_mc.c				optional soc_nxp_ls dpaa2
@@ -406,6 +443,35 @@ dev/ipmi/ipmi_smbus.c				optional ipmi smbus
 dev/ipmi/ipmi_smic.c				optional ipmi
 dev/ipmi/ipmi_ssif.c				optional ipmi smbus
 
+dev/ixl/if_ixl.c		optional	ixl pci \
+	compile-with "${NORMAL_C} -I$S/dev/ixl"
+dev/ixl/ixl_pf_main.c		optional	ixl pci \
+	compile-with "${NORMAL_C} -I$S/dev/ixl"
+dev/ixl/ixl_pf_iflib.c		optional	ixl pci \
+	compile-with "${NORMAL_C} -I$S/dev/ixl"
+dev/ixl/ixl_pf_qmgr.c		optional	ixl pci \
+	compile-with "${NORMAL_C} -I$S/dev/ixl"
+dev/ixl/ixl_pf_iov.c		optional	ixl pci  pci_iov \
+	compile-with "${NORMAL_C} -I$S/dev/ixl"
+dev/ixl/ixl_pf_i2c.c		optional	ixl pci \
+	compile-with "${NORMAL_C} -I$S/dev/ixl"
+dev/ixl/ixl_txrx.c		optional	ixl pci \
+	compile-with "${NORMAL_C} -I$S/dev/ixl"
+dev/ixl/i40e_osdep.c		optional	ixl pci \
+	compile-with "${NORMAL_C} -I$S/dev/ixl"
+dev/ixl/i40e_lan_hmc.c		optional	ixl pci \
+	compile-with "${NORMAL_C} -I$S/dev/ixl"
+dev/ixl/i40e_hmc.c		optional	ixl pci \
+	compile-with "${NORMAL_C} -I$S/dev/ixl"
+dev/ixl/i40e_common.c		optional	ixl pci \
+	compile-with "${NORMAL_C} -I$S/dev/ixl"
+dev/ixl/i40e_nvm.c		optional	ixl pci \
+	compile-with "${NORMAL_C} -I$S/dev/ixl"
+dev/ixl/i40e_adminq.c		optional	ixl pci \
+	compile-with "${NORMAL_C} -I$S/dev/ixl"
+dev/ixl/i40e_dcb.c		optional	ixl pci \
+	compile-with "${NORMAL_C} -I$S/dev/ixl"
+
 dev/mailbox/arm/arm_doorbell.c			optional fdt arm_doorbell
 dev/mbox/mbox_if.m				optional soc_brcm_bcm2837
 
@@ -416,7 +482,6 @@ dev/mmc/host/dwmmc_rockchip.c			optional dwmmc rk_dwmmc fdt
 dev/neta/if_mvneta_fdt.c			optional neta fdt
 dev/neta/if_mvneta.c				optional neta mdio mii fdt
 
-dev/ofw/ofw_cpu.c				optional fdt
 dev/ofw/ofw_pci.c				optional fdt pci
 dev/ofw/ofw_pcib.c				optional fdt pci
 
@@ -529,6 +594,7 @@ dev/clk/allwinner/ccu_a64.c			optional soc_allwinner_a64 aw_ccu fdt
 dev/clk/allwinner/ccu_h3.c			optional soc_allwinner_h5 aw_ccu fdt
 dev/clk/allwinner/ccu_h6.c			optional soc_allwinner_h6 aw_ccu fdt
 dev/clk/allwinner/ccu_h6_r.c			optional soc_allwinner_h6 aw_ccu fdt
+dev/clk/allwinner/ccu_h616.c			optional soc_allwinner_h616 aw_ccu fdt
 dev/clk/allwinner/ccu_sun8i_r.c			optional aw_ccu fdt
 dev/clk/allwinner/ccu_de2.c			optional aw_ccu fdt
 
@@ -539,6 +605,8 @@ arm/allwinner/h3/h3_padconf.c			optional soc_allwinner_h5 fdt
 arm/allwinner/h3/h3_r_padconf.c			optional soc_allwinner_h5 fdt
 arm/allwinner/h6/h6_padconf.c			optional soc_allwinner_h6 fdt
 arm/allwinner/h6/h6_r_padconf.c			optional soc_allwinner_h6 fdt
+arm/allwinner/h616/h616_padconf.c		optional soc_allwinner_h616 fdt
+arm/allwinner/h616/h616_r_padconf.c		optional soc_allwinner_h616 fdt
 
 # Altera/Intel
 arm64/intel/stratix10-soc-fpga-mgr.c		optional soc_intel_stratix10 fdt
@@ -588,23 +656,24 @@ arm/broadcom/bcm2835/bcm283x_dwc_fdt.c			optional dwcotg fdt soc_brcm_bcm2837 | 
 arm/broadcom/bcm2835/bcm2838_pci.c			optional soc_brcm_bcm2838 fdt pci
 arm/broadcom/bcm2835/bcm2838_xhci.c			optional soc_brcm_bcm2838 fdt pci xhci
 arm/broadcom/bcm2835/raspberrypi_gpio.c			optional soc_brcm_bcm2837 gpio fdt | soc_brcm_bcm2838 gpio fdt
-contrib/vchiq/interface/compat/vchi_bsd.c		optional vchiq soc_brcm_bcm2837 \
+arm/broadcom/bcm2835/raspberrypi_virtgpio.c		optional soc_brcm_bcm2837 gpio fdt | soc_brcm_bcm2838 gpio fdt
+contrib/vchiq/interface/compat/vchi_bsd.c		optional vchiq soc_brcm_bcm2837 fdt \
 	compile-with "${NORMAL_C} -DUSE_VCHIQ_ARM -D__VCCOREVER__=0x04000000 -I$S/contrib/vchiq"
-contrib/vchiq/interface/vchiq_arm/vchiq_2835_arm.c	optional vchiq soc_brcm_bcm2837 \
+contrib/vchiq/interface/vchiq_arm/vchiq_2835_arm.c	optional vchiq soc_brcm_bcm2837 fdt \
 	compile-with "${NORMAL_C} -Wno-unused -DUSE_VCHIQ_ARM -D__VCCOREVER__=0x04000000 -I$S/contrib/vchiq"
-contrib/vchiq/interface/vchiq_arm/vchiq_arm.c		optional vchiq soc_brcm_bcm2837 \
-	compile-with "${NORMAL_C} -Wno-unused -DUSE_VCHIQ_ARM -D__VCCOREVER__=0x04000000 -I$S/contrib/vchiq"
-contrib/vchiq/interface/vchiq_arm/vchiq_connected.c	optional vchiq soc_brcm_bcm2837 \
+contrib/vchiq/interface/vchiq_arm/vchiq_arm.c		optional vchiq soc_brcm_bcm2837 fdt \
+	compile-with "${NORMAL_C} -Wno-unused ${NO_WDEFAULT_CONST_INIT_FIELD_UNSAFE} -DUSE_VCHIQ_ARM -D__VCCOREVER__=0x04000000 -I$S/contrib/vchiq"
+contrib/vchiq/interface/vchiq_arm/vchiq_connected.c	optional vchiq soc_brcm_bcm2837 fdt \
 	compile-with "${NORMAL_C} -DUSE_VCHIQ_ARM -D__VCCOREVER__=0x04000000 -I$S/contrib/vchiq"
-contrib/vchiq/interface/vchiq_arm/vchiq_core.c		optional vchiq soc_brcm_bcm2837 \
+contrib/vchiq/interface/vchiq_arm/vchiq_core.c		optional vchiq soc_brcm_bcm2837 fdt \
 	compile-with "${NORMAL_C} -DUSE_VCHIQ_ARM -D__VCCOREVER__=0x04000000 -I$S/contrib/vchiq"
-contrib/vchiq/interface/vchiq_arm/vchiq_kern_lib.c	optional vchiq soc_brcm_bcm2837 \
+contrib/vchiq/interface/vchiq_arm/vchiq_kern_lib.c	optional vchiq soc_brcm_bcm2837 fdt \
 	compile-with "${NORMAL_C} -DUSE_VCHIQ_ARM -D__VCCOREVER__=0x04000000 -I$S/contrib/vchiq"
-contrib/vchiq/interface/vchiq_arm/vchiq_kmod.c		optional vchiq soc_brcm_bcm2837 \
+contrib/vchiq/interface/vchiq_arm/vchiq_kmod.c		optional vchiq soc_brcm_bcm2837 fdt \
 	compile-with "${NORMAL_C} -DUSE_VCHIQ_ARM -D__VCCOREVER__=0x04000000 -I$S/contrib/vchiq"
-contrib/vchiq/interface/vchiq_arm/vchiq_shim.c		optional vchiq soc_brcm_bcm2837 \
+contrib/vchiq/interface/vchiq_arm/vchiq_shim.c		optional vchiq soc_brcm_bcm2837 fdt \
 	compile-with "${NORMAL_C} -DUSE_VCHIQ_ARM -D__VCCOREVER__=0x04000000 -I$S/contrib/vchiq"
-contrib/vchiq/interface/vchiq_arm/vchiq_util.c		optional vchiq soc_brcm_bcm2837 \
+contrib/vchiq/interface/vchiq_arm/vchiq_util.c		optional vchiq soc_brcm_bcm2837 fdt \
 	compile-with "${NORMAL_C} -DUSE_VCHIQ_ARM -D__VCCOREVER__=0x04000000 -I$S/contrib/vchiq"
 
 # Cavium
@@ -725,8 +794,27 @@ dev/ahci/ahci_fsl_fdt.c				optional soc_nxp_ls ahci fdt
 dev/flash/flexspi/flex_spi.c    		optional clk flex_spi soc_nxp_ls fdt
 
 # Qualcomm
-arm64/qualcomm/qcom_gcc.c			optional qcom_gcc fdt
+dev/qcom_gcc/qcom_gcc_main.c			optional qcom_gcc fdt
+dev/qcom_gcc/qcom_gcc_clock.c			optional qcom_gcc fdt
+dev/qcom_gcc/qcom_gcc_reset.c			optional qcom_gcc fdt
+dev/qcom_gcc/qcom_gcc_ipq4018_reset.c		optional qcom_gcc fdt
+dev/qcom_gcc/qcom_gcc_ipq4018_clock.c		optional qcom_gcc fdt
+dev/qcom_gcc/qcom_gcc_msm8916_reset.c		optional qcom_gcc fdt
+dev/qcom_gcc/qcom_gcc_msm8916_clock.c		optional qcom_gcc fdt
+dev/qcom_clk/qcom_clk_fepll.c			optional qcom_gcc fdt
+dev/qcom_clk/qcom_clk_fdiv.c			optional qcom_gcc fdt
+dev/qcom_clk/qcom_clk_apssdiv.c			optional qcom_gcc fdt
+dev/qcom_clk/qcom_clk_freqtbl.c			optional qcom_gcc fdt
+dev/qcom_clk/qcom_clk_rcg2.c			optional qcom_gcc fdt
+dev/qcom_clk/qcom_clk_branch2.c			optional qcom_gcc fdt
+dev/qcom_clk/qcom_clk_ro_div.c			optional qcom_gcc fdt
 dev/qcom_mdio/qcom_mdio_ipq4018.c		optional qcom_mdio fdt mdio mii
+dev/qcom_tlmm/qcom_tlmm_debug.c			optional qcom_tlmm gpio
+dev/qcom_tlmm/qcom_tlmm_pin.c			optional qcom_tlmm gpio
+dev/qcom_tlmm/qcom_tlmm_pinmux.c		optional qcom_tlmm gpio
+dev/qcom_tlmm/qcom_tlmm.c			optional qcom_tlmm gpio
+dev/qcom_tlmm/qcom_tlmm_ipq4018.c		optional qcom_tlmm gpio
+dev/qcom_tlmm/qcom_tlmm_ipq4018_hw.c		optional qcom_tlmm gpio
 
 # RockChip Drivers
 arm64/rockchip/rk3328_codec.c			optional fdt rk3328codec soc_rockchip_rk3328
@@ -762,6 +850,7 @@ dev/clk/rockchip/rk_clk_armclk.c		optional fdt soc_rockchip
 dev/clk/rockchip/rk_clk_composite.c		optional fdt soc_rockchip
 dev/clk/rockchip/rk_clk_fract.c			optional fdt soc_rockchip
 dev/clk/rockchip/rk_clk_gate.c			optional fdt soc_rockchip
+dev/clk/rockchip/rk_clk_mmc.c			optional fdt soc_rockchip
 dev/clk/rockchip/rk_clk_mux.c			optional fdt soc_rockchip
 dev/clk/rockchip/rk_clk_pll.c			optional fdt soc_rockchip
 dev/clk/rockchip/rk3328_cru.c			optional fdt soc_rockchip_rk3328

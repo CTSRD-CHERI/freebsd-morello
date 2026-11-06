@@ -289,18 +289,17 @@ ipsec_accel_sa_newkey_cb(if_t ifp, void *arg)
 	    be32toh(tq->sav->spi), tq->sav->flags, tq->sav->seq);
 	priv = NULL;
 	drv_spi = alloc_unr(drv_spi_unr);
+	if (drv_spi == -1) {
+		dprintf("ipsec_accel_sa_install_newkey: cannot alloc "
+		    "drv_spi if %s spi %#x\n", if_name(ifp),
+		    be32toh(tq->sav->spi));
+		return (0);
+	}
 	if (tq->sav->accel_ifname != NULL &&
 	    strcmp(tq->sav->accel_ifname, if_name(ifp)) != 0) {
 		error = ipsec_accel_handle_sav(tq->sav,
 		    ifp, drv_spi, priv, IFP_HS_REJECTED, NULL);
 		goto out;
-	}
-	if (drv_spi == -1) {
-		/* XXXKIB */
-		dprintf("ipsec_accel_sa_install_newkey: cannot alloc "
-		    "drv_spi if %s spi %#x\n", if_name(ifp),
-		    be32toh(tq->sav->spi));
-		return (ENOMEM);
 	}
 	error = ifp->if_ipsec_accel_m->if_sa_newkey(ifp, tq->sav,
 	    drv_spi, &priv);
@@ -309,27 +308,49 @@ ipsec_accel_sa_newkey_cb(if_t ifp, void *arg)
 			dprintf("ipsec_accel_sa_newkey: driver "
 			    "refused sa if %s spi %#x\n",
 			    if_name(ifp), be32toh(tq->sav->spi));
-			error = ipsec_accel_handle_sav(tq->sav,
-			    ifp, drv_spi, priv, IFP_HS_REJECTED, NULL);
-			/* XXXKIB */
 		} else {
 			dprintf("ipsec_accel_sa_newkey: driver "
 			    "error %d if %s spi %#x\n",
 			    error, if_name(ifp), be32toh(tq->sav->spi));
-			/* XXXKIB */
+		}
+		error = ipsec_accel_handle_sav(tq->sav, ifp, drv_spi, priv,
+		    IFP_HS_REJECTED, NULL);
+		if (error != 0) {
+			dprintf("ipsec_accel_sa_newkey: handle_sav REJECTED "
+			    "err %d if %s spi %#x\n", error,
+			    if_name(ifp), be32toh(tq->sav->spi));
+			free_unr(drv_spi_unr, drv_spi);
 		}
 	} else {
 		error = ipsec_accel_handle_sav(tq->sav, ifp,
 		    drv_spi, priv, IFP_HS_HANDLED, NULL);
 		if (error != 0) {
-			/* XXXKIB */
-			dprintf("ipsec_accel_sa_newkey: handle_sav "
+			dprintf("ipsec_accel_sa_newkey: handle_sav HANDLED "
 			    "err %d if %s spi %#x\n", error,
 			    if_name(ifp), be32toh(tq->sav->spi));
+			error = ifp->if_ipsec_accel_m->if_sa_deinstall(ifp,
+			    drv_spi, priv);
+			if (error == 0)
+				free_unr(drv_spi_unr, drv_spi);
+			/*
+			 * If driver refused to deinstall the SA, keep
+			 * drv_spi leaked so that it is not reused.
+			 * The SA is still programmed into the
+			 * hardware with the drv_spi ident, so it is
+			 * better to leak the drv_spi then reuse for
+			 * another SA and have issues due to aliasing.
+			 */
 		}
 	}
 out:
-	return (error);
+	/*
+	 * Return 0, ignoring any errors from the SA installation.
+	 * This function is a callback for if_foreach_sleep(), which
+	 * stops iteration if one of the callbacks returns non-zero.
+	 * We need to offer the SA to all interfaces that could
+	 * offload it.
+	 */
+	return (0);
 }
 
 static void
@@ -663,7 +684,7 @@ ipsec_accel_spdadd_cb(if_t ifp, void *arg)
 	if (error != 0) {
 		dprintf("ipsec_accel_spdadd: %s if_spdadd %p remember res %d\n",
 		    if_name(ifp), sp, error);
-		return (error);
+		return (0);
 	}
 	error = ifp->if_ipsec_accel_m->if_spdadd(ifp, sp, inp, &i->ifdata);
 	if (error != 0) {
@@ -671,7 +692,7 @@ ipsec_accel_spdadd_cb(if_t ifp, void *arg)
 		dprintf("ipsec_accel_spdadd: %s if_spdadd %p res %d\n",
 		    if_name(ifp), sp, error);
 	}
-	return (error);
+	return (0);
 }
 
 static void
@@ -830,8 +851,6 @@ ipsec_accel_on_ifdown_impl(struct ifnet *ifp)
 static void
 ipsec_accel_ifdetach_event(void *arg __unused, struct ifnet *ifp)
 {
-	if ((ifp->if_flags & IFF_RENAMING) != 0)
-		return;
 	ipsec_accel_on_ifdown_impl(ifp);
 }
 

@@ -1,4 +1,5 @@
-ZFSTOP=	${SRCTOP}/sys/contrib/openzfs
+.include <bsd.init.mk>
+.include <bsd.compiler.mk>
 
 .PATH: ${ZFSTOP}/cmd/zstream
 .PATH: ${ZFSTOP}/man/man8
@@ -10,11 +11,23 @@ MLINKS=	zstream.8 zstreamdump.8
 INCS=	zstream.h
 SRCS= \
 	zstream.c \
+	zstream_backtrace.c \
+	zstream_byteswap.c \
+	zstream_chain.c \
 	zstream_decompress.c \
+	zstream_drop_records.c \
 	zstream_dump.c \
+	zstream_fletcher4.c \
+	zstream_io.c \
+	zstream_queue.c \
+	zstream_raw.c \
 	zstream_recompress.c  \
 	zstream_redup.c \
-	zstream_token.c
+	zstream_selftest.c \
+	zstream_selftest_queue.c \
+	zstream_token.c \
+	zstream_util.c \
+	zstream_validate.c
 
 SYMLINKS=	zstream ${BINDIR}/zstreamdump
 
@@ -25,14 +38,18 @@ CFLAGS+= \
 	-I${ZFSTOP}/include \
 	-I${ZFSTOP}/lib/libspl/include \
 	-I${ZFSTOP}/lib/libspl/include/os/freebsd \
-	-I${SRCTOP}/sys/contrib/openzfs/lib/libzpool/include \
+	-I${ZFSTOP}/lib/libzpool/include \
 	-I${SRCTOP}/sys \
 	-I${SRCTOP}/cddl/compat/opensolaris/include \
 	-I${ZFSTOP}/module/icp/include \
+	-include ${ZFSTOP}/include/sys/simd_config.h \
 	-include ${ZFSTOP}/include/os/freebsd/spl/sys/ccompile.h \
 	-DHAVE_ISSETUGID \
 	-include ${SRCTOP}/sys/modules/zfs/zfs_config.h
+.if ${COMPILER_TYPE} == "clang"
+CFLAGS.zstream_io.c+=	-Wno-error=atomic-alignment
+.endif
 
-LIBADD=	geom m nvpair umem uutil avl spl zfs_core zfs zutil zpool
+LIBADD=	geom m nvpair umem avl spl zfs_core zfs zutil zpool pthread
 
 .include <bsd.prog.mk>

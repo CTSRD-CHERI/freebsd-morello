@@ -43,6 +43,7 @@
 #include "opt_inet6.h"
 
 #include <fs/nfs/nfsport.h>
+#include <fs/nfs/nfsid.h>
 #include <fs/nfsclient/nfsmount.h>
 
 #include <sys/extattr.h>
@@ -69,6 +70,7 @@ struct nfsreqhead nfsd_reqq;
 int nfsrv_lease = NFSRV_LEASE;
 int ncl_mbuf_mlen = MLEN;
 int nfsrv_doflexfile = 0;
+bool nfs_nfsv4root = false;
 NFSNAMEIDMUTEX;
 NFSSOCKMUTEX;
 extern int nfsrv_lughashsize;
@@ -79,19 +81,34 @@ extern struct nfsdevicehead nfsrv_devidhead;
 extern struct nfsstatsv1 nfsstatsv1;
 extern uint32_t nfs_srvmaxio;
 
-NFSD_VNET_DEFINE(int, nfsd_enable_stringtouid) = 0;
-NFSD_VNET_DEFINE(struct nfssockreq, nfsrv_nfsuserdsock);
-NFSD_VNET_DEFINE(nfsuserd_state, nfsrv_nfsuserd) = NOTRUNNING;
-NFSD_VNET_DEFINE(uid_t, nfsrv_defaultuid) = UID_NOBODY;
-NFSD_VNET_DEFINE(gid_t, nfsrv_defaultgid) = GID_NOGROUP;
+/*
+ * Define just enough NFSv4 id<-->name mappings to make things work
+ * until the nfsuserd(8) is running.
+ * XXX These name/ids must be kept the same as what is in /etc/passwd
+ *     and /etc/group.
+ */
+struct nfs_prime_userd nfs_prime_userd[] = {
+	{ NFSID_INITIALIZE,	UID_NOBODY,	GID_NOGROUP,	NULL },
+	{ NFSID_ADDUID,		UID_ROOT,	GID_NOGROUP,	"root" },
+	{ NFSID_ADDUID,		UID_BIN,	GID_NOGROUP,	"bin" },
+	{ NFSID_ADDGID,		UID_NOBODY,	GID_WHEEL,	"wheel" },
+	{ NFSID_ADDGID,		UID_NOBODY,	GID_OPERATOR,	"operator" },
+	{ 0,			0,		0,		NULL },
+};
 
-NFSD_VNET_DEFINE_STATIC(int, nfsrv_userdupcalls) = 0;
+VNET_DEFINE(int, nfsd_enable_stringtouid) = 0;
+VNET_DEFINE(struct nfssockreq, nfsrv_nfsuserdsock);
+VNET_DEFINE(nfsuserd_state, nfsrv_nfsuserd) = NOTRUNNING;
+VNET_DEFINE(uid_t, nfsrv_defaultuid) = UID_NOBODY;
+VNET_DEFINE(gid_t, nfsrv_defaultgid) = GID_NOGROUP;
+
+VNET_DEFINE_STATIC(int, nfsrv_userdupcalls) = 0;
 
 SYSCTL_DECL(_vfs_nfs);
 
-NFSD_VNET_DEFINE_STATIC(int, nfs_enable_uidtostring) = 0;
+VNET_DEFINE_STATIC(int, nfs_enable_uidtostring) = 0;
 SYSCTL_INT(_vfs_nfs, OID_AUTO, enable_uidtostring,
-    CTLFLAG_NFSD_VNET | CTLFLAG_RW, &NFSD_VNET_NAME(nfs_enable_uidtostring), 0,
+    CTLFLAG_VNET | CTLFLAG_RW, &VNET_NAME(nfs_enable_uidtostring), 0,
     "Make nfs always send numeric owner_names");
 
 int nfsrv_maxpnfsmirror = 1;
@@ -194,20 +211,19 @@ struct nfsv4_opflag nfsv4_opflag[NFSV42_NOPS] = {
 	{ 0, 1, 1, 1, LK_EXCLUSIVE, 1, 1 },		/* Removexattr */
 };
 
-static int ncl_mbuf_mhlen = MHLEN;
 struct nfsrv_lughash {
 	struct mtx		mtx;
 	struct nfsuserhashhead	lughead;
 };
 
-NFSD_VNET_DEFINE_STATIC(int, nfsrv_usercnt) = 0;
-NFSD_VNET_DEFINE_STATIC(int, nfsrv_dnsnamelen) = 0;
-NFSD_VNET_DEFINE_STATIC(int, nfsrv_usermax) = 999999999;
-NFSD_VNET_DEFINE_STATIC(struct nfsrv_lughash *, nfsuserhash) = NULL;
-NFSD_VNET_DEFINE_STATIC(struct nfsrv_lughash *, nfsusernamehash) = NULL;
-NFSD_VNET_DEFINE_STATIC(struct nfsrv_lughash *, nfsgrouphash) = NULL;
-NFSD_VNET_DEFINE_STATIC(struct nfsrv_lughash *, nfsgroupnamehash) = NULL;
-NFSD_VNET_DEFINE_STATIC(u_char *, nfsrv_dnsname) = NULL;
+VNET_DEFINE_STATIC(int, nfsrv_usercnt) = 0;
+VNET_DEFINE_STATIC(int, nfsrv_dnsnamelen) = 0;
+VNET_DEFINE_STATIC(int, nfsrv_usermax) = 999999999;
+VNET_DEFINE_STATIC(struct nfsrv_lughash *, nfsuserhash) = NULL;
+VNET_DEFINE_STATIC(struct nfsrv_lughash *, nfsusernamehash) = NULL;
+VNET_DEFINE_STATIC(struct nfsrv_lughash *, nfsgrouphash) = NULL;
+VNET_DEFINE_STATIC(struct nfsrv_lughash *, nfsgroupnamehash) = NULL;
+VNET_DEFINE_STATIC(u_char *, nfsrv_dnsname) = NULL;
 
 /*
  * This static array indicates whether or not the RPC generates a large
@@ -216,22 +232,33 @@ NFSD_VNET_DEFINE_STATIC(u_char *, nfsrv_dnsname) = NULL;
  * marked 0 in this array, the code will still work, just not quite as
  * efficiently.)
  */
-static int nfs_bigreply[NFSV42_NPROCS] = { 0, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0,
-    1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0 };
+static bool nfs_bigreply[NFSV42_NPROCS] = {
+	[NFSPROC_GETACL] = true,
+	[NFSPROC_GETEXTATTR] = true,
+	[NFSPROC_LISTEXTATTR] = true,
+	[NFSPROC_LOOKUP] = true,
+	[NFSPROC_READ] = true,
+	[NFSPROC_READDIR] = true,
+	[NFSPROC_READDIRPLUS] = true,
+	[NFSPROC_READDS] = true,
+	[NFSPROC_READLINK] = true,
+};
 
 /* local functions */
-static int nfsrv_skipace(struct nfsrv_descript *nd, int *acesizep);
+static int nfsrv_skipace(struct nfsrv_descript *nd, acl_type_t, int *acesizep);
 static void nfsv4_wanted(struct nfsv4lock *lp);
 static uint32_t nfsv4_filesavail(struct statfs *, struct mount *);
 static int nfsrv_getuser(int procnum, uid_t uid, gid_t gid, char *name);
+static bool nfs_in_prime(int flag, uid_t uid, gid_t gid);
 static void nfsrv_removeuser(struct nfsusrgrp *usrp, int isuser);
 static int nfsrv_getrefstr(struct nfsrv_descript *, u_char **, u_char **,
     int *, int *);
 static void nfsrv_refstrbigenough(int, u_char **, u_char **, int *);
 static uint32_t vtonfsv4_type(struct vattr *);
 static __enum_uint8(vtype) nfsv4tov_type(uint32_t, uint16_t *);
+static void nfsv4_setsequence(struct nfsmount *, struct nfsrv_descript *,
+    struct nfsclsession *, bool, struct ucred *);
+static uint32_t nfs_trueform(struct vnode *);
 
 static struct {
 	int	op;
@@ -341,6 +368,7 @@ nfscl_reqstart(struct nfsrv_descript *nd, int procnum, struct nfsmount *nmp,
 	 * First, fill in some of the fields of nd.
 	 */
 	nd->nd_slotseq = NULL;
+	NFSBZERO(nd->nd_sessionid, NFSX_V4SESSIONID);
 	if (vers == NFS_VER4) {
 		nd->nd_flag = ND_NFSV4 | ND_NFSCL;
 		if (minorvers == NFSV41_MINORVERSION)
@@ -632,6 +660,7 @@ nfscl_fillsattr(struct nfsrv_descript *nd, struct vattr *vap,
 		if ((flags & NFSSATTR_FULL) && vap->va_size != VNOVAL)
 			NFSSETBIT_ATTRBIT(&attrbits, NFSATTRBIT_SIZE);
 		if ((flags & NFSSATTR_FULL) && vap->va_flags != VNOVAL) {
+			NFSSETBIT_ATTRBIT(&attrbits, NFSATTRBIT_ARCHIVE);
 			NFSSETBIT_ATTRBIT(&attrbits, NFSATTRBIT_HIDDEN);
 			NFSSETBIT_ATTRBIT(&attrbits, NFSATTRBIT_SYSTEM);
 		}
@@ -649,7 +678,7 @@ nfscl_fillsattr(struct nfsrv_descript *nd, struct vattr *vap,
 			NFSSETBIT_ATTRBIT(&attrbits, NFSATTRBIT_TIMECREATE);
 		(void) nfsv4_fillattr(nd, vp->v_mount, vp, NULL, vap, NULL, 0,
 		    &attrbits, NULL, NULL, 0, 0, 0, 0, (uint64_t)0, NULL,
-		    false, false, false, 0);
+		    false, false, false, 0, NULL, false);
 		break;
 	}
 }
@@ -760,7 +789,7 @@ nfsm_dissct(struct nfsrv_descript *nd, int siz, int how)
 		nd->nd_dpos += siz;
 	} else if (nd->nd_md->m_next == NULL) {
 		return (retp);
-	} else if (siz > ncl_mbuf_mhlen) {
+	} else if (siz > MHLEN) {
 		panic("nfs S too big");
 	} else {
 		MGET(mp2, how, MT_DATA);
@@ -885,8 +914,7 @@ nfsm_strtom(struct nfsrv_descript *nd, const char *cp, int siz)
 			if ((nd->nd_flag & ND_EXTPG) != 0) {
 				m2 = nfsm_add_ext_pgs(m2,
 				    nd->nd_maxextsiz, &nd->nd_bextpg);
-				cp2 = (char *)(void *)PHYS_TO_DMAP(
-				    m2->m_epg_pa[nd->nd_bextpg]);
+				cp2 = PHYS_TO_DMAP(m2->m_epg_pa[nd->nd_bextpg]);
 				nd->nd_bextpgsiz = left = PAGE_SIZE;
 			} else {
 				if (siz > ncl_mbuf_mlen)
@@ -1138,20 +1166,20 @@ nfsmout:
  */
 int
 nfsrv_dissectacl(struct nfsrv_descript *nd, NFSACL_T *aclp, bool server,
-    int *aclerrp, int *aclsizep, __unused NFSPROC_T *p)
+    bool posixacl, int *aclerrp, int *aclsizep)
 {
-	u_int32_t *tl;
+	uint32_t *tl;
 	int i, aclsize;
 	int acecnt, error = 0, aceerr = 0, acesize;
 
 	*aclerrp = 0;
-	if (aclp)
+	if (aclp != NULL)
 		aclp->acl_cnt = 0;
 	/*
 	 * Parse out the ace entries and expect them to conform to
 	 * what can be supported by R/W/X bits.
 	 */
-	NFSM_DISSECT(tl, u_int32_t *, NFSX_UNSIGNED);
+	NFSM_DISSECT(tl, uint32_t *, NFSX_UNSIGNED);
 	aclsize = NFSX_UNSIGNED;
 	acecnt = fxdr_unsigned(int, *tl);
 	/*
@@ -1167,20 +1195,28 @@ nfsrv_dissectacl(struct nfsrv_descript *nd, NFSACL_T *aclp, bool server,
 	if (nfsrv_useacl == 0)
 		aceerr = NFSERR_ATTRNOTSUPP;
 	for (i = 0; i < acecnt; i++) {
-		if (aclp && !aceerr)
-			error = nfsrv_dissectace(nd, &aclp->acl_entry[i],
-			    server, &aceerr, &acesize, p);
+		if (aclp != NULL && aceerr == 0) {
+			if (posixacl)
+				error = nfsrv_dissectposixace(nd,
+				    &aclp->acl_entry[i], server, &aceerr,
+				    &acesize);
+			else
+				error = nfsrv_dissectace(nd,
+				    &aclp->acl_entry[i], server, &aceerr,
+				    &acesize);
+		} else if (posixacl)
+			error = nfsrv_skipace(nd, ACL_TYPE_ACCESS, &acesize);
 		else
-			error = nfsrv_skipace(nd, &acesize);
-		if (error)
+			error = nfsrv_skipace(nd, ACL_TYPE_NFS4, &acesize);
+		if (error != 0)
 			goto nfsmout;
 		aclsize += acesize;
 	}
-	if (aclp && !aceerr)
+	if (aclp != NULL && aceerr == 0)
 		aclp->acl_cnt = acecnt;
-	if (aceerr)
+	if (aceerr != 0)
 		*aclerrp = aceerr;
-	if (aclsizep)
+	if (aclsizep != NULL)
 		*aclsizep = aclsize;
 nfsmout:
 	NFSEXITCODE2(error, nd);
@@ -1191,16 +1227,22 @@ nfsmout:
  * Skip over an NFSv4 ace entry. Just dissect the xdr and discard it.
  */
 static int
-nfsrv_skipace(struct nfsrv_descript *nd, int *acesizep)
+nfsrv_skipace(struct nfsrv_descript *nd, acl_type_t acltype, int *acesizep)
 {
-	u_int32_t *tl;
+	uint32_t *tl;
 	int error, len = 0;
 
-	NFSM_DISSECT(tl, u_int32_t *, 4 * NFSX_UNSIGNED);
-	len = fxdr_unsigned(int, *(tl + 3));
+	if (acltype == ACL_TYPE_NFS4) {
+		NFSM_DISSECT(tl, uint32_t *, 4 * NFSX_UNSIGNED);
+		len = fxdr_unsigned(int, *(tl + 3));
+		*acesizep = NFSM_RNDUP(len) + (4 * NFSX_UNSIGNED);
+	} else {
+		NFSM_DISSECT(tl, uint32_t *, 3 * NFSX_UNSIGNED);
+		len = fxdr_unsigned(int, *(tl + 2));
+		*acesizep = NFSM_RNDUP(len) + (3 * NFSX_UNSIGNED);
+	}
 	error = nfsm_advance(nd, NFSM_RNDUP(len), -1);
 nfsmout:
-	*acesizep = NFSM_RNDUP(len) + (4 * NFSX_UNSIGNED);
 	NFSEXITCODE2(error, nd);
 	return (error);
 }
@@ -1303,7 +1345,8 @@ nfsv4_loadattr(struct nfsrv_descript *nd, vnode_t vp,
     struct nfsv3_pathconf *pc, struct statfs *sbp, struct nfsstatfs *sfp,
     struct nfsfsinfo *fsp, NFSACL_T *aclp, int compare, int *retcmpp,
     u_int32_t *leasep, u_int32_t *rderrp, bool *has_namedattrp,
-    uint32_t *clone_blksizep, NFSPROC_T *p, struct ucred *cred)
+    uint32_t *clone_blksizep, uint32_t *trueformp, NFSPROC_T *p,
+    struct ucred *cred)
 {
 	u_int32_t *tl;
 	int i = 0, j, k, l = 0, m, bitpos, attrsum = 0;
@@ -1327,7 +1370,7 @@ nfsv4_loadattr(struct nfsrv_descript *nd, vnode_t vp,
 #endif
 
 	CTASSERT(sizeof(ino_t) == sizeof(uint64_t));
-	NFSD_CURVNET_SET_QUIET(NFSD_TD_TO_VNET(curthread));
+	CURVNET_SET_QUIET(TD_TO_VNET(curthread));
 	if (compare) {
 		retnotsup = 0;
 		error = nfsrv_getattrbits(nd, &attrbits, NULL, &retnotsup);
@@ -1428,6 +1471,11 @@ nfsv4_loadattr(struct nfsrv_descript *nd, vnode_t vp,
 				NFSCLRBIT_ATTRBIT(&checkattrbits, NFSATTRBIT_ACL);
 				NFSCLRBIT_ATTRBIT(&checkattrbits, NFSATTRBIT_ACLSUPPORT);
 		   	   }
+			   /* Some filesystem do not support POSIX ACL   */
+			   if (nfsrv_useacl == 0 || nfs_supportsposixacls(vp) == 0) {
+				NFSCLRBIT_ATTRBIT(&checkattrbits, NFSATTRBIT_POSIXACCESSACL);
+				NFSCLRBIT_ATTRBIT(&checkattrbits, NFSATTRBIT_POSIXDEFAULTACL);
+			   }
 			   /* Some filesystems do not support uf_hidden */
 			   if (vp == NULL || VOP_PATHCONF(vp,
 				_PC_HAS_HIDDENSYSTEM, &has_pathconf) != 0)
@@ -1618,8 +1666,8 @@ nfsv4_loadattr(struct nfsrv_descript *nd, vnode_t vp,
 				NFSACL_T *naclp;
 
 				naclp = acl_alloc(M_WAITOK);
-				error = nfsrv_dissectacl(nd, naclp, true,
-				    &aceerr, &cnt, p);
+				error = nfsrv_dissectacl(nd, naclp, true, false,
+				    &aceerr, &cnt);
 				if (error) {
 				    acl_free(naclp);
 				    goto nfsmout;
@@ -1629,8 +1677,8 @@ nfsv4_loadattr(struct nfsrv_descript *nd, vnode_t vp,
 				    *retcmpp = NFSERR_NOTSAME;
 				acl_free(naclp);
 			    } else {
-				error = nfsrv_dissectacl(nd, NULL, true,
-				    &aceerr, &cnt, p);
+				error = nfsrv_dissectacl(nd, NULL, true, false,
+				    &aceerr, &cnt);
 				if (error)
 				    goto nfsmout;
 				*retcmpp = NFSERR_ATTRNOTSUPP;
@@ -1639,14 +1687,13 @@ nfsv4_loadattr(struct nfsrv_descript *nd, vnode_t vp,
 			} else {
 				if (vp != NULL && aclp != NULL)
 				    error = nfsrv_dissectacl(nd, aclp, false,
-					&aceerr, &cnt, p);
+					false, &aceerr, &cnt);
 				else
 				    error = nfsrv_dissectacl(nd, NULL, false,
-					&aceerr, &cnt, p);
+					false, &aceerr, &cnt);
 				if (error)
 				    goto nfsmout;
 			}
-			
 			attrsum += cnt;
 			break;
 		case NFSATTRBIT_ACLSUPPORT:
@@ -1663,9 +1710,17 @@ nfsv4_loadattr(struct nfsrv_descript *nd, vnode_t vp,
 			attrsum += NFSX_UNSIGNED;
 			break;
 		case NFSATTRBIT_ARCHIVE:
-			NFSM_DISSECT(tl, u_int32_t *, NFSX_UNSIGNED);
-			if (compare && !(*retcmpp))
-				*retcmpp = NFSERR_ATTRNOTSUPP;
+			NFSM_DISSECT(tl, uint32_t *, NFSX_UNSIGNED);
+			if (compare) {
+				if (!(*retcmpp) && ((*tl == newnfs_true &&
+				    (nap->na_flags & UF_ARCHIVE) == 0) ||
+				    (*tl == newnfs_false &&
+				     (nap->na_flags & UF_ARCHIVE) != 0)))
+					*retcmpp = NFSERR_NOTSAME;
+			} else if (nap != NULL) {
+				if (*tl == newnfs_true)
+					nap->na_flags |= UF_ARCHIVE;
+			}
 			attrsum += NFSX_UNSIGNED;
 			break;
 		case NFSATTRBIT_CANSETTIME:
@@ -1689,11 +1744,18 @@ nfsv4_loadattr(struct nfsrv_descript *nd, vnode_t vp,
 			attrsum += NFSX_UNSIGNED;
 			break;
 		case NFSATTRBIT_CASEINSENSITIVE:
-			NFSM_DISSECT(tl, u_int32_t *, NFSX_UNSIGNED);
+			NFSM_DISSECT(tl, uint32_t *, NFSX_UNSIGNED);
 			if (compare) {
 				if (!(*retcmpp)) {
-				    if (*tl != newnfs_false)
-					*retcmpp = NFSERR_NOTSAME;
+					if (vp == NULL || VOP_PATHCONF(vp,
+					    _PC_CASE_INSENSITIVE,
+					    &has_pathconf) != 0)
+						has_pathconf = 0;
+					if ((has_pathconf != 0 &&
+					     *tl != newnfs_true) ||
+					    (has_pathconf == 0 &&
+					    *tl != newnfs_false))
+						*retcmpp = NFSERR_NOTSAME;
 				}
 			} else if (pc != NULL) {
 				pc->pc_caseinsensitive =
@@ -2003,7 +2065,7 @@ nfsv4_loadattr(struct nfsrv_descript *nd, vnode_t vp,
 			} else if (nap != NULL) {
 				if (nfsv4_strtouid(nd, cp, j, &uid))
 					nap->na_uid =
-					    NFSD_VNET(nfsrv_defaultuid);
+					    VNET(nfsrv_defaultuid);
 				else
 					nap->na_uid = uid;
 			}
@@ -2037,7 +2099,7 @@ nfsv4_loadattr(struct nfsrv_descript *nd, vnode_t vp,
 			} else if (nap != NULL) {
 				if (nfsv4_strtogid(nd, cp, j, &gid))
 					nap->na_gid =
-					    NFSD_VNET(nfsrv_defaultgid);
+					    VNET(nfsrv_defaultgid);
 				else
 					nap->na_gid = gid;
 			}
@@ -2416,6 +2478,105 @@ nfsv4_loadattr(struct nfsrv_descript *nd, vnode_t vp,
 			}
 			attrsum += NFSX_UNSIGNED;
 			break;
+		case NFSATTRBIT_ACLTRUEFORM:
+			NFSM_DISSECT(tl, uint32_t *, NFSX_UNSIGNED);
+			if (compare) {
+				if (!(*retcmpp)) {
+					tuint = nfs_trueform(vp);
+					if (tuint != fxdr_unsigned(uint32_t,
+					    *tl))
+						*retcmpp = NFSERR_NOTSAME;
+				}
+			} else if (trueformp != NULL) {
+				*trueformp = fxdr_unsigned(uint32_t, *tl);
+			}
+			attrsum += NFSX_UNSIGNED;
+			break;
+		case NFSATTRBIT_ACLTRUEFORMSCOPE:
+			NFSM_DISSECT(tl, uint32_t *, NFSX_UNSIGNED);
+			if (compare) {
+				if (!(*retcmpp)) {
+					if (fxdr_unsigned(uint32_t, *tl) !=
+					    NFSV4_ACL_SCOPE_FILE_SYSTEM)
+						*retcmpp = NFSERR_NOTSAME;
+				}
+			}
+			attrsum += NFSX_UNSIGNED;
+			break;
+		case NFSATTRBIT_POSIXACCESSACL:
+			if (compare) {
+			  if (!(*retcmpp)) {
+			    if (nfsrv_useacl && nfs_supportsposixacls(vp)) {
+				NFSACL_T *naclp;
+
+				naclp = acl_alloc(M_WAITOK);
+				error = nfsrv_dissectacl(nd, naclp, true, true,
+				    &aceerr, &cnt);
+				if (error) {
+				    acl_free(naclp);
+				    goto nfsmout;
+				}
+				if (aceerr || aclp == NULL ||
+				    nfsrv_compareacl(aclp, naclp))
+				    *retcmpp = NFSERR_NOTSAME;
+				acl_free(naclp);
+			    } else {
+				error = nfsrv_dissectacl(nd, NULL, true, true,
+				    &aceerr, &cnt);
+				if (error)
+				    goto nfsmout;
+				*retcmpp = NFSERR_ATTRNOTSUPP;
+			    }
+			  }
+			} else {
+				if (vp != NULL && aclp != NULL)
+				    error = nfsrv_dissectacl(nd, aclp, false,
+					true, &aceerr, &cnt);
+				else
+				    error = nfsrv_dissectacl(nd, NULL, false,
+					true, &aceerr, &cnt);
+				if (error)
+				    goto nfsmout;
+			}
+			attrsum += cnt;
+			break;
+		case NFSATTRBIT_POSIXDEFAULTACL:
+			if (compare) {
+			  if (!(*retcmpp)) {
+			    if (nfsrv_useacl && nfs_supportsposixacls(vp)) {
+				NFSACL_T *naclp;
+
+				naclp = acl_alloc(M_WAITOK);
+				error = nfsrv_dissectacl(nd, naclp, true, true,
+				    &aceerr, &cnt);
+				if (error) {
+				    acl_free(naclp);
+				    goto nfsmout;
+				}
+				if (aceerr || aclp == NULL ||
+				    nfsrv_compareacl(aclp, naclp))
+				    *retcmpp = NFSERR_NOTSAME;
+				acl_free(naclp);
+			    } else {
+				error = nfsrv_dissectacl(nd, NULL, true, true,
+				    &aceerr, &cnt);
+				if (error)
+				    goto nfsmout;
+				*retcmpp = NFSERR_ATTRNOTSUPP;
+			    }
+			  }
+			} else {
+				if (vp != NULL && aclp != NULL)
+				    error = nfsrv_dissectacl(nd, aclp, false,
+					true, &aceerr, &cnt);
+				else
+				    error = nfsrv_dissectacl(nd, NULL, false,
+					true, &aceerr, &cnt);
+				if (error)
+				    goto nfsmout;
+			}
+			attrsum += cnt;
+			break;
 		default:
 			printf("EEK! nfsv4_loadattr unknown attr=%d\n",
 				bitpos);
@@ -2442,7 +2603,7 @@ nfsv4_loadattr(struct nfsrv_descript *nd, vnode_t vp,
 			error = nfsm_advance(nd, attrsize - attrsum, -1);
 	}
 nfsmout:
-	NFSD_CURVNET_RESTORE();
+	CURVNET_RESTORE();
 	NFSEXITCODE2(error, nd);
 	return (error);
 }
@@ -2673,7 +2834,8 @@ nfsv4_fillattr(struct nfsrv_descript *nd, struct mount *mp, vnode_t vp,
     nfsattrbit_t *attrbitp, struct ucred *cred, NFSPROC_T *p, int isdgram,
     int reterr, int supports_nfsv4acls, int at_root, uint64_t mounted_on_fileno,
     struct statfs *pnfssf, bool xattrsupp, bool has_hiddensystem,
-    bool has_namedattr, uint32_t clone_blksize)
+    bool has_namedattr, uint32_t clone_blksize, fsid_t *fsidp,
+    bool has_caseinsensitive)
 {
 	int bitpos, retnum = 0;
 	u_int32_t *tl;
@@ -2686,7 +2848,8 @@ nfsv4_fillattr(struct nfsrv_descript *nd, struct mount *mp, vnode_t vp,
 	struct statfs *fs;
 	struct nfsfsinfo fsinf;
 	struct timespec temptime;
-	NFSACL_T *aclp, *naclp = NULL;
+	NFSACL_T *aclp, *naclp = NULL, *paclp, *npaclp = NULL, *daclp;
+	NFSACL_T *ndaclp = NULL;
 	short irflag;
 #ifdef QUOTA
 	struct dqblk dqb;
@@ -2705,11 +2868,21 @@ nfsv4_fillattr(struct nfsrv_descript *nd, struct mount *mp, vnode_t vp,
 	 */
 	if (p == NULL && cred == NULL) {
 		NFSCLRNOTSETABLE_ATTRBIT(retbitp, nd);
-		aclp = saclp;
+		/* Only one of the ACL types can be set for a call. */
+		if (NFSISSET_ATTRBIT(retbitp, NFSATTRBIT_ACL))
+			aclp = saclp;
+		else if (NFSISSET_ATTRBIT(retbitp, NFSATTRBIT_POSIXACCESSACL))
+			paclp = saclp;
+		else if (NFSISSET_ATTRBIT(retbitp, NFSATTRBIT_POSIXDEFAULTACL))
+			daclp = saclp;
 	} else {
 		NFSCLRNOTFILLABLE_ATTRBIT(retbitp, nd);
 		naclp = acl_alloc(M_WAITOK);
 		aclp = naclp;
+		npaclp = acl_alloc(M_WAITOK);
+		paclp = npaclp;
+		ndaclp = acl_alloc(M_WAITOK);
+		daclp = ndaclp;
 	}
 	nfsvno_getfs(&fsinf, isdgram);
 	/*
@@ -2744,12 +2917,12 @@ nfsv4_fillattr(struct nfsrv_descript *nd, struct mount *mp, vnode_t vp,
 	 */
 	if (NFSISSET_ATTRBIT(retbitp, NFSATTRBIT_ACLSUPPORT) &&
 	    (nfsrv_useacl == 0 || ((cred != NULL || p != NULL) &&
-		supports_nfsv4acls == 0))) {
+		supports_nfsv4acls != SUPPACL_NFSV4))) {
 		NFSCLRBIT_ATTRBIT(retbitp, NFSATTRBIT_ACLSUPPORT);
 	}
 	if (NFSISSET_ATTRBIT(retbitp, NFSATTRBIT_ACL)) {
 		if (nfsrv_useacl == 0 || ((cred != NULL || p != NULL) &&
-		    supports_nfsv4acls == 0)) {
+		    supports_nfsv4acls != SUPPACL_NFSV4)) {
 			NFSCLRBIT_ATTRBIT(retbitp, NFSATTRBIT_ACL);
 		} else if (naclp != NULL) {
 			if (NFSVOPLOCK(vp, LK_SHARED) == 0) {
@@ -2771,6 +2944,49 @@ nfsv4_fillattr(struct nfsrv_descript *nd, struct mount *mp, vnode_t vp,
 		}
 	}
 
+	/* and the POSIX draft ACL. */
+	if (NFSISSET_ATTRBIT(retbitp, NFSATTRBIT_POSIXACCESSACL)) {
+		if (nfsrv_useacl == 0 || ((cred != NULL || p != NULL) &&
+		    supports_nfsv4acls != SUPPACL_POSIX)) {
+			NFSCLRBIT_ATTRBIT(retbitp, NFSATTRBIT_POSIXACCESSACL);
+		} else if (npaclp != NULL) {
+			if (NFSVOPLOCK(vp, LK_SHARED) == 0) {
+				error = VOP_ACCESSX(vp, VREAD_ACL, cred, p);
+				if (error == 0)
+					error = VOP_GETACL(vp, ACL_TYPE_ACCESS,
+					    npaclp, cred, p);
+				NFSVOPUNLOCK(vp);
+			} else
+				error = NFSERR_PERM;
+			if (error != 0) {
+				if (reterr) {
+					nd->nd_repstat = NFSERR_INVAL;
+					free(fs, M_STATFS);
+					return (0);
+				}
+				NFSCLRBIT_ATTRBIT(retbitp,
+				    NFSATTRBIT_POSIXACCESSACL);
+			}
+		}
+	}
+	if (NFSISSET_ATTRBIT(retbitp, NFSATTRBIT_POSIXDEFAULTACL)) {
+		if (nfsrv_useacl == 0 || ((cred != NULL || p != NULL) &&
+		    supports_nfsv4acls != SUPPACL_POSIX)) {
+			NFSCLRBIT_ATTRBIT(retbitp, NFSATTRBIT_POSIXDEFAULTACL);
+		} else if (ndaclp != NULL) {
+			if (NFSVOPLOCK(vp, LK_SHARED) == 0) {
+				error = VOP_ACCESSX(vp, VREAD_ACL, cred, p);
+				if (error == 0)
+					error = VOP_GETACL(vp, ACL_TYPE_DEFAULT,
+					    ndaclp, cred, p);
+				NFSVOPUNLOCK(vp);
+			} else
+				error = NFSERR_PERM;
+			if (error != 0)
+				ndaclp->acl_cnt = 0;
+		}
+	}
+
 	/*
 	 * Put out the attribute bitmap for the ones being filled in
 	 * and get the field for the number of attributes returned.
@@ -2788,13 +3004,21 @@ nfsv4_fillattr(struct nfsrv_descript *nd, struct mount *mp, vnode_t vp,
 		case NFSATTRBIT_SUPPORTEDATTRS:
 			NFSSETSUPP_ATTRBIT(&attrbits, nd);
 			if (nfsrv_useacl == 0 || ((cred != NULL || p != NULL)
-			    && supports_nfsv4acls == 0)) {
+			    && supports_nfsv4acls != SUPPACL_NFSV4)) {
 			    NFSCLRBIT_ATTRBIT(&attrbits,NFSATTRBIT_ACLSUPPORT);
 			    NFSCLRBIT_ATTRBIT(&attrbits,NFSATTRBIT_ACL);
+			}
+			if (nfsrv_useacl == 0 || ((cred != NULL || p != NULL)
+			    && supports_nfsv4acls != SUPPACL_POSIX)) {
+				NFSCLRBIT_ATTRBIT(&attrbits,
+				    NFSATTRBIT_POSIXACCESSACL);
+				NFSCLRBIT_ATTRBIT(&attrbits,
+				    NFSATTRBIT_POSIXDEFAULTACL);
 			}
 			if (!has_hiddensystem) {
 			    NFSCLRBIT_ATTRBIT(&attrbits, NFSATTRBIT_HIDDEN);
 			    NFSCLRBIT_ATTRBIT(&attrbits, NFSATTRBIT_SYSTEM);
+			    NFSCLRBIT_ATTRBIT(&attrbits, NFSATTRBIT_ARCHIVE);
 			}
 			if (clone_blksize == 0)
 			    NFSCLRBIT_ATTRBIT(&attrbits,
@@ -2847,10 +3071,12 @@ nfsv4_fillattr(struct nfsrv_descript *nd, struct mount *mp, vnode_t vp,
 			break;
 		case NFSATTRBIT_FSID:
 			NFSM_BUILD(tl, u_int32_t *, NFSX_V4FSID);
+			if (fsidp == NULL)
+				fsidp = &mp->mnt_stat.f_fsid;
 			*tl++ = 0;
-			*tl++ = txdr_unsigned(mp->mnt_stat.f_fsid.val[0]);
+			*tl++ = txdr_unsigned(fsidp->val[0]);
 			*tl++ = 0;
-			*tl = txdr_unsigned(mp->mnt_stat.f_fsid.val[1]);
+			*tl = txdr_unsigned(fsidp->val[1]);
 			retnum += NFSX_V4FSID;
 			break;
 		case NFSATTRBIT_UNIQUEHANDLES:
@@ -2879,6 +3105,14 @@ nfsv4_fillattr(struct nfsrv_descript *nd, struct mount *mp, vnode_t vp,
 			*tl = txdr_unsigned(NFSV4ACE_SUPTYPES);
 			retnum += NFSX_UNSIGNED;
 			break;
+		case NFSATTRBIT_ARCHIVE:
+			NFSM_BUILD(tl, uint32_t *, NFSX_UNSIGNED);
+			if ((vap->va_flags & UF_ARCHIVE) != 0)
+				*tl = newnfs_true;
+			else
+				*tl = newnfs_false;
+			retnum += NFSX_UNSIGNED;
+			break;
 		case NFSATTRBIT_CANSETTIME:
 			NFSM_BUILD(tl, u_int32_t *, NFSX_UNSIGNED);
 			if (fsinf.fs_properties & NFSV3FSINFO_CANSETTIME)
@@ -2888,8 +3122,11 @@ nfsv4_fillattr(struct nfsrv_descript *nd, struct mount *mp, vnode_t vp,
 			retnum += NFSX_UNSIGNED;
 			break;
 		case NFSATTRBIT_CASEINSENSITIVE:
-			NFSM_BUILD(tl, u_int32_t *, NFSX_UNSIGNED);
-			*tl = newnfs_false;
+			NFSM_BUILD(tl, uint32_t *, NFSX_UNSIGNED);
+			if (has_caseinsensitive)
+				*tl = newnfs_true;
+			else
+				*tl = newnfs_false;
 			retnum += NFSX_UNSIGNED;
 			break;
 		case NFSATTRBIT_CASEPRESERVING:
@@ -3282,6 +3519,24 @@ nfsv4_fillattr(struct nfsrv_descript *nd, struct mount *mp, vnode_t vp,
 			*tl = txdr_unsigned(clone_blksize);
 			retnum += NFSX_UNSIGNED;
 			break;
+		case NFSATTRBIT_ACLTRUEFORM:
+			NFSM_BUILD(tl, uint32_t *, NFSX_UNSIGNED);
+			*tl = txdr_unsigned(nfs_trueform(vp));
+			retnum += NFSX_UNSIGNED;
+			break;
+		case NFSATTRBIT_ACLTRUEFORMSCOPE:
+			NFSM_BUILD(tl, uint32_t *, NFSX_UNSIGNED);
+			*tl = txdr_unsigned(NFSV4_ACL_SCOPE_FILE_SYSTEM);
+			retnum += NFSX_UNSIGNED;
+			break;
+		case NFSATTRBIT_POSIXACCESSACL:
+			retnum += nfsrv_buildposixacl(nd, paclp,
+			    ACL_TYPE_ACCESS);
+			break;
+		case NFSATTRBIT_POSIXDEFAULTACL:
+			retnum += nfsrv_buildposixacl(nd, daclp,
+			    ACL_TYPE_DEFAULT);
+			break;
 		default:
 			printf("EEK! Bad V4 attribute bitpos=%d\n", bitpos);
 		}
@@ -3289,6 +3544,10 @@ nfsv4_fillattr(struct nfsrv_descript *nd, struct mount *mp, vnode_t vp,
 	}
 	if (naclp != NULL)
 		acl_free(naclp);
+	if (npaclp != NULL)
+		acl_free(npaclp);
+	if (ndaclp != NULL)
+		acl_free(ndaclp);
 	free(fs, M_STATFS);
 	*retnump = txdr_unsigned(retnum);
 	return (retnum + prefixnum);
@@ -3394,16 +3653,16 @@ nfsv4_uidtostr(uid_t uid, u_char **cpp, int *retlenp)
 	int cnt, hasampersand, len = NFSV4_SMALLSTR, ret;
 	struct nfsrv_lughash *hp;
 
-	NFSD_CURVNET_SET_QUIET(NFSD_TD_TO_VNET(curthread));
+	CURVNET_SET_QUIET(TD_TO_VNET(curthread));
 	cnt = 0;
 tryagain:
-	if (NFSD_VNET(nfsrv_dnsnamelen) > 0 &&
-	    !NFSD_VNET(nfs_enable_uidtostring)) {
+	if (VNET(nfsrv_dnsnamelen) > 0 &&
+	    !VNET(nfs_enable_uidtostring)) {
 		/*
 		 * Always map nfsrv_defaultuid to "nobody".
 		 */
-		if (uid == NFSD_VNET(nfsrv_defaultuid)) {
-			i = NFSD_VNET(nfsrv_dnsnamelen) + 7;
+		if (uid == VNET(nfsrv_defaultuid)) {
+			i = VNET(nfsrv_dnsnamelen) + 7;
 			if (i > len) {
 				if (len > NFSV4_SMALLSTR)
 					free(cp, M_NFSSTRING);
@@ -3415,9 +3674,9 @@ tryagain:
 			*retlenp = i;
 			NFSBCOPY("nobody@", cp, 7);
 			cp += 7;
-			NFSBCOPY(NFSD_VNET(nfsrv_dnsname), cp,
-			    NFSD_VNET(nfsrv_dnsnamelen));
-			NFSD_CURVNET_RESTORE();
+			NFSBCOPY(VNET(nfsrv_dnsname), cp,
+			    VNET(nfsrv_dnsnamelen));
+			CURVNET_RESTORE();
 			return;
 		}
 		hasampersand = 0;
@@ -3425,7 +3684,8 @@ tryagain:
 		mtx_lock(&hp->mtx);
 		TAILQ_FOREACH(usrp, &hp->lughead, lug_numhash) {
 			if (usrp->lug_uid == uid) {
-				if (usrp->lug_expiry < NFSD_MONOSEC)
+				if (!usrp->lug_wired &&
+				    usrp->lug_expiry < NFSD_MONOSEC)
 					break;
 				/*
 				 * If the name doesn't already have an '@'
@@ -3441,7 +3701,7 @@ tryagain:
 					i = usrp->lug_namelen;
 				else
 					i = usrp->lug_namelen +
-					    NFSD_VNET(nfsrv_dnsnamelen) + 1;
+					    VNET(nfsrv_dnsnamelen) + 1;
 				if (i > len) {
 					mtx_unlock(&hp->mtx);
 					if (len > NFSV4_SMALLSTR)
@@ -3456,14 +3716,14 @@ tryagain:
 				if (!hasampersand) {
 					cp += usrp->lug_namelen;
 					*cp++ = '@';
-					NFSBCOPY(NFSD_VNET(nfsrv_dnsname), cp,
-					    NFSD_VNET(nfsrv_dnsnamelen));
+					NFSBCOPY(VNET(nfsrv_dnsname), cp,
+					    VNET(nfsrv_dnsnamelen));
 				}
 				TAILQ_REMOVE(&hp->lughead, usrp, lug_numhash);
 				TAILQ_INSERT_TAIL(&hp->lughead, usrp,
 				    lug_numhash);
 				mtx_unlock(&hp->mtx);
-				NFSD_CURVNET_RESTORE();
+				CURVNET_RESTORE();
 				return;
 			}
 		}
@@ -3491,7 +3751,7 @@ tryagain:
 		*cp-- = '0' + (tmp % 10);
 		tmp /= 10;
 	}
-	NFSD_CURVNET_RESTORE();
+	CURVNET_RESTORE();
 	return;
 }
 
@@ -3512,12 +3772,13 @@ nfsrv_getgrpscred(struct ucred *oldcred)
 	cnt = 0;
 	uid = oldcred->cr_uid;
 tryagain:
-	if (NFSD_VNET(nfsrv_dnsnamelen) > 0) {
+	if (VNET(nfsrv_dnsnamelen) > 0) {
 		hp = NFSUSERHASH(uid);
 		mtx_lock(&hp->mtx);
 		TAILQ_FOREACH(usrp, &hp->lughead, lug_numhash) {
 			if (usrp->lug_uid == uid) {
-				if (usrp->lug_expiry < NFSD_MONOSEC)
+				if (!usrp->lug_wired &&
+				    usrp->lug_expiry < NFSD_MONOSEC)
 					break;
 				if (usrp->lug_cred != NULL) {
 					newcred = crhold(usrp->lug_cred);
@@ -3559,7 +3820,7 @@ nfsv4_strtouid(struct nfsrv_descript *nd, u_char *str, int len, uid_t *uidp)
 	uid_t tuid;
 	struct nfsrv_lughash *hp, *hp2;
 
-	NFSD_CURVNET_SET_QUIET(NFSD_TD_TO_VNET(curthread));
+	CURVNET_SET_QUIET(TD_TO_VNET(curthread));
 	if (len == 0) {
 		error = NFSERR_BADOWNER;
 		goto out;
@@ -3571,7 +3832,7 @@ nfsv4_strtouid(struct nfsrv_descript *nd, u_char *str, int len, uid_t *uidp)
 		/* A numeric string. */
 		if ((nd->nd_flag & ND_KERBV) == 0 &&
 		    ((nd->nd_flag & ND_NFSCL) != 0 ||
-		      NFSD_VNET(nfsd_enable_stringtouid) != 0))
+		      VNET(nfsd_enable_stringtouid) != 0))
 			*uidp = tuid;
 		else
 			error = NFSERR_BADOWNER;
@@ -3588,7 +3849,7 @@ nfsv4_strtouid(struct nfsrv_descript *nd, u_char *str, int len, uid_t *uidp)
 
 	cnt = 0;
 tryagain:
-	if (NFSD_VNET(nfsrv_dnsnamelen) > 0) {
+	if (VNET(nfsrv_dnsnamelen) > 0) {
 		/*
 		 * If an '@' is found and the domain name matches, search for
 		 * the name with dns stripped off.
@@ -3596,10 +3857,10 @@ tryagain:
 		 * since RFC8881 defines this string as a DNS domain name.
 		 */
 		if (cnt == 0 && i < len && i > 0 &&
-		    (len - 1 - i) == NFSD_VNET(nfsrv_dnsnamelen) &&
-		    strncasecmp(cp, NFSD_VNET(nfsrv_dnsname),
-		     NFSD_VNET(nfsrv_dnsnamelen)) == 0) {
-			len -= (NFSD_VNET(nfsrv_dnsnamelen) + 1);
+		    (len - 1 - i) == VNET(nfsrv_dnsnamelen) &&
+		    strncasecmp(cp, VNET(nfsrv_dnsname),
+		     VNET(nfsrv_dnsnamelen)) == 0) {
+			len -= (VNET(nfsrv_dnsnamelen) + 1);
 			*(cp - 1) = '\0';
 		}
 
@@ -3607,7 +3868,7 @@ tryagain:
 		 * Check for the special case of "nobody".
 		 */
 		if (len == 6 && !NFSBCMP(str, "nobody", 6)) {
-			*uidp = NFSD_VNET(nfsrv_defaultuid);
+			*uidp = VNET(nfsrv_defaultuid);
 			error = 0;
 			goto out;
 		}
@@ -3617,7 +3878,8 @@ tryagain:
 		TAILQ_FOREACH(usrp, &hp->lughead, lug_namehash) {
 			if (usrp->lug_namelen == len &&
 			    !NFSBCMP(usrp->lug_name, str, len)) {
-				if (usrp->lug_expiry < NFSD_MONOSEC)
+				if (!usrp->lug_wired &&
+				    usrp->lug_expiry < NFSD_MONOSEC)
 					break;
 				hp2 = NFSUSERHASH(usrp->lug_uid);
 				mtx_lock(&hp2->mtx);
@@ -3641,7 +3903,7 @@ tryagain:
 	error = NFSERR_BADOWNER;
 
 out:
-	NFSD_CURVNET_RESTORE();
+	CURVNET_RESTORE();
 	NFSEXITCODE(error);
 	return (error);
 }
@@ -3663,16 +3925,16 @@ nfsv4_gidtostr(gid_t gid, u_char **cpp, int *retlenp)
 	int cnt, hasampersand, len = NFSV4_SMALLSTR, ret;
 	struct nfsrv_lughash *hp;
 
-	NFSD_CURVNET_SET_QUIET(NFSD_TD_TO_VNET(curthread));
+	CURVNET_SET_QUIET(TD_TO_VNET(curthread));
 	cnt = 0;
 tryagain:
-	if (NFSD_VNET(nfsrv_dnsnamelen) > 0 &&
-	    !NFSD_VNET(nfs_enable_uidtostring)) {
+	if (VNET(nfsrv_dnsnamelen) > 0 &&
+	    !VNET(nfs_enable_uidtostring)) {
 		/*
 		 * Always map nfsrv_defaultgid to "nogroup".
 		 */
-		if (gid == NFSD_VNET(nfsrv_defaultgid)) {
-			i = NFSD_VNET(nfsrv_dnsnamelen) + 8;
+		if (gid == VNET(nfsrv_defaultgid)) {
+			i = VNET(nfsrv_dnsnamelen) + 8;
 			if (i > len) {
 				if (len > NFSV4_SMALLSTR)
 					free(cp, M_NFSSTRING);
@@ -3684,9 +3946,9 @@ tryagain:
 			*retlenp = i;
 			NFSBCOPY("nogroup@", cp, 8);
 			cp += 8;
-			NFSBCOPY(NFSD_VNET(nfsrv_dnsname), cp,
-			    NFSD_VNET(nfsrv_dnsnamelen));
-			NFSD_CURVNET_RESTORE();
+			NFSBCOPY(VNET(nfsrv_dnsname), cp,
+			    VNET(nfsrv_dnsnamelen));
+			CURVNET_RESTORE();
 			return;
 		}
 		hasampersand = 0;
@@ -3694,7 +3956,8 @@ tryagain:
 		mtx_lock(&hp->mtx);
 		TAILQ_FOREACH(usrp, &hp->lughead, lug_numhash) {
 			if (usrp->lug_gid == gid) {
-				if (usrp->lug_expiry < NFSD_MONOSEC)
+				if (!usrp->lug_wired &&
+				    usrp->lug_expiry < NFSD_MONOSEC)
 					break;
 				/*
 				 * If the name doesn't already have an '@'
@@ -3710,7 +3973,7 @@ tryagain:
 					i = usrp->lug_namelen;
 				else
 					i = usrp->lug_namelen +
-					    NFSD_VNET(nfsrv_dnsnamelen) + 1;
+					    VNET(nfsrv_dnsnamelen) + 1;
 				if (i > len) {
 					mtx_unlock(&hp->mtx);
 					if (len > NFSV4_SMALLSTR)
@@ -3725,14 +3988,14 @@ tryagain:
 				if (!hasampersand) {
 					cp += usrp->lug_namelen;
 					*cp++ = '@';
-					NFSBCOPY(NFSD_VNET(nfsrv_dnsname), cp,
-					    NFSD_VNET(nfsrv_dnsnamelen));
+					NFSBCOPY(VNET(nfsrv_dnsname), cp,
+					    VNET(nfsrv_dnsnamelen));
 				}
 				TAILQ_REMOVE(&hp->lughead, usrp, lug_numhash);
 				TAILQ_INSERT_TAIL(&hp->lughead, usrp,
 				    lug_numhash);
 				mtx_unlock(&hp->mtx);
-				NFSD_CURVNET_RESTORE();
+				CURVNET_RESTORE();
 				return;
 			}
 		}
@@ -3760,7 +4023,7 @@ tryagain:
 		*cp-- = '0' + (tmp % 10);
 		tmp /= 10;
 	}
-	NFSD_CURVNET_RESTORE();
+	CURVNET_RESTORE();
 	return;
 }
 
@@ -3783,7 +4046,7 @@ nfsv4_strtogid(struct nfsrv_descript *nd, u_char *str, int len, gid_t *gidp)
 	gid_t tgid;
 	struct nfsrv_lughash *hp, *hp2;
 
-	NFSD_CURVNET_SET_QUIET(NFSD_TD_TO_VNET(curthread));
+	CURVNET_SET_QUIET(TD_TO_VNET(curthread));
 	if (len == 0) {
 		error =  NFSERR_BADOWNER;
 		goto out;
@@ -3795,7 +4058,7 @@ nfsv4_strtogid(struct nfsrv_descript *nd, u_char *str, int len, gid_t *gidp)
 		/* A numeric string. */
 		if ((nd->nd_flag & ND_KERBV) == 0 &&
 		    ((nd->nd_flag & ND_NFSCL) != 0 ||
-		      NFSD_VNET(nfsd_enable_stringtouid) != 0))
+		      VNET(nfsd_enable_stringtouid) != 0))
 			*gidp = tgid;
 		else
 			error = NFSERR_BADOWNER;
@@ -3812,16 +4075,16 @@ nfsv4_strtogid(struct nfsrv_descript *nd, u_char *str, int len, gid_t *gidp)
 
 	cnt = 0;
 tryagain:
-	if (NFSD_VNET(nfsrv_dnsnamelen) > 0) {
+	if (VNET(nfsrv_dnsnamelen) > 0) {
 		/*
 		 * If an '@' is found and the dns name matches, search for the
 		 * name with the dns stripped off.
 		 */
 		if (cnt == 0 && i < len && i > 0 &&
-		    (len - 1 - i) == NFSD_VNET(nfsrv_dnsnamelen) &&
-		    strncasecmp(cp, NFSD_VNET(nfsrv_dnsname),
-		    NFSD_VNET(nfsrv_dnsnamelen)) == 0) {
-			len -= (NFSD_VNET(nfsrv_dnsnamelen) + 1);
+		    (len - 1 - i) == VNET(nfsrv_dnsnamelen) &&
+		    strncasecmp(cp, VNET(nfsrv_dnsname),
+		    VNET(nfsrv_dnsnamelen)) == 0) {
+			len -= (VNET(nfsrv_dnsnamelen) + 1);
 			*(cp - 1) = '\0';
 		}
 
@@ -3829,7 +4092,7 @@ tryagain:
 		 * Check for the special case of "nogroup".
 		 */
 		if (len == 7 && !NFSBCMP(str, "nogroup", 7)) {
-			*gidp = NFSD_VNET(nfsrv_defaultgid);
+			*gidp = VNET(nfsrv_defaultgid);
 			error = 0;
 			goto out;
 		}
@@ -3839,7 +4102,8 @@ tryagain:
 		TAILQ_FOREACH(usrp, &hp->lughead, lug_namehash) {
 			if (usrp->lug_namelen == len &&
 			    !NFSBCMP(usrp->lug_name, str, len)) {
-				if (usrp->lug_expiry < NFSD_MONOSEC)
+				if (!usrp->lug_wired &&
+				    usrp->lug_expiry < NFSD_MONOSEC)
 					break;
 				hp2 = NFSGROUPHASH(usrp->lug_gid);
 				mtx_lock(&hp2->mtx);
@@ -3863,7 +4127,7 @@ tryagain:
 	error = NFSERR_BADOWNER;
 
 out:
-	NFSD_CURVNET_RESTORE();
+	CURVNET_RESTORE();
 	NFSEXITCODE(error);
 	return (error);
 }
@@ -3885,12 +4149,12 @@ nfsrv_nfsuserdport(struct nfsuserd_args *nargs, NFSPROC_T *p)
 	int error;
 
 	NFSLOCKNAMEID();
-	if (NFSD_VNET(nfsrv_nfsuserd) != NOTRUNNING) {
+	if (VNET(nfsrv_nfsuserd) != NOTRUNNING) {
 		NFSUNLOCKNAMEID();
 		error = EPERM;
 		goto out;
 	}
-	NFSD_VNET(nfsrv_nfsuserd) = STARTSTOP;
+	VNET(nfsrv_nfsuserd) = STARTSTOP;
 	/*
 	 * Set up the socket record and connect.
 	 * Set nr_client NULL before unlocking, just to ensure that no other
@@ -3898,13 +4162,13 @@ nfsrv_nfsuserdport(struct nfsuserd_args *nargs, NFSPROC_T *p)
 	 * occur if the use of the nameid lock to protect nfsrv_nfsuserd is
 	 * broken.
 	 */
-	rp = &NFSD_VNET(nfsrv_nfsuserdsock);
+	rp = &VNET(nfsrv_nfsuserdsock);
 	rp->nr_client = NULL;
 	NFSUNLOCKNAMEID();
 	rp->nr_sotype = SOCK_DGRAM;
 	rp->nr_soproto = IPPROTO_UDP;
 	rp->nr_lock = (NFSR_RESERVEDPORT | NFSR_LOCALHOST);
-	rp->nr_cred = NULL;
+	rp->nr_cred = crhold(curthread->td_ucred);
 	rp->nr_prog = RPCPROG_NFSUSERD;
 	error = 0;
 	switch (nargs->nuserd_family) {
@@ -3939,12 +4203,12 @@ nfsrv_nfsuserdport(struct nfsuserd_args *nargs, NFSPROC_T *p)
 		    &rp->nr_client);
 	if (error == 0) {
 		NFSLOCKNAMEID();
-		NFSD_VNET(nfsrv_nfsuserd) = RUNNING;
+		VNET(nfsrv_nfsuserd) = RUNNING;
 		NFSUNLOCKNAMEID();
 	} else {
 		free(rp->nr_nam, M_SONAME);
 		NFSLOCKNAMEID();
-		NFSD_VNET(nfsrv_nfsuserd) = NOTRUNNING;
+		VNET(nfsrv_nfsuserd) = NOTRUNNING;
 		NFSUNLOCKNAMEID();
 	}
 out:
@@ -3960,20 +4224,21 @@ nfsrv_nfsuserddelport(void)
 {
 
 	NFSLOCKNAMEID();
-	if (NFSD_VNET(nfsrv_nfsuserd) != RUNNING) {
+	if (VNET(nfsrv_nfsuserd) != RUNNING) {
 		NFSUNLOCKNAMEID();
 		return;
 	}
-	NFSD_VNET(nfsrv_nfsuserd) = STARTSTOP;
+	VNET(nfsrv_nfsuserd) = STARTSTOP;
 	/* Wait for all upcalls to complete. */
-	while (NFSD_VNET(nfsrv_userdupcalls) > 0)
-		msleep(&NFSD_VNET(nfsrv_userdupcalls), NFSNAMEIDMUTEXPTR, PVFS,
+	while (VNET(nfsrv_userdupcalls) > 0)
+		msleep(&VNET(nfsrv_userdupcalls), NFSNAMEIDMUTEXPTR, PVFS,
 		    "nfsupcalls", 0);
 	NFSUNLOCKNAMEID();
-	newnfs_disconnect(NULL, &NFSD_VNET(nfsrv_nfsuserdsock));
-	free(NFSD_VNET(nfsrv_nfsuserdsock).nr_nam, M_SONAME);
+	newnfs_disconnect(NULL, &VNET(nfsrv_nfsuserdsock));
+	free(VNET(nfsrv_nfsuserdsock).nr_nam, M_SONAME);
+	crfree(VNET(nfsrv_nfsuserdsock).nr_cred);
 	NFSLOCKNAMEID();
-	NFSD_VNET(nfsrv_nfsuserd) = NOTRUNNING;
+	VNET(nfsrv_nfsuserd) = NOTRUNNING;
 	NFSUNLOCKNAMEID();
 }
 
@@ -3993,7 +4258,7 @@ nfsrv_getuser(int procnum, uid_t uid, gid_t gid, char *name)
 	int error;
 
 	NFSLOCKNAMEID();
-	if (NFSD_VNET(nfsrv_nfsuserd) != RUNNING) {
+	if (VNET(nfsrv_nfsuserd) != RUNNING) {
 		NFSUNLOCKNAMEID();
 		error = EPERM;
 		goto out;
@@ -4002,9 +4267,9 @@ nfsrv_getuser(int procnum, uid_t uid, gid_t gid, char *name)
 	 * Maintain a count of upcalls in progress, so that nfsrv_X()
 	 * can wait until no upcalls are in progress.
 	 */
-	NFSD_VNET(nfsrv_userdupcalls)++;
+	VNET(nfsrv_userdupcalls)++;
 	NFSUNLOCKNAMEID();
-	KASSERT(NFSD_VNET(nfsrv_userdupcalls) > 0,
+	KASSERT(VNET(nfsrv_userdupcalls) > 0,
 	    ("nfsrv_getuser: non-positive upcalls"));
 	nd = &nfsd;
 	cred = newnfs_getcred();
@@ -4022,13 +4287,13 @@ nfsrv_getuser(int procnum, uid_t uid, gid_t gid, char *name)
 		len = strlen(name);
 		(void) nfsm_strtom(nd, name, len);
 	}
-	error = newnfs_request(nd, NULL, NULL, &NFSD_VNET(nfsrv_nfsuserdsock),
+	error = newnfs_request(nd, NULL, NULL, &VNET(nfsrv_nfsuserdsock),
 	    NULL, NULL, cred, RPCPROG_NFSUSERD, RPCNFSUSERD_VERS, NULL, 0,
 	    NULL, NULL);
 	NFSLOCKNAMEID();
-	if (--NFSD_VNET(nfsrv_userdupcalls) == 0 &&
-	    NFSD_VNET(nfsrv_nfsuserd) == STARTSTOP)
-		wakeup(&NFSD_VNET(nfsrv_userdupcalls));
+	if (--VNET(nfsrv_userdupcalls) == 0 &&
+	    VNET(nfsrv_nfsuserd) == STARTSTOP)
+		wakeup(&VNET(nfsrv_userdupcalls));
 	NFSUNLOCKNAMEID();
 	NFSFREECRED(cred);
 	if (!error) {
@@ -4038,6 +4303,23 @@ nfsrv_getuser(int procnum, uid_t uid, gid_t gid, char *name)
 out:
 	NFSEXITCODE(error);
 	return (error);
+}
+
+/* Check to see if the uid/gid is in the nfs_prime_userd list. */
+static bool
+nfs_in_prime(int flag, uid_t uid, gid_t gid)
+{
+	int i;
+
+	for (i = 0; nfs_prime_userd[i].flag != 0; i++) {
+		if ((nfs_prime_userd[i].flag & flag) == NFSID_ADDUID &&
+		    nfs_prime_userd[i].uid == uid)
+			return (true);
+		if ((nfs_prime_userd[i].flag & flag) == NFSID_ADDGID &&
+		    nfs_prime_userd[i].gid == gid)
+			return (true);
+	}
+	return (false);
 }
 
 /*
@@ -4063,12 +4345,16 @@ nfssvc_idname(struct nfsd_idargs *nidp)
 	}
 	if (nidp->nid_flag & NFSID_INITIALIZE) {
 		cp = malloc(nidp->nid_namelen + 1, M_NFSSTRING, M_WAITOK);
-		error = copyin(nidp->nid_name, cp, nidp->nid_namelen);
+		error = 0;
+		if ((nidp->nid_flag & NFSID_SYSSPACE) == 0)
+			error = copyin(nidp->nid_name, cp, nidp->nid_namelen);
+		else
+			NFSBCOPY(nidp->nid_name, cp, nidp->nid_namelen);
 		if (error != 0) {
 			free(cp, M_NFSSTRING);
 			goto out;
 		}
-		if (atomic_cmpset_acq_int(&NFSD_VNET(nfsrv_dnsnamelen), 0, 0) ==
+		if (atomic_cmpset_acq_int(&VNET(nfsrv_dnsnamelen), 0, 0) ==
 		    0) {
 			/*
 			 * Free up all the old stuff and reinitialize hash
@@ -4077,80 +4363,80 @@ nfssvc_idname(struct nfsd_idargs *nidp)
 			 * ones, to avoid a LOR.
 			 */
 			for (i = 0; i < nfsrv_lughashsize; i++)
-				mtx_lock(&NFSD_VNET(nfsusernamehash)[i].mtx);
+				mtx_lock(&VNET(nfsusernamehash)[i].mtx);
 			for (i = 0; i < nfsrv_lughashsize; i++)
-				mtx_lock(&NFSD_VNET(nfsuserhash)[i].mtx);
+				mtx_lock(&VNET(nfsuserhash)[i].mtx);
 			for (i = 0; i < nfsrv_lughashsize; i++)
 				TAILQ_FOREACH_SAFE(usrp,
-				    &NFSD_VNET(nfsuserhash)[i].lughead, lug_numhash, nusrp)
+				    &VNET(nfsuserhash)[i].lughead, lug_numhash, nusrp)
 					nfsrv_removeuser(usrp, 1);
 			for (i = 0; i < nfsrv_lughashsize; i++)
-				mtx_unlock(&NFSD_VNET(nfsuserhash)[i].mtx);
+				mtx_unlock(&VNET(nfsuserhash)[i].mtx);
 			for (i = 0; i < nfsrv_lughashsize; i++)
-				mtx_unlock(&NFSD_VNET(nfsusernamehash)[i].mtx);
+				mtx_unlock(&VNET(nfsusernamehash)[i].mtx);
 			for (i = 0; i < nfsrv_lughashsize; i++)
-				mtx_lock(&NFSD_VNET(nfsgroupnamehash)[i].mtx);
+				mtx_lock(&VNET(nfsgroupnamehash)[i].mtx);
 			for (i = 0; i < nfsrv_lughashsize; i++)
-				mtx_lock(&NFSD_VNET(nfsgrouphash)[i].mtx);
+				mtx_lock(&VNET(nfsgrouphash)[i].mtx);
 			for (i = 0; i < nfsrv_lughashsize; i++)
 				TAILQ_FOREACH_SAFE(usrp,
-				    &NFSD_VNET(nfsgrouphash)[i].lughead, lug_numhash,
+				    &VNET(nfsgrouphash)[i].lughead, lug_numhash,
 				    nusrp)
 					nfsrv_removeuser(usrp, 0);
 			for (i = 0; i < nfsrv_lughashsize; i++)
-				mtx_unlock(&NFSD_VNET(nfsgrouphash)[i].mtx);
+				mtx_unlock(&VNET(nfsgrouphash)[i].mtx);
 			for (i = 0; i < nfsrv_lughashsize; i++)
-				mtx_unlock(&NFSD_VNET(nfsgroupnamehash)[i].mtx);
-			free(NFSD_VNET(nfsrv_dnsname), M_NFSSTRING);
-			NFSD_VNET(nfsrv_dnsname) = NULL;
+				mtx_unlock(&VNET(nfsgroupnamehash)[i].mtx);
+			free(VNET(nfsrv_dnsname), M_NFSSTRING);
+			VNET(nfsrv_dnsname) = NULL;
 		}
-		if (NFSD_VNET(nfsuserhash) == NULL) {
+		if (VNET(nfsuserhash) == NULL) {
 			/* Allocate the hash tables. */
-			NFSD_VNET(nfsuserhash) = malloc(sizeof(struct nfsrv_lughash) *
+			VNET(nfsuserhash) = malloc(sizeof(struct nfsrv_lughash) *
 			    nfsrv_lughashsize, M_NFSUSERGROUP, M_WAITOK |
 			    M_ZERO);
 			for (i = 0; i < nfsrv_lughashsize; i++)
-				mtx_init(&NFSD_VNET(nfsuserhash)[i].mtx, "nfsuidhash",
+				mtx_init(&VNET(nfsuserhash)[i].mtx, "nfsuidhash",
 				    NULL, MTX_DEF | MTX_DUPOK);
-			NFSD_VNET(nfsusernamehash) = malloc(sizeof(struct nfsrv_lughash) *
+			VNET(nfsusernamehash) = malloc(sizeof(struct nfsrv_lughash) *
 			    nfsrv_lughashsize, M_NFSUSERGROUP, M_WAITOK |
 			    M_ZERO);
 			for (i = 0; i < nfsrv_lughashsize; i++)
-				mtx_init(&NFSD_VNET(nfsusernamehash)[i].mtx,
+				mtx_init(&VNET(nfsusernamehash)[i].mtx,
 				    "nfsusrhash", NULL, MTX_DEF |
 				    MTX_DUPOK);
-			NFSD_VNET(nfsgrouphash) = malloc(sizeof(struct nfsrv_lughash) *
+			VNET(nfsgrouphash) = malloc(sizeof(struct nfsrv_lughash) *
 			    nfsrv_lughashsize, M_NFSUSERGROUP, M_WAITOK |
 			    M_ZERO);
 			for (i = 0; i < nfsrv_lughashsize; i++)
-				mtx_init(&NFSD_VNET(nfsgrouphash)[i].mtx, "nfsgidhash",
+				mtx_init(&VNET(nfsgrouphash)[i].mtx, "nfsgidhash",
 				    NULL, MTX_DEF | MTX_DUPOK);
-			NFSD_VNET(nfsgroupnamehash) = malloc(sizeof(struct nfsrv_lughash) *
+			VNET(nfsgroupnamehash) = malloc(sizeof(struct nfsrv_lughash) *
 			    nfsrv_lughashsize, M_NFSUSERGROUP, M_WAITOK |
 			    M_ZERO);
 			for (i = 0; i < nfsrv_lughashsize; i++)
-			    mtx_init(&NFSD_VNET(nfsgroupnamehash)[i].mtx,
+			    mtx_init(&VNET(nfsgroupnamehash)[i].mtx,
 			    "nfsgrphash", NULL, MTX_DEF | MTX_DUPOK);
 		}
 		/* (Re)initialize the list heads. */
 		for (i = 0; i < nfsrv_lughashsize; i++)
-			TAILQ_INIT(&NFSD_VNET(nfsuserhash)[i].lughead);
+			TAILQ_INIT(&VNET(nfsuserhash)[i].lughead);
 		for (i = 0; i < nfsrv_lughashsize; i++)
-			TAILQ_INIT(&NFSD_VNET(nfsusernamehash)[i].lughead);
+			TAILQ_INIT(&VNET(nfsusernamehash)[i].lughead);
 		for (i = 0; i < nfsrv_lughashsize; i++)
-			TAILQ_INIT(&NFSD_VNET(nfsgrouphash)[i].lughead);
+			TAILQ_INIT(&VNET(nfsgrouphash)[i].lughead);
 		for (i = 0; i < nfsrv_lughashsize; i++)
-			TAILQ_INIT(&NFSD_VNET(nfsgroupnamehash)[i].lughead);
+			TAILQ_INIT(&VNET(nfsgroupnamehash)[i].lughead);
 
 		/*
 		 * Put name in "DNS" string.
 		 */
-		NFSD_VNET(nfsrv_dnsname) = cp;
-		NFSD_VNET(nfsrv_defaultuid) = nidp->nid_uid;
-		NFSD_VNET(nfsrv_defaultgid) = nidp->nid_gid;
-		NFSD_VNET(nfsrv_usercnt) = 0;
-		NFSD_VNET(nfsrv_usermax) = nidp->nid_usermax;
-		atomic_store_rel_int(&NFSD_VNET(nfsrv_dnsnamelen),
+		VNET(nfsrv_dnsname) = cp;
+		VNET(nfsrv_defaultuid) = nidp->nid_uid;
+		VNET(nfsrv_defaultgid) = nidp->nid_gid;
+		VNET(nfsrv_usercnt) = 0;
+		VNET(nfsrv_usermax) = nidp->nid_usermax;
+		atomic_store_rel_int(&VNET(nfsrv_dnsnamelen),
 		    nidp->nid_namelen);
 		goto out;
 	}
@@ -4161,14 +4447,23 @@ nfssvc_idname(struct nfsd_idargs *nidp)
 	 */
 	newusrp = malloc(sizeof(struct nfsusrgrp) + nidp->nid_namelen,
 	    M_NFSUSERGROUP, M_WAITOK | M_ZERO);
-	error = copyin(nidp->nid_name, newusrp->lug_name,
-	    nidp->nid_namelen);
+	error = 0;
+	if ((nidp->nid_flag & NFSID_SYSSPACE) == 0)
+		error = copyin(nidp->nid_name, newusrp->lug_name,
+		    nidp->nid_namelen);
+	else
+		NFSBCOPY(nidp->nid_name, newusrp->lug_name, nidp->nid_namelen);
 	if (error == 0 && nidp->nid_ngroup > 0 &&
 	    (nidp->nid_flag & NFSID_ADDUID) != 0) {
-		grps = malloc(sizeof(gid_t) * nidp->nid_ngroup, M_TEMP,
-		    M_WAITOK);
-		error = copyin(nidp->nid_grps, grps,
-		    sizeof(gid_t) * nidp->nid_ngroup);
+		grps = NULL;
+		if (nidp->nid_ngroup > NGROUPS_MAX)
+			error = EINVAL;
+		if (error == 0) {
+			grps = malloc(sizeof(gid_t) * nidp->nid_ngroup, M_TEMP,
+			    M_WAITOK);
+			error = copyin(nidp->nid_grps, grps,
+			    sizeof(gid_t) * nidp->nid_ngroup);
+		}
 		if (error == 0) {
 			/*
 			 * Create a credential just like svc_getcred(),
@@ -4211,7 +4506,7 @@ nfssvc_idname(struct nfsd_idargs *nidp)
 	if (nidp->nid_flag & (NFSID_DELUID | NFSID_ADDUID)) {
 		/* Must lock all username hash lists first, to avoid a LOR. */
 		for (i = 0; i < nfsrv_lughashsize; i++)
-			mtx_lock(&NFSD_VNET(nfsusernamehash)[i].mtx);
+			mtx_lock(&VNET(nfsusernamehash)[i].mtx);
 		username_locked = 1;
 		hp_idnum = NFSUSERHASH(nidp->nid_uid);
 		mtx_lock(&hp_idnum->mtx);
@@ -4240,7 +4535,7 @@ nfssvc_idname(struct nfsd_idargs *nidp)
 	} else if (nidp->nid_flag & (NFSID_DELGID | NFSID_ADDGID)) {
 		/* Must lock all groupname hash lists first, to avoid a LOR. */
 		for (i = 0; i < nfsrv_lughashsize; i++)
-			mtx_lock(&NFSD_VNET(nfsgroupnamehash)[i].mtx);
+			mtx_lock(&VNET(nfsgroupnamehash)[i].mtx);
 		groupname_locked = 1;
 		hp_idnum = NFSGROUPHASH(nidp->nid_gid);
 		mtx_lock(&hp_idnum->mtx);
@@ -4275,7 +4570,11 @@ nfssvc_idname(struct nfsd_idargs *nidp)
 		newusrp->lug_expiry = NFSD_MONOSEC + nidp->nid_usertimeout;
 	else
 		newusrp->lug_expiry = NFSD_MONOSEC + 5;
+	newusrp->lug_wired = false;
 	if (nidp->nid_flag & (NFSID_ADDUID | NFSID_ADDUSERNAME)) {
+		if (nfs_nfsv4root && nfs_in_prime(NFSID_ADDUID, nidp->nid_uid,
+		    nidp->nid_gid))
+			newusrp->lug_wired = true;
 		newusrp->lug_uid = nidp->nid_uid;
 		thp = NFSUSERHASH(newusrp->lug_uid);
 		mtx_assert(&thp->mtx, MA_OWNED);
@@ -4283,8 +4582,11 @@ nfssvc_idname(struct nfsd_idargs *nidp)
 		thp = NFSUSERNAMEHASH(newusrp->lug_name, newusrp->lug_namelen);
 		mtx_assert(&thp->mtx, MA_OWNED);
 		TAILQ_INSERT_TAIL(&thp->lughead, newusrp, lug_namehash);
-		atomic_add_int(&NFSD_VNET(nfsrv_usercnt), 1);
+		atomic_add_int(&VNET(nfsrv_usercnt), 1);
 	} else if (nidp->nid_flag & (NFSID_ADDGID | NFSID_ADDGROUPNAME)) {
+		if (nfs_nfsv4root && nfs_in_prime(NFSID_ADDGID, nidp->nid_uid,
+		    nidp->nid_gid))
+			newusrp->lug_wired = true;
 		newusrp->lug_gid = nidp->nid_gid;
 		thp = NFSGROUPHASH(newusrp->lug_gid);
 		mtx_assert(&thp->mtx, MA_OWNED);
@@ -4292,7 +4594,7 @@ nfssvc_idname(struct nfsd_idargs *nidp)
 		thp = NFSGROUPNAMEHASH(newusrp->lug_name, newusrp->lug_namelen);
 		mtx_assert(&thp->mtx, MA_OWNED);
 		TAILQ_INSERT_TAIL(&thp->lughead, newusrp, lug_namehash);
-		atomic_add_int(&NFSD_VNET(nfsrv_usercnt), 1);
+		atomic_add_int(&VNET(nfsrv_usercnt), 1);
 	} else {
 		if (newusrp->lug_cred != NULL)
 			crfree(newusrp->lug_cred);
@@ -4321,19 +4623,20 @@ nfssvc_idname(struct nfsd_idargs *nidp)
 		    NFSID_DELUSERNAME | NFSID_ADDUSERNAME)) != 0) {
 			if (username_locked == 0) {
 				for (i = 0; i < nfsrv_lughashsize; i++)
-					mtx_lock(&NFSD_VNET(nfsusernamehash)[i].mtx);
+					mtx_lock(&VNET(nfsusernamehash)[i].mtx);
 				username_locked = 1;
 			}
 			KASSERT(user_locked == 0,
 			    ("nfssvc_idname: user_locked"));
 			for (i = 0; i < nfsrv_lughashsize; i++)
-				mtx_lock(&NFSD_VNET(nfsuserhash)[i].mtx);
+				mtx_lock(&VNET(nfsuserhash)[i].mtx);
 			user_locked = 1;
 			for (i = 0; i < nfsrv_lughashsize; i++) {
 				TAILQ_FOREACH_SAFE(usrp,
-				    &NFSD_VNET(nfsuserhash)[i].lughead, lug_numhash,
+				    &VNET(nfsuserhash)[i].lughead, lug_numhash,
 				    nusrp)
-					if (usrp->lug_expiry < NFSD_MONOSEC)
+					if (!usrp->lug_wired &&
+					    usrp->lug_expiry < NFSD_MONOSEC)
 						nfsrv_removeuser(usrp, 1);
 			}
 			for (i = 0; i < nfsrv_lughashsize; i++) {
@@ -4342,28 +4645,29 @@ nfssvc_idname(struct nfsd_idargs *nidp)
 				 * algorithm.  This code deletes the least
 				 * recently used entry on each hash list.
 				 */
-				if (NFSD_VNET(nfsrv_usercnt) <= NFSD_VNET(nfsrv_usermax))
+				if (VNET(nfsrv_usercnt) <= VNET(nfsrv_usermax))
 					break;
-				usrp = TAILQ_FIRST(&NFSD_VNET(nfsuserhash)[i].lughead);
+				usrp = TAILQ_FIRST(&VNET(nfsuserhash)[i].lughead);
 				if (usrp != NULL)
 					nfsrv_removeuser(usrp, 1);
 			}
 		} else {
 			if (groupname_locked == 0) {
 				for (i = 0; i < nfsrv_lughashsize; i++)
-					mtx_lock(&NFSD_VNET(nfsgroupnamehash)[i].mtx);
+					mtx_lock(&VNET(nfsgroupnamehash)[i].mtx);
 				groupname_locked = 1;
 			}
 			KASSERT(group_locked == 0,
 			    ("nfssvc_idname: group_locked"));
 			for (i = 0; i < nfsrv_lughashsize; i++)
-				mtx_lock(&NFSD_VNET(nfsgrouphash)[i].mtx);
+				mtx_lock(&VNET(nfsgrouphash)[i].mtx);
 			group_locked = 1;
 			for (i = 0; i < nfsrv_lughashsize; i++) {
 				TAILQ_FOREACH_SAFE(usrp,
-				    &NFSD_VNET(nfsgrouphash)[i].lughead, lug_numhash,
+				    &VNET(nfsgrouphash)[i].lughead, lug_numhash,
 				    nusrp)
-					if (usrp->lug_expiry < NFSD_MONOSEC)
+					if (!usrp->lug_wired &&
+					    usrp->lug_expiry < NFSD_MONOSEC)
 						nfsrv_removeuser(usrp, 0);
 			}
 			for (i = 0; i < nfsrv_lughashsize; i++) {
@@ -4372,9 +4676,9 @@ nfssvc_idname(struct nfsd_idargs *nidp)
 				 * algorithm.  This code deletes the least
 				 * recently user entry on each hash list.
 				 */
-				if (NFSD_VNET(nfsrv_usercnt) <= NFSD_VNET(nfsrv_usermax))
+				if (VNET(nfsrv_usercnt) <= VNET(nfsrv_usermax))
 					break;
-				usrp = TAILQ_FIRST(&NFSD_VNET(nfsgrouphash)[i].lughead);
+				usrp = TAILQ_FIRST(&VNET(nfsgrouphash)[i].lughead);
 				if (usrp != NULL)
 					nfsrv_removeuser(usrp, 0);
 			}
@@ -4390,16 +4694,16 @@ nfssvc_idname(struct nfsd_idargs *nidp)
 		mtx_unlock(&hp_name->mtx);
 	if (user_locked != 0)
 		for (i = 0; i < nfsrv_lughashsize; i++)
-			mtx_unlock(&NFSD_VNET(nfsuserhash)[i].mtx);
+			mtx_unlock(&VNET(nfsuserhash)[i].mtx);
 	if (username_locked != 0)
 		for (i = 0; i < nfsrv_lughashsize; i++)
-			mtx_unlock(&NFSD_VNET(nfsusernamehash)[i].mtx);
+			mtx_unlock(&VNET(nfsusernamehash)[i].mtx);
 	if (group_locked != 0)
 		for (i = 0; i < nfsrv_lughashsize; i++)
-			mtx_unlock(&NFSD_VNET(nfsgrouphash)[i].mtx);
+			mtx_unlock(&VNET(nfsgrouphash)[i].mtx);
 	if (groupname_locked != 0)
 		for (i = 0; i < nfsrv_lughashsize; i++)
-			mtx_unlock(&NFSD_VNET(nfsgroupnamehash)[i].mtx);
+			mtx_unlock(&VNET(nfsgroupnamehash)[i].mtx);
 out:
 	NFSEXITCODE(error);
 	return (error);
@@ -4428,7 +4732,7 @@ nfsrv_removeuser(struct nfsusrgrp *usrp, int isuser)
 		mtx_assert(&hp->mtx, MA_OWNED);
 		TAILQ_REMOVE(&hp->lughead, usrp, lug_namehash);
 	}
-	atomic_add_int(&NFSD_VNET(nfsrv_usercnt), -1);
+	atomic_add_int(&VNET(nfsrv_usercnt), -1);
 	if (usrp->lug_cred != NULL)
 		crfree(usrp->lug_cred);
 	free(usrp, M_NFSUSERGROUP);
@@ -4447,11 +4751,11 @@ nfsrv_cleanusergroup(void)
 	struct nfsusrgrp *nusrp, *usrp;
 	int i;
 
-	if (NFSD_VNET(nfsuserhash) == NULL)
+	if (VNET(nfsuserhash) == NULL)
 		return;
 
 	for (i = 0; i < nfsrv_lughashsize; i++) {
-		hp = &NFSD_VNET(nfsuserhash)[i];
+		hp = &VNET(nfsuserhash)[i];
 		TAILQ_FOREACH_SAFE(usrp, &hp->lughead, lug_numhash, nusrp) {
 			TAILQ_REMOVE(&hp->lughead, usrp, lug_numhash);
 			hp2 = NFSUSERNAMEHASH(usrp->lug_name,
@@ -4461,7 +4765,7 @@ nfsrv_cleanusergroup(void)
 				crfree(usrp->lug_cred);
 			free(usrp, M_NFSUSERGROUP);
 		}
-		hp = &NFSD_VNET(nfsgrouphash)[i];
+		hp = &VNET(nfsgrouphash)[i];
 		TAILQ_FOREACH_SAFE(usrp, &hp->lughead, lug_numhash, nusrp) {
 			TAILQ_REMOVE(&hp->lughead, usrp, lug_numhash);
 			hp2 = NFSGROUPNAMEHASH(usrp->lug_name,
@@ -4471,16 +4775,16 @@ nfsrv_cleanusergroup(void)
 				crfree(usrp->lug_cred);
 			free(usrp, M_NFSUSERGROUP);
 		}
-		mtx_destroy(&NFSD_VNET(nfsuserhash)[i].mtx);
-		mtx_destroy(&NFSD_VNET(nfsusernamehash)[i].mtx);
-		mtx_destroy(&NFSD_VNET(nfsgroupnamehash)[i].mtx);
-		mtx_destroy(&NFSD_VNET(nfsgrouphash)[i].mtx);
+		mtx_destroy(&VNET(nfsuserhash)[i].mtx);
+		mtx_destroy(&VNET(nfsusernamehash)[i].mtx);
+		mtx_destroy(&VNET(nfsgroupnamehash)[i].mtx);
+		mtx_destroy(&VNET(nfsgrouphash)[i].mtx);
 	}
-	free(NFSD_VNET(nfsuserhash), M_NFSUSERGROUP);
-	free(NFSD_VNET(nfsusernamehash), M_NFSUSERGROUP);
-	free(NFSD_VNET(nfsgrouphash), M_NFSUSERGROUP);
-	free(NFSD_VNET(nfsgroupnamehash), M_NFSUSERGROUP);
-	free(NFSD_VNET(nfsrv_dnsname), M_NFSSTRING);
+	free(VNET(nfsuserhash), M_NFSUSERGROUP);
+	free(VNET(nfsusernamehash), M_NFSUSERGROUP);
+	free(VNET(nfsgrouphash), M_NFSUSERGROUP);
+	free(VNET(nfsgroupnamehash), M_NFSUSERGROUP);
+	free(VNET(nfsrv_dnsname), M_NFSSTRING);
 }
 
 /*
@@ -4748,8 +5052,7 @@ nfsrvd_rephead(struct nfsrv_descript *nd)
 	if ((nd->nd_flag & ND_EXTPG) != 0) {
 		mreq = mb_alloc_ext_plus_pages(PAGE_SIZE, M_WAITOK);
 		nd->nd_mreq = nd->nd_mb = mreq;
-		nd->nd_bpos = (char *)(void *)
-		    PHYS_TO_DMAP(mreq->m_epg_pa[0]);
+		nd->nd_bpos = PHYS_TO_DMAP(mreq->m_epg_pa[0]);
 		nd->nd_bextpg = 0;
 		nd->nd_bextpgsiz = PAGE_SIZE;
 	} else {
@@ -5021,9 +5324,9 @@ nfsv4_seqsess_cacherep(uint32_t slotid, struct nfsslot *slots, int repstat,
 /*
  * Generate the xdr for an NFSv4.1 Sequence Operation.
  */
-void
+static void
 nfsv4_setsequence(struct nfsmount *nmp, struct nfsrv_descript *nd,
-    struct nfsclsession *sep, int dont_replycache, struct ucred *cred)
+    struct nfsclsession *sep, bool dont_replycache, struct ucred *cred)
 {
 	uint32_t *tl, slotseq = 0;
 	int error, maxslot, slotpos;
@@ -5046,6 +5349,7 @@ nfsv4_setsequence(struct nfsmount *nmp, struct nfsrv_descript *nd,
 	NFSM_BUILD(tl, uint32_t *, NFSX_V4SESSIONID + 4 * NFSX_UNSIGNED);
 	nd->nd_sequence = tl;
 	bcopy(sessionid, tl, NFSX_V4SESSIONID);
+	bcopy(sessionid, nd->nd_sessionid, NFSX_V4SESSIONID);
 	tl += NFSX_V4SESSIONID / NFSX_UNSIGNED;
 	nd->nd_slotseq = tl;
 	if (error == 0) {
@@ -5054,7 +5358,7 @@ nfsv4_setsequence(struct nfsmount *nmp, struct nfsrv_descript *nd,
 		*tl++ = txdr_unsigned(slotseq);
 		*tl++ = txdr_unsigned(slotpos);
 		*tl++ = txdr_unsigned(maxslot);
-		if (dont_replycache == 0)
+		if (!dont_replycache)
 			*tl = newnfs_true;
 		else
 			*tl = newnfs_false;
@@ -5231,8 +5535,7 @@ nfsm_set(struct nfsrv_descript *nd, u_int offs)
 				break;
 			}
 		}
-		nd->nd_bpos = (char *)(void *)
-		    PHYS_TO_DMAP(m->m_epg_pa[nd->nd_bextpg]);
+		nd->nd_bpos = PHYS_TO_DMAP(m->m_epg_pa[nd->nd_bextpg]);
 		if (nd->nd_bextpg == 0)
 			nd->nd_bpos += m->m_epg_1st_off;
 		if (offs > 0) {
@@ -5292,6 +5595,7 @@ nfsrpc_destroysession(struct nfsmount *nmp, struct nfsclsession *tsep,
 	    0, NULL);
 	NFSM_BUILD(tl, uint32_t *, NFSX_V4SESSIONID);
 	bcopy(tsep->nfsess_sessionid, tl, NFSX_V4SESSIONID);
+	bcopy(tsep->nfsess_sessionid, nd->nd_sessionid, NFSX_V4SESSIONID);
 	nd->nd_flag |= ND_USEGSSNAME;
 	error = newnfs_request(nd, nmp, NULL, &nmp->nm_sockreq, NULL, p, cred,
 	    NFS_PROG, NFS_VER4, NULL, 1, NULL, NULL);
@@ -5300,6 +5604,23 @@ nfsrpc_destroysession(struct nfsmount *nmp, struct nfsclsession *tsep,
 	error = nd->nd_repstat;
 	m_freem(nd->nd_mrep);
 	return (error);
+}
+
+/*
+ * Determine the true form (the type of ACL stored on the file) for the
+ * vnode argument.
+ */
+static uint32_t
+nfs_trueform(struct vnode *vp)
+{
+	uint32_t trueform;
+
+	trueform = NFSV4_ACL_MODEL_NONE;
+	if ((vp->v_mount->mnt_flag & MNT_NFS4ACLS) != 0)
+		trueform = NFSV4_ACL_MODEL_NFS4;
+	else if ((vp->v_mount->mnt_flag & MNT_ACLS) != 0)
+		trueform = NFSV4_ACL_MODEL_POSIX_DRAFT;
+	return (trueform);
 }
 
 /*

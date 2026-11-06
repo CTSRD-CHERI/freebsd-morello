@@ -32,10 +32,6 @@
 
 extern struct devsw vdisk_dev;
 
-#ifdef MD_IMAGE_SIZE
-extern struct devsw md_dev;
-#endif
-
 struct devsw *devsw[] = {
 	&efipart_fddev,
 	&efipart_cddev,
@@ -48,7 +44,7 @@ struct devsw *devsw[] = {
 #ifdef EFI_ZFS_BOOT
 	&zfs_dev,
 #endif
-#ifdef MD_IMAGE_SIZE
+#if defined(LOADER_MD_SUPPORT)
 	&md_dev,
 #endif
 	NULL
@@ -57,6 +53,7 @@ struct devsw *devsw[] = {
 struct fs_ops *file_system[] = {
 #ifdef EFI_ZFS_BOOT
 	&zfs_fsops,
+	&zstdfs_fsops,
 #endif
 	&dosfs_fsops,
 	&ufs_fsops,
@@ -66,6 +63,7 @@ struct fs_ops *file_system[] = {
 	&nfs_fsops,
 	&gzipfs_fsops,
 	&bzipfs_fsops,
+	&xzfs_fsops,
 	NULL
 };
 

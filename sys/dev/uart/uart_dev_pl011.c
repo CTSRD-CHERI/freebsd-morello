@@ -367,7 +367,7 @@ static kobj_method_t uart_pl011_methods[] = {
 	KOBJMETHOD(uart_transmit,	uart_pl011_bus_transmit),
 	KOBJMETHOD(uart_grab,		uart_pl011_bus_grab),
 	KOBJMETHOD(uart_ungrab,		uart_pl011_bus_ungrab),
-	{ 0, 0 }
+	KOBJMETHOD_END
 };
 
 static struct uart_class uart_pl011_class = {
@@ -382,30 +382,30 @@ static struct uart_class uart_pl011_class = {
 };
 UART_CLASS(uart_pl011_class);
 
-#ifdef FDT
-static struct ofw_compat_data fdt_compat_data[] = {
-	{"arm,pl011",		(uintptr_t)&uart_pl011_class},
-	{NULL,			(uintptr_t)NULL},
-};
-UART_FDT_CLASS_AND_DEVICE(fdt_compat_data);
-#endif
-
 #ifdef DEV_ACPI
 static struct acpi_spcr_compat_data acpi_spcr_compat_data[] = {
-	{ &uart_pl011_class, ACPI_DBG2_ARM_PL011 },
-	{ &uart_pl011_class, ACPI_DBG2_ARM_SBSA_GENERIC },
-	{ &uart_pl011_class, ACPI_DBG2_ARM_SBSA_32BIT },
+	{ &uart_pl011_class,	ACPI_DBG2_ARM_PL011 },
+	{ &uart_pl011_class,	ACPI_DBG2_ARM_SBSA_GENERIC },
+	{ &uart_pl011_class,	ACPI_DBG2_ARM_SBSA_32BIT },
 	{ NULL, 0 },
 };
 UART_ACPI_SPCR_CLASS(acpi_spcr_compat_data);
 
 static struct acpi_uart_compat_data acpi_compat_data[] = {
-	{"ARMH0011", &uart_pl011_class, 2, 0, 0, 0, "uart pl011"},
-	{"ARMHB000", &uart_pl011_class, 2, 0, 0, 0, "uart pl011"},
-	{"ARMHB000", &uart_pl011_class, 2, 0, 0, 0, "uart pl011"},
-	{NULL, NULL, 0, 0, 0, 0, NULL},
+	{"ARMH0011",	&uart_pl011_class, 2, 0, 0, 0, "uart pl011"},
+	{"ARMHB000",	&uart_pl011_class, 2, 0, 0, 0, "uart pl011"},
+	{"ARMHB000",	&uart_pl011_class, 2, 0, 0, 0, "uart pl011"},
+	{NULL,		NULL,		   0, 0, 0, 0, NULL},
 };
 UART_ACPI_CLASS_AND_DEVICE(acpi_compat_data);
+#endif
+
+#ifdef FDT
+static struct ofw_compat_data fdt_compat_data[] = {
+	{"arm,pl011",	(uintptr_t)&uart_pl011_class},
+	{NULL,		(uintptr_t)NULL},
+};
+UART_FDT_CLASS_AND_DEVICE(fdt_compat_data);
 #endif
 
 static int

@@ -96,31 +96,6 @@
 
 #define	TARG(k, f)	IP_FW_ARG_TABLEARG(chain, k, f)
 
-static void
-ipfw_log_ipfw0(struct ip_fw_args *args, struct ip *ip)
-{
-	if (args->flags & IPFW_ARGS_LENMASK)
-		ipfw_bpf_tap(args->mem, IPFW_ARGS_LENGTH(args->flags));
-	else if (args->flags & IPFW_ARGS_ETHER)
-		/* layer2, use orig hdr */
-		ipfw_bpf_mtap(args->m);
-	else {
-		/* Add fake header. Later we will store
-		 * more info in the header.
-		 */
-		if (ip->ip_v == 4)
-			ipfw_bpf_mtap2("DDDDDDSSSSSS\x08\x00",
-			    ETHER_HDR_LEN, args->m);
-		else if (ip->ip_v == 6)
-			ipfw_bpf_mtap2("DDDDDDSSSSSS\x86\xdd",
-			    ETHER_HDR_LEN, args->m);
-		else
-			/* Obviously bogus EtherType. */
-			ipfw_bpf_mtap2("DDDDDDSSSSSS\xff\xff",
-			    ETHER_HDR_LEN, args->m);
-	}
-}
-
 /*
  * XXX this function alone takes about 2Kbytes of code!
  */
@@ -453,15 +428,10 @@ ipfw_log_syslog(struct ip_fw_chain *chain, struct ip_fw *f, u_int hlen,
 	else
 		mark_str[0] = '\0';
 
-#ifdef __FreeBSD__
 	log(LOG_SECURITY | LOG_INFO, "ipfw: %d %s %s%s %s via %s%s\n",
 	    f ? f->rulenum : -1, action, proto, mark_str,
 	    args->flags & IPFW_ARGS_OUT ? "out" : "in", args->ifp->if_xname,
 	    fragment);
-#else
-	log(LOG_SECURITY | LOG_INFO, "ipfw: %d %s %s%s [no if info]%s\n",
-	    f ? f->rulenum : -1, action, proto, mark_str, fragment);
-#endif
 	if (limit_reached)
 		log(LOG_SECURITY | LOG_NOTICE,
 		    "ipfw: limit %d reached on entry %d\n",
@@ -747,7 +717,8 @@ ipfw_log(struct ip_fw_chain *chain, struct ip_fw *f, u_int hlen,
 	    /* O_LOG is the first action */
 	    ((cmd = ACTION_PTR(f)) && cmd->arg1 == IPFW_LOG_DEFAULT)) {
 		if (V_fw_verbose == 0) {
-			ipfw_log_ipfw0(args, ip);
+			ipfw_bpf_tap(chain, args, ip,
+			    f != NULL ? f->rulenum : IPFW_DEFAULT_RULE);
 			return;
 		}
 		ipfw_log_syslog(chain, f, hlen, args, offset, tablearg, ip);
@@ -761,6 +732,6 @@ ipfw_log(struct ip_fw_chain *chain, struct ip_fw *f, u_int hlen,
 		ipfw_log_rtsock(chain, f, hlen, args, offset, tablearg, eh);
 
 	if (cmd->arg1 & IPFW_LOG_IPFW0)
-		ipfw_log_ipfw0(args, ip);
+		ipfw_bpf_tap(chain, args, ip, f->rulenum);
 }
 /* end of file */

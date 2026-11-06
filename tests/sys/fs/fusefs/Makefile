@@ -5,6 +5,7 @@ PACKAGE=	tests
 TESTSDIR=	${TESTSBASE}/sys/fs/fusefs
 
 ATF_TESTS_SH+=	ctl
+ATF_TESTS_SH+=	ext2-misc
 
 # We could simply link all of these files into a single executable.  But since
 # Kyua treats googletest programs as plain tests, it's better to separate them
@@ -29,11 +30,13 @@ GTESTS+=	fsyncdir
 GTESTS+=	getattr
 GTESTS+=	interrupt
 GTESTS+=	io
+GTESTS+=	ioctl
 GTESTS+=	last_local_modify
 GTESTS+=	link
 GTESTS+=	locks
 GTESTS+=	lookup
 GTESTS+=	lseek
+GTESTS+=	misc
 GTESTS+=	mkdir
 GTESTS+=	mknod
 GTESTS+=	mount
@@ -66,11 +69,14 @@ TEST_METADATA.default_permissions+=	required_user="unprivileged"
 TEST_METADATA.default_permissions_privileged+=	required_user="root"
 TEST_METADATA.mknod+=	required_user="root"
 TEST_METADATA.nfs+=	required_user="root"
+# NB: per-testcase metadata properties override global metadata properties.
+# This must reference all of the required modules for the test.
+TEST_METADATA.ctl+=	required_kmods="ctl fusefs"
 # ctl must be exclusive because it disables/enables camsim
 TEST_METADATA.ctl+=	is_exclusive="true"
 TEST_METADATA.ctl+=	required_user="root"
 
-TEST_METADATA+=	timeout=10
+TEST_METADATA+=	timeout=20
 TEST_METADATA+=	required_kmods="fusefs"
 
 FUSEFS=		${SRCTOP}/sys/fs/fuse
@@ -92,6 +98,13 @@ CXXWARNFLAGS+=	-Wno-vla-cxx-extension
 .endif
 CXXFLAGS+=	-I${SRCTOP}/tests
 CXXFLAGS+=	-I${FUSEFS}
+
+.if ${COMPILER_TYPE} == "gcc" && ${COMPILER_VERSION} >= 160000
+# gcc 16's aggressive inlining hits max-inline-insns-* limits and
+# fails on these sources. Use a lower optimization setting to
+# fix the build.
+CXXFLAGS+= -O1
+.endif
 
 LIBADD+=	pthread
 LIBADD+=	gmock gtest

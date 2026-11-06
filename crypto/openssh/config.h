@@ -35,7 +35,7 @@
 /* getline is not what we expect */
 /* #undef BROKEN_GETLINE */
 
-/* FreeBSD glob does not do what we need */
+/* Do not use system glob */
 #define BROKEN_GLOB 1
 
 /* Define if you system's inet_ntoa is busted (e.g. Irix gcc issue) */
@@ -217,6 +217,9 @@
 /* Have attribute nonnull */
 #define HAVE_ATTRIBUTE__NONNULL__ 1
 
+/* compiler supports nonstring attribute */
+#define HAVE_ATTRIBUTE__NONSTRING__ 1
+
 /* OpenBSD's gcc has sentinel */
 /* #undef HAVE_ATTRIBUTE__SENTINEL__ */
 
@@ -364,9 +367,29 @@
    don't. */
 #define HAVE_DECL_HOWMANY 1
 
+/* Define to 1 if you have the declaration of 'htobe32', and to 0 if you
+   don't. */
+#define HAVE_DECL_HTOBE32 1
+
+/* Define to 1 if you have the declaration of 'htole64', and to 0 if you
+   don't. */
+#define HAVE_DECL_HTOLE64 1
+
 /* Define to 1 if you have the declaration of 'h_errno', and to 0 if you
    don't. */
 #define HAVE_DECL_H_ERRNO 1
+
+/* Define to 1 if you have the declaration of 'INFINITY', and to 0 if you
+   don't. */
+#define HAVE_DECL_INFINITY 1
+
+/* Define to 1 if you have the declaration of 'le32toh', and to 0 if you
+   don't. */
+#define HAVE_DECL_LE32TOH 1
+
+/* Define to 1 if you have the declaration of 'le64toh', and to 0 if you
+   don't. */
+#define HAVE_DECL_LE64TOH 1
 
 /* Define to 1 if you have the declaration of 'loginfailed', and to 0 if you
    don't. */
@@ -432,6 +455,10 @@
    don't. */
 #define HAVE_DECL__GETSHORT 0
 
+/* Define to 1 if you have the declaration of '__builtin_inff', and to 0 if
+   you don't. */
+/* #undef HAVE_DECL___BUILTIN_INFF */
+
 /* Define to 1 if you have the 'DES_crypt' function. */
 #define HAVE_DES_CRYPT 1
 
@@ -453,11 +480,22 @@
 /* Define to 1 if you have the 'dlopen' function. */
 #define HAVE_DLOPEN 1
 
-/* Define to 1 if you have the 'DSA_generate_parameters_ex' function. */
-#define HAVE_DSA_GENERATE_PARAMETERS_EX 1
-
 /* Define to 1 if you have the 'EC_KEY_METHOD_new' function. */
 #define HAVE_EC_KEY_METHOD_NEW 1
+
+/* Define to 1 if you have the 'EC_POINT_get_affine_coordinates' function. */
+#define HAVE_EC_POINT_GET_AFFINE_COORDINATES 1
+
+/* Define to 1 if you have the 'EC_POINT_get_affine_coordinates_GFp' function.
+   */
+#define HAVE_EC_POINT_GET_AFFINE_COORDINATES_GFP 1
+
+/* Define to 1 if you have the 'EC_POINT_set_affine_coordinates' function. */
+#define HAVE_EC_POINT_SET_AFFINE_COORDINATES 1
+
+/* Define to 1 if you have the 'EC_POINT_set_affine_coordinates_GFp' function.
+   */
+#define HAVE_EC_POINT_SET_AFFINE_COORDINATES_GFP 1
 
 /* Define to 1 if you have the <elf.h> header file. */
 #define HAVE_ELF_H 1
@@ -623,6 +661,9 @@
 
 /* Define to 1 if the system has the type 'fsfilcnt_t'. */
 #define HAVE_FSFILCNT_T 1
+
+/* Define to 1 if you have the 'fstatat' function. */
+#define HAVE_FSTATAT 1
 
 /* Define to 1 if you have the 'fstatfs' function. */
 #define HAVE_FSTATFS 1
@@ -961,6 +1002,9 @@
 /* Define to 1 if you have the 'mkdtemp' function. */
 #define HAVE_MKDTEMP 1
 
+/* Define to 1 if you have the 'mmap' function. */
+#define HAVE_MMAP 1
+
 /* define if you have mode_t data type */
 #define HAVE_MODE_T 1
 
@@ -991,6 +1035,12 @@
 /* Define to 1 if you have the 'ngetaddrinfo' function. */
 /* #undef HAVE_NGETADDRINFO */
 
+/* Define to 1 if you have the 'nlist' function. */
+#define HAVE_NLIST 1
+
+/* Define to 1 if you have the <nlist.h> header file. */
+#define HAVE_NLIST_H 1
+
 /* Define to 1 if you have the 'nl_langinfo' function. */
 #define HAVE_NL_LANGINFO 1
 
@@ -1010,8 +1060,11 @@
 /* Define to 1 if you have the 'openpty' function. */
 #define HAVE_OPENPTY 1
 
-/* as a macro */
-#define HAVE_OPENSSL_ADD_ALL_ALGORITHMS 1
+/* Define to 1 if you have the <openssl/configuration.h> header file. */
+#define HAVE_OPENSSL_CONFIGURATION_H 1
+
+/* Define to 1 if you have the <openssl/opensslconf.h> header file. */
+#define HAVE_OPENSSL_OPENSSLCONF_H 1
 
 /* Define to 1 if you have the 'OpenSSL_version' function. */
 #define HAVE_OPENSSL_VERSION 1
@@ -1105,7 +1158,7 @@
 #define HAVE_REALPATH 1
 
 /* Define to 1 if you have the 'recallocarray' function. */
-/* #undef HAVE_RECALLOCARRAY */
+#define HAVE_RECALLOCARRAY 1
 
 /* Define to 1 if you have the 'recvmsg' function. */
 #define HAVE_RECVMSG 1
@@ -1350,6 +1403,9 @@
 /* define if you have struct addrinfo data type */
 #define HAVE_STRUCT_ADDRINFO 1
 
+/* Define to 1 if 'd_type' is a member of 'struct dirent'. */
+#define HAVE_STRUCT_DIRENT_D_TYPE 1
+
 /* define if you have struct in6_addr data type */
 #define HAVE_STRUCT_IN6_ADDR 1
 
@@ -1569,11 +1625,17 @@
 /* Define to 1 if you have the <unistd.h> header file. */
 #define HAVE_UNISTD_H 1
 
+/* Define to 1 if you have the 'unlinkat' function. */
+#define HAVE_UNLINKAT 1
+
 /* Define to 1 if you have the 'unsetenv' function. */
 #define HAVE_UNSETENV 1
 
 /* Define to 1 if the system has the type 'unsigned long long'. */
 #define HAVE_UNSIGNED_LONG_LONG 1
+
+/* Define to 1 if you have the 'unveil' function. */
+/* #undef HAVE_UNVEIL */
 
 /* Define to 1 if you have the 'updwtmp' function. */
 /* #undef HAVE_UPDWTMP */
@@ -1708,6 +1770,9 @@
    EOPNOTSUPP. */
 /* #undef LINK_OPNOTSUPP_ERRNO */
 
+/* Lock all memory to protect sshd against Linux kcompactd */
+/* #undef LINUX_MEMLOCK_ONFAULT */
+
 /* Adjust Linux out-of-memory killer */
 /* #undef LINUX_OOM_ADJUST */
 
@@ -1731,6 +1796,9 @@
 
 /* Set this to your mail directory if you do not have _PATH_MAILDIR */
 /* #undef MAIL_DIRECTORY */
+
+/* Define if your compiler lacks __builtin_popcount */
+/* #undef MISSING_BUILTIN_POPCOUNT */
 
 /* Need setpgrp to for controlling tty */
 /* #undef NEED_SETPGRP */
@@ -1768,9 +1836,6 @@
 /* libcrypto has NID_secp521r1 */
 #define OPENSSL_HAS_NISTP521 1
 
-/* libcrypto is missing AES 192 and 256 bit functions */
-/* #undef OPENSSL_LOBOTOMISED_AES */
-
 /* Define if you want the OpenSSL internally seeded PRNG only */
 #define OPENSSL_PRNG_ONLY 1
 
@@ -1805,6 +1870,12 @@
 /* System dirs owned by bin (uid 2) */
 /* #undef PLATFORM_SYS_DIR_UID */
 
+/* need inet in pledge for setsockopt IP_TOS */
+#define PLEDGE_EXTRA_INET /**/
+
+/* Define if poll 2nd arg is ulong */
+/* #undef POLL_NFDS_T_ULONG */
+
 /* Port number of PRNGD/EGD random number socket */
 /* #undef PRNGD_PORT */
 
@@ -1823,9 +1894,6 @@
 /* no privsep sandboxing */
 /* #undef SANDBOX_NULL */
 
-/* Sandbox using pledge(2) */
-/* #undef SANDBOX_PLEDGE */
-
 /* Sandbox using setrlimit(2) */
 /* #undef SANDBOX_RLIMIT */
 
@@ -1840,9 +1908,6 @@
 
 /* Sandbox using Solaris/Illumos privileges */
 /* #undef SANDBOX_SOLARIS */
-
-/* Sandbox using systrace(4) */
-/* #undef SANDBOX_SYSTRACE */
 
 /* Specify the system call convention in use */
 /* #undef SECCOMP_AUDIT_ARCH */
@@ -1885,9 +1950,6 @@
 /* sshd PAM service name */
 /* #undef SSHD_PAM_SERVICE */
 
-/* Define if pam_chauthtok wants real uid set to the unpriv'ed user */
-/* #undef SSHPAM_CHAUTHTOK_NEEDS_RUID */
-
 /* Use audit debugging module */
 /* #undef SSH_AUDIT_EVENTS */
 
@@ -1898,7 +1960,7 @@
 #define SSH_PRIVSEP_USER "sshd"
 
 /* Use tunnel device compatibility to OpenBSD */
-/* #undef SSH_TUN_COMPAT_AF */
+#define SSH_TUN_COMPAT_AF 1
 
 /* Open tunnel devices the FreeBSD way */
 #define SSH_TUN_FREEBSD 1
@@ -1970,6 +2032,9 @@
 
 /* Define if you have Solaris projects */
 /* #undef USE_SOLARIS_PROJECTS */
+
+/* Use libwtmpdb for sshd */
+/* #undef USE_WTMPDB */
 
 /* compiler variable declarations after code */
 #define VARIABLE_DECLARATION_AFTER_CODE 1

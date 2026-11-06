@@ -35,8 +35,6 @@
 #ifndef _MACHINE__STDINT_H_
 #define	_MACHINE__STDINT_H_
 
-#if !defined(__cplusplus) || defined(__STDC_CONSTANT_MACROS)
-
 #define	INT8_C(c)		(c)
 #define	INT16_C(c)		(c)
 #define	INT32_C(c)		(c)
@@ -49,10 +47,6 @@
 
 #define	INTMAX_C(c)		INT64_C(c)
 #define	UINTMAX_C(c)		UINT64_C(c)
-
-#endif /* !defined(__cplusplus) || defined(__STDC_CONSTANT_MACROS) */
-
-#if !defined(__cplusplus) || defined(__STDC_LIMIT_MACROS)
 
 /*
  * ISO/IEC 9899:1999
@@ -155,7 +149,27 @@
 #define	WINT_MIN	INT32_MIN
 #define	WINT_MAX	INT32_MAX
 
-#endif /* !defined(__cplusplus) || defined(__STDC_LIMIT_MACROS) */
+#if __ISO_C_VISIBLE >= 2023
+/*
+ * ISO/IEC 9899:2023
+ * 7.22.2 Widths of specified-width integer types
+ */
+#define INT_FAST8_WIDTH         INT32_WIDTH
+#define INT_FAST16_WIDTH        INT32_WIDTH
+#define INT_FAST32_WIDTH        INT32_WIDTH
+#define INT_FAST64_WIDTH        INT64_WIDTH
+#define INTPTR_WIDTH            INT64_WIDTH
+#define INTMAX_WIDTH            INT64_WIDTH
+
+/*
+ * ISO/IEC 9899:2023
+ * 7.22.3 Width of other integer types
+ */
+#define PTRDIFF_WIDTH           INT64_WIDTH
+#define SIG_ATOMIC_WIDTH        INT64_WIDTH
+#define SIZE_WIDTH              INT64_WIDTH
+#define WINT_WIDTH              INT32_WIDTH
+#endif /* __ISO_C_VISIBLE >= 2023 */
 
 #endif /* !_MACHINE__STDINT_H_ */
 

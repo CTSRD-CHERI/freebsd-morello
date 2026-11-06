@@ -35,7 +35,6 @@
 #include <machine/specialreg.h>
 
 #include "assym.inc"
-#include "opt_sched.h"
 
 /*****************************************************************************/
 /* Scheduling                                                                */
@@ -136,13 +135,11 @@ ctx_switch_fpusave_done:
 	movq	%r15,TD_LOCK(%r13)		/* Release the old thread */
 sw1:
 	leaq	TD_MD_PCB(%r12),%r8
-#if defined(SCHED_ULE)
 	movq	$blocked_lock, %rdx
 	movq	TD_LOCK(%r12),%rcx
 	cmpq	%rcx, %rdx
 	je	sw1wait
 sw1cont:
-#endif
 	/*
 	 * At this point, we've switched address spaces and are ready
 	 * to load up the rest of the next context.
@@ -190,14 +187,22 @@ do_kthread:
 	cmpq	%rax,%rdx
 	jne	do_tss
 done_tss:
+	movq	%r8,PCPU(CURPCB)
+	cmpb	$0,fred
+	jne	1f
 	movq	TD_MD_STACK_BASE(%r12),%r9
 	movq	%r9,PCPU(RSP0)
-	movq	%r8,PCPU(CURPCB)
 	movq	PCPU(PTI_RSP0),%rax
 	cmpq	$~0,PCPU(UCR3)
 	cmove	%r9,%rax
 	movq	%rax,TSS_RSP0(%rdx)
-	movq	%r12,PCPU(CURTHREAD)		/* into next thread */
+	jmp	2f
+1:	movq	TD_MD_STACK_BASE(%r12),%rdx
+	movl	%edx,%eax
+	shrq	$32,%rdx
+	movl	$MSR_FRED_RSP0,%ecx
+	wrmsr
+2:	movq	%r12,PCPU(CURTHREAD)		/* into next thread */
 
 	/* Test if debug registers should be restored. */
 	testl	$PCB_DBREGS,PCB_FLAGS(%r8)
@@ -368,8 +373,36 @@ ENTRY(savectx)
 	movl	%eax,PCB_SFMASK(%rdi)
 	movl	%edx,PCB_SFMASK+4(%rdi)
 
-	sgdt	PCB_GDT(%rdi)
-	sidt	PCB_IDT(%rdi)
+	cmpb	$0, fred
+	je	1f
+	movl	$MSR_FRED_RSP0,%ecx
+	rdmsr
+	movl	%eax,PCB_FRED_RSP0(%rdi)
+	movl	%edx,PCB_FRED_RSP0+4(%rdi)
+	movl	$MSR_FRED_RSP1,%ecx
+	rdmsr
+	movl	%eax,PCB_FRED_RSP1(%rdi)
+	movl	%edx,PCB_FRED_RSP1+4(%rdi)
+	movl	$MSR_FRED_RSP2,%ecx
+	rdmsr
+	movl	%eax,PCB_FRED_RSP2(%rdi)
+	movl	%edx,PCB_FRED_RSP2+4(%rdi)
+	movl	$MSR_FRED_RSP3,%ecx
+	rdmsr
+	movl	%eax,PCB_FRED_RSP3(%rdi)
+	movl	%edx,PCB_FRED_RSP3+4(%rdi)
+	movl	$MSR_FRED_STKLVLS,%ecx
+	rdmsr
+	movl	%eax,PCB_FRED_STKLVLS(%rdi)
+	movl	%edx,PCB_FRED_STKLVLS+4(%rdi)
+	movl	$MSR_FRED_CONFIG,%ecx
+	rdmsr
+	movl	%eax,PCB_FRED_CONFIG(%rdi)
+	movl	%edx,PCB_FRED_CONFIG+4(%rdi)
+	jmp	2f
+
+1:	sidt	PCB_IDT(%rdi)
+2:	sgdt	PCB_GDT(%rdi)
 	sldt	PCB_LDT(%rdi)
 	str	PCB_TR(%rdi)
 
@@ -434,6 +467,34 @@ ENTRY(resumectx)
 	movl	PCB_SFMASK(%rdi),%eax
 	wrmsr
 
+	/* Restore FRED state before reloading %cr4. */
+	cmpb	$0,fred
+	je	1f
+	movl	$MSR_FRED_RSP0,%ecx
+	movl	PCB_FRED_RSP0(%rdi),%eax
+	movl	4 + PCB_FRED_RSP0(%rdi),%edx
+	wrmsr
+	movl	$MSR_FRED_RSP1,%ecx
+	movl	PCB_FRED_RSP1(%rdi),%eax
+	movl	4 + PCB_FRED_RSP1(%rdi),%edx
+	wrmsr
+	movl	$MSR_FRED_RSP2,%ecx
+	movl	PCB_FRED_RSP2(%rdi),%eax
+	movl	4 + PCB_FRED_RSP2(%rdi),%edx
+	wrmsr
+	movl	$MSR_FRED_RSP3,%ecx
+	movl	PCB_FRED_RSP3(%rdi),%eax
+	movl	4 + PCB_FRED_RSP3(%rdi),%edx
+	wrmsr
+	movl	$MSR_FRED_STKLVLS,%ecx
+	movl	PCB_FRED_STKLVLS(%rdi),%eax
+	movl	4 + PCB_FRED_STKLVLS(%rdi),%edx
+	wrmsr
+	movl	$MSR_FRED_CONFIG,%ecx
+	movl	PCB_FRED_CONFIG(%rdi),%eax
+	movl	4 + PCB_FRED_CONFIG(%rdi),%edx
+	wrmsr
+1:
 	/* Restore CR0, CR2, CR4 and CR3. */
 	movq	PCB_CR0(%rdi),%rax
 	movq	%rax,%cr0
@@ -445,8 +506,10 @@ ENTRY(resumectx)
 	movq	%rax,%cr3
 
 	/* Restore descriptor tables. */
+	cmpb	$0,fred
+	jne	1f
 	lidt	PCB_IDT(%rdi)
-	lldt	PCB_LDT(%rdi)
+1:	lldt	PCB_LDT(%rdi)
 
 #define	SDT_SYSTSS	9
 #define	SDT_SYSBSY	11
@@ -492,7 +555,6 @@ ENTRY(resumectx)
 END(resumectx)
 
 /* Wait for the new thread to become unblocked */
-#if defined(SCHED_ULE)
 sw1wait:
 1:
 	pause
@@ -500,4 +562,5 @@ sw1wait:
 	cmpq	%rcx, %rdx
 	je	1b
 	jmp	sw1cont
-#endif
+
+	.section .note.GNU-stack,"",%progbits

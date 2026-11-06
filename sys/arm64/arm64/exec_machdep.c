@@ -60,6 +60,10 @@
 #include <machine/vfp.h>
 #endif
 
+#define	CTX_SIZE_SVE(buf_size)					\
+    roundup2(sizeof(struct sve_context) + (buf_size),		\
+      _Alignof(struct sve_context))
+
 _Static_assert(sizeof(mcontext_t) == 880, "mcontext_t size incorrect");
 _Static_assert(sizeof(ucontext_t) == 960, "ucontext_t size incorrect");
 _Static_assert(sizeof(siginfo_t) == 80, "siginfo_t size incorrect");
@@ -210,8 +214,8 @@ fill_dbregs(struct thread *td, struct dbreg *regs)
 	} else {
 		debug_ver = ID_AA64DFR0_DebugVer_VAL(dfr0) >>
 		    ID_AA64DFR0_DebugVer_SHIFT;
-		nbkpts = ID_AA64DFR0_BRPs_VAL(dfr0) >> ID_AA64DFR0_BRPs_SHIFT;
-		nwtpts = ID_AA64DFR0_WRPs_VAL(dfr0) >> ID_AA64DFR0_WRPs_SHIFT;
+		nbkpts = ID_AA64DFR0_BRPs_NUM(dfr0);
+		nwtpts = ID_AA64DFR0_WRPs_NUM(dfr0);
 	}
 
 	/*
@@ -441,6 +445,7 @@ exec_setregs(struct thread *td, struct image_params *imgp, uintptr_t stack)
 	else
 		new_tcr = 0;
 	td->td_proc->p_md.md_tcr = new_tcr;
+	td->td_md.md_sctlr = 0;
 
 	/* TODO: should create a pmap function for this... */
 	tcr = READ_SPECIALREG(tcr_el1);
@@ -466,6 +471,7 @@ exec_setregs(struct thread *td, struct image_params *imgp, uintptr_t stack)
 
 	/* Generate new pointer authentication keys */
 	ptrauth_exec(td);
+	mte_exec(td);
 }
 
 /* Sanity check these are the same size, they will be memcpy'd to and from */
@@ -478,6 +484,7 @@ int
 get_mcontext(struct thread *td, mcontext_t *mcp, int clear_ret)
 {
 	struct trapframe *tf = td->td_frame;
+	ksiginfo_t *ksi = td->td_proc->p_ksi;
 
 	if (clear_ret & GET_MC_CLEAR_RET) {
 		mcp->mc_gpregs.gp_x[0] = 0;
@@ -493,6 +500,10 @@ get_mcontext(struct thread *td, mcontext_t *mcp, int clear_ret)
 	mcp->mc_gpregs.gp_sp = tf->tf_sp;
 	mcp->mc_gpregs.gp_lr = tf->tf_lr;
 	mcp->mc_gpregs.gp_elr = tf->tf_elr;
+	if (ksi != NULL && (ksi->ksi_flags & KSI_EXCEPT) != 0) {
+		mcp->mc_esr = tf->tf_esr;
+		mcp->mc_flags |= _MC_ESR_VALID;
+	}
 	get_fpcontext(td, mcp);
 
 	return (0);
@@ -585,8 +596,7 @@ set_mcontext(struct thread *td, mcontext_t *mcp)
 
 				buf_size = sve_buf_size(td);
 				/* Check the size is valid */
-				if (ctx.ctx_size !=
-				    (sizeof(sve_ctx) + buf_size))
+				if (ctx.ctx_size != CTX_SIZE_SVE(buf_size))
 					return (EINVAL);
 
 				memset(pcb->pcb_svesaved, 0,
@@ -729,7 +739,7 @@ sendsig_ctx_sve(struct thread *td, vm_offset_t *addrp)
 {
 	struct sve_context ctx;
 	struct pcb *pcb;
-	size_t buf_size;
+	size_t buf_size, ctx_size;
 	vm_offset_t ctx_addr;
 
 	pcb = td->td_pcb;
@@ -740,14 +750,15 @@ sendsig_ctx_sve(struct thread *td, vm_offset_t *addrp)
 	MPASS(pcb->pcb_svesaved != NULL);
 
 	buf_size = sve_buf_size(td);
+	ctx_size = CTX_SIZE_SVE(buf_size);
 
 	/* Address for the full context */
-	*addrp -= sizeof(ctx) + buf_size;
+	*addrp -= ctx_size;
 	ctx_addr = *addrp;
 
 	memset(&ctx, 0, sizeof(ctx));
 	ctx.sve_ctx.ctx_id = ARM64_CTX_SVE;
-	ctx.sve_ctx.ctx_size = sizeof(ctx) + buf_size;
+	ctx.sve_ctx.ctx_size = ctx_size;
 	ctx.sve_vector_len = pcb->pcb_sve_len;
 	ctx.sve_flags = 0;
 
@@ -834,7 +845,7 @@ sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 	/* Make room, keeping the stack aligned */
 	fp = (struct sigframe *)addr;
 	fp--;
-	fp = (struct sigframe *)STACKALIGN(fp);
+	fp = STACKALIGN(fp);
 
 	/* Copy the sigframe out to the user's stack. */
 	if (copyout(&frame, fp, sizeof(*fp)) != 0) {

@@ -648,7 +648,7 @@ nospace:
 }
 
 static void
-m_copyfromunmapped(const struct mbuf *m, int off, int len, caddr_t cp)
+m_copyfromunmapped(const struct mbuf *m, int off, int len, void *data)
 {
 	struct iovec iov;
 	struct uio uio;
@@ -658,7 +658,7 @@ m_copyfromunmapped(const struct mbuf *m, int off, int len, caddr_t cp)
 	KASSERT(len >= 0, ("m_copyfromunmapped: negative len %d", len));
 	KASSERT(off < m->m_len,
 	    ("m_copyfromunmapped: len exceeds mbuf length"));
-	iov.iov_base = cp;
+	iov.iov_base = data;
 	iov.iov_len = len;
 	uio.uio_resid = len;
 	uio.uio_iov = &iov;
@@ -676,8 +676,9 @@ m_copyfromunmapped(const struct mbuf *m, int off, int len, caddr_t cp)
  * continuing for "len" bytes, into the indicated buffer.
  */
 void
-m_copydata(const struct mbuf *m, int off, int len, caddr_t cp)
+m_copydata(const struct mbuf *m, int off, int len, void *data)
 {
+	char *cp = data;
 	u_int count;
 
 	KASSERT(off >= 0, ("m_copydata, negative off %d", off));
@@ -695,7 +696,7 @@ m_copydata(const struct mbuf *m, int off, int len, caddr_t cp)
 		if ((m->m_flags & M_EXTPG) != 0)
 			m_copyfromunmapped(m, off, count, cp);
 		else
-			bcopy(mtod(m, caddr_t) + off, cp, count);
+			bcopy(mtod(m, char *) + off, cp, count);
 		len -= count;
 		cp += count;
 		off = 0;
@@ -925,7 +926,7 @@ m_adj_decap(struct mbuf *mp, int len)
  * contiguous region in an attempt to avoid being called next time.
  */
 struct mbuf *
-m_pullup(struct mbuf *n, int len)
+__m_pullup(struct mbuf *n, int len)
 {
 	struct mbuf *m;
 	int count;
@@ -957,6 +958,8 @@ m_pullup(struct mbuf *n, int len)
 	}
 	space = &m->m_dat[MLEN] - (m->m_data + m->m_len);
 	do {
+		KASSERT((n->m_flags & M_EXTPG) == 0,
+		    ("%s: unmapped mbuf %p in chain", __func__, n));
 		count = min(min(max(len, max_protohdr), space), n->m_len);
 		bcopy(mtod(n, caddr_t), mtod(m, caddr_t) + m->m_len,
 		  (u_int)count);
@@ -1001,6 +1004,8 @@ m_copyup(struct mbuf *n, int len, int dstoff)
 	m->m_data += dstoff;
 	space = &m->m_dat[MLEN] - (m->m_data + m->m_len);
 	do {
+		KASSERT((n->m_flags & M_EXTPG) == 0,
+		    ("%s: unmapped mbuf %p in chain", __func__, n));
 		count = min(min(max(len, max_protohdr), space), n->m_len);
 		memcpy(mtod(m, caddr_t) + m->m_len, mtod(n, caddr_t),
 		    (unsigned)count);
@@ -1244,7 +1249,7 @@ m_devget(char *buf, int totlen, int off, struct ifnet *ifp,
 }
 
 static void
-m_copytounmapped(const struct mbuf *m, int off, int len, c_caddr_t cp)
+m_copytounmapped(const struct mbuf *m, int off, int len, const void *data)
 {
 	struct iovec iov;
 	struct uio uio;
@@ -1253,7 +1258,7 @@ m_copytounmapped(const struct mbuf *m, int off, int len, c_caddr_t cp)
 	KASSERT(off >= 0, ("m_copytounmapped: negative off %d", off));
 	KASSERT(len >= 0, ("m_copytounmapped: negative len %d", len));
 	KASSERT(off < m->m_len, ("m_copytounmapped: len exceeds mbuf length"));
-	iov.iov_base = __DECONST(caddr_t, cp);
+	iov.iov_base = __DECONST(void *, data);
 	iov.iov_len = len;
 	uio.uio_resid = len;
 	uio.uio_iov = &iov;
@@ -1272,8 +1277,9 @@ m_copytounmapped(const struct mbuf *m, int off, int len, c_caddr_t cp)
  * chain if necessary.
  */
 void
-m_copyback(struct mbuf *m0, int off, int len, c_caddr_t cp)
+m_copyback(struct mbuf *m0, int off, int len, const void *data)
 {
+	const char *cp = data;
 	int mlen;
 	struct mbuf *m = m0, *n;
 	int totlen = 0;
@@ -1287,7 +1293,7 @@ m_copyback(struct mbuf *m0, int off, int len, c_caddr_t cp)
 			n = m_get(M_NOWAIT, m->m_type);
 			if (n == NULL)
 				goto out;
-			bzero(mtod(n, caddr_t), MLEN);
+			bzero(mtod(n, void *), MLEN);
 			n->m_len = min(MLEN, len + off);
 			m->m_next = n;
 		}
@@ -1302,7 +1308,7 @@ m_copyback(struct mbuf *m0, int off, int len, c_caddr_t cp)
 		if ((m->m_flags & M_EXTPG) != 0)
 			m_copytounmapped(m, off, mlen, cp);
 		else
-			bcopy(cp, off + mtod(m, caddr_t), (u_int)mlen);
+			bcopy(cp, mtod(m, char *) + off, (u_int)mlen);
 		cp += mlen;
 		len -= mlen;
 		mlen += off;
@@ -1331,8 +1337,9 @@ out:	if (((m = m0)->m_flags & M_PKTHDR) && (m->m_pkthdr.len < totlen))
  * Return 1 if able to complete the job; otherwise 0.
  */
 int
-m_append(struct mbuf *m0, int len, c_caddr_t cp)
+m_append(struct mbuf *m0, int len, const void *data)
 {
+	const char *cp = data;
 	struct mbuf *m, *n;
 	int remainder, space;
 
@@ -1346,7 +1353,7 @@ m_append(struct mbuf *m0, int len, c_caddr_t cp)
 		 */
 		if (space > remainder)
 			space = remainder;
-		bcopy(cp, mtod(m, caddr_t) + m->m_len, space);
+		bcopy(cp, mtod(m, char *) + m->m_len, space);
 		m->m_len += space;
 		cp += space, remainder -= space;
 	}
@@ -1359,7 +1366,7 @@ m_append(struct mbuf *m0, int len, c_caddr_t cp)
 		if (n == NULL)
 			break;
 		n->m_len = min(MLEN, remainder);
-		bcopy(cp, mtod(n, caddr_t), n->m_len);
+		bcopy(cp, mtod(n, void *), n->m_len);
 		cp += n->m_len, remainder -= n->m_len;
 		m->m_next = n;
 		m = n;
@@ -1394,7 +1401,7 @@ m_apply_extpg_one(struct mbuf *m, int off, int len,
 		pglen = m_epg_pagelen(m, i, pgoff);
 		if (off < pglen) {
 			count = min(pglen - off, len);
-			p = (void *)PHYS_TO_DMAP(m->m_epg_pa[i] + pgoff + off);
+			p = PHYS_TO_DMAP(m->m_epg_pa[i] + pgoff + off);
 			rval = f(arg, p, count);
 			if (rval)
 				return (rval);
@@ -2148,6 +2155,15 @@ m_unshare(struct mbuf *m0, int how)
 	mprev = NULL;
 	for (m = m0; m != NULL; m = mprev->m_next) {
 		/*
+		 * m_unshare() can not process KTLS mbufs because they must
+		 * neither be linearized nor converted to mapped.
+		 */
+		if (mbuf_has_tls_session(m)) {
+			m_freem(m0);
+			return (NULL);
+		}
+
+		/*
 		 * Regular mbufs are ignored unless there's a cluster
 		 * in front of it that we can use to coalesce.  We do
 		 * the latter mainly so later clusters can be coalesced
@@ -2160,7 +2176,8 @@ m_unshare(struct mbuf *m0, int how)
 		 * crypto operations, especially when using hardware.
 		 */
 		if ((m->m_flags & M_EXT) == 0) {
-			if (mprev && (mprev->m_flags & M_EXT) &&
+			if (mprev &&
+			    (mprev->m_flags & (M_EXT | M_EXTPG)) == M_EXT &&
 			    m->m_len <= M_TRAILINGSPACE(mprev)) {
 				/* XXX: this ignores mbuf types */
 				memcpy(mtod(mprev, caddr_t) + mprev->m_len,
@@ -2189,11 +2206,12 @@ m_unshare(struct mbuf *m0, int how)
 		 */
 		KASSERT(m->m_flags & M_EXT, ("m_flags 0x%x", m->m_flags));
 		/* NB: we only coalesce into a cluster or larger */
-		if (mprev != NULL && (mprev->m_flags & M_EXT) &&
+		if (mprev != NULL &&
+		    (mprev->m_flags & (M_EXT | M_EXTPG)) == M_EXT &&
 		    m->m_len <= M_TRAILINGSPACE(mprev)) {
 			/* XXX: this ignores mbuf types */
-			memcpy(mtod(mprev, caddr_t) + mprev->m_len,
-			    mtod(m, caddr_t), m->m_len);
+			m_copydata(m, 0, m->m_len,
+			    mtod(mprev, caddr_t) + mprev->m_len);
 			mprev->m_len += m->m_len;
 			mprev->m_next = m->m_next;	/* unlink from chain */
 			m_free(m);			/* reclaim mbuf */
@@ -2224,7 +2242,7 @@ m_unshare(struct mbuf *m0, int how)
 		mlast = NULL;
 		for (;;) {
 			int cc = min(len, MCLBYTES);
-			memcpy(mtod(n, caddr_t), mtod(m, caddr_t) + off, cc);
+			m_copydata(m, off, cc, mtod(n, caddr_t));
 			n->m_len = cc;
 			if (mlast != NULL)
 				mlast->m_next = n;

@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -47,6 +37,7 @@
 #include <sys/dsl_synctask.h>
 #include <sys/dsl_prop.h>
 #include <sys/dmu_zfetch.h>
+#include <sys/kstat.h>
 #include <sys/zfs_ioctl.h>
 #include <sys/zap.h>
 #include <sys/zio_checksum.h>
@@ -635,7 +626,7 @@ dmu_buf_hold_array_by_dnode(dnode_t *dn, uint64_t offset, uint64_t length,
 int
 dmu_buf_hold_array(objset_t *os, uint64_t object, uint64_t offset,
     uint64_t length, int read, const void *tag, int *numbufsp,
-    dmu_buf_t ***dbpp)
+    dmu_buf_t ***dbpp, dmu_flags_t flags)
 {
 	dnode_t *dn;
 	int err;
@@ -645,7 +636,7 @@ dmu_buf_hold_array(objset_t *os, uint64_t object, uint64_t offset,
 		return (err);
 
 	err = dmu_buf_hold_array_by_dnode(dn, offset, length, read, tag,
-	    numbufsp, dbpp, DMU_READ_PREFETCH);
+	    numbufsp, dbpp, flags);
 
 	dnode_rele(dn, FTAG);
 
@@ -655,14 +646,14 @@ dmu_buf_hold_array(objset_t *os, uint64_t object, uint64_t offset,
 int
 dmu_buf_hold_array_by_bonus(dmu_buf_t *db_fake, uint64_t offset,
     uint64_t length, boolean_t read, const void *tag, int *numbufsp,
-    dmu_buf_t ***dbpp)
+    dmu_buf_t ***dbpp, dmu_flags_t flags)
 {
 	dmu_buf_impl_t *db = (dmu_buf_impl_t *)db_fake;
 	int err;
 
 	DB_DNODE_ENTER(db);
 	err = dmu_buf_hold_array_by_dnode(DB_DNODE(db), offset, length, read,
-	    tag, numbufsp, dbpp, DMU_READ_PREFETCH);
+	    tag, numbufsp, dbpp, flags);
 	DB_DNODE_EXIT(db);
 
 	return (err);
@@ -698,6 +689,38 @@ dmu_buf_rele_array(dmu_buf_t **dbp_fake, int numbufs, const void *tag)
  * in cache, they will be asynchronously read in.  Dnode read by dnode_hold()
  * is currently synchronous.
  */
+/*
+ * Outstanding bytes of explicit (user-requested) prefetch in flight, bounded
+ * by dmu_prefetch_user() so a large POSIX_FADV_WILLNEED hint cannot pin memory
+ * without limit and OOM the system (#15776).  Internal prefetch callers are
+ * not throttled.  Exported through the "dmustats" kstat.
+ */
+static uint64_t dmu_prefetch_bytes_active;
+
+static struct {
+	kstat_named_t prefetch_bytes_active;
+} dmu_stats = {
+	{ "prefetch_bytes_active",	KSTAT_DATA_UINT64 },
+};
+
+static kstat_t *dmu_ksp;
+
+static int
+dmu_kstats_update(kstat_t *ksp, int rw)
+{
+	(void) ksp;
+	if (rw == KSTAT_WRITE)
+		return (EACCES);
+	dmu_stats.prefetch_bytes_active.value.ui64 =
+	    atomic_load_64(&dmu_prefetch_bytes_active);
+	return (0);
+}
+
+static void dmu_prefetch_user_done(void *arg, uint64_t level, uint64_t blkid,
+    boolean_t issued);
+static void dmu_prefetch_by_dnode_impl(dnode_t *dn, int64_t level,
+    uint64_t offset, uint64_t len, zio_priority_t pri, uint64_t maxbytes);
+
 void
 dmu_prefetch(objset_t *os, uint64_t object, int64_t level, uint64_t offset,
     uint64_t len, zio_priority_t pri)
@@ -717,9 +740,48 @@ dmu_prefetch(objset_t *os, uint64_t object, int64_t level, uint64_t offset,
 	dnode_rele(dn, FTAG);
 }
 
+/*
+ * Like dmu_prefetch(), but for explicit user requests (e.g.
+ * POSIX_FADV_WILLNEED) that may span an arbitrarily large range.  Bound the
+ * outstanding prefetch so a large hint cannot pin memory without limit and OOM
+ * the system (#15776).  The budget is a quarter of arc_boot_target_bytes():
+ * the adaptive ARC target (arc_c) once the cache is warm, so it
+ * tightens under memory pressure; while the cache is still cold it uses the
+ * midpoint toward arc_c_max instead, so a hint issued right after boot -- when
+ * arc_c has not grown yet -- is not starved.
+ */
 void
-dmu_prefetch_by_dnode(dnode_t *dn, int64_t level, uint64_t offset,
+dmu_prefetch_user(objset_t *os, uint64_t object, int64_t level, uint64_t offset,
     uint64_t len, zio_priority_t pri)
+{
+	dnode_t *dn;
+
+	if (dmu_prefetch_max == 0 || len == 0) {
+		dmu_prefetch_dnode(os, object, pri);
+		return;
+	}
+
+	if (dnode_hold(os, object, FTAG, &dn) != 0)
+		return;
+
+	uint64_t maxbytes = arc_boot_target_bytes() / 4;
+	dmu_prefetch_by_dnode_impl(dn, level, offset, len, pri, maxbytes);
+
+	dnode_rele(dn, FTAG);
+}
+
+static void
+dmu_prefetch_user_done(void *arg, uint64_t level, uint64_t blkid,
+    boolean_t issued)
+{
+	(void) level, (void) blkid, (void) issued;
+	atomic_add_64(&dmu_prefetch_bytes_active,
+	    -(int64_t)(uintptr_t)arg);
+}
+
+static void
+dmu_prefetch_by_dnode_impl(dnode_t *dn, int64_t level, uint64_t offset,
+    uint64_t len, zio_priority_t pri, uint64_t maxbytes)
 {
 	int64_t level2 = level;
 	uint64_t start, end, start2, end2;
@@ -729,6 +791,24 @@ dmu_prefetch_by_dnode(dnode_t *dn, int64_t level, uint64_t offset,
 	 * level, and following blocks [start2, end2) at higher level2.
 	 */
 	rw_enter(&dn->dn_struct_rwlock, RW_READER);
+
+	/*
+	 * When bounding explicit prefetch (maxbytes != 0), take up to half the
+	 * remaining budget for this request, so concurrent hints each get a
+	 * slice instead of the first taking everything.  The resulting cap
+	 * drives the block-range split below in place of dmu_prefetch_max, so a
+	 * tight budget pushes more of the range up to the cheap indirect level
+	 * -- prefetching all the indirects and only some data, which is what a
+	 * following random-access pattern wants.  maxbytes == 0 is the
+	 * unthrottled internal path and keeps the plain dmu_prefetch_max split.
+	 */
+	uint64_t cap = dmu_prefetch_max;
+	if (maxbytes != 0) {
+		uint64_t active = atomic_load_64(&dmu_prefetch_bytes_active);
+		uint64_t headroom = maxbytes > active ? maxbytes - active : 0;
+		cap = MIN(dmu_prefetch_max, headroom >> 1);
+	}
+
 	if (dn->dn_datablkshift != 0) {
 
 		/*
@@ -751,14 +831,16 @@ dmu_prefetch_by_dnode(dnode_t *dn, int64_t level, uint64_t offset,
 		end2 = dbuf_whichblock(dn, level, offset + len - 1) + 1;
 		uint8_t ibs = dn->dn_indblkshift;
 		uint8_t bs = (level == 0) ? dn->dn_datablkshift : ibs;
-		uint_t limit = P2ROUNDUP(dmu_prefetch_max, 1 << bs) >> bs;
+		uint_t limit = P2ROUNDUP(cap, 1 << bs) >> bs;
 		start2 = end = MIN(end2, start + limit);
 
 		/*
 		 * Find level2 where [start2, end2) fits into dmu_prefetch_max.
 		 */
 		uint8_t ibps = ibs - SPA_BLKPTRSHIFT;
-		limit = P2ROUNDUP(dmu_prefetch_max, 1 << ibs) >> ibs;
+		limit = P2ROUNDUP(cap, 1 << ibs) >> ibs;
+		if (limit == 0)
+			end2 = start2;
 		do {
 			level2++;
 			start2 = P2ROUNDUP(start2, 1 << ibps) >> ibps;
@@ -770,10 +852,90 @@ dmu_prefetch_by_dnode(dnode_t *dn, int64_t level, uint64_t offset,
 		end = start + (level == 0 && offset < dn->dn_datablksz);
 	}
 
-	for (uint64_t i = start; i < end; i++)
-		dbuf_prefetch(dn, level, i, pri, 0);
-	for (uint64_t i = start2; i < end2; i++)
-		dbuf_prefetch(dn, level2, i, pri, 0);
+	/*
+	 * Byte size of the blocks issued by each loop: data blocks (or
+	 * indirects, if a higher level was requested) in the first, indirect
+	 * blocks in the second.  Account the whole issued range against the
+	 * budget in one shot up front -- one atomic add, not one per block --
+	 * and let each block's completion callback release its own size, so the
+	 * counter drains back as the reads complete.
+	 */
+	uint64_t blksz1 = (level == 0) ? dn->dn_datablksz :
+	    (1ULL << dn->dn_indblkshift);
+	uint64_t blksz2 = 1ULL << dn->dn_indblkshift;
+	dbuf_prefetch_fn cb = NULL;
+	if (maxbytes != 0) {
+		uint64_t issued = (end - start) * blksz1 +
+		    (end2 - start2) * blksz2;
+		if (issued != 0) {
+			atomic_add_64(&dmu_prefetch_bytes_active, issued);
+			cb = dmu_prefetch_user_done;
+		}
+	}
+
+	for (uint64_t i = start; i < end; i++) {
+		(void) dbuf_prefetch_impl(dn, level, i, pri, 0, cb,
+		    (void *)(uintptr_t)blksz1);
+	}
+	for (uint64_t i = start2; i < end2; i++) {
+		(void) dbuf_prefetch_impl(dn, level2, i, pri, 0, cb,
+		    (void *)(uintptr_t)blksz2);
+	}
+	rw_exit(&dn->dn_struct_rwlock);
+}
+
+void
+dmu_prefetch_by_dnode(dnode_t *dn, int64_t level, uint64_t offset,
+    uint64_t len, zio_priority_t pri)
+{
+	dmu_prefetch_by_dnode_impl(dn, level, offset, len, pri, 0);
+}
+
+/*
+ * Prime a prefetch for sequential accesses from offset for at least len bytes.
+ */
+void
+dmu_prefetch_stream(objset_t *os, uint64_t object, uint64_t offset,
+    uint64_t len, boolean_t start_now)
+{
+	dnode_t *dn;
+
+	if (dnode_hold(os, object, FTAG, &dn) != 0)
+		return;
+	dmu_prefetch_stream_by_dnode(dn, offset, len, start_now);
+	dnode_rele(dn, FTAG);
+}
+
+void
+dmu_prefetch_stream_by_dnode(dnode_t *dn, uint64_t offset, uint64_t len,
+    boolean_t start_now)
+{
+	rw_enter(&dn->dn_struct_rwlock, RW_READER);
+	if (dn->dn_datablkshift != 0) {
+		uint64_t start = dbuf_whichblock(dn, 0, offset);
+		if (len == 0) {
+			if (dmu_zfetch_prime(&dn->dn_zfetch, start, start) &&
+			    start_now) {
+				dmu_zfetch(&dn->dn_zfetch, start, 0, B_TRUE,
+				    B_TRUE, B_TRUE, B_FALSE);
+			}
+		} else {
+			uint64_t end = dbuf_whichblock(dn, 0, offset + len - 1);
+			if (start == end) {
+				if (start_now) {
+					dbuf_prefetch(dn, 0, start,
+					    ZIO_PRIORITY_ASYNC_READ, 0);
+				}
+			} else if (
+			    dmu_zfetch_prime(&dn->dn_zfetch, start, end + 1) &&
+			    start_now) {
+				dmu_zfetch(&dn->dn_zfetch, start, 0, B_TRUE,
+				    B_TRUE, B_TRUE, B_FALSE);
+			}
+		}
+	} else if (offset < dn->dn_datablksz && start_now) {
+		dbuf_prefetch(dn, 0, 0, ZIO_PRIORITY_ASYNC_READ, 0);
+	}
 	rw_exit(&dn->dn_struct_rwlock);
 }
 
@@ -848,12 +1010,15 @@ dmu_prefetch_wait(objset_t *os, uint64_t object, uint64_t offset, uint64_t size)
 		return (err);
 
 	/*
-	 * Chunk the requests (16 indirects worth) so that we can be interrupted
+	 * Chunk the requests (16 indirects worth) so that we can be
+	 * interrupted.  Prefetch at least SPA_MAXBLOCKSIZE at a time
+	 * to better utilize pools with smaller block sizes.
 	 */
 	uint64_t chunksize;
 	if (dn->dn_indblkshift) {
 		uint64_t nbps = bp_span_in_blocks(dn->dn_indblkshift, 1);
 		chunksize = (nbps * 16) << dn->dn_datablkshift;
+		chunksize = MAX(chunksize, SPA_MAXBLOCKSIZE);
 	} else {
 		chunksize = dn->dn_datablksz;
 	}
@@ -891,6 +1056,41 @@ dmu_prefetch_dnode(objset_t *os, uint64_t object, zio_priority_t pri)
 	uint64_t blkid = dbuf_whichblock(dn, 0, object * sizeof (dnode_phys_t));
 	dbuf_prefetch(dn, 0, blkid, pri, 0);
 	rw_exit(&dn->dn_struct_rwlock);
+}
+
+/*
+ * Advisory cache eviction for a byte range of an object.
+ */
+void
+dmu_evict_range(objset_t *os, uint64_t object, uint64_t offset, uint64_t len)
+{
+	dnode_t *dn;
+
+	if (len == 0)
+		return;
+	if (dnode_hold(os, object, FTAG, &dn) != 0)
+		return;
+
+	/*
+	 * Exclude the last block if the range end is not block-aligned:
+	 * a sequential access may continue into that block.  The first
+	 * block is included even when partially covered since backwards
+	 * access patterns are rare.
+	 */
+	rw_enter(&dn->dn_struct_rwlock, RW_READER);
+	uint64_t start, end;
+	if (dn->dn_datablkshift != 0) {
+		start = dbuf_whichblock(dn, 0, offset);
+		end = dbuf_whichblock(dn, 0, offset + len);
+	} else {
+		start = (offset >= dn->dn_datablksz);
+		end = (offset + len >= dn->dn_datablksz);
+	}
+	if (end > start)
+		dbuf_evict_range(dn, start, end - 1);
+	rw_exit(&dn->dn_struct_rwlock);
+
+	dnode_rele(dn, FTAG);
 }
 
 /*
@@ -1291,7 +1491,7 @@ dmu_write_impl(dmu_buf_t **dbp, int numbufs, uint64_t offset, uint64_t size,
 
 void
 dmu_write(objset_t *os, uint64_t object, uint64_t offset, uint64_t size,
-    const void *buf, dmu_tx_t *tx)
+    const void *buf, dmu_tx_t *tx, dmu_flags_t flags)
 {
 	dmu_buf_t **dbp;
 	int numbufs;
@@ -1300,8 +1500,8 @@ dmu_write(objset_t *os, uint64_t object, uint64_t offset, uint64_t size,
 		return;
 
 	VERIFY0(dmu_buf_hold_array(os, object, offset, size,
-	    FALSE, FTAG, &numbufs, &dbp));
-	dmu_write_impl(dbp, numbufs, offset, size, buf, tx, DMU_READ_PREFETCH);
+	    FALSE, FTAG, &numbufs, &dbp, flags));
+	dmu_write_impl(dbp, numbufs, offset, size, buf, tx, flags);
 	dmu_buf_rele_array(dbp, numbufs, FTAG);
 }
 
@@ -1334,27 +1534,6 @@ dmu_write_by_dnode(dnode_t *dn, uint64_t offset, uint64_t size,
 }
 
 void
-dmu_prealloc(objset_t *os, uint64_t object, uint64_t offset, uint64_t size,
-    dmu_tx_t *tx)
-{
-	dmu_buf_t **dbp;
-	int numbufs, i;
-
-	if (size == 0)
-		return;
-
-	VERIFY0(dmu_buf_hold_array(os, object, offset, size,
-	    FALSE, FTAG, &numbufs, &dbp));
-
-	for (i = 0; i < numbufs; i++) {
-		dmu_buf_t *db = dbp[i];
-
-		dmu_buf_will_not_fill(db, tx);
-	}
-	dmu_buf_rele_array(dbp, numbufs, FTAG);
-}
-
-void
 dmu_write_embedded(objset_t *os, uint64_t object, uint64_t offset,
     void *data, uint8_t etype, uint8_t comp, int uncompressed_size,
     int compressed_size, int byteorder, dmu_tx_t *tx)
@@ -1381,7 +1560,7 @@ dmu_redact(objset_t *os, uint64_t object, uint64_t offset, uint64_t size,
 	dmu_buf_t **dbp;
 
 	VERIFY0(dmu_buf_hold_array(os, object, offset, size, FALSE, FTAG,
-	    &numbufs, &dbp));
+	    &numbufs, &dbp, DMU_READ_PREFETCH));
 	for (i = 0; i < numbufs; i++)
 		dmu_buf_redact(dbp[i], tx);
 	dmu_buf_rele_array(dbp, numbufs, FTAG);
@@ -1689,8 +1868,8 @@ dmu_object_cached_size(objset_t *os, uint64_t object,
 
 	dmu_object_info_from_dnode(dn, &doi);
 
-	for (uint64_t off = 0; off < doi.doi_max_offset;
-	    off += dmu_prefetch_max) {
+	for (uint64_t off = 0; off < doi.doi_max_offset &&
+	    dmu_prefetch_max > 0; off += dmu_prefetch_max) {
 		/* dbuf_read doesn't prefetch L1 blocks. */
 		dmu_prefetch_by_dnode(dn, 1, off,
 		    dmu_prefetch_max, ZIO_PRIORITY_SYNC_READ);
@@ -2512,9 +2691,7 @@ dmu_write_policy(objset_t *os, dnode_t *dn, int level, int wp, zio_prop_t *zp)
 	memset(zp->zp_salt, 0, ZIO_DATA_SALT_LEN);
 	memset(zp->zp_iv, 0, ZIO_DATA_IV_LEN);
 	memset(zp->zp_mac, 0, ZIO_DATA_MAC_LEN);
-	zp->zp_zpl_smallblk = (DMU_OT_IS_FILE(zp->zp_type) ||
-	    zp->zp_type == DMU_OT_ZVOL) ?
-	    os->os_zpl_special_smallblock : 0;
+	zp->zp_zpl_smallblk = os->os_zpl_special_smallblock;
 	zp->zp_storage_type = dn ? dn->dn_storage_type : DMU_OT_NONE;
 
 	ASSERT3U(zp->zp_compress, !=, ZIO_COMPRESS_INHERIT);
@@ -2590,7 +2767,7 @@ dmu_read_l0_bps(objset_t *os, uint64_t object, uint64_t offset, uint64_t length,
 	int error, numbufs;
 
 	error = dmu_buf_hold_array(os, object, offset, length, FALSE, FTAG,
-	    &numbufs, &dbp);
+	    &numbufs, &dbp, DMU_READ_PREFETCH);
 	if (error != 0) {
 		if (error == ESRCH) {
 			error = SET_ERROR(ENXIO);
@@ -2628,6 +2805,44 @@ dmu_read_l0_bps(objset_t *os, uint64_t object, uint64_t offset, uint64_t length,
 			}
 		} else {
 			bp = db->db_blkptr;
+		}
+
+		/*
+		 * A block with a pending free (a truncate or hole
+		 * punch not yet synced) must not be cloned: the clone
+		 * would add a BRT reference to a block about to be
+		 * freed, so the pending clone would apply onto an
+		 * already-freed DVA and double free it.  Report
+		 * EAGAIN and let the caller retry once the free
+		 * syncs (the block then reads as a hole).
+		 *
+		 * A hole (or absent BP) has nothing to free and is
+		 * cloned as a hole below.  When the head dirty record
+		 * overrode the BP (a clone in this txg) only frees
+		 * recorded after the override count against it;
+		 * earlier frees predate it.  This mirrors
+		 * dbuf_read_hole().
+		 */
+		if (bp != NULL && !BP_IS_HOLE(bp)) {
+			dbuf_dirty_record_t *dr =
+			    list_head(&db->db_dirty_records);
+			boolean_t freed;
+
+			DB_DNODE_ENTER(db);
+			dnode_t *rdn = DB_DNODE(db);
+			if (dr != NULL && dr->dt.dl.dr_brtwrite) {
+				freed = dnode_block_freed_after(rdn,
+				    db->db_blkid, dr->dr_txg);
+			} else {
+				freed = dnode_block_freed(rdn,
+				    db->db_blkid);
+			}
+			DB_DNODE_EXIT(db);
+			if (freed) {
+				mutex_exit(&db->db_mtx);
+				error = SET_ERROR(EAGAIN);
+				goto out;
+			}
 		}
 
 		mutex_exit(&db->db_mtx);
@@ -2691,7 +2906,7 @@ dmu_brt_clone(objset_t *os, uint64_t object, uint64_t offset, uint64_t length,
 	spa = os->os_spa;
 
 	VERIFY0(dmu_buf_hold_array(os, object, offset, length, FALSE, FTAG,
-	    &numbufs, &dbp));
+	    &numbufs, &dbp, DMU_READ_PREFETCH));
 	ASSERT3U(nbps, ==, numbufs);
 
 	/*
@@ -2916,6 +3131,16 @@ dmu_init(void)
 	l2arc_init();
 	arc_init();
 	dbuf_init();
+
+	dmu_ksp = kstat_create("zfs", 0, "dmustats", "misc",
+	    KSTAT_TYPE_NAMED,
+	    sizeof (dmu_stats) / sizeof (kstat_named_t),
+	    KSTAT_FLAG_VIRTUAL);
+	if (dmu_ksp != NULL) {
+		dmu_ksp->ks_data = &dmu_stats;
+		dmu_ksp->ks_update = dmu_kstats_update;
+		kstat_install(dmu_ksp);
+	}
 }
 
 void
@@ -2930,6 +3155,13 @@ dmu_fini(void)
 	dmu_objset_fini();
 	sa_cache_fini();
 	zfs_dbgmsg_fini();
+
+	if (dmu_ksp != NULL) {
+		kstat_delete(dmu_ksp);
+		dmu_ksp = NULL;
+	}
+	ASSERT0(atomic_load_64(&dmu_prefetch_bytes_active));
+
 	abd_fini();
 }
 
@@ -2940,6 +3172,8 @@ EXPORT_SYMBOL(dmu_buf_rele_array);
 EXPORT_SYMBOL(dmu_prefetch);
 EXPORT_SYMBOL(dmu_prefetch_by_dnode);
 EXPORT_SYMBOL(dmu_prefetch_dnode);
+EXPORT_SYMBOL(dmu_prefetch_stream);
+EXPORT_SYMBOL(dmu_prefetch_stream_by_dnode);
 EXPORT_SYMBOL(dmu_free_range);
 EXPORT_SYMBOL(dmu_free_long_range);
 EXPORT_SYMBOL(dmu_free_long_object);
@@ -2953,7 +3187,6 @@ EXPORT_SYMBOL(dmu_write_by_dnode);
 EXPORT_SYMBOL(dmu_write_uio);
 EXPORT_SYMBOL(dmu_write_uio_dbuf);
 EXPORT_SYMBOL(dmu_write_uio_dnode);
-EXPORT_SYMBOL(dmu_prealloc);
 EXPORT_SYMBOL(dmu_object_info);
 EXPORT_SYMBOL(dmu_object_info_from_dnode);
 EXPORT_SYMBOL(dmu_object_info_from_db);

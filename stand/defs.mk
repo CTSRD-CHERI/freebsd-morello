@@ -11,6 +11,7 @@ FORTIFY_SOURCE=	0
 MK_CTF=		no
 MK_SSP=		no
 MK_PIE=		no
+MK_RETPOLINE=	no
 MK_ZEROREGS=	no
 MAN=
 .if !defined(PIC)
@@ -38,6 +39,7 @@ MK_UBSAN:=	no
 WARNS?=		1
 
 BOOTSRC=	${SRCTOP}/stand
+EDK2INC=	${SYSDIR}/contrib/edk2/Include
 EFISRC=		${BOOTSRC}/efi
 EFIINC=		${EFISRC}/include
 # For amd64, there's a bit of mixed bag. Some of the tree (i386, lib*32) is
@@ -55,12 +57,11 @@ LIBLUASRC=	${BOOTSRC}/liblua
 LIBOFWSRC=	${BOOTSRC}/libofw
 LUASRC=		${SRCTOP}/contrib/lua/src
 SASRC=		${BOOTSRC}/libsa
+SAZFSSRC=	${SASRC}/zfs
 SYSDIR=		${SRCTOP}/sys
 UBOOTSRC=	${BOOTSRC}/uboot
-ZFSSRC=		${SASRC}/zfs
-OZFS=		${SRCTOP}/sys/contrib/openzfs
-ZFSOSSRC=	${OZFS}/module/os/freebsd/
-ZFSOSINC=	${OZFS}/include/os/freebsd
+ZFSOSSRC=	${ZFSTOP}/module/os/freebsd/
+ZFSOSINC=	${ZFSTOP}/include/os/freebsd
 LIBCSRC=	${SRCTOP}/lib/libc
 
 BOOTOBJ=	${OBJTOP}/stand
@@ -77,7 +78,7 @@ LIBSA=		${BOOTOBJ}/libsa/libsa.a
 .if ${MACHINE} == "i386"
 LIBSA32=	${LIBSA}
 .else
-LIBSA32=	${BOOTOBJ}/libsa32/libsa32.a
+LIBSA32=	${BOOTOBJ}/${"${LOADER}" == "loader_ia32":?efi/libsa32efi:libsa32}/libsa32.a
 .endif
 
 # Standard options:
@@ -126,6 +127,12 @@ CFLAGS+=	-I${SASRC}/geli
 .if ${LOADER_DISK_SUPPORT:Uyes} == "yes"
 CFLAGS+= -DLOADER_DISK_SUPPORT
 .endif
+.if ${LOADER_NET_SUPPORT:Uno} == "yes"
+CFLAGS+= -DLOADER_NET_SUPPORT
+.endif
+.if ${LOADER_MD_SUPPORT:Uno} == "yes"
+CFLAGS+= -DLOADER_MD_SUPPORT
+.endif
 
 # Machine specific flags for all builds here
 
@@ -157,11 +164,6 @@ CFLAGS.gcc+=	-mcmodel=medany
 CFLAGS+=	-msoft-float
 .endif
 
-# -msoft-float seems to be insufficient for powerpcspe
-.if ${MACHINE_ARCH} == "powerpcspe"
-CFLAGS+=	-mno-spe
-.endif
-
 .if ${MACHINE_CPUARCH} == "i386" || (${MACHINE_CPUARCH} == "amd64" && ${DO32:U0} == 1)
 CFLAGS+=	-march=i386
 CFLAGS.gcc+=	-mpreferred-stack-boundary=2
@@ -185,6 +187,20 @@ CFLAGS+=	-fPIC
 CFLAGS+=	-mno-relax
 .endif
 
+# ZLIB flags
+ZLIB_CFLAGS=-DHAVE_MEMCPY -I${SYSDIR}/contrib/zlib ${NO_WDEPRECATED_NON_PROTOTYPE}
+
+# BZIP2 flags
+BZIP2_CFLAGS=-I${SRCTOP}/contrib/bzip2  -DBZ_NO_STDIO -DBZ_NO_COMPRESS
+
+# ZSTD client cflags
+ZSTD_CFLAGS=-I${SYSDIR}/contrib/zstd/lib
+
+# XZ flags
+XZ_DIR=${SRCTOP}/sys/contrib/xz-embedded
+XZ_CFLAGS=-DXZ_USE_CRC64 -I${XZ_DIR}/freebsd -I${XZ_DIR}/linux/include/linux
+
+
 # The boot loader build uses dd status=none, where possible, for reproducible
 # build output (since performance varies from run to run). Trouble is that
 # option was recently (10.3) added to FreeBSD and is non-standard. Only use it
@@ -206,6 +222,8 @@ LOADER_INTERP?=${LOADER_DEFAULT_INTERP}
 
 # Make sure we use the machine link we're about to create
 CFLAGS+=-I.
+
+.include "${BOOTSRC}/veriexec.mk"
 
 all: ${PROG}
 

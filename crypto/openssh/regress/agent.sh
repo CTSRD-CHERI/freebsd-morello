@@ -1,4 +1,4 @@
-#	$OpenBSD: agent.sh,v 1.21 2023/03/01 09:29:32 dtucker Exp $
+#	$OpenBSD: agent.sh,v 1.26 2026/06/15 06:36:52 djm Exp $
 #	Placed in the Public Domain.
 
 tid="simple agent test"
@@ -84,12 +84,14 @@ if [ $r -ne 52 ]; then
 	fail "ssh connect with failed (exit code $r)"
 fi
 
+cp $OBJ/sshd_proxy $OBJ/sshd_proxy.bak
+cp $OBJ/ssh_proxy $OBJ/ssh_proxy.bak
 for t in ${SSH_KEYTYPES}; do
 	trace "connect via agent using $t key"
-	if [ "$t" = "ssh-dss" ]; then
-		echo "PubkeyAcceptedAlgorithms +ssh-dss" >> $OBJ/ssh_proxy
-		echo "PubkeyAcceptedAlgorithms +ssh-dss" >> $OBJ/sshd_proxy
-	fi
+	grep -vi PubkeyAcceptedAlgorithms $OBJ/sshd_proxy.bak > $OBJ/sshd_proxy
+	echo "PubkeyAcceptedAlgorithms=+$t" >> $OBJ/sshd_proxy
+	grep -vi PubkeyAcceptedAlgorithms $OBJ/ssh_proxy.bak > $OBJ/ssh_proxy
+	echo "PubkeyAcceptedAlgorithms=+$t" >> $OBJ/ssh_proxy
 	${SSH} -F $OBJ/ssh_proxy -i $OBJ/$t-agent.pub -oIdentitiesOnly=yes \
 		somehost exit 52
 	r=$?
@@ -97,6 +99,8 @@ for t in ${SSH_KEYTYPES}; do
 		fail "ssh connect with failed (exit code $r)"
 	fi
 done
+cp $OBJ/sshd_proxy.bak $OBJ/sshd_proxy
+cp $OBJ/ssh_proxy.bak $OBJ/ssh_proxy
 
 trace "agent forwarding"
 ${SSH} -A -F $OBJ/ssh_proxy somehost ${SSHADD} -l > /dev/null 2>&1
@@ -143,8 +147,14 @@ fi
 (printf 'cert-authority,principals="estragon" '; cat $OBJ/user_ca_key.pub) \
 	> $OBJ/authorized_keys_$USER
 for t in ${SSH_KEYTYPES}; do
-    if [ "$t" != "ssh-dss" ]; then
 	trace "connect via agent using $t key"
+	# Accept both keys and certs.
+	BASE=`echo $t | cut -d '@' -f1`
+	ACCEPT=`$SSH -Q key | grep "^$BASE" | xargs echo | sed 's/ /,/g'`
+	grep -vi PubkeyAcceptedAlgorithms $OBJ/sshd_proxy.bak > $OBJ/sshd_proxy
+	echo "PubkeyAcceptedAlgorithms=+$ACCEPT" >> $OBJ/sshd_proxy
+	grep -vi PubkeyAcceptedAlgorithms $OBJ/ssh_proxy.bak > $OBJ/ssh_proxy
+	echo "PubkeyAcceptedAlgorithms=+$ACCEPT" >> $OBJ/ssh_proxy
 	${SSH} -F $OBJ/ssh_proxy -i $OBJ/$t-agent.pub \
 		-oCertificateFile=$OBJ/$t-agent-cert.pub \
 		-oIdentitiesOnly=yes somehost exit 52
@@ -152,12 +162,11 @@ for t in ${SSH_KEYTYPES}; do
 	if [ $r -ne 52 ]; then
 		fail "ssh connect with failed (exit code $r)"
 	fi
-    fi
 done
 
 ## Deletion tests.
 
-trace "delete all agent keys"
+trace "delete all agent keys using -D"
 ${SSHADD} -D > /dev/null 2>&1
 r=$?
 if [ $r -ne 0 ]; then
@@ -181,15 +190,38 @@ r=$?
 if [ $r -ne 0 ]; then
 	fail "ssh-add -l failed: exit code $r"
 fi
+trace "delete all agent keys using SIGUSR1"
+kill -s USR1 $SSH_AGENT_PID
+r=$?
+if [ $r -ne 0 ]; then
+	fail "kill -s USR1 failed: exit code $r"
+fi
+# make sure they're gone
+${SSHADD} -l > /dev/null 2>&1
+r=$?
+if [ $r -ne 1 ]; then
+	fail "ssh-add -l returned unexpected exit code: $r"
+fi
+# re-add keys/certs to agent
+for t in ${SSH_KEYTYPES}; do
+	${SSHADD} $OBJ/$t-agent-private >/dev/null 2>&1 || \
+		fail "ssh-add failed exit code $?"
+done
+# make sure they are there
+${SSHADD} -l > /dev/null 2>&1
+r=$?
+if [ $r -ne 0 ]; then
+	fail "ssh-add -l failed: exit code $r"
+fi
 
 check_key_absent() {
-	${SSHADD} -L | grep "^$1 " >/dev/null
+	${SSHADD} -L | sed s/' .*//' | grep "^$1\$" #>/dev/null
 	if [ $? -eq 0 ]; then
 		fail "$1 key unexpectedly present"
 	fi
 }
 check_key_present() {
-	${SSHADD} -L | grep "^$1 " >/dev/null
+	${SSHADD} -L | sed s/' .*//' | grep "^$1\$" >/dev/null
 	if [ $? -ne 0 ]; then
 		fail "$1 key missing from agent"
 	fi

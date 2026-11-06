@@ -179,9 +179,15 @@
 /* Define to 1 if you have the 'getopt_long' function. */
 #define HAVE_GETOPT_LONG 1
 
+/* Define to 1 if you have the 'getrlimit' function. */
+#define HAVE_GETRLIMIT 1
+
 /* Define if the GNU gettext() function is already present or preinstalled. */
 /* FreeBSD - disabled intentionally */
 /* #undef HAVE_GETTEXT */
+
+/* Define to 1 if 'HWCAP_CRC32' is declared in <sys/auxv.h>. */
+/* #undef HAVE_HWCAP_CRC32 */
 
 /* Define if you have the iconv() function and it works. */
 #define HAVE_ICONV 1
@@ -403,7 +409,7 @@
 #define PACKAGE_NAME "XZ Utils"
 
 /* Define to the full name and version of this package. */
-#define PACKAGE_STRING "XZ Utils 5.8.1"
+#define PACKAGE_STRING "XZ Utils 5.8.4"
 
 /* Define to the one symbol short name of this package. */
 #define PACKAGE_TARNAME "xz"
@@ -412,7 +418,7 @@
 #define PACKAGE_URL "https://tukaani.org/xz/"
 
 /* Define to the version of this package. */
-#define PACKAGE_VERSION "5.8.1"
+#define PACKAGE_VERSION "5.8.4"
 
 /* Define to necessary symbol if this constant uses a non-standard name on
    your system. */
@@ -487,6 +493,10 @@
 /* Enable extensions on AIX, Interix, z/OS.  */
 #ifndef _ALL_SOURCE
 # define _ALL_SOURCE 1
+#endif
+/* Enable extensions on Cosmopolitan Libc. */
+#ifndef _COSMO_SOURCE
+# define _COSMO_SOURCE 1
 #endif
 /* Enable general extensions on macOS.  */
 #ifndef _DARWIN_C_SOURCE
@@ -577,7 +587,7 @@
 
 
 /* Version number of package */
-#define VERSION "5.8.1"
+#define VERSION "5.8.4"
 
 /* Define WORDS_BIGENDIAN to 1 if your processor stores words with the most
    significant byte first (like Motorola and SPARC, unlike Intel). */

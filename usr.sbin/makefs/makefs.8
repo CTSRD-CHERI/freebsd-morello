@@ -33,7 +33,7 @@
 .\" ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 .\" POSSIBILITY OF SUCH DAMAGE.
 .\"
-.Dd July 19, 2025
+.Dd October 7, 2026
 .Dt MAKEFS 8
 .Os
 .Sh NAME
@@ -124,7 +124,7 @@ See the source for usage, and look for defines starting with
 .It Fl F Ar mtree-specfile
 .Em This is almost certainly not the option you are looking for.
 To create an image from a list of files in an mtree format manifest,
-specify it as the last argument on the command line, not as a the
+specify it as the last argument on the command line, not as the
 argument to
 .Fl F .
 .Pp
@@ -325,7 +325,8 @@ Expected number of files per directory.
 .It Sy bsize
 Block size.
 .It Sy density
-Bytes per inode. If unset, will allocate the minimum number of inodes to
+Bytes per inode.
+If unset, will allocate the minimum number of inodes to
 represent the filesystem if no free space has been requested (free blocks
 or minimum size set); otherwise the larger of the newfs defaults or what
 is required by the free inode parameters if set.
@@ -394,7 +395,6 @@ where
 is one of
 .Ql efi ,
 .Ql i386 ,
-.Ql mac68k ,
 .Ql macppc ,
 or
 .Ql powerpc .
@@ -451,7 +451,7 @@ The following keywords are supported (see
 .Xr newfs_msdos 8
 for more details):
 .Pp
-.Bl -tag -width omit-trailing-period -offset indent -compact
+.Bl -tag -width sectors_per_cluster -offset indent -compact
 .It Cm backup_sector
 Location of the backup boot sector.
 .It Cm block_size
@@ -530,36 +530,49 @@ The arguments consist of a keyword, an equal sign
 and a value.
 The following keywords are supported:
 .Pp
-.Bl -tag -width omit-trailing-period -offset indent -compact
-.It ashift
+.Bl -tag -width verify-txgs -offset indent -compact
+.It Cm ashift
 The base-2 logarithm of the minimum block size.
 Typical values are 9 (512B blocks) and 12 (4KB blocks).
 The default value is 12.
-.It bootfs
+.It Cm autotrim
+The value of the
+.Ql autotrim
+pool property, either
+.Ql on
+or
+.Ql off .
+The default is
+.Ql off .
+.It Cm bootfs
 The name of the bootable dataset for the pool.
 Specifying this option causes the
 .Ql bootfs
 property to be set in the created pool.
-.It mssize
+.It Cm mssize
 The size of metaslabs in the created pool.
 By default,
 .Nm
 allocates large (up to 512MB) metaslabs with the expectation that
 the image will be auto-expanded upon first use.
 This option allows the default heuristic to be overridden.
-.It verify-txgs
+.It Cm path
+The path to the device for this vdev.
+The default is
+.Pa /dev/null .
+.It Cm verify-txgs
 Prompt OpenZFS to verify pool metadata during import.
 This is disabled by default as it may significantly increase import times.
-.It poolguid
+.It Cm poolguid
 Use the specified 64-bit integer as the pool GUID.
 If this option is not specified, the pool GUID will be random but fixed
 across multiple identical invocations of
 .Nm .
 This option is useful for testing but not required for reproducibility.
-.It poolname
+.It Cm poolname
 The name of the ZFS pool.
 This option must be specified.
-.It rootpath
+.It Cm rootpath
 An implicit path prefix added to dataset mountpoints.
 By default it is
 .Pa /<poolname> .
@@ -569,7 +582,7 @@ should be set to
 .Pa / .
 At least one dataset must have a mountpoint equal to
 .Va rootpath .
-.It fs
+.It Cm fs
 Create an additional dataset.
 This option may be specified multiple times.
 The argument value must be of the form
@@ -598,13 +611,13 @@ Dataset properties, as described in
 may be specified following the dataset name.
 The following properties may be set for a dataset:
 .Pp
-.Bl -tag -compact -offset indent
-.It atime
-.It canmount
-.It compression
-.It exec
-.It mountpoint
-.It setuid
+.Bl -hang -compact -offset indent
+.It Cm atime
+.It Cm canmount
+.It Cm compression
+.It Cm exec
+.It Cm mountpoint
+.It Cm setuid
 .El
 Note that
 .Nm

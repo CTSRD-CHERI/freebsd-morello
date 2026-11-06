@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright 2015 Nexenta Systems, Inc. All rights reserved.
@@ -65,8 +55,8 @@
 #include <sys/dktp/fdisk.h>
 #include <sys/vdev_impl.h>
 #include <sys/fs/zfs.h>
+#include <sys/taskq.h>
 
-#include <thread_pool.h>
 #include <libzutil.h>
 #include <libnvpair.h>
 
@@ -306,6 +296,78 @@ fix_paths(libpc_handle_t *hdl, nvlist_t *nv, name_entry_t *names)
 }
 
 /*
+ * Determine if the path in the given spare or l2cache vdev config still
+ * refers to the expected device.  Unlike the vdev tree, which is built
+ * from the scanned labels, these configs are read from the pool's MOS
+ * by a tryimport.  Their path may be a persistent name (by-id, by-vdev,
+ * multipath, ...) which is perfectly valid yet absent from the list of
+ * scanned names, in which case fix_paths() would needlessly rewrite it
+ * to some scanned name of last resort (e.g. a bare /dev basename which
+ * is not stable across reboots).  The device is verified much as the
+ * scanned candidates are: the path must name a device type which is
+ * safe to probe, a label must be readable from it and the label vdev
+ * guid must match the expected one.  As in zpool_find_import_impl(),
+ * the device must also be openable exclusively, otherwise it may be
+ * an in-use multipath component.
+ */
+static boolean_t
+aux_path_active(nvlist_t *nv)
+{
+	const char *path;
+	uint64_t guid, label_guid;
+	nvlist_t *label = NULL;
+	int fd, num_labels;
+	boolean_t active = B_FALSE;
+
+	if (nvlist_lookup_string(nv, ZPOOL_CONFIG_PATH, &path) != 0 ||
+	    nvlist_lookup_uint64(nv, ZPOOL_CONFIG_GUID, &guid) != 0)
+		return (B_FALSE);
+
+	/*
+	 * The path comes from the pool's MOS and may name anything, so
+	 * check it is safe to probe first.  O_NONBLOCK below keeps the open
+	 * of a FIFO swapped in after this check from blocking, and the type
+	 * of the opened descriptor is re-checked below before it is used.
+	 */
+	if (!zpool_dev_probe_ok(path))
+		return (B_FALSE);
+
+	/*
+	 * Preferentially open using O_DIRECT to bypass the block device
+	 * cache which may be stale for multipath devices.  An EINVAL errno
+	 * indicates O_DIRECT is unsupported so fallback to just O_RDONLY.
+	 */
+	fd = open(path, O_RDONLY | O_EXCL | O_NONBLOCK | O_DIRECT | O_CLOEXEC);
+	if (fd < 0 && errno == EINVAL)
+		fd = open(path, O_RDONLY | O_EXCL | O_NONBLOCK | O_CLOEXEC);
+	if (fd < 0)
+		return (B_FALSE);
+
+	/*
+	 * zpool_dev_probe_ok() stat'd the name, but if the path was a
+	 * symlink it could have been repointed at a different node before
+	 * the open() above.  Re-check the type of the descriptor we now
+	 * hold so a crafted MOS path cannot make us read a label from an
+	 * unexpected node.
+	 */
+	if (!zpool_dev_probe_ok_fd(fd)) {
+		(void) close(fd);
+		return (B_FALSE);
+	}
+
+	if (zpool_read_label(fd, &label, &num_labels) == 0 && label != NULL) {
+		if (nvlist_lookup_uint64(label, ZPOOL_CONFIG_GUID,
+		    &label_guid) == 0 && label_guid == guid)
+			active = B_TRUE;
+		nvlist_free(label);
+	}
+
+	(void) close(fd);
+
+	return (active);
+}
+
+/*
  * Add the given configuration to the list of known devices.
  */
 static int
@@ -488,7 +550,7 @@ vdev_is_hole(uint64_t *hole_array, uint_t holes, uint_t id)
  */
 static nvlist_t *
 get_configs(libpc_handle_t *hdl, pool_list_t *pl, boolean_t active_ok,
-    nvlist_t *policy)
+    boolean_t keep_aux_path, nvlist_t *policy)
 {
 	pool_entry_t *pe;
 	vdev_entry_t *ve;
@@ -846,13 +908,20 @@ get_configs(libpc_handle_t *hdl, pool_list_t *pl, boolean_t active_ok,
 
 		/*
 		 * Go through and update the paths for spares, now that we have
-		 * them.
+		 * them.  A path which still refers to the expected device is
+		 * kept as is, it may well be more persistent than any of the
+		 * scanned names.
 		 */
 		verify(nvlist_lookup_nvlist(config, ZPOOL_CONFIG_VDEV_TREE,
 		    &nvroot) == 0);
 		if (nvlist_lookup_nvlist_array(nvroot, ZPOOL_CONFIG_SPARES,
 		    &spares, &nspares) == 0) {
 			for (i = 0; i < nspares; i++) {
+				if (keep_aux_path &&
+				    aux_path_active(spares[i])) {
+					update_vdev_config_dev_strs(spares[i]);
+					continue;
+				}
 				if (fix_paths(hdl, spares[i], pl->names) != 0)
 					goto nomem;
 			}
@@ -864,6 +933,11 @@ get_configs(libpc_handle_t *hdl, pool_list_t *pl, boolean_t active_ok,
 		if (nvlist_lookup_nvlist_array(nvroot, ZPOOL_CONFIG_L2CACHE,
 		    &l2cache, &nl2cache) == 0) {
 			for (i = 0; i < nl2cache; i++) {
+				if (keep_aux_path &&
+				    aux_path_active(l2cache[i])) {
+					update_vdev_config_dev_strs(l2cache[i]);
+					continue;
+				}
 				if (fix_paths(hdl, l2cache[i], pl->names) != 0)
 					goto nomem;
 			}
@@ -1457,7 +1531,7 @@ zpool_find_import_impl(libpc_handle_t *hdl, importargs_t *iarg,
 	name_entry_t *ne, *nenext;
 	rdsk_node_t *slice;
 	void *cookie;
-	tpool_t *t;
+	taskq_t *tq;
 
 	verify(iarg->poolname == NULL || iarg->guid == 0);
 
@@ -1480,13 +1554,14 @@ zpool_find_import_impl(libpc_handle_t *hdl, importargs_t *iarg,
 		threads = MIN(threads, am / VDEV_LABELS);
 #endif
 #endif
-	t = tpool_create(1, threads, 0, NULL);
+	tq = taskq_create("zpool_find_import", threads, minclsyspri, 1, INT_MAX,
+	    TASKQ_DYNAMIC);
 	for (slice = avl_first(cache); slice;
 	    (slice = avl_walk(cache, slice, AVL_AFTER)))
-		(void) tpool_dispatch(t, zpool_open_func, slice);
+		(void) taskq_dispatch(tq, zpool_open_func, slice, TQ_SLEEP);
 
-	tpool_wait(t);
-	tpool_destroy(t);
+	taskq_wait(tq);
+	taskq_destroy(tq);
 
 	/*
 	 * Process the cache, filtering out any entries which are not
@@ -1555,7 +1630,15 @@ zpool_find_import_impl(libpc_handle_t *hdl, importargs_t *iarg,
 	avl_destroy(cache);
 	free(cache);
 
-	ret = get_configs(hdl, &pools, iarg->can_be_active, iarg->policy);
+	/*
+	 * Existing spare and l2cache paths may only be trusted when the
+	 * search locations were not chosen by the caller.  An import from
+	 * user supplied directories (or a scan of them) is the documented
+	 * way to deliberately rewrite all of the pool's device paths, so
+	 * in that case they must be derived from the scanned names alone.
+	 */
+	ret = get_configs(hdl, &pools, iarg->can_be_active,
+	    iarg->paths == 0 && !iarg->scan, iarg->policy);
 
 	for (pe = pools.pools; pe != NULL; pe = penext) {
 		penext = pe->pe_next;
@@ -1903,30 +1986,43 @@ zpool_find_config(libpc_handle_t *hdl, const char *target, nvlist_t **configp,
 		*sepp = '\0';
 
 	pools = zpool_search_import(hdl, args);
-
-	if (pools != NULL) {
-		nvpair_t *elem = NULL;
-		while ((elem = nvlist_next_nvpair(pools, elem)) != NULL) {
-			VERIFY0(nvpair_value_nvlist(elem, &config));
-			if (pool_match(config, targetdup)) {
-				count++;
-				if (match != NULL) {
-					/* multiple matches found */
-					continue;
-				} else {
-					match = fnvlist_dup(config);
-				}
-			}
-		}
-		fnvlist_free(pools);
+	if (pools == NULL) {
+		zutil_error_aux(hdl, dgettext(TEXT_DOMAIN, "no pools found"));
+		(void) zutil_error_fmt(hdl, LPC_UNKNOWN, dgettext(TEXT_DOMAIN,
+		    "failed to find config for pool '%s'"), targetdup);
+		free(targetdup);
+		return (ENOENT);
 	}
 
+	nvpair_t *elem = NULL;
+	while ((elem = nvlist_next_nvpair(pools, elem)) != NULL) {
+		VERIFY0(nvpair_value_nvlist(elem, &config));
+		if (pool_match(config, targetdup)) {
+			count++;
+			if (match != NULL) {
+				/* multiple matches found */
+				continue;
+			} else {
+				match = fnvlist_dup(config);
+			}
+		}
+	}
+	fnvlist_free(pools);
+
 	if (count == 0) {
+		zutil_error_aux(hdl, dgettext(TEXT_DOMAIN,
+		    "no matching pools"));
+		(void) zutil_error_fmt(hdl, LPC_UNKNOWN, dgettext(TEXT_DOMAIN,
+		    "failed to find config for pool '%s'"), targetdup);
 		free(targetdup);
 		return (ENOENT);
 	}
 
 	if (count > 1) {
+		zutil_error_aux(hdl, dgettext(TEXT_DOMAIN,
+		    "more than one matching pool"));
+		(void) zutil_error_fmt(hdl, LPC_UNKNOWN, dgettext(TEXT_DOMAIN,
+		    "failed to find config for pool '%s'"), targetdup);
 		free(targetdup);
 		fnvlist_free(match);
 		return (EINVAL);

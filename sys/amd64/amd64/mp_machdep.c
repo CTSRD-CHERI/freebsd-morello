@@ -110,6 +110,7 @@ smp_targeted_tlb_shootdown_t smp_targeted_tlb_shootdown =
  */
 
 static int start_ap(int apic_id, vm_paddr_t boot_address);
+static int start_all_aps(void);
 
 /*
  * Initialize the IPI handlers and start up the AP's.
@@ -138,6 +139,10 @@ cpu_mp_start(void)
 
 	/* Install an inter-CPU IPI for CPU stop/restart */
 	setidt(IPI_STOP, pti ? IDTVEC(cpustop_pti) : IDTVEC(cpustop),
+	    SDT_SYSIGT, SEL_KPL, 0);
+
+	/* Install an inter-CPU IPI for CPU offline */
+	setidt(IPI_OFF, pti ? IDTVEC(cpuoff_pti) : IDTVEC(cpuoff),
 	    SDT_SYSIGT, SEL_KPL, 0);
 
 	/* Install an inter-CPU IPI for CPU suspend/resume */
@@ -176,6 +181,15 @@ cpu_mp_start(void)
 #endif
 }
 
+void
+cpu_mp_stop(void)
+{
+	cpuset_t other_cpus = all_cpus;
+
+	CPU_CLR(PCPU_GET(cpuid), &other_cpus);
+	offline_cpus(other_cpus);
+}
+
 /*
  * AP CPU's call this to initialize themselves.
  */
@@ -204,8 +218,8 @@ init_secondary(void)
 	pc->pc_curthread = 0;
 	pc->pc_tssp = &pc->pc_common_tss;
 	pc->pc_rsp0 = 0;
-	pc->pc_pti_rsp0 = (((vm_offset_t)&pc->pc_pti_stack +
-	    PC_PTI_STACK_SZ * sizeof(uint64_t)) & ~0xful);
+	pc->pc_pti_rsp0 = STACKALIGN(((vm_offset_t)&pc->pc_pti_stack +
+	    PC_PTI_STACK_SZ * sizeof(uint64_t)));
 	gdt = pc->pc_gdt;
 	pc->pc_tss = (struct system_segment_descriptor *)&gdt[GPROC0_SEL];
 	pc->pc_fs32p = &gdt[GUFS32_SEL];
@@ -226,25 +240,51 @@ init_secondary(void)
 	    IOPERM_BITMAP_SIZE;
 	pc->pc_common_tss.tss_rsp0 = 0;
 
-	/* The doublefault stack runs on IST1. */
-	np = ((struct nmi_pcpu *)&doublefault_stack[DBLFAULT_STACK_SIZE]) - 1;
-	np->np_pcpu = (register_t)pc;
-	pc->pc_common_tss.tss_ist1 = (long)np;
+	/*
+	 * The doublefault stack.
+	 * Runs on IST1 for IDT.
+	 * Uses CSL 2 for FRED.
+	 */
+	if (fred) {
+		wrmsr(MSR_FRED_RSP2, (uint64_t)&doublefault_stack[
+		    DBLFAULT_STACK_SIZE]);
+	} else {
+		np = ((struct nmi_pcpu *)&doublefault_stack[
+		    DBLFAULT_STACK_SIZE]) - 1;
+		np->np_pcpu = (register_t)pc;
+		pc->pc_common_tss.tss_ist1 = (long)np;
+	}
 
-	/* The NMI stack runs on IST2. */
-	np = ((struct nmi_pcpu *)&nmi_stack[NMI_STACK_SIZE]) - 1;
-	np->np_pcpu = (register_t)pc;
-	pc->pc_common_tss.tss_ist2 = (long)np;
+	/*
+	 * The NMI stack.
+	 * Runs on IST2 for IDT.
+	 * Uses CSL 1 for FRED.
+	 */
+	if (fred) {
+		wrmsr(MSR_FRED_RSP1, (uint64_t)&nmi_stack[NMI_STACK_SIZE]);
+	} else {
+		np = ((struct nmi_pcpu *)&nmi_stack[NMI_STACK_SIZE]) - 1;
+		np->np_pcpu = (register_t)pc;
+		pc->pc_common_tss.tss_ist2 = (long)np;
+	}
 
-	/* The MC# stack runs on IST3. */
-	np = ((struct nmi_pcpu *)&mce_stack[MCE_STACK_SIZE]) - 1;
-	np->np_pcpu = (register_t)pc;
-	pc->pc_common_tss.tss_ist3 = (long)np;
+	/*
+	 * The MC# stack.
+	 * Runs on IST3 for IDT.
+	 * Shares CSL 1 with NMI for FRED.
+	 */
+	if (!fred) {
+		np = ((struct nmi_pcpu *)&mce_stack[MCE_STACK_SIZE]) - 1;
+		np->np_pcpu = (register_t)pc;
+		pc->pc_common_tss.tss_ist3 = (long)np;
+	}
 
-	/* The DB# stack runs on IST4. */
-	np = ((struct nmi_pcpu *)&dbg_stack[DBG_STACK_SIZE]) - 1;
-	np->np_pcpu = (register_t)pc;
-	pc->pc_common_tss.tss_ist4 = (long)np;
+	if (!fred) {
+		/* The DB# stack, used for IDT, runs on IST4. */
+		np = ((struct nmi_pcpu *)&dbg_stack[DBG_STACK_SIZE]) - 1;
+		np->np_pcpu = (register_t)pc;
+		pc->pc_common_tss.tss_ist4 = (long)np;
+	}
 
 	/* Prepare private GDT */
 	gdt_segs[GPROC0_SEL].ssd_base = (long)&pc->pc_common_tss;
@@ -264,7 +304,12 @@ init_secondary(void)
 	wrmsr(MSR_KGSBASE, 0);		/* User value */
 	fix_cpuid();
 
-	lidt(&r_idt);
+	if (fred)
+		amd64_cpu_init_fred();
+	else
+		lidt(&r_idt);
+
+	amd64_cpu_init_msr_memctl();
 
 	gsel_tss = GSEL(GPROC0_SEL, SEL_KPL);
 	ltr(gsel_tss);
@@ -310,14 +355,14 @@ amd64_mp_alloc_pcpu(void)
 			m = vm_page_alloc_noobj(VM_ALLOC_ZERO);
 		if (m == NULL)
 			panic("cannot alloc pcpu page for cpu %d", cpu);
-		pmap_qenter((vm_offset_t)&__pcpu[cpu], &m, 1);
+		pmap_qenter(&__pcpu[cpu], &m, 1);
 	}
 }
 
 /*
  * start each AP in our list
  */
-int
+static int
 start_all_aps(void)
 {
 	vm_page_t m_boottramp, m_pml4, m_pdp, m_pd[4];
@@ -331,7 +376,6 @@ start_all_aps(void)
 	u_char mpbiosreason;
 
 	amd64_mp_alloc_pcpu();
-	mtx_init(&ap_boot_mtx, "ap boot", NULL, MTX_SPIN);
 
 	MPASS(bootMP_size <= PAGE_SIZE);
 	m_boottramp = vm_page_alloc_noobj_contig(0, 1, 0,
@@ -342,29 +386,29 @@ start_all_aps(void)
 	/* Create a transient 1:1 mapping of low 4G */
 	if (la57) {
 		m_pml4 = pmap_page_alloc_below_4g(true);
-		v_pml4 = (pml4_entry_t *)PHYS_TO_DMAP(VM_PAGE_TO_PHYS(m_pml4));
+		v_pml4 = VM_PAGE_TO_DMAP(m_pml4);
 	} else {
 		v_pml4 = &kernel_pmap->pm_pmltop[0];
 	}
 	m_pdp = pmap_page_alloc_below_4g(true);
-	v_pdp = (pdp_entry_t *)PHYS_TO_DMAP(VM_PAGE_TO_PHYS(m_pdp));
+	v_pdp = VM_PAGE_TO_DMAP(m_pdp);
 	m_pd[0] = pmap_page_alloc_below_4g(false);
-	v_pd = (pd_entry_t *)PHYS_TO_DMAP(VM_PAGE_TO_PHYS(m_pd[0]));
+	v_pd = VM_PAGE_TO_DMAP(m_pd[0]);
 	for (i = 0; i < NPDEPG; i++)
 		v_pd[i] = (i << PDRSHIFT) | X86_PG_V | X86_PG_RW | X86_PG_A |
 		    X86_PG_M | PG_PS;
 	m_pd[1] = pmap_page_alloc_below_4g(false);
-	v_pd = (pd_entry_t *)PHYS_TO_DMAP(VM_PAGE_TO_PHYS(m_pd[1]));
+	v_pd = VM_PAGE_TO_DMAP(m_pd[1]);
 	for (i = 0; i < NPDEPG; i++)
 		v_pd[i] = (NBPDP + (i << PDRSHIFT)) | X86_PG_V | X86_PG_RW |
 		    X86_PG_A | X86_PG_M | PG_PS;
 	m_pd[2] = pmap_page_alloc_below_4g(false);
-	v_pd = (pd_entry_t *)PHYS_TO_DMAP(VM_PAGE_TO_PHYS(m_pd[2]));
+	v_pd = VM_PAGE_TO_DMAP(m_pd[2]);
 	for (i = 0; i < NPDEPG; i++)
 		v_pd[i] = (2UL * NBPDP + (i << PDRSHIFT)) | X86_PG_V |
 		    X86_PG_RW | X86_PG_A | X86_PG_M | PG_PS;
 	m_pd[3] = pmap_page_alloc_below_4g(false);
-	v_pd = (pd_entry_t *)PHYS_TO_DMAP(VM_PAGE_TO_PHYS(m_pd[3]));
+	v_pd = VM_PAGE_TO_DMAP(m_pd[3]);
 	for (i = 0; i < NPDEPG; i++)
 		v_pd[i] = (3UL * NBPDP + (i << PDRSHIFT)) | X86_PG_V |
 		    X86_PG_RW | X86_PG_A | X86_PG_M | PG_PS;
@@ -386,7 +430,7 @@ start_all_aps(void)
 	pmap_invalidate_all(kernel_pmap);
 
 	/* copy the AP 1st level boot code */
-	bcopy(mptramp_start, (void *)PHYS_TO_DMAP(boot_address), bootMP_size);
+	bcopy(mptramp_start, PHYS_TO_DMAP(boot_address), bootMP_size);
 	if (bootverbose)
 		printf("AP boot address %#lx\n", boot_address);
 
@@ -417,12 +461,17 @@ start_all_aps(void)
 		    M_WAITOK | M_ZERO);
 		doublefault_stack = kmem_malloc(DBLFAULT_STACK_SIZE,
 		    M_WAITOK | M_ZERO);
-		mce_stack = kmem_malloc(MCE_STACK_SIZE,
-		    M_WAITOK | M_ZERO);
+		if (!fred) {
+			mce_stack = kmem_malloc(MCE_STACK_SIZE,
+			    M_WAITOK | M_ZERO);
+		}
 		nmi_stack = kmem_malloc_domainset(
 		    DOMAINSET_PREF(domain), NMI_STACK_SIZE, M_WAITOK | M_ZERO);
-		dbg_stack = kmem_malloc_domainset(
-		    DOMAINSET_PREF(domain), DBG_STACK_SIZE, M_WAITOK | M_ZERO);
+		if (!fred) {
+			dbg_stack = kmem_malloc_domainset(
+			    DOMAINSET_PREF(domain), DBG_STACK_SIZE,
+			    M_WAITOK | M_ZERO);
+		}
 		dpcpu = kmem_malloc_domainset(DOMAINSET_PREF(domain),
 		    DPCPU_SIZE, M_WAITOK | M_ZERO);
 
@@ -551,7 +600,7 @@ invl_scoreboard_init(void *arg __unused)
 		invl_op_pg = INVL_OP_PG;
 	}
 }
-SYSINIT(invl_ops, SI_SUB_SMP - 1, SI_ORDER_ANY, invl_scoreboard_init, NULL);
+SYSINIT(invl_ops, SI_SUB_KMEM, SI_ORDER_ANY, invl_scoreboard_init, NULL);
 
 static uint32_t *
 invl_scoreboard_getcpu(u_int cpu)
@@ -726,25 +775,12 @@ smp_masked_invlpg_range(vm_offset_t addr1, vm_offset_t addr2, pmap_t pmap,
 		addr2 = round_page(addr2);
 		total = atop(addr2 - addr1);
 		for (va = addr1; total > 0;) {
-			if ((va & PDRMASK) != 0 || total < NPDEPG) {
-				cnt = atop(NBPDR - (va & PDRMASK));
-				if (cnt > total)
-					cnt = total;
-				if (cnt > invlpgb_maxcnt + 1)
-					cnt = invlpgb_maxcnt + 1;
-				invlpgb(INVLPGB_GLOB | INVLPGB_VA | va, 0,
-				    cnt - 1);
-				va += ptoa(cnt);
-				total -= cnt;
-			} else {
-				cnt = total / NPTEPG;
-				if (cnt > invlpgb_maxcnt + 1)
-					cnt = invlpgb_maxcnt + 1;
-				invlpgb(INVLPGB_GLOB | INVLPGB_VA | va, 0,
-				    INVLPGB_2M_CNT | (cnt - 1));
-				va += cnt << PDRSHIFT;
-				total -= cnt * NPTEPG;
-			}
+			cnt = MIN(total, invlpgb_maxcnt + 1);
+			/* 4K increments because these may not be superpages. */
+			invlpgb(INVLPGB_GLOB | INVLPGB_VA | va, 0,
+			    cnt - 1);
+			va += ptoa(cnt);
+			total -= cnt;
 		}
 		tlbsync();
 		sched_unpin();

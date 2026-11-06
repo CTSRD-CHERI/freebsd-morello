@@ -144,6 +144,8 @@ static struct ibv_context *c4iw_alloc_context(struct ibv_device *ibdev,
 	context->ibv_ctx.ops = c4iw_ctx_ops;
 
 	switch (rhp->chip_version) {
+	case CHELSIO_T7:
+		PDBG("%s T7/T6/T5/T4 device\n", __FUNCTION__);
 	case CHELSIO_T6:
 		PDBG("%s T6/T5/T4 device\n", __FUNCTION__);
 	case CHELSIO_T5:
@@ -204,6 +206,7 @@ static struct ibv_context *c4iw_alloc_context(struct ibv_device *ibdev,
 		if (t5_en_wc && !context->status_page->wc_supported) {
 			t5_en_wc = 0;
 		}
+		rhp->write_cmpl_supported = context->status_page->write_cmpl_supported;
 	}
 
 	return &context->ibv_ctx;
@@ -214,9 +217,9 @@ err_free:
 	if (rhp->cqid2ptr)
 		free(rhp->cqid2ptr);
 	if (rhp->qpid2ptr)
-		free(rhp->cqid2ptr);
+		free(rhp->qpid2ptr);
 	if (rhp->mmid2ptr)
-		free(rhp->cqid2ptr);
+		free(rhp->mmid2ptr);
 	free(context);
 	return NULL;
 }
@@ -429,6 +432,8 @@ static struct verbs_device *cxgb4_driver_init(const char *uverbs_sys_path,
 	    strstr(&ibdev[2], "nex") && devnum >= 0) {
 		snprintf(dev_str, sizeof(dev_str), "/dev/t%cnex/%d", ibdev[1],
 		    devnum);
+	} else if (strstr(&ibdev[0], "chnex") && devnum >= 0) {
+		snprintf(dev_str, sizeof(dev_str), "/dev/chnex/%d", devnum);
 	} else
 		return NULL;
 
@@ -523,7 +528,10 @@ found:
 		goto err;
 
 	dev->ibv_dev.ops = &c4iw_dev_ops;
-	dev->chip_version = CHELSIO_CHIP_VERSION(hca_table[i].device >> 8);
+	if (hca_table[i].device == 0xd000)
+		dev->chip_version = CHELSIO_T7;
+	else
+		dev->chip_version = CHELSIO_CHIP_VERSION(hca_table[i].device >> 8);
 	dev->abi_version = abi_version;
 
 	PDBG("%s device claimed\n", __FUNCTION__);

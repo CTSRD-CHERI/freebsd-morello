@@ -216,15 +216,16 @@ nl_send(struct nl_writer *nw, struct nlpcb *nlp)
 		    hdr->nlmsg_len);
 	}
 
-	if (nlp->nl_linux && linux_netlink_p != NULL &&
-	    __predict_false(!linux_netlink_p->msgs_to_linux(nw, nlp))) {
+	if (nlp->nl_linux && linux_netlink_p != NULL) {
+		nb = linux_netlink_p->msgs_to_linux(nw->buf, nlp, nw->ifp);
 		nl_buf_free(nw->buf);
 		nw->buf = NULL;
-		return (false);
+		if (nb == NULL)
+			return (false);
+	} else {
+		nb = nw->buf;
+		nw->buf = NULL;
 	}
-
-	nb = nw->buf;
-	nw->buf = NULL;
 
 	SOCK_RECVBUF_LOCK(so);
 	if (!nw->ignore_limit && __predict_false(sb->sb_hiwat <= sb->sb_ccc)) {
@@ -255,7 +256,7 @@ nl_send(struct nl_writer *nw, struct nlpcb *nlp)
 	}
 }
 
-static int
+static __noinline int
 nl_receive_message(struct nlmsghdr *hdr, int remaining_length,
     struct nlpcb *nlp, struct nl_pstate *npt)
 {
@@ -344,9 +345,11 @@ nl_process_nbuf(struct nl_buf *nb, struct nlpcb *nlp)
 	};
 
 	for (; nb->offset + sizeof(struct nlmsghdr) <= nb->datalen;) {
+		u_int msglen;
+
 		hdr = (struct nlmsghdr *)&nb->data[nb->offset];
 		/* Save length prior to calling handler */
-		int msglen = NLMSG_ALIGN(hdr->nlmsg_len);
+		msglen = NLMSG_ALIGN(hdr->nlmsg_len);
 		NL_LOG(LOG_DEBUG3, "parsing offset %d/%d",
 		    nb->offset, nb->datalen);
 		npt_clear(&npt);

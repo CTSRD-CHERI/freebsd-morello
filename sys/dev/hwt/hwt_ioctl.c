@@ -112,12 +112,11 @@ hwt_priv_check(struct proc *o, struct proc *t)
 			error = EPERM;
 			goto done;
 		}
-
-	/* Check the read and saved GIDs too. */
-	if (!groupmember(tc->cr_rgid, oc) ||
+	if (!groupmember(tc->cr_gid, oc) ||
+	    !groupmember(tc->cr_rgid, oc) ||
 	    !groupmember(tc->cr_svgid, oc)) {
-			error = EPERM;
-			goto done;
+		error = EPERM;
+		goto done;
 	}
 
 done:
@@ -305,11 +304,6 @@ hwt_ioctl_alloc_mode_cpu(struct thread *td, struct hwt_owner *ho,
 		return (error);
 
 	CPU_FOREACH_ISSET(cpu_id, &cpu_map) {
-#ifdef SMP
-		/* Ensure CPU is not halted. */
-		if (CPU_ISSET(cpu_id, &hlt_cpus_mask))
-			return (ENXIO);
-#endif
 #if 0
 		/* TODO: Check if the owner have this cpu configured already. */
 		ctx = hwt_owner_lookup_ctx_by_cpu(ho, halloc->cpu);

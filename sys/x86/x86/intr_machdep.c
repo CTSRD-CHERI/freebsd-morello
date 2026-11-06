@@ -245,6 +245,26 @@ intr_register_source(struct intsrc *isrc)
 	return (0);
 }
 
+void
+intr_disable_all(void)
+{
+	/*
+	 * Disable all external interrupts.  This is used by kexec_reboot() to
+	 * prevent problems on the other side when APs are brought up.
+	 */
+	for (int v = 0; v < num_io_irqs; v++) {
+		struct intsrc *is;
+
+		is = interrupt_sources[v];
+		if (is == NULL)
+			continue;
+		if (is->is_pic->pic_disable_intr != NULL) {
+			is->is_pic->pic_disable_source(is, PIC_EOI);
+			is->is_pic->pic_disable_intr(is);
+		}
+	}
+}
+
 struct intsrc *
 intr_lookup_source(int vector)
 {
@@ -383,6 +403,15 @@ intr_suspend(void)
 			pic->pic_suspend(pic);
 	}
 	mtx_unlock(&intrpic_lock);
+}
+
+void
+intr_enable_src(u_int irq)
+{
+	struct intsrc *is;
+
+	is = interrupt_sources[irq];
+	is->is_pic->pic_enable_source(is);
 }
 
 static int

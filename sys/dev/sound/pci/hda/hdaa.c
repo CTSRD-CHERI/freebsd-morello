@@ -47,9 +47,9 @@
 
 #include "mixer_if.h"
 
-#define hdaa_lock(devinfo)	snd_mtxlock((devinfo)->lock)
-#define hdaa_unlock(devinfo)	snd_mtxunlock((devinfo)->lock)
-#define hdaa_lockassert(devinfo) snd_mtxassert((devinfo)->lock)
+#define hdaa_lock(devinfo)	mtx_lock((devinfo)->lock)
+#define hdaa_unlock(devinfo)	mtx_unlock((devinfo)->lock)
+#define hdaa_lockassert(devinfo) mtx_assert((devinfo)->lock, MA_OWNED)
 
 static const struct {
 	const char *key;
@@ -167,6 +167,7 @@ const static char *ossnames[] = SOUND_DEVICE_NAMES;
  * Function prototypes
  ****************************************************************************/
 static int	hdaa_pcmchannel_setup(struct hdaa_chan *);
+static void	hdaa_audio_wake(struct hdaa_devinfo *);
 
 static void	hdaa_widget_connection_select(struct hdaa_widget *, uint8_t);
 static void	hdaa_audio_ctl_amp_set(struct hdaa_audio_ctl *,
@@ -532,9 +533,11 @@ static void
 hdaa_presence_handler(struct hdaa_widget *w)
 {
 	struct hdaa_devinfo *devinfo = w->devinfo;
-	struct hdaa_audio_as *as;
+	struct hdaa_audio_as *as, *asp;
+	char buf[32];
 	uint32_t res;
-	int connected, old;
+	int connected, old, i;
+	bool active;
 
 	if (w->enable == 0 || w->type !=
 	    HDA_PARAM_AUDIO_WIDGET_CAP_TYPE_PIN_COMPLEX)
@@ -552,13 +555,6 @@ hdaa_presence_handler(struct hdaa_widget *w)
 	if (connected == old)
 		return;
 	w->wclass.pin.connected = connected;
-	HDA_BOOTVERBOSE(
-		if (connected || old != 2) {
-			device_printf(devinfo->dev,
-			    "Pin sense: nid=%d sense=0x%08x (%sconnected)\n",
-			    w->nid, res, !connected ? "dis" : "");
-		}
-	);
 
 	as = &devinfo->as[w->bindas];
 	if (as->hpredir >= 0 && as->pins[15] == w->nid)
@@ -567,6 +563,38 @@ hdaa_presence_handler(struct hdaa_widget *w)
 		hdaa_autorecsrc_handler(as, w);
 	if (old != 2)
 		hdaa_channels_handler(as);
+
+	if (connected || old != 2) {
+		HDA_BOOTVERBOSE(
+			device_printf(devinfo->dev,
+			    "Pin sense: nid=%d sense=0x%08x (%sconnected)\n",
+			    w->nid, res, !connected ? "dis" : "");
+		);
+		if (as->hpredir >= 0)
+			return;
+		for (i = 0, active = false; i < devinfo->num_devs; i++) {
+			if (device_get_unit(devinfo->devs[i].dev) == snd_unit) {
+				active = true;
+				break;
+			}
+		}
+		/* Proceed only if we are currently using this codec. */
+		if (!active)
+			return;
+		for (i = 0; i < devinfo->ascnt; i++) {
+			asp = &devinfo->as[i];
+			if (!asp->enable)
+				continue;
+			if ((connected && asp->index == as->index) ||
+			    (!connected && asp->dir == as->dir)) {
+				snprintf(buf, sizeof(buf), "cdev=dsp%d",
+				    device_get_unit(asp->pdevinfo->dev));
+				devctl_notify("SND", "CONN",
+				    asp->dir == HDAA_CTL_IN ? "IN" : "OUT", buf);
+				break;
+			}
+		}
+	}
 }
 
 /*
@@ -812,6 +840,38 @@ hdaa_sense_deinit(struct hdaa_devinfo *devinfo)
 		    device_get_parent(devinfo->dev), devinfo->dev,
 		    w->unsol);
 		w->unsol = -1;
+	}
+}
+
+static void
+hdaa_sense_wake(struct hdaa_devinfo *devinfo)
+{
+	struct hdaa_widget *w;
+	int i;
+
+	for (i = devinfo->startnode; i < devinfo->endnode; i++) {
+		w = hdaa_widget_get(devinfo, i);
+		if (w == NULL || w->enable == 0 || w->type !=
+		    HDA_PARAM_AUDIO_WIDGET_CAP_TYPE_PIN_COMPLEX)
+			continue;
+		if (w->unsol >= 0) {
+			hda_command(devinfo->dev,
+			    HDA_CMD_SET_UNSOLICITED_RESPONSE(0, w->nid,
+			    HDA_CMD_SET_UNSOLICITED_RESPONSE_ENABLE |
+			    w->unsol));
+		}
+		/*
+		 * Run jack presence handling for playback pins only.  The
+		 * recording path can drop the driver lock to update the
+		 * recording source, which is not safe while starting a stream
+		 * with the channel lock held.  The playback path does not drop
+		 * the driver lock.
+		 */
+		if (devinfo->as[w->bindas].dir == HDAA_CTL_OUT)
+			hdaa_presence_handler(w);
+		if (HDA_PARAM_PIN_CAP_DP(w->wclass.pin.cap) ||
+		    HDA_PARAM_PIN_CAP_HDMI(w->wclass.pin.cap))
+			hdaa_eld_handler(w);
 	}
 }
 
@@ -1981,8 +2041,8 @@ hdaa_audio_setup(struct hdaa_chan *ch)
 			/* Write HDMI/DisplayPort audio infoframe. */
 			hda_command(ch->devinfo->dev,
 			    HDA_CMD_SET_HDMI_DIP_INDEX(0, nid, 0x00));
-			if (w->eld != NULL && w->eld_len >= 6 &&
-			    ((w->eld[5] >> 2) & 0x3) == 1) { /* DisplayPort */
+			if (wp->eld != NULL && wp->eld_len >= 6 &&
+			    ((wp->eld[5] >> 2) & 0x3) == 1) { /* DisplayPort */
 				hda_command(ch->devinfo->dev,
 				    HDA_CMD_SET_HDMI_DIP_DATA(0, nid, 0x84));
 				hda_command(ch->devinfo->dev,
@@ -2028,7 +2088,7 @@ hdaa_audio_setup(struct hdaa_chan *ch)
 static unsigned
 gcd(unsigned a, unsigned b)
 {
-	u_int c;
+	unsigned int c;
 
 	while (b != 0) {
 		c = a;
@@ -2053,11 +2113,12 @@ hdaa_channel_setfragments(kobj_t obj, void *data,
 					uint32_t blksz, uint32_t blkcnt)
 {
 	struct hdaa_chan *ch = data;
+	int error;
 
-	blksz -= blksz % lcm(HDA_DMA_ALIGNMENT, sndbuf_getalign(ch->b));
+	blksz -= blksz % lcm(HDA_DMA_ALIGNMENT, ch->b->align);
 
-	if (blksz > (sndbuf_getmaxsize(ch->b) / HDA_BDL_MIN))
-		blksz = sndbuf_getmaxsize(ch->b) / HDA_BDL_MIN;
+	if (blksz > (ch->b->maxsize / HDA_BDL_MIN))
+		blksz = ch->b->maxsize / HDA_BDL_MIN;
 	if (blksz < HDA_BLK_MIN)
 		blksz = HDA_BLK_MIN;
 	if (blkcnt > HDA_BDL_MAX)
@@ -2065,7 +2126,7 @@ hdaa_channel_setfragments(kobj_t obj, void *data,
 	if (blkcnt < HDA_BDL_MIN)
 		blkcnt = HDA_BDL_MIN;
 
-	while ((blksz * blkcnt) > sndbuf_getmaxsize(ch->b)) {
+	while ((blksz * blkcnt) > ch->b->maxsize) {
 		if ((blkcnt >> 1) >= HDA_BDL_MIN)
 			blkcnt >>= 1;
 		else if ((blksz >> 1) >= HDA_BLK_MIN)
@@ -2074,14 +2135,15 @@ hdaa_channel_setfragments(kobj_t obj, void *data,
 			break;
 	}
 
-	if ((sndbuf_getblksz(ch->b) != blksz ||
-	    sndbuf_getblkcnt(ch->b) != blkcnt) &&
-	    sndbuf_resize(ch->b, blkcnt, blksz) != 0)
+	if ((ch->b->blksz != blksz || ch->b->blkcnt != blkcnt) &&
+	    (error = sndbuf_resize(ch->b, blkcnt, blksz)) != 0) {
 		device_printf(ch->devinfo->dev, "%s: failed blksz=%u blkcnt=%u\n",
 		    __func__, blksz, blkcnt);
+		return (error);
+	}
 
-	ch->blksz = sndbuf_getblksz(ch->b);
-	ch->blkcnt = sndbuf_getblkcnt(ch->b);
+	ch->blksz = ch->b->blksz;
+	ch->blkcnt = ch->b->blkcnt;
 
 	return (0);
 }
@@ -2091,7 +2153,9 @@ hdaa_channel_setblocksize(kobj_t obj, void *data, uint32_t blksz)
 {
 	struct hdaa_chan *ch = data;
 
-	hdaa_channel_setfragments(obj, data, blksz, ch->pdevinfo->chan_blkcnt);
+	if (hdaa_channel_setfragments(obj, data, blksz,
+	    ch->pdevinfo->chan_blkcnt) != 0)
+		return (0);
 
 	return (ch->blksz);
 }
@@ -2128,7 +2192,15 @@ static int
 hdaa_channel_start(struct hdaa_chan *ch)
 {
 	struct hdaa_devinfo *devinfo = ch->devinfo;
-	uint32_t fmt;
+	uint32_t fmt, power;
+
+	power = hda_command(devinfo->dev,
+	    HDA_CMD_GET_POWER_STATE(0, devinfo->nid));
+	if (power != HDA_INVALID &&
+	    (HDA_CMD_GET_POWER_STATE_ACT(power) != HDA_CMD_POWER_STATE_D0 ||
+	     HDA_CMD_GET_POWER_STATE_SET(power) != HDA_CMD_POWER_STATE_D0)) {
+		hdaa_audio_wake(devinfo);
+	}
 
 	fmt = hdaa_stream_format(ch);
 	ch->stripectl = fls(ch->stripecap & hdaa_allowed_stripes(fmt) &
@@ -2142,7 +2214,7 @@ hdaa_channel_start(struct hdaa_chan *ch)
 	    ch->dir == PCMDIR_PLAY ? 1 : 0, ch->sid);
 	HDAC_STREAM_START(device_get_parent(devinfo->dev), devinfo->dev,
 	    ch->dir == PCMDIR_PLAY ? 1 : 0, ch->sid,
-	    sndbuf_getbufaddr(ch->b), ch->blksz, ch->blkcnt);
+	    ch->b->buf_addr, ch->blksz, ch->blkcnt);
 	ch->flags |= HDAA_CHN_RUNNING;
 	return (0);
 }
@@ -3241,10 +3313,51 @@ hdaa_audio_as_parse(struct hdaa_devinfo *devinfo)
 				first = seq;
 			/* Check association correctness. */
 			if (as[cnt].pins[seq] != 0) {
-				device_printf(devinfo->dev, "%s: Duplicate pin %d (%d) "
-				    "in association %d! Disabling association.\n",
-				    __func__, seq, w->nid, j);
-				as[cnt].enable = 0;
+				int newseq = -1;
+
+				/*
+				 * Some firmware (e.g. Apple EFI on Mac hardware)
+				 * assigns seq=0 to all HDMI/DP output pins in
+				 * an association.  Reassign the duplicate to
+				 * the next free slot rather than disabling the
+				 * whole association.  Limit to seq=0 duplicates:
+				 * any other duplicate sequence is more likely a
+				 * genuine firmware error and should still disable.
+				 */
+				if (seq == 0 && dir == HDAA_CTL_OUT &&
+				    HDA_PARAM_AUDIO_WIDGET_CAP_DIGITAL(
+				    w->param.widget_cap) &&
+				    (HDA_PARAM_PIN_CAP_HDMI(w->wclass.pin.cap) ||
+				    HDA_PARAM_PIN_CAP_DP(w->wclass.pin.cap))) {
+					int cand;
+
+					for (cand = 1; cand < 16; cand++) {
+						if (as[cnt].pins[cand] == 0) {
+							newseq = cand;
+							break;
+						}
+					}
+				}
+				if (newseq >= 0) {
+					HDA_BOOTVERBOSE(
+						device_printf(devinfo->dev,
+						    "%s: Duplicate pin %d (%d) "
+						    "in association %d, "
+						    "reassigning to seq %d.\n",
+						    __func__, seq, w->nid,
+						    j, newseq);
+					);
+					seq = newseq;
+					/* Update hpredir anchor to lowest seq. */
+					first = min(first, newseq);
+				} else {
+					device_printf(devinfo->dev,
+					    "%s: Duplicate pin %d (%d) "
+					    "in association %d! "
+					    "Disabling association.\n",
+					    __func__, seq, w->nid, j);
+					as[cnt].enable = 0;
+				}
 			}
 			if (dir != as[cnt].dir) {
 				device_printf(devinfo->dev, "%s: Pin %d has wrong "
@@ -5203,13 +5316,10 @@ hdaa_gpo_commit(struct hdaa_devinfo *devinfo)
 }
 
 static void
-hdaa_audio_commit(struct hdaa_devinfo *devinfo)
+hdaa_audio_widget_commit(struct hdaa_devinfo *devinfo)
 {
 	struct hdaa_widget *w;
 	int i;
-
-	/* Commit controls. */
-	hdaa_audio_ctl_commit(devinfo);
 
 	/* Commit selectors, pins and EAPD. */
 	for (i = 0; i < devinfo->nodecnt; i++) {
@@ -5244,6 +5354,13 @@ hdaa_audio_commit(struct hdaa_devinfo *devinfo)
 }
 
 static void
+hdaa_audio_commit(struct hdaa_devinfo *devinfo)
+{
+	hdaa_audio_ctl_commit(devinfo);
+	hdaa_audio_widget_commit(devinfo);
+}
+
+static void
 hdaa_powerup(struct hdaa_devinfo *devinfo)
 {
 	int i;
@@ -5259,6 +5376,23 @@ hdaa_powerup(struct hdaa_devinfo *devinfo)
 		    i, HDA_CMD_POWER_STATE_D0));
 	}
 	DELAY(1000);
+}
+
+static void
+hdaa_audio_wake(struct hdaa_devinfo *devinfo)
+{
+	struct hdaa_audio_ctl *ctl;
+	int i;
+
+	hdaa_lockassert(devinfo);
+	hdaa_powerup(devinfo);
+	hdaa_audio_widget_commit(devinfo);
+	hdaa_patch_direct(devinfo);
+	i = 0;
+	while ((ctl = hdaa_audio_ctl_each(devinfo, &i)) != NULL)
+		hdaa_audio_ctl_amp_set(ctl, HDAA_AMP_MUTE_DEFAULT,
+		    HDAA_AMP_VOL_DEFAULT, HDAA_AMP_VOL_DEFAULT);
+	hdaa_sense_wake(devinfo);
 }
 
 static int
@@ -6194,15 +6328,15 @@ hdaa_configure(device_t dev)
 	);
 	hdaa_patch_direct(devinfo);
 	HDA_BOOTHVERBOSE(
-		device_printf(dev, "Pin sense init...\n");
-	);
-	hdaa_sense_init(devinfo);
-	HDA_BOOTHVERBOSE(
 		device_printf(dev, "Creating PCM devices...\n");
 	);
 	hdaa_unlock(devinfo);
 	hdaa_create_pcms(devinfo);
 	hdaa_lock(devinfo);
+	HDA_BOOTHVERBOSE(
+		device_printf(dev, "Pin sense init...\n");
+	);
+	hdaa_sense_init(devinfo);
 
 	HDA_BOOTVERBOSE(
 		if (devinfo->quirks != 0) {
@@ -7047,17 +7181,17 @@ hdaa_pcm_attach(device_t dev)
 	pcm_setflags(dev, pcm_getflags(dev) | SD_F_MPSAFE);
 
 	HDA_BOOTHVERBOSE(
-		device_printf(dev, "OSS mixer initialization...\n");
-	);
-	if (mixer_init(dev, &hdaa_audio_ctl_ossmixer_class, pdevinfo) != 0)
-		device_printf(dev, "Can't register mixer\n");
-
-	HDA_BOOTHVERBOSE(
 		device_printf(dev, "Registering PCM channels...\n");
 	);
 	pcm_init(dev, pdevinfo);
 
 	pdevinfo->registered++;
+
+	HDA_BOOTHVERBOSE(
+		device_printf(dev, "OSS mixer initialization...\n");
+	);
+	if (mixer_init(dev, &hdaa_audio_ctl_ossmixer_class, pdevinfo) != 0)
+		device_printf(dev, "Can't register mixer\n");
 
 	d = device_get_softc(dev);
 	if (pdevinfo->playas >= 0) {
@@ -7143,5 +7277,5 @@ static driver_t hdaa_pcm_driver = {
 };
 
 DRIVER_MODULE(snd_hda_pcm, hdaa, hdaa_pcm_driver, NULL, NULL);
-MODULE_DEPEND(snd_hda, sound, SOUND_MINVER, SOUND_PREFVER, SOUND_MAXVER);
+MODULE_DEPEND(snd_hda, sound, 1, 1, 1);
 MODULE_VERSION(snd_hda, 1);

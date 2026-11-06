@@ -35,8 +35,9 @@
 
 #include <efi.h>
 #include <efilib.h>
-#include <efiprot.h>
 #include <efichar.h>
+#include <Protocol/DevicePath.h>
+#include <Protocol/BlockIo.h>
 #include <disk.h>
 
 static EFI_GUID blkio_guid = BLOCK_IO_PROTOCOL;
@@ -388,7 +389,7 @@ efipart_inithandles(void)
 		status = OpenProtocolByHandle(hin[i], &blkio_guid,
 		    (void **)&blkio);
 		if (EFI_ERROR(status)) {
-			printf("error %lu\n", EFI_ERROR_CODE(status));
+			printf("error %lu\n", DECODE_ERROR(status));
 			continue;
 		}
 
@@ -1033,7 +1034,7 @@ efipart_readwrite(EFI_BLOCK_IO *blkio, int rw, daddr_t blk, daddr_t nblks,
 
 	if (EFI_ERROR(status)) {
 		printf("%s: rw=%d, blk=%ju size=%ju status=%lu\n", __func__, rw,
-		    blk, nblks, EFI_ERROR_CODE(status));
+		    blk, nblks, DECODE_ERROR(status));
 	}
 	TSEXIT();
 	return (efi_status_to_errno(status));
@@ -1248,4 +1249,46 @@ error:
 	if (need_buf)
 		free(blkbuf);
 	return (rc);
+}
+
+/*
+ * Predicate: is this a VirtualDisk as far as UEFI is concerned?
+ */
+static bool
+testmd(pdinfo_t *md)
+{
+	EFI_DEVICE_PATH *node;
+
+	node = efi_devpath_last_node(md->pd_devpath);
+	if (node == NULL)
+		return (false);
+	if (DevicePathType(node) == MEDIA_DEVICE_PATH &&
+	    DevicePathSubType(node) == MEDIA_RAM_DISK_DP)
+		return (true);
+
+	return (false);
+}
+
+/*
+ * Passes all the VirtualDisk instances to FreeBSD as a preloaded memory disk.
+ */
+void
+efiblk_memdisk_preload(void)
+{
+#ifdef LOADER_MD_SUPPORT
+	MEDIA_RAM_DISK_DEVICE_PATH *ram;
+	uint64_t start, end;
+	pdinfo_t *md;
+	int i;
+
+	STAILQ_FOREACH(md, &pdinfo, pd_link) {
+		if (!testmd(md))
+			continue;
+		ram = (MEDIA_RAM_DISK_DEVICE_PATH *)efi_devpath_last_node(md->pd_devpath);
+		i = ram->Instance;
+		start = ((uint64_t)ram->StartingAddr[1] << 32) | ram->StartingAddr[0];
+		end = ((uint64_t)ram->EndingAddr[1] << 32) | ram->EndingAddr[0];
+		md_export_to_kernel(start, end - start + 1);
+	}
+#endif
 }

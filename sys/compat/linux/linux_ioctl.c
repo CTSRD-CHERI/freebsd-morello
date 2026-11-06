@@ -43,6 +43,7 @@
 #include <sys/malloc.h>
 #include <sys/mman.h>
 #include <sys/proc.h>
+#include <sys/vnode.h>
 #include <sys/sbuf.h>
 #include <sys/sockio.h>
 #include <sys/soundcard.h>
@@ -58,6 +59,8 @@
 #include <net/if_types.h>
 
 #include <dev/evdev/input.h>
+#include <dev/hid/hidraw.h>
+#include <dev/iicbus/iic.h>
 #include <dev/usb/usb_ioctl.h>
 
 #ifdef COMPAT_LINUX32
@@ -99,11 +102,14 @@ DEFINE_LINUX_IOCTL_SET(vfat, VFAT);
 DEFINE_LINUX_IOCTL_SET(console, CONSOLE);
 DEFINE_LINUX_IOCTL_SET(hdio, HDIO);
 DEFINE_LINUX_IOCTL_SET(disk, DISK);
+DEFINE_LINUX_IOCTL_SET(i2c, I2C);
 DEFINE_LINUX_IOCTL_SET(socket, SOCKET);
 DEFINE_LINUX_IOCTL_SET(sound, SOUND);
 DEFINE_LINUX_IOCTL_SET(termio, TERMIO);
 DEFINE_LINUX_IOCTL_SET(private, PRIVATE);
 DEFINE_LINUX_IOCTL_SET(drm, DRM);
+DEFINE_LINUX_IOCTL_SET(dmabuf, DMABUF);
+DEFINE_LINUX_IOCTL_SET(syncfile, SYNCFILE);
 DEFINE_LINUX_IOCTL_SET(sg, SG);
 DEFINE_LINUX_IOCTL_SET(v4l, VIDEO);
 DEFINE_LINUX_IOCTL_SET(v4l2, VIDEO2);
@@ -113,6 +119,7 @@ DEFINE_LINUX_IOCTL_SET(kcov, KCOV);
 #ifndef COMPAT_LINUX32
 DEFINE_LINUX_IOCTL_SET(nvme, NVME);
 #endif
+DEFINE_LINUX_IOCTL_SET(hidraw, HIDRAW);
 
 #undef DEFINE_LINUX_IOCTL_SET
 
@@ -156,6 +163,18 @@ struct linux_hd_big_geometry {
 	uint8_t		sectors;
 	uint32_t	cylinders;
 	uint32_t	start;
+};
+
+struct linux_i2c_msg {
+	uint16_t	addr;
+	uint16_t	flags;
+	uint16_t	len;
+	l_uintptr_t	buf;
+};
+
+struct linux_i2c_rdwr_data {
+	l_uintptr_t	msgs;
+	l_uint		nmsgs;
 };
 
 static int
@@ -331,6 +350,17 @@ struct linux_termios {
 	unsigned char c_cc[LINUX_NCCS];
 };
 
+struct linux_termios2 {
+	unsigned int c_iflag;
+	unsigned int c_oflag;
+	unsigned int c_cflag;
+	unsigned int c_lflag;
+	unsigned char c_line;
+	unsigned char c_cc[LINUX_NCCS];
+	unsigned int c_ispeed;
+	unsigned int c_ospeed;
+};
+
 struct linux_winsize {
 	unsigned short ws_row, ws_col;
 	unsigned short ws_xpixel, ws_ypixel;
@@ -386,7 +416,7 @@ bsd_to_linux_speed(int speed, struct speedtab *table)
 	for ( ; table->sp_speed != -1; table++)
 		if (table->sp_speed == speed)
 			return (table->sp_code);
-	return (-1);
+	return (LINUX_BOTHER);
 }
 
 static void
@@ -506,6 +536,14 @@ bsd_to_linux_termios(struct termios *bios, struct linux_termios *lios)
 			lios->c_cc[i] = LINUX_POSIX_VDISABLE;
 	}
 	lios->c_line = 0;
+}
+
+static void
+bsd_to_linux_termios2(struct termios *bios, struct linux_termios2 *lios2)
+{
+	bsd_to_linux_termios(bios, (struct linux_termios *)lios2);
+	lios2->c_ospeed = bios->c_ospeed;
+	lios2->c_ispeed = bios->c_ispeed;
 }
 
 static void
@@ -629,6 +667,16 @@ linux_to_bsd_termios(struct linux_termios *lios, struct termios *bios)
 }
 
 static void
+linux_to_bsd_termios2(struct linux_termios2 *lios2, struct termios *bios)
+{
+	linux_to_bsd_termios((struct linux_termios *)lios2, bios);
+	if ((lios2->c_cflag & LINUX_CBAUD) == LINUX_BOTHER)
+		bios->c_ospeed = lios2->c_ospeed;
+	if ((lios2->c_cflag & LINUX_CIBAUD) == LINUX_BOTHER << LINUX_IBSHIFT)
+		bios->c_ispeed = lios2->c_ispeed;
+}
+
+static void
 bsd_to_linux_termio(struct termios *bios, struct linux_termio *lio)
 {
 	struct linux_termios lios;
@@ -664,6 +712,7 @@ linux_ioctl_termio(struct thread *td, struct linux_ioctl_args *args)
 {
 	struct termios bios;
 	struct linux_termios lios;
+	struct linux_termios2 lios2;
 	struct linux_termio lio;
 	struct file *fp;
 	int error;
@@ -1001,6 +1050,43 @@ linux_ioctl_termio(struct thread *td, struct linux_ioctl_args *args)
 		args->cmd = TIOCCBRK;
 		error = (sys_ioctl(td, (struct ioctl_args *)args));
 		break;
+
+	case LINUX_TCGETS2:
+		error = fo_ioctl(fp, TIOCGETA, (caddr_t)&bios, td->td_ucred,
+		    td);
+		if (error)
+			break;
+		bsd_to_linux_termios2(&bios, &lios2);
+		error = copyout(&lios2, (void *)args->arg, sizeof(lios2));
+		break;
+
+	case LINUX_TCSETS2:
+		error = copyin((void *)args->arg, &lios2, sizeof(lios2));
+		if (error)
+			break;
+		linux_to_bsd_termios2(&lios2, &bios);
+		error = (fo_ioctl(fp, TIOCSETA, (caddr_t)&bios, td->td_ucred,
+		    td));
+		break;
+
+	case LINUX_TCSETSW2:
+		error = copyin((void *)args->arg, &lios2, sizeof(lios2));
+		if (error)
+			break;
+		linux_to_bsd_termios2(&lios2, &bios);
+		error = (fo_ioctl(fp, TIOCSETAW, (caddr_t)&bios, td->td_ucred,
+		    td));
+		break;
+
+	case LINUX_TCSETSF2:
+		error = copyin((void *)args->arg, &lios2, sizeof(lios2));
+		if (error)
+			break;
+		linux_to_bsd_termios2(&lios2, &bios);
+		error = (fo_ioctl(fp, TIOCSETAF, (caddr_t)&bios, td->td_ucred,
+		    td));
+		break;
+
 	case LINUX_TIOCGPTN: {
 		int nb;
 
@@ -2495,6 +2581,42 @@ linux_ioctl_drm(struct thread *td, struct linux_ioctl_args *args)
 	return (sys_ioctl(td, (struct ioctl_args *)args));
 }
 
+/*
+ * dma-buf ioctl handler (drm-kmod)
+ */
+static int
+linux_ioctl_dmabuf(struct thread *td, struct linux_ioctl_args *args)
+{
+
+	switch (args->cmd & 0xffff) {
+	case LINUX_DMA_BUF_IOCTL_SYNC:
+	case LINUX_DMA_BUF_IOCTL_EXPORT_SYNC_FILE:
+	case LINUX_DMA_BUF_IOCTL_IMPORT_SYNC_FILE:
+		args->cmd = SETDIR(args->cmd);
+		return (sys_ioctl(td, (struct ioctl_args *)args));
+	}
+
+	return (ENOIOCTL);
+}
+
+/*
+ * sync_file ioctl handler (drm-kmod)
+ */
+static int
+linux_ioctl_syncfile(struct thread *td, struct linux_ioctl_args *args)
+{
+
+	switch (args->cmd & 0xffff) {
+	case LINUX_SYNC_IOC_MERGE:
+	case LINUX_SYNC_IOC_FILE_INFO:
+	case LINUX_SYNC_IOC_SET_DEADLINE:
+		args->cmd = SETDIR(args->cmd);
+		return (sys_ioctl(td, (struct ioctl_args *)args));
+	}
+
+	return (ENOIOCTL);
+}
+
 #ifdef COMPAT_LINUX32
 static int
 linux_ioctl_sg_io(struct thread *td, struct linux_ioctl_args *args)
@@ -3569,6 +3691,155 @@ linux_ioctl_nvme(struct thread *td, struct linux_ioctl_args *args)
 	return (sys_ioctl(td, (struct ioctl_args *)args));
 }
 #endif
+
+static int
+linux_ioctl_i2c(struct thread *td, struct linux_ioctl_args *args)
+{
+	struct linux_i2c_rdwr_data lrdwr;
+	struct linux_i2c_msg *lmsgs = NULL;
+	struct iic_rdwr_data rdwr;
+	struct iic_msg *msgs = NULL;
+	struct file *fp;
+	iic_linux_rdwr_t *linux_rdwr;
+	l_ulong funcs;
+	uint16_t lflags;
+	uint8_t addr;
+	int error;
+	l_uint i;
+
+	error = fget(td, args->fd, &cap_ioctl_rights, &fp);
+	if (error != 0)
+		return (error);
+
+	linux_rdwr = NULL;
+	if (fp->f_type == DTYPE_VNODE && fp->f_vnode != NULL &&
+	    fp->f_vnode->v_rdev != NULL)
+		linux_rdwr = (iic_linux_rdwr_t *)fp->f_vnode->v_rdev->si_drv2;
+
+	switch (args->cmd & 0xffff) {
+	case LINUX_I2C_RETRIES:
+	case LINUX_I2C_TIMEOUT:
+	case LINUX_I2C_PEC:
+		error = 0;
+		break;
+	case LINUX_I2C_TENBIT:
+		error = (args->arg == 0) ? 0 : ENOTSUP;
+		break;
+	case LINUX_I2C_FUNCS:
+		funcs = LINUX_I2C_FUNC_I2C | LINUX_I2C_FUNC_NOSTART;
+		error = copyout(&funcs, (void *)args->arg, sizeof(funcs));
+		break;
+	case LINUX_I2C_SLAVE:
+	case LINUX_I2C_SLAVE_FORCE:
+		if (args->arg > 0x7f) {
+			error = EINVAL;
+			break;
+		}
+		addr = (uint8_t)(args->arg << 1);
+		error = fo_ioctl(fp, I2CSADDR, (caddr_t)&addr, td->td_ucred, td);
+		break;
+	case LINUX_I2C_RDWR:
+		error = copyin((void *)args->arg, &lrdwr, sizeof(lrdwr));
+		if (error != 0)
+			break;
+		if (lrdwr.nmsgs > IIC_RDRW_MAX_MSGS) {
+			error = EINVAL;
+			break;
+		}
+		lmsgs = malloc(sizeof(*lmsgs) * lrdwr.nmsgs, M_TEMP, M_WAITOK);
+		msgs = malloc(sizeof(*msgs) * lrdwr.nmsgs, M_TEMP, M_WAITOK);
+		error = copyin((void *)(uintptr_t)lrdwr.msgs, lmsgs,
+		    sizeof(*lmsgs) * lrdwr.nmsgs);
+		if (error != 0)
+			break;
+		for (i = 0; i < lrdwr.nmsgs; i++) {
+			lflags = lmsgs[i].flags;
+			if (lmsgs[i].addr > 0x7f || (lflags & LINUX_I2C_M_TEN) != 0) {
+				error = ENOTSUP;
+				break;
+			}
+			if ((lflags & ~(LINUX_I2C_M_RD | LINUX_I2C_M_NOSTART)) != 0) {
+				error = ENOTSUP;
+				break;
+			}
+			msgs[i].slave = lmsgs[i].addr << 1;
+			msgs[i].flags = (lflags & LINUX_I2C_M_RD) ? IIC_M_RD : IIC_M_WR;
+			if ((lflags & LINUX_I2C_M_NOSTART) != 0)
+				msgs[i].flags |= IIC_M_NOSTART;
+			msgs[i].len = lmsgs[i].len;
+			msgs[i].buf = (uint8_t *)(uintptr_t)lmsgs[i].buf;
+		}
+		if (error == 0) {
+			if (linux_rdwr == NULL) {
+				error = ENOTTY;
+			} else {
+				rdwr.msgs = msgs;
+				rdwr.nmsgs = lrdwr.nmsgs;
+				error = linux_rdwr(fp, &rdwr, fp->f_flag, td);
+				if (error == 0)
+					td->td_retval[0] = lrdwr.nmsgs;
+			}
+		}
+		break;
+	case LINUX_I2C_SMBUS:
+	default:
+		error = ENOTSUP;
+		break;
+	}
+	free(msgs, M_TEMP);
+	free(lmsgs, M_TEMP);
+	fdrop(fp, td);
+	return (error);
+}
+
+static int
+linux_ioctl_hidraw(struct thread *td, struct linux_ioctl_args *args)
+{
+	int len = (args->cmd & 0x3fff0000) >> 16;
+	if (len > 8192)
+		return (EINVAL);
+
+	switch (args->cmd & 0xffff) {
+	case LINUX_HIDIOCGRDESCSIZE:
+		args->cmd = HIDIOCGRDESCSIZE;
+		break;
+	case LINUX_HIDIOCGRDESC:
+		args->cmd = HIDIOCGRDESC;
+		break;
+	case LINUX_HIDIOCGRAWINFO:
+		args->cmd = HIDIOCGRAWINFO;
+		break;
+	case LINUX_HIDIOCGRAWNAME:
+		args->cmd = HIDIOCGRAWNAME(len);
+		break;
+	case LINUX_HIDIOCGRAWPHYS:
+		args->cmd = HIDIOCGRAWPHYS(len);
+		break;
+	case LINUX_HIDIOCSFEATURE:
+		args->cmd = HIDIOCSFEATURE(len);
+		break;
+	case LINUX_HIDIOCGFEATURE:
+		args->cmd = HIDIOCGFEATURE(len);
+		break;
+	case LINUX_HIDIOCGRAWUNIQ:
+		args->cmd = HIDIOCGRAWUNIQ(len);
+		break;
+	case LINUX_HIDIOCSINPUT:
+		args->cmd = HIDIOCSINPUT(len);
+		break;
+	case LINUX_HIDIOCGINPUT:
+		args->cmd = HIDIOCGINPUT(len);
+		break;
+	case LINUX_HIDIOCSOUTPUT:
+		args->cmd = HIDIOCSOUTPUT(len);
+		break;
+	case LINUX_HIDIOCGOUTPUT:
+		args->cmd = HIDIOCGOUTPUT(len);
+		break;
+	}
+
+	return (sys_ioctl(td, (struct ioctl_args *)args));
+}
 
 /*
  * main ioctl syscall function

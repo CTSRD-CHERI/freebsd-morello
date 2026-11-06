@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2006, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -468,8 +458,21 @@ check_filesystem(spa_t *spa, uint64_t head_ds, zbookmark_err_phys_t *zep,
 	kmem_free(zc, sizeof (*zc));
 
 out:
-	kmem_free(snap_obj_array, sizeof (*snap_obj_array));
+	kmem_free(snap_obj_array, snap_count * sizeof (*snap_obj_array));
 	return (error);
+}
+
+/*
+ * Report an error block whose datasets could not be checked.
+ */
+static int
+copyout_unresolved(uint64_t dataset, zbookmark_err_phys_t *zep, void *uaddr,
+    uint64_t *count)
+{
+	zbookmark_phys_t zb;
+
+	zep_to_zb(dataset, zep, &zb);
+	return (copyout_entry(&zb, uaddr, count));
 }
 
 static int
@@ -483,15 +486,8 @@ process_error_block(spa_t *spa, uint64_t head_ds, zbookmark_err_phys_t *zep,
 	 * the key is not loaded. In this case do not proceed to
 	 * check_filesystem(), instead do the accounting here.
 	 */
-	if (zep->zb_birth == 0 || head_ds == 0) {
-		zbookmark_phys_t zb;
-		zep_to_zb(head_ds, zep, &zb);
-		int error = copyout_entry(&zb, uaddr, count);
-		if (error != 0) {
-			return (error);
-		}
-		return (0);
-	}
+	if (zep->zb_birth == 0 || head_ds == 0)
+		return (copyout_unresolved(head_ds, zep, uaddr, count));
 
 	uint64_t top_affected_fs;
 	uint64_t init_count = *count;
@@ -522,6 +518,21 @@ process_error_block(spa_t *spa, uint64_t head_ds, zbookmark_err_phys_t *zep,
 
 		list_destroy(&clones_list);
 	}
+
+	/*
+	 * ENOMEM and EFAULT concern the userland buffer and must be returned.
+	 * Any other failure to check the datasets, e.g. because the key is not
+	 * loaded or a snapshot was destroyed, must not hide the other entries:
+	 * report the block as above unless check_filesystem() already copied
+	 * out part of it, and leave the entry in the log.
+	 */
+	if (error != 0 && error != ENOMEM && error != EFAULT) {
+		if (init_count == *count)
+			error = copyout_unresolved(head_ds, zep, uaddr, count);
+		else
+			error = 0;
+	}
+
 	if (error == 0 && init_count == *count) {
 		/*
 		 * If we reach this point, no errors have been detected
@@ -1472,7 +1483,6 @@ spa_swap_errlog(spa_t *spa, uint64_t new_head_ds, uint64_t old_head_ds,
 	mutex_exit(&spa->spa_errlog_lock);
 }
 
-#if defined(_KERNEL)
 /* error handling */
 EXPORT_SYMBOL(spa_log_error);
 EXPORT_SYMBOL(spa_approx_errlog_size);
@@ -1490,7 +1500,6 @@ EXPORT_SYMBOL(find_top_affected_fs);
 EXPORT_SYMBOL(find_birth_txg);
 EXPORT_SYMBOL(zep_to_zb);
 EXPORT_SYMBOL(name_to_errphys);
-#endif
 
 ZFS_MODULE_PARAM(zfs_spa, spa_, upgrade_errlog_limit, UINT, ZMOD_RW,
 	"Limit the number of errors which will be upgraded to the new "

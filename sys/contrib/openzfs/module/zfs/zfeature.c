@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -308,6 +298,7 @@ feature_sync(spa_t *spa, zfeature_info_t *feature, uint64_t refcount,
 	ASSERT(VALID_FEATURE_OR_NONE(feature->fi_feature));
 	uint64_t zapobj = (feature->fi_flags & ZFEATURE_FLAG_READONLY_COMPAT) ?
 	    spa->spa_feat_for_write_obj : spa->spa_feat_for_read_obj;
+	ASSERT(MUTEX_HELD(&spa->spa_feat_stats_lock));
 	VERIFY0(zap_update(spa->spa_meta_objset, zapobj, feature->fi_guid,
 	    sizeof (uint64_t), 1, &refcount, tx));
 
@@ -360,7 +351,9 @@ feature_enable_sync(spa_t *spa, zfeature_info_t *feature, dmu_tx_t *tx)
 	    feature->fi_guid, 1, strlen(feature->fi_desc) + 1,
 	    feature->fi_desc, tx));
 
+	mutex_enter(&spa->spa_feat_stats_lock);
 	feature_sync(spa, feature, initial_refcount, tx);
+	mutex_exit(&spa->spa_feat_stats_lock);
 
 	if (spa_feature_is_enabled(spa, SPA_FEATURE_ENABLED_TXG)) {
 		uint64_t enabling_txg = dmu_tx_get_txg(tx);
@@ -416,6 +409,7 @@ feature_do_action(spa_t *spa, spa_feature_t fid, feature_action_t action,
 	ASSERT(dmu_tx_is_syncing(tx));
 	ASSERT3U(spa_version(spa), >=, SPA_VERSION_FEATURES);
 
+	mutex_enter(&spa->spa_feat_stats_lock);
 	VERIFY3U(feature_get_refcount(spa, feature, &refcount), !=, ENOTSUP);
 
 	switch (action) {
@@ -433,6 +427,7 @@ feature_do_action(spa_t *spa, spa_feature_t fid, feature_action_t action,
 	}
 
 	feature_sync(spa, feature, refcount, tx);
+	mutex_exit(&spa->spa_feat_stats_lock);
 }
 
 void

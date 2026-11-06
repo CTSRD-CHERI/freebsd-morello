@@ -28,13 +28,15 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
+#include <sys/bus.h>
 #include <sys/kernel.h>
+#include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/module.h>
-#include <sys/bus.h>
 #include <sys/pciio.h>
 #include <sys/rman.h>
 #include <sys/smp.h>
+#include <sys/sx.h>
 #include <sys/sysctl.h>
 
 #include <dev/pci/pcivar.h>
@@ -67,6 +69,12 @@
 
 MALLOC_DEFINE(M_PPTMSIX, "pptmsix", "Passthru MSI-X resources");
 
+static struct sx ppt_mtx;
+SX_SYSINIT(ppt_mtx, &ppt_mtx, "ppt_mtx");
+#define	PPT_LOCK()		sx_xlock(&ppt_mtx)
+#define	PPT_UNLOCK()		sx_xunlock(&ppt_mtx)
+#define	PPT_ASSERT_LOCKED()	sx_assert(&ppt_mtx, SA_XLOCKED)
+
 struct pptintr_arg {				/* pptintr(pptintr_arg) */
 	struct pptdev	*pptdev;
 	uint64_t	addr;
@@ -82,6 +90,7 @@ struct pptseg {
 struct pptdev {
 	device_t	dev;
 	struct vm	*vm;			/* owner of this device */
+	bool		resetting;		/* guest FLR in progress */
 	TAILQ_ENTRY(pptdev)	next;
 	struct pptseg mmio[MAX_MMIOSEGS];
 	struct {
@@ -156,17 +165,20 @@ ppt_attach(device_t dev)
 
 	ppt = device_get_softc(dev);
 
+	PPT_LOCK();
 	cmd1 = cmd = pci_read_config(dev, PCIR_COMMAND, 2);
 	cmd &= ~(PCIM_CMD_PORTEN | PCIM_CMD_MEMEN | PCIM_CMD_BUSMASTEREN);
 	pci_write_config(dev, PCIR_COMMAND, cmd, 2);
 	error = iommu_remove_device(iommu_host_domain(), dev, pci_get_rid(dev));
 	if (error != 0) {
 		pci_write_config(dev, PCIR_COMMAND, cmd1, 2);
+		PPT_UNLOCK();
 		return (error);
 	}
 	num_pptdevs++;
 	TAILQ_INSERT_TAIL(&pptdev_list, ppt, next);
 	ppt->dev = dev;
+	PPT_UNLOCK();
 
 	if (bootverbose)
 		device_printf(dev, "attached\n");
@@ -180,22 +192,26 @@ ppt_detach(device_t dev)
 	struct pptdev *ppt;
 	int error;
 
+	error = 0;
 	ppt = device_get_softc(dev);
 
-	if (ppt->vm != NULL)
-		return (EBUSY);
+	PPT_LOCK();
+	if (ppt->vm != NULL) {
+		error = EBUSY;
+		goto out;
+	}
 	if (iommu_host_domain() != NULL) {
 		error = iommu_add_device(iommu_host_domain(), dev,
 		    pci_get_rid(dev));
-	} else {
-		error = 0;
+		if (error != 0)
+			goto out;
 	}
-	if (error != 0)
-		return (error);
 	num_pptdevs--;
 	TAILQ_REMOVE(&pptdev_list, ppt, next);
+out:
+	PPT_UNLOCK();
 
-	return (0);
+	return (error);
 }
 
 static device_method_t ppt_methods[] = {
@@ -216,19 +232,32 @@ ppt_find(struct vm *vm, int bus, int slot, int func, struct pptdev **pptp)
 	struct pptdev *ppt;
 	int b, s, f;
 
-	TAILQ_FOREACH(ppt, &pptdev_list, next) {
-		dev = ppt->dev;
-		b = pci_get_bus(dev);
-		s = pci_get_slot(dev);
-		f = pci_get_function(dev);
-		if (bus == b && slot == s && func == f)
+	PPT_ASSERT_LOCKED();
+
+	for (;;) {
+		TAILQ_FOREACH(ppt, &pptdev_list, next) {
+			dev = ppt->dev;
+			b = pci_get_bus(dev);
+			s = pci_get_slot(dev);
+			f = pci_get_function(dev);
+			if (bus == b && slot == s && func == f)
+				break;
+		}
+
+		if (ppt == NULL)
+			return (ENOENT);
+		if (ppt->vm != vm)	/* Make sure we own this device. */
+			return (EBUSY);
+		if (!ppt->resetting)
 			break;
+		/*
+		 * Once resetting is set, every exit from ppt_reset_device()
+		 * reacquires ppt_mtx, clears resetting, and wakes us.  The FLR wait
+		 * itself is bounded.
+		 */
+		sx_sleep(ppt, &ppt_mtx, 0, "pptflr", 0);
 	}
 
-	if (ppt == NULL)
-		return (ENOENT);
-	if (ppt->vm != vm)		/* Make sure we own this device */
-		return (EBUSY);
 	*pptp = ppt;
 	return (0);
 }
@@ -336,13 +365,6 @@ ppt_teardown_msix(struct pptdev *ppt)
 }
 
 int
-ppt_avail_devices(void)
-{
-
-	return (num_pptdevs);
-}
-
-int
 ppt_assigned_devices(struct vm *vm)
 {
 	struct pptdev *ppt;
@@ -413,10 +435,11 @@ ppt_assign_device(struct vm *vm, int bus, int slot, int func)
 	int error;
 	uint16_t cmd;
 
+	PPT_LOCK();
 	/* Passing NULL requires the device to be unowned. */
 	error = ppt_find(NULL, bus, slot, func, &ppt);
-	if (error)
-		return (error);
+	if (error != 0)
+		goto out;
 
 	pci_save_state(ppt->dev);
 	ppt_pci_reset(ppt->dev);
@@ -424,12 +447,14 @@ ppt_assign_device(struct vm *vm, int bus, int slot, int func)
 	error = iommu_add_device(vm_iommu_domain(vm), ppt->dev,
 	    pci_get_rid(ppt->dev));
 	if (error != 0)
-		return (error);
+		goto out;
 	ppt->vm = vm;
 	cmd = pci_read_config(ppt->dev, PCIR_COMMAND, 2);
 	cmd |= PCIM_CMD_BUSMASTEREN | ppt_bar_enables(ppt);
 	pci_write_config(ppt->dev, PCIR_COMMAND, cmd, 2);
-	return (0);
+out:
+	PPT_UNLOCK();
+	return (error);
 }
 
 int
@@ -439,9 +464,10 @@ ppt_unassign_device(struct vm *vm, int bus, int slot, int func)
 	int error;
 	uint16_t cmd;
 
+	PPT_LOCK();
 	error = ppt_find(vm, bus, slot, func, &ppt);
-	if (error)
-		return (error);
+	if (error != 0)
+		goto out;
 
 	cmd = pci_read_config(ppt->dev, PCIR_COMMAND, 2);
 	cmd &= ~(PCIM_CMD_PORTEN | PCIM_CMD_MEMEN | PCIM_CMD_BUSMASTEREN);
@@ -455,6 +481,110 @@ ppt_unassign_device(struct vm *vm, int bus, int slot, int func)
 	error = iommu_remove_device(vm_iommu_domain(vm), ppt->dev,
 	    pci_get_rid(ppt->dev));
 	ppt->vm = NULL;
+out:
+	PPT_UNLOCK();
+	return (error);
+}
+
+int
+ppt_reset_device(struct vm *vm, int bus, int slot, int func)
+{
+	struct pptdev *ppt;
+	uint16_t cmd, enables, original_cmd;
+	int error;
+
+	PPT_LOCK();
+	error = ppt_find(vm, bus, slot, func, &ppt);
+	if (error != 0)
+		goto out_locked;
+
+	/*
+	 * FLR takes at least 100 ms.  Reserve this function, but do not let a
+	 * guest hold the global PPT lock and delay operations on other VMs.
+	 */
+	ppt->resetting = true;
+	PPT_UNLOCK();
+
+	original_cmd = pci_read_config(ppt->dev, PCIR_COMMAND, 2);
+	if (original_cmd == 0xffff) {
+		error = ENXIO;
+		goto out;
+	}
+	if (!pcie_flr_supported(ppt->dev)) {
+		error = ENOTSUP;
+		goto out;
+	}
+
+	/*
+	 * Disable physical INTx before releasing its handler.  This also makes
+	 * an asserted Function send Deassert_INTx before FLR, as required by
+	 * PCIe.  Gate decoding and DMA before tearing down MSI or MSI-X.
+	 */
+	cmd = original_cmd | PCIM_CMD_INTxDIS;
+	cmd &= ~(PCIM_CMD_PORTEN | PCIM_CMD_MEMEN | PCIM_CMD_BUSMASTEREN);
+	pci_write_config(ppt->dev, PCIR_COMMAND, cmd, 2);
+	ppt_teardown_msi(ppt);
+	ppt_teardown_msix(ppt);
+
+	/*
+	 * Save the host-owned state after interrupt teardown, then restore BARs
+	 * and PCIe controls after FLR.  The IOMMU domain remains intact.  bhyve
+	 * removes guest BAR mappings before this ioctl; a later guest MEMEN write
+	 * recreates them.
+	 */
+	pci_save_state(ppt->dev);
+
+	/*
+	 * A guest-requested FLR must not be escalated to a power reset.  The
+	 * support check above and force=true mean that pcie_flr() cannot fail
+	 * for a stable function.  If its support nevertheless disappears
+	 * between the two checks, destructive preparation has already torn down
+	 * host interrupt resources.  Return EIO so bhyve discards the now-stale
+	 * guest interrupt state even though the FLR was not initiated.
+	 */
+	if (!pcie_flr(ppt->dev,
+	    max(pcie_get_max_completion_timeout(ppt->dev) / 1000, 10), true)) {
+		device_printf(ppt->dev, "guest FLR could not be performed\n");
+		error = EIO;
+		goto restore;
+	}
+	error = 0;
+
+	/*
+	 * Restore the decode and DMA enables which were set before the FLR;
+	 * the guest command register is intentionally virtual.  Do not infer
+	 * writable enables from the BAR resources here.  For example, a VF can
+	 * use PF-owned BAR apertures while its own MEMEN bit is RsvdP.
+	 *
+	 * A post-reset readback failure does not undo the guest-visible reset.
+	 */
+restore:
+	pci_restore_state(ppt->dev);
+	enables = original_cmd &
+	    (PCIM_CMD_PORTEN | PCIM_CMD_MEMEN | PCIM_CMD_BUSMASTEREN);
+	cmd = pci_read_config(ppt->dev, PCIR_COMMAND, 2);
+	if (cmd == 0xffff) {
+		device_printf(ppt->dev,
+		    "config space unavailable after guest FLR\n");
+		error = EIO;
+		goto out;
+	}
+	cmd &= ~(PCIM_CMD_PORTEN | PCIM_CMD_MEMEN | PCIM_CMD_BUSMASTEREN |
+	    PCIM_CMD_INTxDIS);
+	cmd |= enables | (original_cmd & PCIM_CMD_INTxDIS);
+	pci_write_config(ppt->dev, PCIR_COMMAND, cmd, 2);
+	cmd = pci_read_config(ppt->dev, PCIR_COMMAND, 2);
+	if (cmd == 0xffff || (cmd & enables) != enables) {
+		device_printf(ppt->dev,
+		    "failed to restore command register after guest FLR\n");
+		error = EIO;
+	}
+out:
+	PPT_LOCK();
+	ppt->resetting = false;
+	wakeup(ppt);
+out_locked:
+	PPT_UNLOCK();
 	return (error);
 }
 
@@ -507,13 +637,17 @@ ppt_map_mmio(struct vm *vm, int bus, int slot, int func,
 	    hpa % PAGE_SIZE != 0 || gpa + len < gpa || hpa + len < hpa)
 		return (EINVAL);
 
+	PPT_LOCK();
 	error = ppt_find(vm, bus, slot, func, &ppt);
 	if (error)
-		return (error);
+		goto out;
 
-	if (!ppt_valid_bar_mapping(ppt, hpa, len))
-		return (EINVAL);
+	if (!ppt_valid_bar_mapping(ppt, hpa, len)) {
+		error = EINVAL;
+		goto out;
+	}
 
+	error = ENOSPC;
 	for (i = 0; i < MAX_MMIOSEGS; i++) {
 		seg = &ppt->mmio[i];
 		if (seg->len == 0) {
@@ -522,10 +656,12 @@ ppt_map_mmio(struct vm *vm, int bus, int slot, int func,
 				seg->gpa = gpa;
 				seg->len = len;
 			}
-			return (error);
+			break;
 		}
 	}
-	return (ENOSPC);
+out:
+	PPT_UNLOCK();
+	return (error);
 }
 
 int
@@ -536,10 +672,12 @@ ppt_unmap_mmio(struct vm *vm, int bus, int slot, int func,
 	struct pptseg *seg;
 	struct pptdev *ppt;
 
+	PPT_LOCK();
 	error = ppt_find(vm, bus, slot, func, &ppt);
 	if (error)
-		return (error);
+		goto out;
 
+	error = ENOENT;
 	for (i = 0; i < MAX_MMIOSEGS; i++) {
 		seg = &ppt->mmio[i];
 		if (seg->gpa == gpa && seg->len == len) {
@@ -548,10 +686,12 @@ ppt_unmap_mmio(struct vm *vm, int bus, int slot, int func,
 				seg->gpa = 0;
 				seg->len = 0;
 			}
-			return (error);
+			break;
 		}
 	}
-	return (ENOENT);
+out:
+	PPT_UNLOCK();
+	return (error);
 }
 
 static int
@@ -593,19 +733,22 @@ ppt_setup_msi(struct vm *vm, int bus, int slot, int func,
 	if (numvec < 0 || numvec > MAX_MSIMSGS)
 		return (EINVAL);
 
+	PPT_LOCK();
 	error = ppt_find(vm, bus, slot, func, &ppt);
 	if (error)
-		return (error);
+		goto out;
 
 	/* Reject attempts to enable MSI while MSI-X is active. */
-	if (ppt->msix.num_msgs != 0 && numvec != 0)
-		return (EBUSY);
+	if (ppt->msix.num_msgs != 0 && numvec != 0) {
+		error = EBUSY;
+		goto out;
+	}
 
 	/* Free any allocated resources */
 	ppt_teardown_msi(ppt);
 
 	if (numvec == 0)		/* nothing more to do */
-		return (0);
+		goto out;
 
 	flags = RF_ACTIVE;
 	msi_count = pci_msi_count(ppt->dev);
@@ -620,8 +763,10 @@ ppt_setup_msi(struct vm *vm, int bus, int slot, int func,
 	 * The device must be capable of supporting the number of vectors
 	 * the guest wants to allocate.
 	 */
-	if (numvec > msi_count)
-		return (EINVAL);
+	if (numvec > msi_count) {
+		error = EINVAL;
+		goto out;
+	}
 
 	/*
 	 * Make sure that we can allocate all the MSI vectors that are needed
@@ -631,10 +776,11 @@ ppt_setup_msi(struct vm *vm, int bus, int slot, int func,
 		tmp = numvec;
 		error = pci_alloc_msi(ppt->dev, &tmp);
 		if (error)
-			return (error);
+			goto out;
 		else if (tmp != numvec) {
 			pci_release_msi(ppt->dev);
-			return (ENOSPC);
+			error = ENOSPC;
+			goto out;
 		} else {
 			/* success */
 		}
@@ -669,10 +815,12 @@ ppt_setup_msi(struct vm *vm, int bus, int slot, int func,
 
 	if (i < numvec) {
 		ppt_teardown_msi(ppt);
-		return (ENXIO);
+		error = ENXIO;
 	}
 
-	return (0);
+out:
+	PPT_UNLOCK();
+	return (error);
 }
 
 int
@@ -684,17 +832,22 @@ ppt_setup_msix(struct vm *vm, int bus, int slot, int func,
 	int numvec, alloced, rid, error;
 	size_t res_size, cookie_size, arg_size;
 
+	PPT_LOCK();
 	error = ppt_find(vm, bus, slot, func, &ppt);
 	if (error)
-		return (error);
+		goto out;
 
 	/* Reject attempts to enable MSI-X while MSI is active. */
-	if (ppt->msi.num_msgs != 0)
-		return (EBUSY);
+	if (ppt->msi.num_msgs != 0) {
+		error = EBUSY;
+		goto out;
+	}
 
 	dinfo = device_get_ivars(ppt->dev);
-	if (!dinfo)
-		return (ENXIO);
+	if (dinfo == NULL) {
+		error = ENXIO;
+		goto out;
+	}
 
 	/*
 	 * First-time configuration:
@@ -704,8 +857,10 @@ ppt_setup_msix(struct vm *vm, int bus, int slot, int func,
 	 */
 	if (ppt->msix.num_msgs == 0) {
 		numvec = pci_msix_count(ppt->dev);
-		if (numvec <= 0)
-			return (EINVAL);
+		if (numvec <= 0) {
+			error = EINVAL;
+			goto out;
+		}
 
 		ppt->msix.startrid = 1;
 		ppt->msix.num_msgs = numvec;
@@ -725,7 +880,8 @@ ppt_setup_msix(struct vm *vm, int bus, int slot, int func,
 
 		if (ppt->msix.msix_table_res == NULL) {
 			ppt_teardown_msix(ppt);
-			return (ENOSPC);
+			error = ENOSPC;
+			goto out;
 		}
 		ppt->msix.msix_table_rid = rid;
 
@@ -737,7 +893,8 @@ ppt_setup_msix(struct vm *vm, int bus, int slot, int func,
 
 			if (ppt->msix.msix_pba_res == NULL) {
 				ppt_teardown_msix(ppt);
-				return (ENOSPC);
+				error = ENOSPC;
+				goto out;
 			}
 			ppt->msix.msix_pba_rid = rid;
 		}
@@ -746,12 +903,16 @@ ppt_setup_msix(struct vm *vm, int bus, int slot, int func,
 		error = pci_alloc_msix(ppt->dev, &alloced);
 		if (error || alloced != numvec) {
 			ppt_teardown_msix(ppt);
-			return (error == 0 ? ENOSPC: error);
+			if (error == 0)
+				error = ENOSPC;
+			goto out;
 		}
 	}
 
-	if (idx >= ppt->msix.num_msgs)
-		return (EINVAL);
+	if (idx >= ppt->msix.num_msgs) {
+		error = EINVAL;
+		goto out;
+	}
 
 	if ((vector_control & PCIM_MSIX_VCTRL_MASK) == 0) {
 		/* Tear down the IRQ if it's already set up */
@@ -762,8 +923,10 @@ ppt_setup_msix(struct vm *vm, int bus, int slot, int func,
 		rid = ppt->msix.startrid + idx;
 		ppt->msix.res[idx] = bus_alloc_resource_any(ppt->dev, SYS_RES_IRQ,
 							    &rid, RF_ACTIVE);
-		if (ppt->msix.res[idx] == NULL)
-			return (ENXIO);
+		if (ppt->msix.res[idx] == NULL) {
+			error = ENXIO;
+			goto out;
+		}
 
 		ppt->msix.arg[idx].pptdev = ppt;
 		ppt->msix.arg[idx].addr = addr;
@@ -774,19 +937,20 @@ ppt_setup_msix(struct vm *vm, int bus, int slot, int func,
 				       INTR_TYPE_NET | INTR_MPSAFE,
 				       pptintr, NULL, &ppt->msix.arg[idx],
 				       &ppt->msix.cookie[idx]);
-
 		if (error != 0) {
 			bus_release_resource(ppt->dev, SYS_RES_IRQ, rid, ppt->msix.res[idx]);
 			ppt->msix.cookie[idx] = NULL;
 			ppt->msix.res[idx] = NULL;
-			return (ENXIO);
+			error = ENXIO;
+			goto out;
 		}
 	} else {
 		/* Masked, tear it down if it's already been set up */
 		ppt_teardown_msix_intr(ppt, idx);
 	}
-
-	return (0);
+out:
+	PPT_UNLOCK();
+	return (error);
 }
 
 int
@@ -795,10 +959,13 @@ ppt_disable_msix(struct vm *vm, int bus, int slot, int func)
 	struct pptdev *ppt;
 	int error;
 
+	PPT_LOCK();
 	error = ppt_find(vm, bus, slot, func, &ppt);
-	if (error)
+	if (error != 0) {
+		PPT_UNLOCK();
 		return (error);
-
+	}
 	ppt_teardown_msix(ppt);
+	PPT_UNLOCK();
 	return (0);
 }

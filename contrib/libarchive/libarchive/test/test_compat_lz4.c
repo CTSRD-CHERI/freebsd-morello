@@ -31,7 +31,7 @@
  * In particular:
  *  * lz4 -d will read multiple lz4 streams, concatenating the output
  *  * lz4 -d will stop at the end of a stream if the following data
- *    doesn't start with a lz4 signature.
+ *    doesn't start with an lz4 signature.
  */
 
 /*
@@ -78,7 +78,7 @@ verify(const char *name, const char *n[])
 	assertEqualString(archive_filter_name(a, 0), "lz4");
 	assertEqualInt(archive_format(a), ARCHIVE_FORMAT_TAR_USTAR);
 
-	assertEqualInt(ARCHIVE_OK, archive_read_close(a));
+	assertEqualIntA(a, ARCHIVE_OK, archive_read_close(a));
 	assertEqualInt(ARCHIVE_OK, archive_read_free(a));
 }
 
@@ -98,6 +98,8 @@ DEFINE_TEST(test_compat_lz4)
 	verify("test_compat_lz4_3.tar.lz4.uu", n);
 	/* This sample has been compressed with -B4 option. */
 	verify("test_compat_lz4_B4.tar.lz4.uu", n2);
+	/* This sample has been compresed with -B4, and has two skippable frames at the start. */
+	verify("test_compat_lz4_skippable_frames_B4.tar.lz4.uu", n2);
 	/* This sample has been compressed with -B5 option. */
 	verify("test_compat_lz4_B5.tar.lz4.uu", n2);
 	/* This sample has been compressed with -B6 option. */

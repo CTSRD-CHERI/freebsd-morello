@@ -580,7 +580,9 @@ getspace(size_t blk)
 static void
 usage(void)
 {
-	fprintf(stderr, "usage: tcopy [-cvx] [-s maxblk] [src [dest]]\n");
+	fprintf(stderr,
+            "usage: tcopy [-crvx] [-l logfile] [-s maxblk] [src [dest]]\n"
+        );
 	exit(1);
 }
 
@@ -738,7 +740,7 @@ main(int argc, char *argv[])
 				warnx("illegal block size");
 				usage();
 			}
-			if (maxblk <= 0) {
+			if (tmp <= 0) {
 				warnx("illegal block size");
 				usage();
 			}

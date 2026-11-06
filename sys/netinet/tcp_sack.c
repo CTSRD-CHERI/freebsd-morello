@@ -69,7 +69,6 @@
  * Research Laboratory (NRL).
  */
 
-#include <sys/cdefs.h>
 #include "opt_inet.h"
 #include "opt_inet6.h"
 
@@ -116,8 +115,7 @@
 
 #include <machine/in_cksum.h>
 
-VNET_DECLARE(struct uma_zone *, sack_hole_zone);
-#define	V_sack_hole_zone		VNET(sack_hole_zone)
+extern uma_zone_t tcp_sack_hole_zone;
 
 SYSCTL_NODE(_net_inet_tcp, OID_AUTO, sack, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "TCP SACK");
@@ -126,11 +124,6 @@ VNET_DEFINE(int, tcp_do_sack) = 1;
 SYSCTL_INT(_net_inet_tcp_sack, OID_AUTO, enable, CTLFLAG_VNET | CTLFLAG_RW,
     &VNET_NAME(tcp_do_sack), 0,
     "Enable/Disable TCP SACK support");
-
-VNET_DEFINE(int, tcp_do_newsack) = 1;
-SYSCTL_INT(_net_inet_tcp_sack, OID_AUTO, revised, CTLFLAG_VNET | CTLFLAG_RW,
-    &VNET_NAME(tcp_do_newsack), 0,
-    "Use revised SACK loss recovery per RFC 6675");
 
 VNET_DEFINE(int, tcp_do_lrd) = 1;
 SYSCTL_INT(_net_inet_tcp_sack, OID_AUTO, lrd, CTLFLAG_VNET | CTLFLAG_RW,
@@ -472,7 +465,7 @@ tcp_sackhole_alloc(struct tcpcb *tp, tcp_seq start, tcp_seq end)
 		return NULL;
 	}
 
-	hole = (struct sackhole *)uma_zalloc(V_sack_hole_zone, M_NOWAIT);
+	hole = uma_zalloc(tcp_sack_hole_zone, M_NOWAIT);
 	if (hole == NULL)
 		return NULL;
 
@@ -493,7 +486,7 @@ static void
 tcp_sackhole_free(struct tcpcb *tp, struct sackhole *hole)
 {
 
-	uma_zfree(V_sack_hole_zone, hole);
+	uma_zfree(tcp_sack_hole_zone, hole);
 
 	tp->snd_numholes--;
 	atomic_subtract_int(&V_tcp_sack_globalholes, 1);
@@ -997,8 +990,7 @@ tcp_sack_partialack(struct tcpcb *tp, struct tcphdr *th, u_int *maxsegp)
 	 * the trailing packets of a window are lost and no further data
 	 * is available for sending.
 	 */
-	if ((V_tcp_do_newsack) &&
-	    SEQ_LT(th->th_ack, tp->snd_recover) &&
+	if (SEQ_LT(th->th_ack, tp->snd_recover) &&
 	    TAILQ_EMPTY(&tp->snd_holes) &&
 	    (tp->sackhint.delivered_data > 0)) {
 		/*
@@ -1063,22 +1055,6 @@ tcp_sack_output(struct tcpcb *tp, int *sack_bytes_rexmt)
 	}
 	KASSERT(SEQ_LT(hole->start, hole->end),
 	    ("%s: SEQ_GEQ(hole.start, hole.end)", __func__));
-	if (!(V_tcp_do_newsack)) {
-		KASSERT(SEQ_LT(hole->start, tp->snd_fack),
-		    ("%s: SEG_GEQ(hole.start, snd.fack)", __func__));
-		KASSERT(SEQ_LT(hole->end, tp->snd_fack),
-		    ("%s: SEG_GEQ(hole.end, snd.fack)", __func__));
-		KASSERT(SEQ_LT(hole->rxmit, tp->snd_fack),
-		    ("%s: SEQ_GEQ(hole.rxmit, snd.fack)", __func__));
-		if (SEQ_GEQ(hole->start, hole->end) ||
-		    SEQ_GEQ(hole->start, tp->snd_fack) ||
-		    SEQ_GEQ(hole->end, tp->snd_fack) ||
-		    SEQ_GEQ(hole->rxmit, tp->snd_fack)) {
-			log(LOG_CRIT,"tcp: invalid SACK hole (%u-%u,%u) vs fwd ack %u, ignoring.\n",
-					hole->start, hole->end, hole->rxmit, tp->snd_fack);
-			return (NULL);
-		}
-	}
 	return (hole);
 }
 

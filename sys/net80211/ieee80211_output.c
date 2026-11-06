@@ -365,8 +365,7 @@ ieee80211_start_pkt(struct ieee80211vap *vap, struct mbuf *m)
 	 *     mbuf has the 802.3 header present (and contiguous).
 	 */
 	ni = NULL;
-	if (m->m_len < sizeof(struct ether_header) &&
-	   (m = m_pullup(m, sizeof(struct ether_header))) == NULL) {
+	if ((m = m_pullup(m, sizeof(struct ether_header))) == NULL) {
 		IEEE80211_DPRINTF(vap, IEEE80211_MSG_OUTPUT,
 		    "discard frame, %s\n", "m_pullup failed");
 		vap->iv_stats.is_tx_nobuf++;	/* XXX */
@@ -974,7 +973,7 @@ ieee80211_send_setup(
 
 		/* NB: zero out i_seq field (for s/w encryption etc) */
 		*(uint16_t *)&wh->i_seq[0] = 0;
-	} else
+	} else if (!IEEE80211_CONF_SEQNO_OFFLOAD(ni->ni_ic))
 		ieee80211_output_seqno_assign(ni, tid, m);
 
 	if (IEEE80211_IS_MULTICAST(wh->i_addr1))
@@ -1081,6 +1080,12 @@ ieee80211_send_nulldata(struct ieee80211_node *ni)
 	int hdrlen;
 	uint8_t *frm;
 	int ret;
+
+	/* Don't send NULL frames if we've been configured not to do so. */
+	if ((ic->ic_flags_ext & IEEE80211_FEXT_NO_NULLDATA) != 0) {
+		ieee80211_node_decref(ni);
+		return (0);
+	}
 
 	if (vap->iv_state == IEEE80211_S_CAC) {
 		IEEE80211_NOTE(vap, IEEE80211_MSG_OUTPUT | IEEE80211_MSG_DOTH,
@@ -1810,7 +1815,8 @@ ieee80211_encap(struct ieee80211vap *vap, struct ieee80211_node *ni,
 		 * and we don't need the TX lock held.
 		 */
 		if ((m->m_flags & M_AMPDU_MPDU) == 0) {
-			ieee80211_output_seqno_assign(ni, tid, m);
+			if (!IEEE80211_CONF_SEQNO_OFFLOAD(ic))
+				ieee80211_output_seqno_assign(ni, tid, m);
 		} else {
 			/*
 			 * NB: don't assign a sequence # to potential
@@ -1828,7 +1834,9 @@ ieee80211_encap(struct ieee80211vap *vap, struct ieee80211_node *ni,
 			*(uint16_t *)wh->i_seq = 0;
 		}
 	} else {
-		ieee80211_output_seqno_assign(ni, IEEE80211_NONQOS_TID, m);
+		if (!IEEE80211_CONF_SEQNO_OFFLOAD(ic))
+			ieee80211_output_seqno_assign(ni, IEEE80211_NONQOS_TID,
+			    m);
 		/*
 		 * XXX TODO: we shouldn't allow EAPOL, etc that would
 		 * be forced to be non-QoS traffic to be A-MSDU encapsulated.
@@ -3856,6 +3864,8 @@ ieee80211_beacon_update(struct ieee80211_node *ni, struct mbuf *m, int mcast)
 	 * If the driver identifies it does its own TX seqno management then
 	 * we can skip this (and still not do the TX seqno.)
 	 */
+
+	/* TODO: IEEE80211_CONF_SEQNO_OFFLOAD() */
 	ieee80211_output_beacon_seqno_assign(ni, m);
 
 	/* XXX faster to recalculate entirely or just changes? */

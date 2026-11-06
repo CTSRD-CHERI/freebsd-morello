@@ -61,6 +61,10 @@ device		tdfx			# Enable 3Dfx Voodoo support
 #XXX this stores pointers in a 32bit field that is defined by the hardware
 #device	pst
 
+# Thunderbolt (USB 4.0) support
+device		thunderbolt
+options		THUNDERBOLT_DEBUG
+
 #
 # Microsemi smartpqi controllers.
 # These controllers have a SCSI-like interface, and require the
@@ -70,6 +74,9 @@ device		smartpqi
 
 # Broadcom MPT Fusion, version 4, is 64-bit only
 device		mpi3mr			# LSI-Logic MPT-Fusion 4
+
+# Universal Flash Storage Host Controller Interface support
+device 		ufshci			# UFS host controller
 
 #
 # Network interfaces:
@@ -107,6 +114,9 @@ device		sfxge		# Solarflare SFC9000 10Gb Ethernet
 
 device		ioat		# Intel I/OAT DMA engine
 
+# Intel ME Host Firmware Status (HFSTS) debug probe
+device		hfsts
+
 # EFI Runtime Services support
 options 	EFIRT
 
@@ -115,6 +125,10 @@ device		efidev
 
 # EFI RTC
 device		efirtc
+
+# Apple System Management Controller (SMC)
+device		asmc
+options		ASMC_DEBUG	# Enable asmc(4)-specific debug logic.
 
 #
 # Intel QuickAssist driver with OpenCrypto support
@@ -172,5 +186,4 @@ options 	PV_STATS
 #options	KUBSAN			# Kernel Undefined Behavior Sanitizer
 #options	KCSAN			# Kernel Concurrency Sanitizer
 #options	KASAN			# Kernel Address Sanitizer
-#options	KCSAN			# Kernel Concurrency Sanitizer
 #options	KMSAN			# Kernel Memory Sanitizer

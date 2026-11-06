@@ -43,13 +43,15 @@ efi_exit(EFI_STATUS exit_code)
 	} else {
 		RS->ResetSystem(EfiResetCold, EFI_SUCCESS, 0, NULL);
 	}
+	__unreachable();
 }
 
 void
 exit(int status)
 {
 
-	efi_exit(EFI_LOAD_ERROR);
+	efi_exit(errno_to_efi_status(status));
+	__unreachable();
 }
 
 static CHAR16 *
@@ -103,10 +105,10 @@ efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table)
 
 	setheap((void *)(uintptr_t)heap, (void *)(uintptr_t)(heap + heapsize));
 
+	/* Use efi_exit() from here on... */
+
 	/* Start tslog now that we have a heap.*/
 	tslog_init();
-
-	/* Use efi_exit() from here on... */
 
 	status = OpenProtocolByHandle(IH, &image_protocol, (void**)&img);
 	if (status != EFI_SUCCESS)

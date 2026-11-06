@@ -1,5 +1,5 @@
 #
-# SPDX-License-Idendifier: BSD-2-Clause
+# SPDX-License-Identifier: BSD-2-Clause
 #
 # Copyright (c) 2025 FreeBSD Foundation
 #
@@ -14,7 +14,7 @@
 LIBDIR=		${PLUGINSDIR}/kdb
 SHLIBDIR=	${LIBDIR}
 LIB=		db2
-LDFLAGS=-Wl,--no-undefined
+LDFLAGS+=-Wl,--no-undefined
 LIBADD=	krb5profile krb5 com_err k5crypto kadm5srv_mit kdb5 gssrpc gssapi_krb5 krb5support
 VERSION_MAP=	${.CURDIR}/version.map
 
@@ -42,7 +42,8 @@ CFLAGS+=-I${KRB5_DIR}/plugins/kdb/db2 \
 	-I${KRB5_DIR}/lib/kdb \
 	-I${KRB5_DIR}/lib \
 	-I${KRB5_OBJTOP}/plugins/kdb/db2 \
-	-I${KRB5_OBJTOP}/lib/kdb
+	-I${KRB5_OBJTOP}/lib/kdb \
+	-I${KRB5_OBJTOP}/util/profile
 
 .include <bsd.lib.mk>
 

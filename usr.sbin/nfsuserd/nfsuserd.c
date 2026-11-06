@@ -50,6 +50,7 @@
 #include <fs/nfs/nfsproto.h>
 #include <fs/nfs/nfskpiport.h>
 #include <fs/nfs/nfs.h>
+#include <fs/nfs/nfsid.h>
 
 #include <ctype.h>
 #include <err.h>
@@ -421,8 +422,12 @@ main(int argc, char *argv[])
 			/* Get the group list for this user. */
 			ngroup = NGROUPS;
 			if (getgrouplist(pwd->pw_name, pwd->pw_gid, grps,
-			    &ngroup) < 0)
-				syslog(LOG_ERR, "Group list too small");
+			    &ngroup) < 0) {
+				syslog(LOG_ERR,
+				    "Group list of user '%s' too big",
+				    pwd->pw_name);
+				ngroup = NGROUPS;
+			}
 			nid.nid_ngroup = ngroup;
 			nid.nid_grps = grps;
 		} else {
@@ -621,8 +626,12 @@ nfsuserdsrv(struct svc_req *rqstp, SVCXPRT *transp)
 				/* Get the group list for this user. */
 				ngroup = NGROUPS;
 				if (getgrouplist(pwd->pw_name, pwd->pw_gid,
-				    grps, &ngroup) < 0)
-					syslog(LOG_ERR, "Group list too small");
+				    grps, &ngroup) < 0) {
+					syslog(LOG_ERR,
+					    "Group list of user '%s' too big",
+					    pwd->pw_name);
+					ngroup = NGROUPS;
+				}
 				nid.nid_ngroup = ngroup;
 				nid.nid_grps = grps;
 			} else {
@@ -695,7 +704,8 @@ nfsuserdsrv(struct svc_req *rqstp, SVCXPRT *transp)
 		if (pwd != NULL) {
 			nid.nid_usertimeout = defusertimeout;
 			nid.nid_uid = pwd->pw_uid;
-			nid.nid_name = pwd->pw_name;
+			/* NSS may canonicalize the name used for the lookup. */
+			nid.nid_name = info.name;
 		} else {
 			nid.nid_usertimeout = 5;
 			nid.nid_uid = defaultuid;
@@ -728,7 +738,8 @@ nfsuserdsrv(struct svc_req *rqstp, SVCXPRT *transp)
 		if (grp != NULL) {
 			nid.nid_usertimeout = defusertimeout;
 			nid.nid_gid = grp->gr_gid;
-			nid.nid_name = grp->gr_name;
+			/* NSS may canonicalize the name used for the lookup. */
+			nid.nid_name = info.name;
 		} else {
 			nid.nid_usertimeout = 5;
 			nid.nid_gid = defaultgid;

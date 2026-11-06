@@ -91,8 +91,8 @@ static int node_init(struct ieee80211_node *);
 static void node_cleanup(struct ieee80211_node *);
 static void node_free(struct ieee80211_node *);
 static void node_age(struct ieee80211_node *);
-static int8_t node_getrssi(const struct ieee80211_node *);
-static void node_getsignal(const struct ieee80211_node *, int8_t *, int8_t *);
+static net80211_rssi_t node_getrssi(const struct ieee80211_node *);
+static void node_getsignal(const struct ieee80211_node *, net80211_rssi_t *, int8_t *);
 static void node_getmimoinfo(const struct ieee80211_node *,
 	struct ieee80211_mimo_info *);
 
@@ -1341,7 +1341,7 @@ node_age(struct ieee80211_node *ni)
 		ieee80211_ht_node_age(ni);
 }
 
-static int8_t
+static net80211_rssi_t
 node_getrssi(const struct ieee80211_node *ni)
 {
 	uint32_t avgrssi = ni->ni_avgrssi;
@@ -1354,7 +1354,7 @@ node_getrssi(const struct ieee80211_node *ni)
 }
 
 static void
-node_getsignal(const struct ieee80211_node *ni, int8_t *rssi, int8_t *noise)
+node_getsignal(const struct ieee80211_node *ni, net80211_rssi_t *rssi, int8_t *noise)
 {
 	*rssi = node_getrssi(ni);
 	*noise = ni->ni_noise;
@@ -2673,7 +2673,7 @@ ieee80211_dump_node(struct ieee80211_node_table *nt __unused,
 		ni->ni_htctlchan, ni->ni_ht2ndchan);
 	net80211_printf("\thtopmode %x htstbc %x htchw %d (%s)\n",
 		ni->ni_htopmode, ni->ni_htstbc,
-		ni->ni_chw, ieee80211_ni_chw_to_str(ni->ni_chw));
+		ni->ni_chw, net80211_ni_chw_to_str(ni->ni_chw));
 	net80211_printf("\tvhtcap %x freq1 %d freq2 %d vhtbasicmcs %x\n",
 		ni->ni_vhtcap, (int) ni->ni_vht_chan1, (int) ni->ni_vht_chan2,
 		(int) ni->ni_vht_basicmcs);
@@ -2831,7 +2831,7 @@ ieee80211_node_join(struct ieee80211_node *ni, int resp)
 	    ni->ni_flags & IEEE80211_NODE_QOS ? ", QoS" : "",
 	    /* XXX update for VHT string */
 	    ni->ni_flags & IEEE80211_NODE_HT ?
-		(ni->ni_chw == IEEE80211_STA_RX_BW_40 ? ", HT40" : ", HT20") : "",
+		(ni->ni_chw == NET80211_STA_RX_BW_40 ? ", HT40" : ", HT20") : "",
 	    ni->ni_flags & IEEE80211_NODE_AMPDU ? " (+AMPDU)" : "",
 	    ni->ni_flags & IEEE80211_NODE_AMSDU ? " (+AMSDU)" : "",
 	    ni->ni_flags & IEEE80211_NODE_MIMO_RTS ? " (+SMPS-DYN)" :
@@ -3039,7 +3039,7 @@ get_hostap_rssi(void *arg, struct ieee80211_node *ni)
 {
 	struct rssiinfo *info = arg;
 	struct ieee80211vap *vap = ni->ni_vap;
-	int8_t rssi;
+	net80211_rssi_t rssi;
 
 	/* only associated stations */
 	if (ni->ni_associd == 0)
@@ -3056,7 +3056,7 @@ get_adhoc_rssi(void *arg, struct ieee80211_node *ni)
 {
 	struct rssiinfo *info = arg;
 	struct ieee80211vap *vap = ni->ni_vap;
-	int8_t rssi;
+	net80211_rssi_t rssi;
 
 	/* only neighbors */
 	/* XXX check bssid */
@@ -3075,7 +3075,7 @@ get_mesh_rssi(void *arg, struct ieee80211_node *ni)
 {
 	struct rssiinfo *info = arg;
 	struct ieee80211vap *vap = ni->ni_vap;
-	int8_t rssi;
+	net80211_rssi_t rssi;
 
 	/* only neighbors that peered successfully */
 	if (ni->ni_mlstate != IEEE80211_NODE_MESH_ESTABLISHED)
@@ -3088,7 +3088,7 @@ get_mesh_rssi(void *arg, struct ieee80211_node *ni)
 }
 #endif /* IEEE80211_SUPPORT_MESH */
 
-int8_t
+net80211_rssi_t
 ieee80211_getrssi(struct ieee80211vap *vap)
 {
 #define	NZ(x)	((x) == 0 ? 1 : (x))
@@ -3126,7 +3126,7 @@ ieee80211_getrssi(struct ieee80211vap *vap)
 }
 
 void
-ieee80211_getsignal(struct ieee80211vap *vap, int8_t *rssi, int8_t *noise)
+ieee80211_getsignal(struct ieee80211vap *vap, net80211_rssi_t *rssi, int8_t *noise)
 {
 
 	if (vap->iv_bss == NULL)		/* NB: shouldn't happen */

@@ -33,6 +33,10 @@
 #ifndef	_LIBCASPER_IMPL_H_
 #define	_LIBCASPER_IMPL_H_
 
+#include <sys/param.h>
+#include <sys/procdesc.h>
+
+#include <errno.h>
 #include <stdbool.h>
 
 #include "libcasper.h"
@@ -44,6 +48,25 @@ struct service_connection;
 bool fd_is_valid(int fd);
 void fd_fix_environment(int *fdp);
 
+static inline pid_t
+casper_pdfork(int *fdp)
+{
+	pid_t pid;
+
+	pid = pdfork(fdp, PD_NOWAITPID);
+#if __FreeBSD_version < 1700000
+	/*
+	 * Kernels predating PD_NOWAITPID (introduced in 15.2) reject the
+	 * flag with EINVAL before creating a child, so retrying without
+	 * it is safe.  The child must then be reaped with waitpid(2), as
+	 * before.  This fallback is compiled out starting with 17.0.
+	 */
+	if (pid == -1 && errno == EINVAL)
+		pid = pdfork(fdp, 0);
+#endif
+	return (pid);
+}
+
 /* Private service functions. */
 struct service	*service_alloc(const char *name,
 		    service_limit_func_t *limitfunc,
@@ -54,6 +77,8 @@ void		 service_message(struct service *service,
 void		 service_start(struct service *service, int sock, int procfd);
 const char	*service_name(struct service *service);
 int		 service_get_channel_flags(struct service *service);
+bool		 service_have_connections(void);
+bool		 service_poll_dispatch(void);
 
 /* Private service connection functions. */
 struct service_connection	*service_connection_add(struct service *service,
@@ -63,10 +88,6 @@ void				 service_connection_remove(
 				    struct service_connection *sconn);
 int				 service_connection_clone(
 				    struct service *service,
-				    struct service_connection *sconn);
-struct service_connection	*service_connection_first(
-				    struct service *service);
-struct service_connection	*service_connection_next(
 				    struct service_connection *sconn);
 cap_channel_t			*service_connection_get_chan(
 				    const struct service_connection *sconn);

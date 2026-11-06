@@ -29,6 +29,7 @@
 #include <sys/types.h>
 #include <sys/mman.h>
 #include <sys/queue.h>
+#include <sys/time.h>
 #include "namespace.h"
 #include <stdlib.h>
 #include "un-namespace.h"
@@ -46,8 +47,17 @@ LIST_HEAD(pshared_hash_head, psh);
 static struct pshared_hash_head pshared_hash[HASH_SIZE];
 #define	PSHARED_KEY_HASH(key)	(((unsigned long)(key) >> 8) % HASH_SIZE)
 /* XXXKIB: lock could be split to per-hash chain, if appears contested */
-static struct urwlock pshared_lock = DEFAULT_URWLOCK;
+static struct urwlock pshared_lock __aligned(CACHE_LINE_SIZE) = DEFAULT_URWLOCK;
 static int page_size;
+
+static struct {
+	unsigned long val;
+	char pad[CACHE_LINE_SIZE - sizeof(unsigned long)];
+} pshared_gen __aligned(CACHE_LINE_SIZE);
+
+#define GC_INTERVAL_USEC 25000
+static struct timeval pshared_gc_time = {0, 0};
+bool __thr_pshared_destroy_imm_gc = false;
 
 void
 __thr_pshared_init(void)
@@ -88,15 +98,38 @@ pshared_unlock(struct pthread *curthread)
 	_thr_ast(curthread);
 }
 
+static void
+pshared_gen_bump(void)
+{
+	atomic_add_long(&pshared_gen.val, 1);
+}
+
+static void *
+pshared_cache_lookup(struct pthread *curthread, void *key)
+{
+	if (curthread->pshared_key == key &&
+	    curthread->pshared_gen == atomic_load_long(&pshared_gen.val))
+		return (curthread->pshared_val);
+	return (NULL);
+}
+
+static void
+pshared_cache_insert(struct pthread *curthread, void *key, void *val,
+    unsigned long gen)
+{
+	curthread->pshared_key = key;
+	curthread->pshared_val = val;
+	curthread->pshared_gen = gen;
+}
+
 /*
  * Among all processes sharing a lock only one executes
  * pthread_lock_destroy().  Other processes still have the hash and
  * mapped off-page.
  *
  * Mitigate the problem by checking the liveness of all hashed keys
- * periodically.  Right now this is executed on each
- * pthread_lock_destroy(), but may be done less often if found to be
- * too time-consuming.
+ * periodically.  Right now this is executed on pthread_lock_destroy()
+ * if previous gc happen later than 25msecs.
  */
 static void
 pshared_gc(struct pthread *curthread)
@@ -104,8 +137,18 @@ pshared_gc(struct pthread *curthread)
 	struct pshared_hash_head *hd;
 	struct psh *h, *h1;
 	int error, i;
+	struct timeval now, diff;
 
 	pshared_wlock(curthread);
+
+	if (!__thr_pshared_destroy_imm_gc && gettimeofday(&now, NULL) == 0) {
+		timersub(&now, &pshared_gc_time, &diff);
+		if (diff.tv_sec == 0 && diff.tv_usec < GC_INTERVAL_USEC) {
+			pshared_unlock(curthread);
+			return;
+		}
+	}
+
 	for (i = 0; i < HASH_SIZE; i++) {
 		hd = &pshared_hash[i];
 		LIST_FOREACH_SAFE(h, hd, link, h1) {
@@ -114,10 +157,16 @@ pshared_gc(struct pthread *curthread)
 			if (error == 0)
 				continue;
 			LIST_REMOVE(h, link);
+			pshared_gen_bump();
 			munmap(h->val, page_size);
 			free(h);
 		}
 	}
+
+	if (!__thr_pshared_destroy_imm_gc && gettimeofday(&now, NULL) == 0) {
+		pshared_gc_time = now;
+	}
+
 	pshared_unlock(curthread);
 }
 
@@ -193,6 +242,7 @@ pshared_remove(void *key)
 	LIST_FOREACH(h, hd, link) {
 		if (h->key == key) {
 			LIST_REMOVE(h, link);
+			pshared_gen_bump();
 			val = h->val;
 			free(h);
 			return (val);
@@ -226,6 +276,7 @@ __thr_pshared_offpage(void *key, int doalloc)
 {
 	struct pthread *curthread;
 	void *res;
+	unsigned long gen;
 	int fd, ins_done;
 
 	curthread = _get_curthread();
@@ -233,11 +284,17 @@ __thr_pshared_offpage(void *key, int doalloc)
 		pshared_destroy(curthread, key);
 		res = NULL;
 	} else {
-		pshared_rlock(curthread);
-		res = pshared_lookup(key);
-		pshared_unlock(curthread);
+		res = pshared_cache_lookup(curthread, key);
 		if (res != NULL)
 			return (res);
+		pshared_rlock(curthread);
+		gen = pshared_gen.val;
+		res = pshared_lookup(key);
+		pshared_unlock(curthread);
+		if (res != NULL) {
+			pshared_cache_insert(curthread, key, res, gen);
+			return (res);
+		}
 	}
 	fd = _umtx_op(NULL, UMTX_OP_SHM, doalloc ? UMTX_SHM_CREAT :
 	    UMTX_SHM_LOOKUP, key, NULL);
@@ -248,11 +305,14 @@ __thr_pshared_offpage(void *key, int doalloc)
 	if (res == MAP_FAILED)
 		return (NULL);
 	pshared_wlock(curthread);
+	gen = pshared_gen.val;
 	ins_done = pshared_insert(key, &res);
 	pshared_unlock(curthread);
 	if (!ins_done) {
 		pshared_clean(key, res);
 		res = NULL;
+	} else {
+		pshared_cache_insert(curthread, key, res, gen);
 	}
 	return (res);
 }

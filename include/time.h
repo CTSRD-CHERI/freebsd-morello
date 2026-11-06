@@ -34,9 +34,6 @@
  * SUCH DAMAGE.
  */
 
-/*
- */
-
 #ifndef _TIME_H_
 #define	_TIME_H_
 
@@ -44,6 +41,10 @@
 #include <sys/_null.h>
 #include <sys/_types.h>
 #include <sys/_clock_id.h>
+
+#if __ISO_C_VISIBLE >= 2023 || __BSD_VISIBLE
+#define __STDC_VERSION_TIME_H__	202311L
+#endif
 
 #if __POSIX_VISIBLE > 0 && __POSIX_VISIBLE < 200112 || __BSD_VISIBLE
 /*
@@ -170,10 +171,11 @@ extern int daylight;
 
 #if __BSD_VISIBLE
 time_t timelocal(struct tm * const);
-time_t timegm(struct tm * const);
 int timer_oshandle_np(timer_t timerid);
 time_t time2posix(time_t t);
 time_t posix2time(time_t t);
+struct tm *offtime(const time_t *, long);
+struct tm *offtime_r(const time_t *__restrict, long, struct tm *__restrict);
 #endif /* __BSD_VISIBLE */
 
 #if __POSIX_VISIBLE >= 200809 || defined(_XLOCALE_H_)
@@ -191,6 +193,7 @@ int timespec_get(struct timespec *ts, int base);
 #define TIME_MONOTONIC	2	/* monotonic time */
 /* ISO/IEC 9899:2024 7.29.2.7 The timespec_getres function */
 int timespec_getres(struct timespec *, int);
+time_t timegm(struct tm * const);
 #endif
 #endif
 

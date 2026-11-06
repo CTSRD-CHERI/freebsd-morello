@@ -31,19 +31,6 @@
 #include "archive.h"
 #include "archive_cryptor_private.h"
 
-/*
- * On systems that do not support any recognized crypto libraries,
- * this file will normally define no usable symbols.
- *
- * But some compilers and linkers choke on empty object files, so
- * define a public symbol that will always exist.  This could
- * be removed someday if this file gains another always-present
- * symbol definition.
- */
-int __libarchive_cryptor_build_hack(void) {
-	return 0;
-}
-
 #ifdef ARCHIVE_CRYPTOR_USE_Apple_CommonCrypto
 
 static int
@@ -57,7 +44,7 @@ pbkdf2_sha1(const char *pw, size_t pw_len, const uint8_t *salt,
 	return 0;
 }
 
-#elif defined(_WIN32) && !defined(__CYGWIN__) && defined(HAVE_BCRYPT_H) && _WIN32_WINNT >= _WIN32_WINNT_VISTA
+#elif defined(_WIN32) && !defined(__CYGWIN__) && defined(ARCHIVE_CRYPTO_WIN)
 #ifdef _MSC_VER
 #pragma comment(lib, "Bcrypt.lib")
 #endif
@@ -151,7 +138,7 @@ pbkdf2_sha1(const char *pw, size_t pw_len, const uint8_t *salt,
 	(void)rounds; /* UNUSED */
 	(void)derived_key; /* UNUSED */
 	(void)derived_key_len; /* UNUSED */
-	return -1; /* UNSUPPORTED */
+	return CRYPTOR_STUB_FUNCTION; /* UNSUPPORTED */
 }
 
 #endif
@@ -197,7 +184,7 @@ aes_ctr_release(archive_crypto_ctx *ctx)
 	return 0;
 }
 
-#elif defined(_WIN32) && !defined(__CYGWIN__) && defined(HAVE_BCRYPT_H) && _WIN32_WINNT >= _WIN32_WINNT_VISTA
+#elif defined(_WIN32) && !defined(__CYGWIN__) && defined(ARCHIVE_CRYPTO_WIN)
 
 static int
 aes_ctr_init(archive_crypto_ctx *ctx, const uint8_t *key, size_t key_len)
@@ -439,14 +426,14 @@ aes_ctr_init(archive_crypto_ctx *ctx, const uint8_t *key, size_t key_len)
 	(void)ctx; /* UNUSED */
 	(void)key; /* UNUSED */
 	(void)key_len; /* UNUSED */
-	return -1;
+	return CRYPTOR_STUB_FUNCTION;
 }
 
 static int
 aes_ctr_encrypt_counter(archive_crypto_ctx *ctx)
 {
 	(void)ctx; /* UNUSED */
-	return -1;
+	return CRYPTOR_STUB_FUNCTION;
 }
 
 static int
@@ -469,7 +456,7 @@ aes_ctr_update(archive_crypto_ctx *ctx, const uint8_t * const in,
 	(void)out; /* UNUSED */
 	(void)out_len; /* UNUSED */
 	aes_ctr_encrypt_counter(ctx); /* UNUSED */ /* Fix unused function warning */
-	return -1;
+	return CRYPTOR_STUB_FUNCTION;
 }
 
 #else
@@ -490,9 +477,9 @@ aes_ctr_update(archive_crypto_ctx *ctx, const uint8_t * const in,
     size_t in_len, uint8_t * const out, size_t *out_len)
 {
 	uint8_t *const ebuf = ctx->encr_buf;
-	unsigned pos = ctx->encr_pos;
-	unsigned max = (unsigned)((in_len < *out_len)? in_len: *out_len);
-	unsigned i;
+	size_t pos = ctx->encr_pos;
+	size_t max = (in_len < *out_len)? in_len: *out_len;
+	size_t i;
 
 	for (i = 0; i < max; ) {
 		if (pos == AES_BLOCK_SIZE) {

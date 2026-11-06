@@ -245,13 +245,16 @@ nlmsg_copy_nla(const struct nlattr *nla_orig, struct nl_writer *nw)
  * Translate a FreeBSD interface name to a Linux interface name.
  */
 static bool
-nlmsg_translate_ifname_nla(struct nlattr *nla, struct nl_writer *nw)
+nlmsg_translate_ifname_nla(struct nlmsghdr *hdr, struct nlattr *nla,
+    struct nl_writer *nw)
 {
+	struct ifinfomsg *ifinfo;
 	char ifname[LINUX_IFNAMSIZ];
 
-	if (ifname_bsd_to_linux_name((char *)(nla + 1), ifname,
+	ifinfo = (struct ifinfomsg *)(hdr + 1);
+	if (ifname_bsd_to_linux_idx(ifinfo->ifi_index, ifname,
 	    sizeof(ifname)) <= 0)
-		return (false);
+		return (nlmsg_copy_nla(nla, nw));
 	return (nlattr_add_string(nw, IFLA_IFNAME, ifname));
 }
 
@@ -272,7 +275,7 @@ nlmsg_translate_all_nla(struct nlmsghdr *hdr, struct nlattr *nla,
 	case NL_RTM_GETLINK:
 		switch (nla->nla_type) {
 		case IFLA_IFNAME:
-			return (nlmsg_translate_ifname_nla(nla, nw));
+			return (nlmsg_translate_ifname_nla(hdr, nla, nw));
 		default:
 			break;
 		}
@@ -340,11 +343,13 @@ rtnl_if_flags_to_linux(unsigned int if_flags)
 		case IFF_STATICARP:
 		case IFF_STICKYARP:
 		case IFF_DYING:
-		case IFF_RENAMING:
 			/* No Linux analogue */
 			break;
+		case IFF_LOWER_UP:	/* IFF_NETLINK_1 */
+			result |= LINUX_IFF_LOWER_UP;
+			break;
 		case IFF_MULTICAST:
-			result |= 1 << 12;
+			result |= LINUX_IFF_MULTICAST;
 		}
 	}
 	return (result);
@@ -364,7 +369,15 @@ rtnl_newlink_to_linux(struct nlmsghdr *hdr, struct nlpcb *nlp,
 	/* Convert interface type */
 	switch (ifinfo->ifi_type) {
 	case IFT_ETHER:
+	case IFT_BRIDGE:
+	case IFT_L2VLAN:
 		ifinfo->ifi_type = LINUX_ARPHRD_ETHER;
+		break;
+	case IFT_LOOP:
+		ifinfo->ifi_type = LINUX_ARPHRD_LOOPBACK;
+		break;
+	case IFT_STF:
+		ifinfo->ifi_type = LINUX_ARPHRD_SIT;
 		break;
 	}
 	ifinfo->ifi_flags = rtnl_if_flags_to_linux(ifinfo->ifi_flags);
@@ -563,23 +576,17 @@ nlmsg_to_linux(struct nlmsghdr *hdr, struct nlpcb *nlp, struct nl_writer *nw)
 	}
 }
 
-static bool
-nlmsgs_to_linux(struct nl_writer *nw, struct nlpcb *nlp)
+static struct nl_buf *
+nlmsgs_to_linux(struct nl_buf *orig, struct nlpcb *nlp, const struct ifnet *ifp)
 {
-	struct nl_buf *nb, *orig;
-	u_int offset, msglen, orig_messages;
+	struct nl_writer nw;
+	u_int offset, msglen;
 
-	RT_LOG(LOG_DEBUG3, "%p: in %u bytes %u messages", __func__,
-	    nw->buf->datalen, nw->num_messages);
+	if (__predict_false(!nl_writer_unicast(&nw,
+	    orig->datalen + SCRATCH_BUFFER_SIZE, nlp, false)))
+		return (NULL);
 
-	orig = nw->buf;
-	nb = nl_buf_alloc(orig->datalen + SCRATCH_BUFFER_SIZE, M_NOWAIT);
-	if (__predict_false(nb == NULL))
-		return (false);
-	nw->buf = nb;
-	orig_messages = nw->num_messages;
-	nw->num_messages = 0;
-
+	nw.ifp = ifp;
 	/* Assume correct headers. Buffer IS mutable */
 	for (offset = 0;
 	    offset + sizeof(struct nlmsghdr) <= orig->datalen;
@@ -587,22 +594,18 @@ nlmsgs_to_linux(struct nl_writer *nw, struct nlpcb *nlp)
 		struct nlmsghdr *hdr = (struct nlmsghdr *)&orig->data[offset];
 
 		msglen = NLMSG_ALIGN(hdr->nlmsg_len);
-		if (!nlmsg_to_linux(hdr, nlp, nw)) {
+		if (!nlmsg_to_linux(hdr, nlp, &nw)) {
 			RT_LOG(LOG_DEBUG, "failed to process msg type %d",
 			    hdr->nlmsg_type);
-			nl_buf_free(nb);
-			nw->buf = orig;
-			nw->num_messages = orig_messages;
-			return (false);
+			nl_buf_free(nw.buf);
+			return (NULL);
 		}
 	}
 
-	MPASS(nw->num_messages == orig_messages);
-	MPASS(nw->buf == nb);
-	nl_buf_free(orig);
-	RT_LOG(LOG_DEBUG3, "%p: out %u bytes", __func__, offset);
+	RT_LOG(LOG_DEBUG3, "%p: in %u bytes %u messages", __func__,
+	    nw.buf->datalen, nw.num_messages);
 
-	return (true);
+	return (nw.buf);
 }
 
 static struct linux_netlink_provider linux_netlink_v1 = {

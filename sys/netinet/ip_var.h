@@ -82,24 +82,6 @@ struct ipoption {
 	char	ipopt_list[MAX_IPOPTLEN];	/* options proper */
 };
 
-#if defined(_NETINET_IN_VAR_H_) && defined(_KERNEL)
-/*
- * Structure attached to inpcb.ip_moptions and
- * passed to ip_output when IP multicast options are in use.
- * This structure is lazy-allocated.
- */
-struct ip_moptions {
-	struct	ifnet *imo_multicast_ifp; /* ifp for outgoing multicasts */
-	struct in_addr imo_multicast_addr; /* ifindex/addr on MULTICAST_IF */
-	u_long	imo_multicast_vif;	/* vif num outgoing multicasts */
-	u_char	imo_multicast_ttl;	/* TTL for outgoing multicasts */
-	u_char	imo_multicast_loop;	/* 1 => hear sends if a member */
-	struct ip_mfilter_head imo_head; /* group membership list */
-};
-#else
-struct ip_moptions;
-#endif
-
 struct	ipstat {
 	uint64_t ips_total;		/* total packets received */
 	uint64_t ips_badsum;		/* checksum bad */
@@ -191,6 +173,7 @@ struct inpcb;
 struct route;
 struct sockopt;
 struct inpcbinfo;
+struct ip_moptions;
 
 VNET_DECLARE(int, ip_defttl);			/* default IP ttl */
 VNET_DECLARE(int, ipforwarding);		/* ip forwarding */
@@ -199,9 +182,6 @@ VNET_DECLARE(int, ipsendredirects);
 VNET_DECLARE(int, ipstealth);			/* stealth forwarding */
 #endif
 VNET_DECLARE(struct socket *, ip_rsvpd);	/* reservation protocol daemon*/
-VNET_DECLARE(struct socket *, ip_mrouter);	/* multicast routing daemon */
-extern int	(*legal_vif_num)(int);
-extern u_long	(*ip_mcast_src)(int);
 VNET_DECLARE(int, rsvp_on);
 VNET_DECLARE(int, drop_redirect);
 VNET_DECLARE(int, ip_random_id);
@@ -214,7 +194,6 @@ VNET_DECLARE(int, ip_random_id);
 #define	V_ipstealth		VNET(ipstealth)
 #endif
 #define	V_ip_rsvpd		VNET(ip_rsvpd)
-#define	V_ip_mrouter		VNET(ip_mrouter)
 #define	V_rsvp_on		VNET(rsvp_on)
 #define	V_drop_redirect		VNET(drop_redirect)
 #define	V_ip_random_id		VNET(ip_random_id)
@@ -227,9 +206,6 @@ int	ip_ctloutput(struct socket *, struct sockopt *sopt);
 int	ip_fragment(struct ip *ip, struct mbuf **m_frag, int mtu,
 	    u_long if_hwassist_flags);
 void	ip_forward(struct mbuf *m, int srcrt);
-extern int
-	(*ip_mforward)(struct ip *, struct ifnet *, struct mbuf *,
-	    struct ip_moptions *);
 int	ip_output(struct mbuf *,
 	    struct mbuf *, struct route *, int, struct ip_moptions *,
 	    struct inpcb *);
@@ -244,9 +220,6 @@ int	rsvp_input(struct mbuf **, int *, int);
 
 int	ip_rsvp_init(struct socket *);
 int	ip_rsvp_done(void);
-extern int	(*ip_rsvp_vif)(struct socket *, struct sockopt *);
-extern void	(*ip_rsvp_force_done)(struct socket *);
-extern int	(*rsvp_input_p)(struct mbuf **, int *, int);
 
 typedef int	ipproto_input_t(struct mbuf **, int *, int);
 struct icmp;
@@ -271,6 +244,7 @@ VNET_DECLARE(struct pfil_head *, inet_local_pfil_head);
 #define	PFIL_INET_LOCAL_NAME	"inet-local"
 
 void	in_delayed_cksum(struct mbuf *m);
+void	in_delayed_cksum_o(struct mbuf *m, uint16_t o);
 
 /* Hooks for ipfw, dummynet, divert etc. Most are declared in raw_ip.c */
 /*
@@ -333,7 +307,7 @@ VNET_DECLARE(ip_fw_ctl_ptr_t, ip_fw_ctl_ptr);
 #define	V_ip_fw_ctl_ptr		VNET(ip_fw_ctl_ptr)
 
 /* Divert hooks. */
-extern void	(*ip_divert_ptr)(struct mbuf *m, bool incoming);
+extern void	(*ip_divert_ptr)(struct mbuf *m, uint64_t id, bool incoming);
 /* ng_ipfw hooks -- XXX make it the same as divert and dummynet */
 extern int	(*ng_ipfw_input_p)(struct mbuf **, struct ip_fw_args *, bool);
 extern int	(*ip_dn_ctl_ptr)(struct sockopt *);

@@ -83,6 +83,7 @@
 #include <sys/reboot.h>
 #include <sys/reg.h>
 #include <sys/rwlock.h>
+#include <sys/sched.h>
 #include <sys/signalvar.h>
 #include <sys/syscallsubr.h>
 #include <sys/sysctl.h>
@@ -194,9 +195,6 @@ cpu_startup(void *dummy)
 	 */
 	cpu_setup(PCPU_GET(cpuid));
 
-#ifdef PERFMON
-	perfmon_init();
-#endif
 	printf("real memory  = %ju (%ju MB)\n", ptoa((uintmax_t)physmem),
 	    ptoa((uintmax_t)physmem) / 1048576);
 	realmem = physmem;
@@ -467,6 +465,7 @@ powerpc_init(vm_offset_t fdt, vm_offset_t toc, vm_offset_t ofentry, void *mdp,
 	 * Bring up MMU
 	 */
 	pmap_mmu_init();
+	sched_instance_select();
 	link_elf_ireloc();
 	pmap_bootstrap(startkernel, endkernel);
 	mtmsr(psl_kernset & ~PSL_EE);
@@ -488,9 +487,8 @@ powerpc_init(vm_offset_t fdt, vm_offset_t toc, vm_offset_t ofentry, void *mdp,
 	/*
 	 * Finish setting up thread0.
 	 */
-	thread0.td_pcb = (struct pcb *)
-	    ((thread0.td_kstack + thread0.td_kstack_pages * PAGE_SIZE -
-	    sizeof(struct pcb)) & ~15UL);
+	thread0.td_pcb = (struct pcb *)__align_down(td_kstack_top(&thread0) -
+	    sizeof(struct pcb), 16);
 	bzero((void *)thread0.td_pcb, sizeof(struct pcb));
 	pc->pc_curpcb = thread0.td_pcb;
 
@@ -564,7 +562,7 @@ load_external_symtab(void) {
 	if (!(end - start > 0))
 		return;
 
-	kernelimg_final = (u_char *) PHYS_TO_DMAP(start);
+	kernelimg_final = PHYS_TO_DMAP(start);
 #ifdef	AIM
 	kernelimg = kernelimg_final;
 #else	/* BOOKE */

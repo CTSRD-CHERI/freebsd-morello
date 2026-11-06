@@ -44,6 +44,7 @@
 #include <net/if_types.h>
 #include <net/if_media.h>
 #include <net/iflib.h>
+#include <net/rss_config.h>
 
 #include <dev/enetc/enetc_hw.h>
 #include <dev/enetc/enetc.h>
@@ -456,14 +457,18 @@ enetc_detach(if_ctx_t ctx)
 
 	sc = iflib_get_softc(ctx);
 
-	for (i = 0; i < sc->rx_num_queues; i++)
-		iflib_irq_free(ctx, &sc->rx_queues[i].irq);
+	if (sc->rx_queues != NULL) {
+		for (i = 0; i < sc->rx_num_queues; i++)
+			iflib_irq_free(ctx, &sc->rx_queues[i].irq);
+	}
 
 	bus_generic_detach(sc->dev);
 
-	if (sc->regs != NULL)
+	if (sc->regs != NULL) {
 		error = bus_release_resource(sc->dev, SYS_RES_MEMORY,
 		    rman_get_rid(sc->regs), sc->regs);
+		sc->regs = NULL;
+	}
 
 	if (sc->ctrl_queue.dma.idi_size != 0)
 		iflib_dma_free(&sc->ctrl_queue.dma);
@@ -599,6 +604,7 @@ enetc_setup_rss(struct enetc_softc *sc)
 {
 	struct iflib_dma_info dma;
 	int error, i, buckets_num = 0;
+	uint8_t rss_key[RSS_KEYSIZE];
 	uint8_t *rss_table;
 	uint32_t reg;
 
@@ -610,8 +616,11 @@ enetc_setup_rss(struct enetc_softc *sc)
 	if (buckets_num == 0)
 		return (ENOTSUP);
 
+	_Static_assert(ENETC_RSSHASH_KEY_SIZE == RSS_KEYSIZE,
+	    "RSS key size mismatch");
+	rss_getkey(rss_key);
 	for (i = 0; i < ENETC_RSSHASH_KEY_SIZE / sizeof(uint32_t); i++) {
-		arc4rand((uint8_t *)&reg, sizeof(reg), 0);
+		reg = le32dec(rss_key + i * sizeof(reg));
 		ENETC_PORT_WR4(sc, ENETC_PRSSK(i), reg);
 	}
 
@@ -848,7 +857,7 @@ enetc_hash_vid(uint16_t vid)
 	bool bit;
 	int i;
 
-	for (i = 0;i < 6;i++) {
+	for (i = 0; i < 6; i++) {
 		bit = vid & BIT(i);
 		bit ^= !!(vid & BIT(i + 6));
 		hash |= bit << i;
@@ -968,7 +977,7 @@ enetc_disable_txq(struct enetc_softc *sc, int qid)
 		cidx = ENETC_TXQ_RD4(sc, qid, ENETC_TBCIR);
 	}
 
-	if (timeout == 0)
+	if (pidx != cidx)
 		device_printf(sc->dev,
 		    "Timeout while waiting for txq%d to stop transmitting packets\n",
 		    qid);
@@ -1020,7 +1029,7 @@ enetc_msix_intr_assign(if_ctx_t ctx, int msix)
 		    ENETC_RBICR0_ICEN | ENETC_RBICR0_SET_ICPT(ENETC_RX_INTR_PKT_THR));
 	}
 	vector = 0;
-	for (i = 0;i < sc->tx_num_queues; i++, vector++) {
+	for (i = 0; i < sc->tx_num_queues; i++, vector++) {
 		tx_queue = &sc->tx_queues[i];
 		snprintf(irq_name, sizeof(irq_name), "txq%d", i);
 		iflib_softirq_alloc_generic(ctx, &tx_queue->irq,
@@ -1130,7 +1139,7 @@ enetc_isc_txd_encap(void *data, if_pkt_info_t ipi)
 	}
 
 	/* Now add remaining descriptors. */
-	for (;i < ipi->ipi_nsegs; i++) {
+	for (; i < ipi->ipi_nsegs; i++) {
 		desc = &queue->ring[pidx];
 		bzero(desc, sizeof(*desc));
 		desc->addr = segs[i].ds_addr;
@@ -1343,7 +1352,8 @@ enetc_get_counter(if_ctx_t ctx, ift_counter cnt)
 	case IFCOUNTER_IERRORS:
 		return (ENETC_PORT_RD8(sc, ENETC_PM0_RERR));
 	case IFCOUNTER_OERRORS:
-		return (ENETC_PORT_RD8(sc, ENETC_PM0_TERR));
+		return (if_get_counter_default(ifp, cnt) +
+		    ENETC_PORT_RD8(sc, ENETC_PM0_TERR));
 	default:
 		return (if_get_counter_default(ifp, cnt));
 	}

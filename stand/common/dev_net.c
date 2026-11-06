@@ -66,6 +66,10 @@
 #include "dev_net.h"
 #include "bootstrap.h"
 
+#ifndef NETPROTO_DEFAULT
+# define NETPROTO_DEFAULT NET_NFS
+#endif
+
 static char *netdev_name;
 static int netdev_sock = -1;
 static int netdev_opens;
@@ -78,6 +82,7 @@ static int	net_strategy(void *, int, daddr_t, size_t, char *, size_t *);
 static int	net_print(int);
 
 static int net_getparams(int sock);
+static void net_setparams(int sock);
 
 struct devsw netdev = {
 	.dv_name = "net",
@@ -114,7 +119,6 @@ net_init(void)
 static int
 net_open(struct open_file *f, ...)
 {
-	struct iodesc *d;
 	va_list args;
 	struct devdesc *dev;
 	const char *devname;	/* Device part of file name (or NULL). */
@@ -157,35 +161,55 @@ net_open(struct open_file *f, ...)
 				return (error);
 			}
 		}
-		/*
-		 * Set the variables required by the kernel's nfs_diskless
-		 * mechanism.  This is the minimum set of variables required to
-		 * mount a root filesystem without needing to obtain additional
-		 * info from bootp or other sources.
-		 */
-		d = socktodesc(netdev_sock);
-		setenv("boot.netif.hwaddr", ether_sprintf(d->myea), 1);
-		setenv("boot.netif.ip", inet_ntoa(myip), 1);
-		setenv("boot.netif.netmask", intoa(netmask), 1);
-		setenv("boot.netif.gateway", inet_ntoa(gateip), 1);
-		setenv("boot.netif.server", inet_ntoa(rootip), 1);
-		if (netproto == NET_TFTP) {
-			setenv("boot.tftproot.server", inet_ntoa(rootip), 1);
-			setenv("boot.tftproot.path", rootpath, 1);
-		} else if (netproto == NET_NFS) {
-			setenv("boot.nfsroot.server", inet_ntoa(rootip), 1);
-			setenv("boot.nfsroot.path", rootpath, 1);
-		}
-		if (intf_mtu != 0) {
-			char mtu[16];
-			snprintf(mtu, sizeof(mtu), "%u", intf_mtu);
-			setenv("boot.netif.mtu", mtu, 1);
-		}
-
+		net_setparams(netdev_sock);
 	}
 	netdev_opens++;
 	dev->d_opendata = &netdev_sock;
 	return (error);
+}
+
+/*
+ * Configure a network interface without opening a file on it.  This is used
+ * by consumers which need DHCP configuration before switching to a firmware
+ * network protocol.
+ */
+int
+net_configure(struct devdesc *dev)
+{
+	int error;
+
+	if (netdev_sock >= 0)
+		return (0);
+
+	netdev_sock = netif_open(dev);
+	if (netdev_sock < 0)
+		return (ENXIO);
+
+	error = 0;
+	if (rootip.s_addr == 0)
+		error = net_getparams(netdev_sock);
+	if (error == 0)
+		net_setparams(netdev_sock);
+	if (error != 0) {
+		netif_close(netdev_sock);
+		netdev_sock = -1;
+		return (error);
+	}
+
+	netdev_name = strdup(dev->d_dev->dv_name);
+	if (netdev_name == NULL) {
+		netif_close(netdev_sock);
+		netdev_sock = -1;
+		return (ENOMEM);
+	}
+	return (error);
+}
+
+void
+net_deconfigure(void)
+{
+
+	net_cleanup();
 }
 
 static int
@@ -193,7 +217,7 @@ net_close(struct open_file *f)
 {
 	struct devdesc *dev;
 
-	DEBUG_PRINTF(1,("%s: opens=%d\n", __func__, netdev_opens));
+	DEBUG_PRINTF(2,("%s: opens=%d\n", __func__, netdev_opens));
 
 	dev = f->f_devdata;
 	dev->d_opendata = NULL;
@@ -245,6 +269,7 @@ static int
 net_getparams(int sock)
 {
 	char buf[MAXHOSTNAMELEN];
+	const char *val;
 	n_long rootaddr, smask;
 
 #ifdef	SUPPORT_BOOTP
@@ -303,7 +328,9 @@ net_getparams(int sock)
 		return (EIO);
 	}
 exit:
-	if ((rootaddr = net_parse_rootpath()) != INADDR_NONE)
+	if ((val = getenv("dhcp.root-path")) != NULL)
+		strlcpy(rootpath, val, sizeof(rootpath));
+	if ((rootaddr = net_parse_rootpath()) != htonl(INADDR_NONE))
 		rootip.s_addr = rootaddr;
 
 	DEBUG_PRINTF(1,("%s: proto: %d\n", __func__, netproto));
@@ -312,6 +339,37 @@ exit:
 	DEBUG_PRINTF(1,("%s: server path: %s\n", __func__, rootpath));
 
 	return (0);
+}
+
+static void
+net_setparams(int sock)
+{
+	struct iodesc *d;
+
+	/*
+	 * Set the variables required by the kernel's nfs_diskless mechanism.
+	 */
+	d = socktodesc(sock);
+	setenv("boot.netif.hwaddr", ether_sprintf(d->myea), 1);
+	setenv("boot.netif.ip", inet_ntoa(myip), 1);
+	setenv("boot.netif.netmask", intoa(netmask), 1);
+	setenv("boot.netif.gateway", inet_ntoa(gateip), 1);
+	setenv("boot.netif.server", inet_ntoa(rootip), 1);
+	if (netproto == NET_TFTP) {
+		setenv("boot.tftproot.server", inet_ntoa(rootip), 1);
+		setenv("boot.tftproot.path", rootpath, 1);
+	} else if (netproto == NET_NFS) {
+		setenv("boot.nfsroot.server", inet_ntoa(rootip), 1);
+		setenv("boot.nfsroot.path", rootpath, 1);
+	}
+	if (intf_mtu != 0) {
+		char mtu[16];
+
+		snprintf(mtu, sizeof(mtu), "%u", intf_mtu);
+		setenv("boot.netif.mtu", mtu, 1);
+	}
+
+	DEBUG_PRINTF(1,("%s: netproto=%d\n", __func__, netproto));
 }
 
 static int
@@ -344,11 +402,17 @@ net_print(int verbose)
 	return (ret);
 }
 
+bool
+is_tftp(void)
+{
+    return (netproto == NET_TFTP);
+}
+
 /*
  * Parses the rootpath if present
  *
  * The rootpath format can be in the form
- * <scheme>://ip/path
+ * <scheme>://ip[:port]/path
  * <scheme>:/path
  *
  * For compatibility with previous behaviour it also accepts as an NFS scheme
@@ -363,10 +427,10 @@ net_print(int verbose)
 uint32_t
 net_parse_rootpath(void)
 {
-	n_long addr = htonl(INADDR_NONE);
+	n_long addr = 0;
 	size_t i;
 	char ip[FNAME_SIZE];
-	char *ptr, *val;
+	char *ptr, *portp, *val;
 
 	netproto = NET_NONE;
 
@@ -381,7 +445,7 @@ net_parse_rootpath(void)
 	ptr = rootpath;
 	/* Fallback for compatibility mode */
 	if (netproto == NET_NONE) {
-		netproto = NET_NFS;
+		netproto = NETPROTO_DEFAULT;
 		(void)strsep(&ptr, ":");
 		if (ptr != NULL) {
 			addr = inet_addr(rootpath);
@@ -394,16 +458,21 @@ net_parse_rootpath(void)
 		if (*ptr == '/') {
 			/* we are in the form <scheme>://, we do expect an ip */
 			ptr++;
-			/*
-			 * XXX when http will be there we will need to check for
-			 * a port, but right now we do not need it yet
-			 */
+			portp = val = strchr(ptr, ':');
+			if (val != NULL) {
+				val++;
+				rootport = strtol(val, NULL, 10);
+			}
 			val = strchr(ptr, '/');
 			if (val != NULL) {
+				if (portp == NULL)
+					portp = val;
 				snprintf(ip, sizeof(ip), "%.*s",
-				    (int)((uintptr_t)val - (uintptr_t)ptr),
+				    (int)(portp - ptr),
 				    ptr);
 				addr = inet_addr(ip);
+				DEBUG_PRINTF(1,("ip=%s addr=%#x\n",
+					ip, addr));
 				bcopy(val, rootpath, strlen(val) + 1);
 			}
 		} else {
@@ -411,6 +480,7 @@ net_parse_rootpath(void)
 			bcopy(ptr, rootpath, strlen(ptr) + 1);
 		}
 	}
-
+	if (addr == 0)
+		addr = htonl(INADDR_NONE);
 	return (addr);
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 1984-2025  Mark Nudelman
+ * Copyright (C) 1984-2026  Mark Nudelman
  *
  * You may distribute under the terms of either the GNU General Public
  * License or the Less License, as specified in the README file.
@@ -26,7 +26,7 @@ public lbool plusoption = FALSE;
 static constant char *optstring(constant char *s, char **p_str, constant char *printopt, constant char *validchars);
 static int flip_triple(int val, lbool lc);
 
-extern int less_is_more;
+extern lbool less_is_more;
 extern int quit_at_eof;
 extern char *every_first_cmd;
 extern int opt_use_backslash;
@@ -70,7 +70,6 @@ public void scan_option(constant char *s, lbool is_env)
 	char *str;
 	lbool set_default;
 	lbool lc;
-	lbool ambig;
 	PARG parg;
 
 	if (s == NULL)
@@ -94,7 +93,7 @@ public void scan_option(constant char *s, lbool is_env)
 				break;
 			case O_NUMBER:
 				printopt = opt_desc(pendopt);
-				*(pendopt->ovar) = getnumc(&s, printopt, NULL);
+				getnumc(&s, printopt, (pendopt->otype & O_NEGOK) != 0, pendopt->ovar);
 				break;
 			}
 		}
@@ -179,14 +178,20 @@ public void scan_option(constant char *s, lbool is_env)
 		 * Not a special case.
 		 * Look up the option letter in the option table.
 		 */
-		ambig = FALSE;
 		if (optname == NULL)
 		{
 			printopt = propt(optc);
 			lc = ASCII_IS_LOWER(optc);
 			o = findopt(optc);
+			if (o == NULL)
+			{
+				parg.p_string = printopt;
+				error(LM(There_is_no_X_option_help), &parg);
+				return;
+			}
 		} else
 		{
+			lbool ambig = FALSE;
 			printopt = optname;
 			lc = ASCII_IS_LOWER(optname[0]);
 			o = findopt_name(&optname, NULL, &ambig);
@@ -208,8 +213,7 @@ public void scan_option(constant char *s, lbool is_env)
 				    (o->otype & OTYPE) != O_NUMBER)
 				{
 					parg.p_string = printopt;
-					error("The %s option should not be followed by =",
-						&parg);
+					error(LM(The_X_option_should_not_be_followed_by_eq), &parg);
 					return;
 				}
 				s++;
@@ -221,17 +225,15 @@ public void scan_option(constant char *s, lbool is_env)
 				 */
 				o = NULL;
 			}
-		}
-		if (o == NULL)
-		{
-			parg.p_string = printopt;
-			if (ambig)
-				error("%s is an ambiguous abbreviation (\"less --help\" for help)",
-					&parg);
-			else
-				error("There is no %s option (\"less --help\" for help)",
-					&parg);
-			return;
+			if (o == NULL)
+			{
+				parg.p_string = printopt;
+				if (ambig)
+					error(LM(X_is_an_ambiguous_abbreviation), &parg);
+				else
+					error(LM(There_is_no__X_option_help), &parg);
+				return;
+			}
 		}
 
 		str = NULL;
@@ -292,7 +294,7 @@ public void scan_option(constant char *s, lbool is_env)
 			}
 			if (o->otype & O_UNSUPPORTED)
 				break;
-			*(o->ovar) = getnumc(&s, printopt, NULL);
+			getnumc(&s, printopt, (o->otype & O_NEGOK) != 0, o->ovar);
 			break;
 		}
 		/*
@@ -314,11 +316,9 @@ public void scan_option(constant char *s, lbool is_env)
  *      OPT_UNSET       set to the default value
  *      OPT_SET         set to the inverse of the default value
  */
-public void toggle_option(struct loption *o, lbool lower, constant char *s, int how_toggle)
+public lbool toggle_option(struct loption *o, lbool lower, constant char *s, int how_toggle)
 {
-	int num;
 	int no_prompt;
-	lbool err;
 	PARG parg;
 
 	no_prompt = (how_toggle & OPT_NO_PROMPT);
@@ -326,22 +326,22 @@ public void toggle_option(struct loption *o, lbool lower, constant char *s, int 
 
 	if (o == NULL)
 	{
-		error("No such option", NULL_PARG);
-		return;
+		error(LM(No_such_option), NULL_PARG);
+		return FALSE;
 	}
 
 	if (how_toggle == OPT_TOGGLE && (o->otype & O_NO_TOGGLE))
 	{
 		parg.p_string = opt_desc(o);
-		error("Cannot change the %s option", &parg);
-		return;
+		error(LM(Cannot_change_the_X_option), &parg);
+		return FALSE;
 	}
 
 	if (how_toggle == OPT_NO_TOGGLE && (o->otype & O_NO_QUERY))
 	{
 		parg.p_string = opt_desc(o);
-		error("Cannot query the %s option", &parg);
-		return;
+		error(LM(Cannot_query_the_X_option), &parg);
+		return FALSE;
 	} 
 
 	/*
@@ -424,9 +424,8 @@ public void toggle_option(struct loption *o, lbool lower, constant char *s, int 
 			{
 			case OPT_SET:
 			case OPT_UNSET:
-				error("Cannot use \"-+\" or \"-!\" for a string option",
-					NULL_PARG);
-				return;
+				error(LM(Cannot_use_or_for_a_string_option), NULL_PARG);
+				return FALSE;
 			}
 			break;
 		case O_NUMBER:
@@ -436,17 +435,15 @@ public void toggle_option(struct loption *o, lbool lower, constant char *s, int 
 			switch (how_toggle)
 			{
 			case OPT_TOGGLE:
-				num = getnumc(&s, NULL, &err);
-				if (!err)
-					*(o->ovar) = num;
+				if (!getnumc(&s, opt_desc(o), (o->otype & O_NEGOK) != 0, o->ovar))
+					return FALSE;
 				break;
 			case OPT_UNSET:
 				*(o->ovar) = o->odefault;
 				break;
 			case OPT_SET:
-				error("Can't use \"-!\" for a numeric option",
-					NULL_PARG);
-				return;
+				error(LM(Cant_use_for_a_numeric_option), NULL_PARG);
+				return FALSE;
 			}
 			break;
 		}
@@ -476,7 +473,7 @@ public void toggle_option(struct loption *o, lbool lower, constant char *s, int 
 			/*
 			 * Print the odesc message.
 			 */
-			if (o->ovar != NULL)
+			if (o->ovar != NULL && o->odesc[*(o->ovar)] != NULL)
 				error(o->odesc[*(o->ovar)], NULL_PARG);
 			break;
 		case O_NUMBER:
@@ -484,19 +481,22 @@ public void toggle_option(struct loption *o, lbool lower, constant char *s, int 
 			 * The message is in odesc[1] and has a %d for 
 			 * the value of the variable.
 			 */
-			parg.p_int = *(o->ovar);
-			error(o->odesc[1], &parg);
+			if (o->odesc[1] != NULL)
+			{
+				parg.p_int = *(o->ovar);
+				error(o->odesc[1], &parg);
+			}
 			break;
 		case O_STRING:
-			/*
-			 * Message was already printed by the handling function.
-			 */
+			if (how_toggle != OPT_NO_TOGGLE && o->ofunc != NULL)
+				(*o->ofunc)(QUERY, NULL);
 			break;
 		}
 	}
 
 	if (how_toggle != OPT_NO_TOGGLE && (o->otype & O_REPAINT))
 		screen_trashed();
+	return TRUE;
 }
 
 /*
@@ -513,20 +513,20 @@ static int flip_triple(int val, lbool lc)
 /*
  * Determine if an option takes a parameter.
  */
-public int opt_has_param(struct loption *o)
+public lbool opt_has_param(constant struct loption *o)
 {
 	if (o == NULL)
-		return (0);
+		return FALSE;
 	if (o->otype & (O_BOOL|O_TRIPLE|O_NOVAR|O_NO_TOGGLE))
-		return (0);
-	return (1);
+		return FALSE;
+	return TRUE;
 }
 
 /*
  * Return the prompt to be used for a given option letter.
  * Only string and number valued options have prompts.
  */
-public constant char * opt_prompt(struct loption *o)
+public constant char * opt_prompt(constant struct loption *o)
 {
 	if (o == NULL || (o->otype & (O_STRING|O_NUMBER)) == 0)
 		return ("?");
@@ -543,7 +543,7 @@ public constant char * opt_toggle_disallowed(int c)
 	{
 	case 'o':
 		if (ch_getflags() & CH_CANSEEK)
-			return "Input is not a pipe";
+			return LM(Input_is_not_a_pipe);
 		break;
 	}
 	return NULL;
@@ -568,7 +568,7 @@ static void nostring(constant char *printopt)
 {
 	PARG parg;
 	parg.p_string = printopt;
-	error("Value is required after %s", &parg);
+	error(LM(Value_is_required_after_X), &parg);
 }
 
 /*
@@ -653,26 +653,29 @@ static constant char * optstring(constant char *s, char **p_str, constant char *
 	return (p);
 }
 
-/*
- */
-static int num_error(constant char *printopt, lbool *errp, lbool overflow)
-{
-	PARG parg;
+typedef enum {
+	NUM_ERR_NONE, NUM_ERR_OVERFLOW, NUM_ERR_NEG, NUM_ERR_MISSING
+} num_error_type;
 
-	if (errp != NULL)
-	{
-		*errp = TRUE;
-		return (-1);
-	}
+/*
+ * Display error message for invalid number.
+ */
+static lbool num_error(constant char *printopt, num_error_type error_type)
+{
 	if (printopt != NULL)
 	{
+		constant char *msg;
+		PARG parg;
+		switch (error_type)
+		{
+		case NUM_ERR_OVERFLOW: msg = LM(Number_too_large_in_X); break;
+		case NUM_ERR_NEG:      msg = LM(Negative_number_not_allowed_in_X); break;
+		default:               msg = LM(Number_is_required_after_X); break;
+		}
 		parg.p_string = printopt;
-		error((overflow
-		       ? "Number too large in '%s'"
-		       : "Number is required after %s"),
-		      &parg);
+		error(msg, &parg);
 	}
-	return (-1);
+	return FALSE;
 }
 
 /*
@@ -680,38 +683,38 @@ static int num_error(constant char *printopt, lbool *errp, lbool overflow)
  * Like atoi(), but takes a pointer to a char *, and updates
  * the char * to point after the translated number.
  */
-public int getnumc(constant char **sp, constant char *printopt, lbool *errp)
+public lbool getnumc(constant char **sp, constant char *printopt, lbool neg_ok, mutable int *p_num)
 {
 	constant char *s = *sp;
 	int n;
-	lbool neg;
+	lbool neg = FALSE;
 
 	s = skipspc(s);
-	neg = FALSE;
 	if (*s == '-')
 	{
+		if (!neg_ok)
+			return num_error(printopt, NUM_ERR_NEG);
 		neg = TRUE;
 		s++;
 	}
 	if (*s < '0' || *s > '9')
-		return (num_error(printopt, errp, FALSE));
-
+		return num_error(printopt, NUM_ERR_MISSING);
 	n = lstrtoic(s, sp, 10);
 	if (n < 0)
-		return (num_error(printopt, errp, TRUE));
-	if (errp != NULL)
-		*errp = FALSE;
+		return num_error(printopt, NUM_ERR_OVERFLOW);
 	if (neg)
 		n = -n;
-	return (n);
+	*p_num = n;
+	return TRUE;
 }
 
-public int getnum(char **sp, constant char *printopt, lbool *errp)
+public lbool getnum(char **sp, constant char *printopt, lbool neg_ok, mutable int *p_num)
 {
 	constant char *cs = *sp;
-	int r = getnumc(&cs, printopt, errp);
+	if (!getnumc(&cs, printopt, neg_ok, p_num))
+		return FALSE;
 	*sp = (char *) cs;
-	return r;
+	return TRUE;
 }
 
 /*
@@ -720,7 +723,7 @@ public int getnum(char **sp, constant char *printopt, lbool *errp)
  * The value of the fraction is returned as parts per NUM_FRAC_DENOM.
  * That is, if "n" is returned, the fraction intended is n/NUM_FRAC_DENOM.
  */
-public long getfraction(constant char **sp, constant char *printopt, lbool *errp)
+public lbool getfraction(constant char **sp, mutable long *p_frac)
 {
 	constant char *s;
 	long frac = 0;
@@ -728,7 +731,7 @@ public long getfraction(constant char **sp, constant char *printopt, lbool *errp
 
 	s = skipspc(*sp);
 	if (*s < '0' || *s > '9')
-		return (num_error(printopt, errp, FALSE));
+		return FALSE;
 
 	for ( ;  *s >= '0' && *s <= '9';  s++)
 	{
@@ -740,9 +743,8 @@ public long getfraction(constant char **sp, constant char *printopt, lbool *errp
 	while (fraclen++ < NUM_LOG_FRAC_DENOM)
 		frac *= 10;
 	*sp = s;
-	if (errp != NULL)
-		*errp = FALSE;
-	return (frac);
+	*p_frac = frac;
+	return TRUE;
 }
 
 /*
@@ -751,6 +753,7 @@ public long getfraction(constant char **sp, constant char *printopt, lbool *errp
  */
 public void init_unsupport(void)
 {
+	PARG parg;
 	constant char *s = lgetenv("LESS_UNSUPPORT");
 	if (isnullenv(s))
 		return;
@@ -759,17 +762,19 @@ public void init_unsupport(void)
 		struct loption *opt;
 		s = skipspc(s);
 		if (*s == '\0') break;
-		if (*s == '-' && *++s == '\0') break;
-		if (*s == '-') /* long option name */
+		parg.p_string = s;
+		if (s[0] == '-' && s[1] == '-') /* long option name */
 		{
-			++s;
-			opt = findopt_name(&s, NULL, NULL);
+			s += 2;
+			opt = (*s == '\0') ? NULL : findopt_name(&s, NULL, NULL);
 		} else /* short (single-char) option */
 		{
-			opt = findopt(*s);
-			if (opt != NULL) ++s;
+			if (*s == '-') s++;
+			opt = (*s == '\0') ? NULL : findopt(*s++);
 		}
-		if (opt != NULL)
+		if (opt == NULL)
+			error("invalid option in LESS_UNSUPPORT: %s", &parg);
+		else
 			opt->otype |= O_UNSUPPORTED;
 	}
 }

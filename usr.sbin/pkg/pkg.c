@@ -168,7 +168,7 @@ extract_pkg_static(int fd, char *p, int sz)
 {
 	struct archive *a;
 	struct archive_entry *ae;
-	char *end;
+	const char *end;
 	int ret, r;
 
 	ret = -1;
@@ -334,6 +334,12 @@ fetchfail:
 	}
 
 cleanup:
+	fetchFreeURL(u);
+	while (mirrors != NULL) {
+		current = mirrors;
+		mirrors = mirrors->next;
+		free(current);
+	}
 	if (remote != NULL)
 		fclose(remote);
 
@@ -889,7 +895,7 @@ bootstrap_pkg(bool force, const char *fetchOpts, struct repository *repo)
 		    getenv("TMPDIR") ? getenv("TMPDIR") : _PATH_TMP,
 		    bootstrap_name);
 		snprintf(url, MAXPATHLEN, "%s/Latest/%s.pubkeysig",
-		    repo->url, bootstrap_name);
+		    packagesite, bootstrap_name);
 
 		if ((fd_sig = fetch_to_fd(repo, url, tmpsig, fetchOpts)) == -1) {
 			fprintf(stderr, "Signature for pkg not "
@@ -1033,7 +1039,7 @@ cleanup:
 static bool
 pkg_is_pkg_pkg(const char *pkg)
 {
-	char *vstart, *basename;
+	const char *vstart, *basename;
 	size_t namelen;
 
 	/* Strip path. */

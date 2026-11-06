@@ -33,8 +33,10 @@
 
 #include <sys/param.h>
 #include <sys/bus.h>
+#include <sys/conf.h>
 #include <sys/kernel.h>
 #include <sys/module.h>
+#include <sys/stat.h>
 #include <sys/sysctl.h>
 
 #include <dev/evdev/input.h>
@@ -132,28 +134,20 @@ hgame_dpad_cb(HIDMAP_CB_ARGS)
 		data = ctx.data;
 		switch (HIDMAP_CB_UDATA64) {
 		case HUG_D_PAD_UP:
-			if (sc->dpad_down)
-				return (ENOMSG);
-			evdev_push_abs(evdev, ABS_HAT0Y, (data == 0) ? 0 : -1);
 			sc->dpad_up = (data != 0);
+			evdev_push_abs(evdev, ABS_HAT0Y, sc->dpad_down - sc->dpad_up);
 			break;
 		case HUG_D_PAD_DOWN:
-			if (sc->dpad_up)
-				return (ENOMSG);
-			evdev_push_abs(evdev, ABS_HAT0Y, (data == 0) ? 0 : 1);
 			sc->dpad_down = (data != 0);
+			evdev_push_abs(evdev, ABS_HAT0Y, sc->dpad_down - sc->dpad_up);
 			break;
 		case HUG_D_PAD_RIGHT:
-			if (sc->dpad_left)
-				return (ENOMSG);
-			evdev_push_abs(evdev, ABS_HAT0X, (data == 0) ? 0 : 1);
 			sc->dpad_right = (data != 0);
+			evdev_push_abs(evdev, ABS_HAT0X, sc->dpad_right - sc->dpad_left);
 			break;
 		case HUG_D_PAD_LEFT:
-			if (sc->dpad_right)
-				return (ENOMSG);
-			evdev_push_abs(evdev, ABS_HAT0X, (data == 0) ? 0 : -1);
 			sc->dpad_left = (data != 0);
+			evdev_push_abs(evdev, ABS_HAT0X, sc->dpad_right - sc->dpad_left);
 			break;
 		}
 		break;
@@ -170,8 +164,11 @@ hgame_final_cb(HIDMAP_CB_ARGS)
 {
 	struct evdev_dev *evdev = HIDMAP_CB_GET_EVDEV();
 
-	if (HIDMAP_CB_GET_STATE() == HIDMAP_CB_IS_ATTACHING)
+	if (HIDMAP_CB_GET_STATE() == HIDMAP_CB_IS_ATTACHING) {
 		evdev_support_prop(evdev, INPUT_PROP_DIRECT);
+		evdev_set_cdev_mode(evdev, UID_ROOT, GID_GAMES,
+		    S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+	}
 
 	/* Do not execute callback at interrupt handler and detach */
 	return (ENOSYS);

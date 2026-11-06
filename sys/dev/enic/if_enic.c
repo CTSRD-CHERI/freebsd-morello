@@ -449,6 +449,8 @@ enic_attach_pre(if_ctx_t ctx)
 		dev_err(enic, "Device initialization failed, aborting\n");
 		goto err_out_dev_close;
 	}
+	/* Queue DMA has not been enabled; the first iflib stop may be skipped. */
+	softc->stopped = 1;
 	ENIC_UNLOCK(softc);
 
 	enic->port_mtu = vnic_dev_mtu(enic->vdev);
@@ -493,26 +495,6 @@ enic_attach_pre(if_ctx_t ctx)
 	ifmedia_add(softc->media, IFM_ETHER | IFM_40G_SR4, 0, NULL);
 	ifmedia_add(softc->media, IFM_ETHER | IFM_10_FL, 0, NULL);
 
-	/*
-	 * Allocate the CQ here since TX is called first before RX.
-	 */
-	if (softc->enic.cq == NULL)
-		softc->enic.cq = malloc(sizeof(struct vnic_cq) *
-		     softc->enic.wq_count + softc->enic.rq_count, M_DEVBUF,
-		     M_NOWAIT | M_ZERO);
-	if (softc->enic.cq == NULL)
-		return (ENOMEM);
-
-	/*
-	 * Allocate the consistent memory for stats and counters upfront so
-	 * both primary and secondary processes can access them.
-	 */
-	err = vnic_dev_alloc_stats_mem(enic->vdev);
-	if (err) {
-		dev_err(enic, "Failed to allocate cmd memory, aborting\n");
-		goto err_out_dev_close;
-	}
-
         err = enic_allocate_msix(softc);
         if (err) {
 		dev_err(enic, "Failed to allocate MSIX, aborting\n");
@@ -555,10 +537,13 @@ enic_msix_intr_assign(if_ctx_t ctx, int msix)
 	vnic_dev_set_intr_mode(enic->vdev, VNIC_DEV_INTR_MODE_MSIX);
 	ENIC_UNLOCK(softc);
 
-	enic->intr_queues = malloc(sizeof(*enic->intr_queues) *
-	    enic->conf_intr_count, M_DEVBUF, M_NOWAIT | M_ZERO);
+	if (enic->intr_queues == NULL)
+		enic->intr_queues = malloc(sizeof(*enic->intr_queues) *
+		    enic->conf_intr_count, M_DEVBUF, M_NOWAIT | M_ZERO);
 	enic->intr = malloc(sizeof(*enic->intr) * msix, M_DEVBUF, M_NOWAIT
 	    | M_ZERO);
+	if (enic->intr_queues == NULL || enic->intr == NULL)
+		return (ENOMEM);
 	for (i = 0; i < scctx->isc_nrxqsets; i++) {
 		snprintf(irq_name, sizeof(irq_name), "erxq%d:%d", i,
 		    device_get_unit(softc->dev));
@@ -647,14 +632,19 @@ enic_free_irqs(struct enic_softc *softc)
 	scctx = softc->scctx;
 	enic = &softc->enic;
 
-	for (i = 0; i < scctx->isc_nrxqsets + scctx->isc_ntxqsets; i++) {
-		iflib_irq_free(softc->ctx, &enic->intr_queues[i].intr_irq);
+	if (enic->intr_queues != NULL) {
+		for (i = 0;
+		    i < scctx->isc_nrxqsets + scctx->isc_ntxqsets; i++)
+			iflib_irq_free(softc->ctx,
+			    &enic->intr_queues[i].intr_irq);
 	}
 
 	iflib_irq_free(softc->ctx, &softc->enic_event_intr_irq);
 	iflib_irq_free(softc->ctx, &softc->enic_err_intr_irq);
 	free(enic->intr_queues, M_DEVBUF);
+	enic->intr_queues = NULL;
 	free(enic->intr, M_DEVBUF);
+	enic->intr = NULL;
 }
 
 static int
@@ -697,9 +687,21 @@ enic_detach(if_ctx_t ctx)
 	vnic_dev_close(enic->vdev);
 	vnic_dev_deinit_devcmd2(enic->vdev);
 	free(softc->vdev.devcmd, M_DEVBUF);
+	softc->vdev.devcmd = NULL;
 	pci_disable_busmaster(softc->dev);
 	enic_pci_mapping_free(softc);
 	ENIC_UNLOCK(softc);
+	if (softc->vdev.stats_res.idi_size != 0) {
+		iflib_dma_free(&softc->vdev.stats_res);
+		softc->vdev.stats = NULL;
+	}
+	if (softc->vdev.flow_counters_res.idi_size != 0) {
+		iflib_dma_free(&softc->vdev.flow_counters_res);
+		softc->vdev.flow_counters = NULL;
+	}
+	free(softc->mta, M_DEVBUF);
+	softc->mta = NULL;
+	mtx_destroy(&softc->enic_lock);
 
 	return 0;
 }
@@ -712,11 +714,19 @@ enic_tx_queues_alloc(if_ctx_t ctx, caddr_t * vaddrs, uint64_t * paddrs,
 	int q;
 
 	softc = iflib_get_softc(ctx);
+	softc->enic.cq = malloc(sizeof(*softc->enic.cq) *
+	    (softc->enic.wq_count + softc->enic.rq_count), M_DEVBUF,
+	    M_NOWAIT | M_ZERO);
+	if (softc->enic.cq == NULL)
+		return (ENOMEM);
 	/* Allocate the array of transmit queues */
 	softc->enic.wq = malloc(sizeof(struct vnic_wq) *
 				ntxqsets, M_DEVBUF, M_NOWAIT | M_ZERO);
-	if (softc->enic.wq == NULL)
+	if (softc->enic.wq == NULL) {
+		free(softc->enic.cq, M_DEVBUF);
+		softc->enic.cq = NULL;
 		return (ENOMEM);
+	}
 
 	/* Initialize driver state for each transmit queue */
 
@@ -787,8 +797,13 @@ enic_rx_queues_alloc(if_ctx_t ctx, caddr_t * vaddrs, uint64_t * paddrs,
 	/* Allocate the array of receive queues */
 	softc->enic.rq = malloc(sizeof(struct vnic_rq) * nrxqsets, M_DEVBUF,
 	    M_NOWAIT | M_ZERO);
-	if (softc->enic.rq == NULL)
+	if (softc->enic.rq == NULL) {
+		free(softc->enic.wq, M_DEVBUF);
+		softc->enic.wq = NULL;
+		free(softc->enic.cq, M_DEVBUF);
+		softc->enic.cq = NULL;
 		return (ENOMEM);
+	}
 
 	/* Initialize driver state for each receive queue */
 
@@ -851,19 +866,20 @@ enic_queues_free(if_ctx_t ctx)
 	softc = iflib_get_softc(ctx);
 
 	free(softc->enic.rq, M_DEVBUF);
+	softc->enic.rq = NULL;
 	free(softc->enic.wq, M_DEVBUF);
+	softc->enic.wq = NULL;
 	free(softc->enic.cq, M_DEVBUF);
+	softc->enic.cq = NULL;
 }
 
 static int
 enic_rxq_intr(void *rxq)
 {
 	struct vnic_rq *rq;
-	if_t ifp;
 
 	rq = (struct vnic_rq *)rxq;
-	ifp = iflib_get_ifp(rq->vdev->softc->ctx);
-	if ((if_getdrvflags(ifp) & IFF_DRV_RUNNING) == 0)
+	if (!iflib_is_running(rq->vdev->softc->ctx))
 		return (FILTER_HANDLED);
 
 	return (FILTER_SCHEDULE_THREAD);
@@ -896,8 +912,8 @@ enic_err_intr(void *vsc)
 
 	softc = vsc;
 
-	enic_stop(softc->ctx);
-	enic_init(softc->ctx);
+	iflib_request_reset_if_up(softc->ctx);
+	iflib_admin_intr_deferred(softc->ctx);
 
 	return (FILTER_HANDLED);
 }
@@ -929,7 +945,7 @@ enic_stop(if_ctx_t ctx)
 	for (index = 0; index < scctx->isc_ntxqsets; index++) {
 		enic_stop_wq(enic, index);
 		vnic_wq_clean(&enic->wq[index]);
-		vnic_cq_clean(&enic->cq[enic_cq_rq(enic, index)]);
+		vnic_cq_clean(&enic->cq[enic_cq_wq(enic, index)]);
 
 		wq = &softc->enic.wq[index];
 		wq->ring.desc_avail = wq->ring.desc_count - 1;
@@ -945,7 +961,7 @@ enic_stop(if_ctx_t ctx)
 	for (index = 0; index < scctx->isc_nrxqsets; index++) {
 		enic_stop_rq(enic, index);
 		vnic_rq_clean(&enic->rq[index]);
-		vnic_cq_clean(&enic->cq[enic_cq_wq(enic, index)]);
+		vnic_cq_clean(&enic->cq[enic_cq_rq(enic, index)]);
 
 		rq = &softc->enic.rq[index];
 		cq_rq = enic_cq_rq(&softc->enic, index);
@@ -968,6 +984,7 @@ enic_init(if_ctx_t ctx)
 	struct enic *enic;
 	if_softc_ctx_t scctx;
 	unsigned int index;
+	int error;
 
 	softc = iflib_get_softc(ctx);
 	scctx = softc->scctx;
@@ -989,11 +1006,17 @@ enic_init(if_ctx_t ctx)
 	bcopy(if_getlladdr(softc->ifp), softc->lladdr, ETHER_ADDR_LEN);
 	enic_set_lladdr(softc);
 
-	ENIC_LOCK(softc);
-	vnic_dev_enable_wait(enic->vdev);
-	ENIC_UNLOCK(softc);
-
+	/* Queue setup above needs normal stop cleanup even if enable fails. */
 	softc->stopped = 0;
+	ENIC_LOCK(softc);
+	error = vnic_dev_enable_wait(enic->vdev);
+	ENIC_UNLOCK(softc);
+	if (error != 0) {
+		device_printf(softc->dev, "Device enable failed: %d\n", error);
+		enic_stop(ctx);
+		iflib_init_failed(ctx);
+		return;
+	}
 
 	enic_link_status(softc);
 }
@@ -1075,14 +1098,12 @@ enic_mtu_set(if_ctx_t ctx, uint32_t mtu)
 	softc = iflib_get_softc(ctx);
 	enic = &softc->enic;
 
-	enic_stop(softc->ctx);
 	if (mtu > enic->port_mtu){
 		return (EINVAL);
 	}
 
 	enic->config.mtu = mtu;
 	scctx->isc_max_frame_size = mtu + ETHER_HDR_LEN + ETHER_CRC_LEN;
-	enic_init(softc->ctx);
 
 	return (0);
 }

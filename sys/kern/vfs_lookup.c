@@ -113,7 +113,7 @@ SDT_PROBE_DEFINE4(vfs, namei, lookup, return, "int", "struct vnode *", "bool",
 uma_zone_t namei_zone;
 
 /* Placeholder vnode for mp traversal. */
-static struct vnode *vp_crossmp;
+struct vnode *vp_crossmp;
 
 static int
 crossmp_vop_islocked(struct vop_islocked_args *ap)
@@ -133,7 +133,7 @@ crossmp_vop_lock1(struct vop_lock1_args *ap)
 	lk = vp->v_vnlock;
 	flags = ap->a_flags;
 
-	KASSERT((flags & (LK_SHARED | LK_NOWAIT)) == (LK_SHARED | LK_NOWAIT),
+	KASSERT((flags & LK_TYPE_MASK) == LK_SHARED,
 	    ("%s: invalid lock request 0x%x for crossmp", __func__, flags));
 
 	if ((flags & LK_INTERLOCK) != 0)
@@ -613,11 +613,25 @@ namei(struct nameidata *ndp)
 	struct componentname *cnp;
 	struct thread *td;
 	struct pwd *pwd;
+	char *abi_symlink;	/* abs symlink expansion from the ABI pass */
+	size_t abi_symlink_len;
+	size_t abi_suffix_len;	/* leftover path past the saved target */
+	bool target_resolved;	/* walk has consumed that target */
+	enum {
+		NAMEI_ABI_PASS_ABI = 0,
+		NAMEI_ABI_PASS_SYMLINK,
+		NAMEI_ABI_PASS_NATIVE,
+	} abi_pass;
 	int error;
 	enum cache_fpl_status status;
 
 	cnp = &ndp->ni_cnd;
 	td = curthread;
+	abi_symlink = NULL;
+	abi_symlink_len = 0;
+	abi_suffix_len = 0;
+	target_resolved = false;
+	abi_pass = NAMEI_ABI_PASS_ABI;
 #ifdef INVARIANTS
 	KASSERT((ndp->ni_debugflags & NAMEI_DBG_CALLED) == 0,
 	    ("%s: repeated call to namei without NDREINIT", __func__));
@@ -655,7 +669,15 @@ restart:
 	ndp->ni_loopcnt = 0;
 	ndp->ni_vp = NULL;
 
-	error = namei_getpath(ndp);
+	if (__predict_false(abi_pass == NAMEI_ABI_PASS_SYMLINK)) {
+		/*
+		 * The expansion was installed when abi_pass became
+		 * SYMLINK.  It is not reloaded from userspace.
+		 */
+		MPASS(cnp->cn_pnbuf != NULL);
+		error = 0;
+	} else
+		error = namei_getpath(ndp);
 	if (__predict_false(error != 0)) {
 		namei_cleanup_cnp(cnp);
 		nameicap_cleanup(ndp, error);
@@ -734,6 +756,8 @@ restart:
 	 * Locked lookup.
 	 */
 	for (;;) {
+		size_t prev_pathlen;
+
 		ndp->ni_startdir = dp;
 		error = vfs_lookup(ndp);
 		if (error != 0) {
@@ -746,10 +770,56 @@ restart:
 			    error == ENOENT && was_restarted == 0;
 			if (error != ERESTART && !abi_restart)
 				goto out;
+			/*
+			 * One restart from the native root is allowed.
+			 * abi_pass only moves ABI -> SYMLINK or ABI ->
+			 * NATIVE; never backwards.  If the target of an
+			 * absolute symlink had not yet resolved when the
+			 * ABI pass failed, restart walking the saved
+			 * expansion in place of the original path: the
+			 * target may name a file that exists only in the
+			 * native namespace (host-integration symlinks
+			 * under the ABI root, linprocfs' /proc/<pid>/exe).
+			 * An ENOENT after the target resolved, or with
+			 * nothing saved, restarts from the original path.
+			 *
+			 * The old path buffer is released before the
+			 * expansion is installed, so namei_cleanup_cnp()
+			 * does not free the saved symlink.
+			 *
+			 * vfs_lookup() subtracts a component from
+			 * ni_pathlen before looking it up, so a miss on
+			 * the target's own last component leaves exactly
+			 * the suffix; only less than that means the walk
+			 * had moved past the target.
+			 */
+			if (abi_symlink != NULL &&
+			    ndp->ni_pathlen < abi_suffix_len)
+				target_resolved = true;
 			nameicap_cleanup(ndp, error);
 			pwd_drop(pwd);
 			namei_cleanup_cnp(cnp);
 			NDRESET(ndp);
+			if (abi_restart && abi_symlink != NULL &&
+			    !target_resolved) {
+				KASSERT(abi_pass == NAMEI_ABI_PASS_ABI,
+				    ("%s: symlink restart from pass %d",
+				    __func__, abi_pass));
+				abi_pass = NAMEI_ABI_PASS_SYMLINK;
+				cnp->cn_pnbuf = abi_symlink;
+				ndp->ni_pathlen = abi_symlink_len;
+				abi_symlink = NULL;
+			} else {
+				if (abi_restart) {
+					KASSERT(abi_pass ==
+					    NAMEI_ABI_PASS_ABI,
+					    ("%s: native restart from pass %d",
+					    __func__, abi_pass));
+					abi_pass = NAMEI_ABI_PASS_NATIVE;
+				}
+				uma_zfree(namei_zone, abi_symlink);
+				abi_symlink = NULL;
+			}
 			if (abi_restart)
 				was_restarted = ISRESTARTED;
 			ndp->ni_cnd.cn_flags |= was_restarted;
@@ -764,31 +834,68 @@ restart:
 			    ndp->ni_vp, false, ndp);
 			nameicap_cleanup(ndp, 0);
 			pwd_drop(pwd);
+			uma_zfree(namei_zone, abi_symlink);
 			NDVALIDATE(ndp);
 			return (0);
 		}
+		prev_pathlen = ndp->ni_pathlen;
 		error = namei_follow_link(ndp);
 		if (error != 0)
 			break;
 		vput(ndp->ni_vp);
 		dp = ndp->ni_dvp;
+		if (abi_symlink != NULL &&
+		    prev_pathlen <= abi_suffix_len)
+			target_resolved = true;
 		/*
 		 * Check if root directory should replace current directory.
 		 */
 		cnp->cn_nameptr = cnp->cn_pnbuf;
 		if (*(cnp->cn_nameptr) == '/') {
 			/*
-			 * Reset the lookup to start from the real root without
-			 * origin path name reloading.
+			 * For ABI-root lookups, preserve the ABI root while
+			 * following absolute symlinks during the first lookup.
+			 *
+			 * Only force the real root after the ABI lookup has
+			 * already failed and namei() has restarted in the
+			 * native namespace.  Otherwise absolute symlinks inside
+			 * /compat/linux, including the ELF interpreter symlink,
+			 * incorrectly escape to the native root (PR 289739).
 			 */
-			if (__predict_false(ndp->ni_rootdir != pwd->pwd_rdir)) {
-				cnp->cn_flags |= ISRESTARTED;
+			if ((cnp->cn_flags & ISRESTARTED) != 0)
 				ndp->ni_rootdir = pwd->pwd_rdir;
+			else if (pwd->pwd_adir != pwd->pwd_rdir) {
+				/*
+				 * Save the expansion, and the length of
+				 * the not-yet-walked suffix appended past
+				 * the target, so that should the target
+				 * fail to resolve under the ABI root the
+				 * ENOENT handling above can restart from
+				 * the expansion in place of the original
+				 * path.
+				 */
+				if (abi_symlink == NULL)
+					abi_symlink = uma_zalloc(namei_zone,
+					    M_WAITOK);
+				memcpy(abi_symlink, cnp->cn_pnbuf,
+				    ndp->ni_pathlen);
+				abi_symlink_len = ndp->ni_pathlen;
+				abi_suffix_len = prev_pathlen;
+				target_resolved = false;
 			}
 			vrele(dp);
 			error = namei_handle_root(ndp, &dp);
 			if (error != 0)
 				goto out;
+		} else if (target_resolved) {
+			/*
+			 * Target already consumed under the ABI root
+			 * (relative symlink at or past the end of the
+			 * saved expansion).  A later ENOENT is no
+			 * grounds to restart from that expansion.
+			 */
+			uma_zfree(namei_zone, abi_symlink);
+			abi_symlink = NULL;
 		}
 	}
 	vput(ndp->ni_vp);
@@ -800,6 +907,7 @@ out:
 	namei_cleanup_cnp(cnp);
 	nameicap_cleanup(ndp, error);
 	pwd_drop(pwd);
+	uma_zfree(namei_zone, abi_symlink);
 	return (error);
 }
 
@@ -883,7 +991,7 @@ vfs_lookup_degenerate(struct nameidata *ndp, struct vnode *dp, int wantparent)
 	}
 	if (wantparent) {
 		ndp->ni_dvp = dp;
-		VREF(dp);
+		vref(dp);
 	}
 	ndp->ni_vp = dp;
 	cnp->cn_namelen = 0;
@@ -979,16 +1087,20 @@ vfs_lookup_cross_mount(struct nameidata *ndp)
 			 * We are going to be holding the vnode lock, which
 			 * in this case is shared by the root vnode of the
 			 * filesystem mounted at mp, across the call to
-			 * VFS_ROOT().  Make the situation clear to the
+			 * VFS_ROOT().  Make the situation clear to that
 			 * filesystem by passing LK_CANRECURSE if the
-			 * lock is held exclusive, or by clearinng
-			 * LK_NODDLKTREAT to allow recursion on the shared
-			 * lock in the presence of an exclusive waiter.
+			 * lock is held exclusive, upgrading the lock (and
+			 * passing LK_CANRECURSE) if the lock is held shared
+			 * but mp requires an exclusive lock for lookup,
+			 * or clearing LK_NODDLKTREAT to allow recursion on
+			 * the shared lock in the presence of an exclusive
+			 * waiter.
 			 */
 			if (VOP_ISLOCKED(dp) == LK_EXCLUSIVE) {
 				crosslkflags &= ~LK_SHARED;
 				crosslkflags |= LK_EXCLUSIVE | LK_CANRECURSE;
 			} else if ((crosslkflags & LK_EXCLUSIVE) != 0) {
+				crosslkflags |= LK_CANRECURSE;
 				error = vn_lock(dp, LK_UPGRADE);
 				if (error != 0) {
 					MPASS(error == ENOENT);
@@ -1121,7 +1233,7 @@ vfs_lookup(struct nameidata *ndp)
 
 	cnp->cn_lkflags = LK_SHARED;
 	dp = ndp->ni_startdir;
-	ndp->ni_startdir = NULLVP;
+	ndp->ni_startdir = NULL;
 
 	/*
 	 * Leading slashes, if any, are supposed to be skipped by the caller.
@@ -1284,7 +1396,7 @@ dirloop:
 			    (cnp->cn_flags & NOCROSSMOUNT) != 0)) {
 				ndp->ni_dvp = dp;
 				ndp->ni_vp = dp;
-				VREF(dp);
+				vref(dp);
 				goto nextname;
 			}
 			if ((dp->v_vflag & VV_ROOT) == 0)
@@ -1295,7 +1407,7 @@ dirloop:
 			}
 			tdp = dp;
 			dp = dp->v_mount->mnt_vnodecovered;
-			VREF(dp);
+			vref(dp);
 			vput(tdp);
 			vn_lock(dp,
 			    enforce_lkflags(dp->v_mount, cnp->cn_lkflags |
@@ -1343,7 +1455,7 @@ unionlookup:
 		    (dp->v_mount->mnt_flag & MNT_UNION)) {
 			tdp = dp;
 			dp = dp->v_mount->mnt_vnodecovered;
-			VREF(dp);
+			vref(dp);
 			vput(tdp);
 			vn_lock(dp,
 			    enforce_lkflags(dp->v_mount, cnp->cn_lkflags |
@@ -1483,15 +1595,41 @@ nextname:
 		error = EROFS;
 		goto bad2;
 	}
-	if (!wantparent) {
+	if (wantparent) {
+		/*
+		 * Do not return vp_crossmp for the case of mount
+		 * over the regular file.  Substitute ni_dvp with the
+		 * covered vnode.
+		 */
+		if (ndp->ni_dvp == vp_crossmp &&
+		    (dp->v_vflag & VV_ROOT) != 0 && dp->v_type != VDIR) {
+			struct vnode *mvp;
+
+			vput(ndp->ni_dvp);
+			mvp = dp->v_mount->mnt_vnodecovered;
+			vref(mvp);
+			ndp->ni_dvp = mvp;
+			if ((cnp->cn_flags & LOCKPARENT) != 0) {
+				vn_lock_pair(dp, true, VOP_ISLOCKED(dp), mvp,
+				    false, LK_EXCLUSIVE);
+				if (VN_IS_DOOMED(dp) || VN_IS_DOOMED(mvp)) {
+					error = ENOENT;
+					goto bad2;
+				}
+			} else {
+				ni_dvp_unlocked = 1;
+			}
+		} else if ((cnp->cn_flags & LOCKPARENT) == 0 &&
+		    ndp->ni_dvp != dp) {
+			VOP_UNLOCK(ndp->ni_dvp);
+			ni_dvp_unlocked = 1;
+		}
+	} else {
 		ni_dvp_unlocked = 2;
 		if (ndp->ni_dvp != dp)
 			vput(ndp->ni_dvp);
 		else
 			vrele(ndp->ni_dvp);
-	} else if ((cnp->cn_flags & LOCKPARENT) == 0 && ndp->ni_dvp != dp) {
-		VOP_UNLOCK(ndp->ni_dvp);
-		ni_dvp_unlocked = 1;
 	}
 
 	if (cnp->cn_flags & AUDITVNODE1)
@@ -1615,7 +1753,7 @@ vfs_relookup(struct vnode *dvp, struct vnode **vpp, struct componentname *cnp,
 		}
 		/* ASSERT(dvp == ndp->ni_startdir) */
 		if (refstart)
-			VREF(dvp);
+			vref(dvp);
 		if ((cnp->cn_flags & LOCKPARENT) == 0)
 			VOP_UNLOCK(dp);
 		/*
@@ -1653,7 +1791,7 @@ vfs_relookup(struct vnode *dvp, struct vnode **vpp, struct componentname *cnp,
 
 	/* ASSERT(dvp == ndp->ni_startdir) */
 	if (refstart)
-		VREF(dvp);
+		vref(dvp);
 
 	if ((cnp->cn_flags & LOCKLEAF) == 0)
 		VOP_UNLOCK(dp);

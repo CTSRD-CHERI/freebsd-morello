@@ -87,7 +87,7 @@
 
 #define	HALF_OF_SEC_NS			500000000
 #define	RTC_RES_US			1000000
-#define	RTC_TIMEOUT			70
+#define	RTC_TIMEOUT			150
 
 #define	RTC_READ(sc, reg) 		bus_read_4((sc)->res, (reg))
 #define	RTC_WRITE(sc, reg, val)		bus_write_4((sc)->res, (reg), (val))
@@ -137,6 +137,7 @@ static struct ofw_compat_data compat_data[] = {
 	{ "allwinner,sun20i-d1-rtc", (uintptr_t) &h3_conf },
 	{ "allwinner,sun50i-h5-rtc", (uintptr_t) &h3_conf },
 	{ "allwinner,sun50i-h6-rtc", (uintptr_t) &h3_conf },
+	{ "allwinner,sun50i-h616-rtc", (uintptr_t) &h3_conf },
 	{ NULL, 0 }
 };
 
@@ -321,7 +322,8 @@ aw_rtc_settime(device_t dev, struct timespec *ts)
 {
 	struct aw_rtc_softc *sc  = device_get_softc(dev);
 	struct clocktime ct;
-	uint32_t clk, rdate, rtime;
+	uint32_t rdate, rtime;
+	u_int i;
 
 	/* RTC resolution is 1 sec */
 	if (ts->tv_nsec >= HALF_OF_SEC_NS)
@@ -335,12 +337,12 @@ aw_rtc_settime(device_t dev, struct timespec *ts)
 		return (EINVAL);
 	}
 
-	for (clk = 0; RTC_READ(sc, LOSC_CTRL_REG) & LOSC_BUSY_MASK; clk++) {
-		if (clk > RTC_TIMEOUT) {
+	for (i = 0; RTC_READ(sc, LOSC_CTRL_REG) & LOSC_BUSY_MASK; i++) {
+		if (i > RTC_TIMEOUT) {
 			device_printf(dev, "could not set time, RTC busy\n");
 			return (EINVAL);
 		}
-		DELAY(1);
+		DELAY(10);
 	}
 	/* reset time register to avoid unexpected date increment */
 	RTC_WRITE(sc, sc->conf->rtc_time, 0);
@@ -352,21 +354,21 @@ aw_rtc_settime(device_t dev, struct timespec *ts)
 	rtime = SET_SEC_VALUE(ct.sec) | SET_MIN_VALUE(ct.min) |
 		SET_HOUR_VALUE(ct.hour);
 
-	for (clk = 0; RTC_READ(sc, LOSC_CTRL_REG) & LOSC_BUSY_MASK; clk++) {
-		if (clk > RTC_TIMEOUT) {
+	for (i = 0; RTC_READ(sc, LOSC_CTRL_REG) & LOSC_BUSY_MASK; i++) {
+		if (i > RTC_TIMEOUT) {
 			device_printf(dev, "could not set date, RTC busy\n");
 			return (EINVAL);
 		}
-		DELAY(1);
+		DELAY(10);
 	}
 	RTC_WRITE(sc, sc->conf->rtc_date, rdate);
 
-	for (clk = 0; RTC_READ(sc, LOSC_CTRL_REG) & LOSC_BUSY_MASK; clk++) {
-		if (clk > RTC_TIMEOUT) {
+	for (i = 0; RTC_READ(sc, LOSC_CTRL_REG) & LOSC_BUSY_MASK; i++) {
+		if (i > RTC_TIMEOUT) {
 			device_printf(dev, "could not set time, RTC busy\n");
 			return (EINVAL);
 		}
-		DELAY(1);
+		DELAY(10);
 	}
 	RTC_WRITE(sc, sc->conf->rtc_time, rtime);
 

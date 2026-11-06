@@ -196,7 +196,7 @@ loop:
 	if (error != 0) {
 		vgone(vp);
 		vput(vp);
-		*vpp = NULLVP;
+		*vpp = NULL;
 		return (error);
 	}
 
@@ -211,7 +211,7 @@ loop:
 		mtx_unlock(&fdesc_hashmtx);
 		vgone(vp);
 		vput(vp);
-		*vpp = NULLVP;
+		*vpp = NULL;
 		return (-1);
 	}
 
@@ -227,7 +227,7 @@ loop:
 			vput(vp);
 			/* If we didn't get it, return no vnode. */
 			if (error)
-				vp2 = NULLVP;
+				vp2 = NULL;
 			*vpp = vp2;
 			return (error);
 		}
@@ -248,6 +248,7 @@ struct fdesc_get_ino_args {
 	struct file *fp;
 	struct thread *td;
 	bool fdropped;
+	bool traverse;
 };
 
 static int
@@ -261,7 +262,8 @@ fdesc_get_ino_alloc(struct mount *mp, void *arg, int lkflags,
 
 	a = arg;
 	fdm = VFSTOFDESC(mp);
-	if ((fdm->flags & FMNT_NODUP) != 0 && a->fp->f_type == DTYPE_VNODE) {
+	if ((a->traverse || (fdm->flags & FMNT_NODUP) != 0) &&
+	    a->fp->f_type == DTYPE_VNODE) {
 		vp = a->fp->f_vnode;
 		vget(vp, lkflags | LK_RETRY);
 		*rvp = vp;
@@ -287,11 +289,14 @@ fdesc_lookup(struct vop_lookup_args *ap)
 	char *pname = cnp->cn_nameptr;
 	struct thread *td = curthread;
 	struct file *fp;
+	struct filecaps fcaps;
 	struct fdesc_get_ino_args arg;
+	struct vnode *fvp;
 	int nlen = cnp->cn_namelen;
 	u_int fd, fd1;
 	int error;
-	struct vnode *fvp;
+	uint8_t fflags;
+	bool traverse;
 
 	if ((cnp->cn_flags & ISLASTCN) &&
 	    (cnp->cn_nameiop == DELETE || cnp->cn_nameiop == RENAME)) {
@@ -301,7 +306,7 @@ fdesc_lookup(struct vop_lookup_args *ap)
 
 	if (cnp->cn_namelen == 1 && *pname == '.') {
 		*vpp = dvp;
-		VREF(dvp);
+		vref(dvp);
 		return (0);
 	}
 
@@ -332,8 +337,20 @@ fdesc_lookup(struct vop_lookup_args *ap)
 	/*
 	 * No rights to check since 'fp' isn't actually used.
 	 */
-	if ((error = fget(td, fd, &cap_no_rights, &fp)) != 0)
+	if ((error = fget_cap(td, fd, &cap_no_rights, &fflags, &fp,
+	    &fcaps)) != 0)
 		goto bad;
+
+	/* A component below /dev/fd/N resolves in the directory N names. */
+	traverse = ((cnp->cn_flags & ISLASTCN) == 0 ||
+	    (cnp->cn_flags & TRAILINGSLASH) != 0) &&
+	    (VFSTOFDESC(dvp->v_mount)->flags & FMNT_LINRDLNKF) != 0;
+	if (traverse && fp->f_type != DTYPE_VNODE) {
+		fdrop(fp, td);
+		filecaps_free(&fcaps);
+		error = ENOTDIR;
+		goto bad;
+	}
 
 	/*
 	 * Make sure we do not deadlock looking up the dvp itself.
@@ -350,6 +367,7 @@ fdesc_lookup(struct vop_lookup_args *ap)
 	arg.fp = fp;
 	arg.td = td;
 	arg.fdropped = false;
+	arg.traverse = traverse;
 	error = vn_vget_ino_gen(dvp, fdesc_get_ino_alloc, &arg,
 	    LK_EXCLUSIVE, &fvp);
 
@@ -366,6 +384,36 @@ fdesc_lookup(struct vop_lookup_args *ap)
 		if (error == 0 && VN_IS_DOOMED(dvp))
 			error = ENOENT;
 	}
+
+	/*
+	 * Make sure that a nodup mount can't be used to launder away monotonic
+	 * file descriptor metadata, namely UF_RESOLVE_BENEATH and capability
+	 * rights.
+	 */
+	if (error == 0 && fvp->v_mount != dvp->v_mount &&
+	    ((fflags & UF_RESOLVE_BENEATH) != 0 || !filecaps_full(&fcaps))) {
+		struct nameidata *ndp;
+
+		ndp = vfs_lookup_nameidata(cnp);
+		if (ndp == NULL) {
+			vput(fvp);
+			error = ENOTCAPABLE;
+		} else {
+			if ((fflags & UF_RESOLVE_BENEATH) != 0)
+				ndp->ni_resflags |= NIRES_BENEATH;
+			if (!filecaps_full(&fcaps)) {
+				if (cap_rights_is_valid(
+				    &ndp->ni_filecaps.fc_rights))
+					filecaps_intersect(&fcaps,
+					    &ndp->ni_filecaps);
+				else
+					filecaps_move(&fcaps,
+					    &ndp->ni_filecaps);
+				ndp->ni_resflags |= NIRES_STRICTREL;
+			}
+		}
+	}
+	filecaps_free(&fcaps);
 
 	if (error)
 		goto bad;
@@ -469,7 +517,6 @@ fdesc_getattr(struct vop_getattr_args *ap)
 		break;
 	}
 
-	vp->v_type = vap->va_type;
 	return (0);
 }
 

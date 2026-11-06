@@ -12,7 +12,31 @@ from typing import List
 from typing import Optional
 
 logging.getLogger("scapy").setLevel(logging.CRITICAL)
-import scapy.all as sc
+try:
+    import scapy.all as sc
+except ImportError as e:
+    # Fake scapy well enough to be able to list test cases
+    from types import SimpleNamespace
+    sc = SimpleNamespace(
+        scapy=SimpleNamespace(
+            fields=SimpleNamespace(
+                SourceIPField=0,
+                ByteEnumField=0,
+                MultiEnumField=0,
+                BitField=0,
+                FlagsField=0,
+                ByteField=0,
+                IPField=0,
+                ShortField=0,
+            ),
+            layers=SimpleNamespace(
+                inet=SimpleNamespace(
+                    DestIPField=0,
+                    ICMPTimeStampField=0,
+                )
+            )
+        )
+    )
 
 
 def build_response_packet(echo, ip, icmp, oip_ihl, special):
@@ -55,6 +79,10 @@ def build_response_packet(echo, ip, icmp, oip_ihl, special):
     if special == "wrong":
         # Build a package with a wrong last byte
         payload_no_last_byte = sc.bytes_hex(load)[:-2]
+        load = (sc.hex_bytes(payload_no_last_byte)) + b"\x00"
+    if special == "short-wrong":
+        # Build a short package with a wrong last byte
+        payload_no_last_byte = sc.bytes_hex(load)[:-4]
         load = (sc.hex_bytes(payload_no_last_byte)) + b"\x00"
     if special == "not-mine":
         # Modify the ICMP Identifier field
@@ -178,7 +206,7 @@ def pinger(
     :keyword oip_ihl: Inner packet's Internet Header Length, defaults to None
     :type oip_ihl: class:`scapy.fields.BitField`, optional
     :keyword special: Send a special packet - one of `no-payload`, `not-mine`,
-        `tcp`, `udp`, `wrong` or `warp`, defaults to None
+        `short-wrong`, `tcp`, `udp`, `wrong` or `warp`, defaults to None
     :type special: str, optional
     :keyword icmp_pptr: ICMP pointer, defaults to 0
     :type icmp_pptr: class:`scapy.fields.ByteField`
@@ -407,8 +435,8 @@ round-trip min/avg/max/stddev = /// ms
                 "args": "ping -A -c3 192.0.2.2",
                 "returncode": 2,
                 "stdout": """\
-\x07\x07PING 192.0.2.2 (192.0.2.2): 56 data bytes
-
+PING 192.0.2.2 (192.0.2.2): 56 data bytes
+\x07\x07
 --- 192.0.2.2 ping statistics ---
 3 packets transmitted, 0 packets received, 100.0% packet loss
 """,
@@ -439,8 +467,8 @@ round-trip min/avg/max/stddev = /// ms
                 "args": "ping -A -c3 2001:db8::2",
                 "returncode": 2,
                 "stdout": """\
-\x07\x07PING(56=40+8+8 bytes) 2001:db8::1 --> 2001:db8::2
-
+PING(56=40+8+8 bytes) 2001:db8::1 --> 2001:db8::2
+\x07\x07
 --- 2001:db8::2 ping statistics ---
 3 packets transmitted, 0 packets received, 100.0% packet loss
 """,
@@ -1439,6 +1467,40 @@ round-trip min/avg/max/stddev = /// ms
                 "redacted": True,
             },
             id="_0_0_special_wrong",
+        ),
+        pytest.param(
+            {
+                "src": "192.0.2.1",
+                "dst": "192.0.2.2",
+                "icmp_type": 0,
+                "icmp_code": 0,
+                "special": "short-wrong",
+            },
+            {
+                "returncode": 0,
+                "stdout": """\
+PATTERN: 0x01
+PING 192.0.2.2 (192.0.2.2): 56 data bytes
+63 bytes from: icmp_seq=0 ttl= time= ms
+wrong total length 83 instead of 84
+wrong data byte #54 should be 0x1 but was 0x0
+cp: xx xx xx xx xx xx xx xx
+	  1  1  1  1  1  1  1  1  1  1  1  1  1  1  1  1
+	  1  1  1  1  1  1  1  1  1  1  1  1  1  1  1  1
+	  1  1  1  1  1  1  1  1  1  1  1  1  1  1  0
+dp: xx xx xx xx xx xx xx xx
+	  1  1  1  1  1  1  1  1  1  1  1  1  1  1  1  1
+	  1  1  1  1  1  1  1  1  1  1  1  1  1  1  1  1
+	  1  1  1  1  1  1  1  1  1  1  1  1  1  1  1  1
+
+--- 192.0.2.2 ping statistics ---
+1 packets transmitted, 1 packets received, 0.0% packet loss
+round-trip min/avg/max/stddev = /// ms
+""",
+                "stderr": "",
+                "redacted": True,
+            },
+            id="_0_0_special_short_wrong",
         ),
     ]
 

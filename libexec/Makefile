@@ -4,17 +4,17 @@
 
 SUBDIR=	${_atf} \
 	${_atrun} \
-	${_blacklistd-helper} \
+	${_blocklistd-helper} \
 	${_comsat} \
 	${_dma} \
 	flua \
 	getty \
 	${_hyperv} \
-	kgdb \
 	${_mail.local} \
 	${_makewhatis.local} \
 	${_mknetid} \
 	${_phttpget} \
+	${_pkgserve} \
 	${_pppoed} \
 	rc \
 	revnetgroup \
@@ -38,8 +38,8 @@ SUBDIR=	${_atf} \
 _atrun=		atrun
 .endif
 
-.if ${MK_BLACKLIST} != "no"
-_blacklistd-helper+=	blacklistd-helper
+.if ${MK_BLOCKLIST} != "no"
+_blocklistd-helper+=	blocklistd-helper
 .endif
 
 .if ${MK_BOOTPD} != "no"
@@ -54,10 +54,6 @@ SUBDIR+=	fingerd
 _phttpget=	phttpget
 .endif
 
-.if ${MK_FTP} != "no"
-SUBDIR+=	ftpd
-.endif
-
 .if ${MK_MAIL} != "no"
 _comsat=	comsat
 .endif
@@ -68,6 +64,10 @@ _dma=		dma
 
 .if ${MK_HYPERV} != "no"
 _hyperv+=	hyperv
+.endif
+
+.if ${MK_PKGSERVE} != "no"
+_pkgserve=	pkg-serve
 .endif
 
 .if ${MK_NIS} != "no"

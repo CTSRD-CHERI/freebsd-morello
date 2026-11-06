@@ -77,7 +77,7 @@ static int iommu_check_free;
 #endif
 
 static void
-intel_gas_init(void)
+intel_gas_init(void *dummy __unused)
 {
 
 	iommu_map_entry_zone = uma_zcreate("IOMMU_MAP_ENTRY",
@@ -282,7 +282,7 @@ iommu_gas_fini_domain(struct iommu_domain *domain)
 
 	entry = RB_MIN(iommu_gas_entries_tree, &domain->rb_root);
 	KASSERT(entry->start == 0, ("start entry start %p", domain));
-	KASSERT(entry->end == IOMMU_PAGE_SIZE, ("start entry end %p", domain));
+	KASSERT(entry->end == 0, ("start entry end %p", domain));
 	KASSERT(entry->flags ==
 	    (IOMMU_MAP_ENTRY_PLACE | IOMMU_MAP_ENTRY_UNMAPPED),
 	    ("start entry flags %p", domain));

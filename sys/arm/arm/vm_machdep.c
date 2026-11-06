@@ -97,9 +97,6 @@ cpu_fork(struct thread *td1, struct proc *p2, struct thread *td2, int flags)
 	if ((flags & RFPROC) == 0)
 		return;
 
-	/* Point the pcb to the top of the stack */
-	pcb2 = (struct pcb *)
-	    (td2->td_kstack + td2->td_kstack_pages * PAGE_SIZE) - 1;
 #ifdef VFP
 	/* Store actual state of VFP */
 	if (curthread == td1) {
@@ -107,7 +104,7 @@ cpu_fork(struct thread *td1, struct proc *p2, struct thread *td2, int flags)
 			vfp_save_state(td1, td1->td_pcb);
 	}
 #endif
-	td2->td_pcb = pcb2;
+	pcb2 = td2->td_pcb;
 
 	/* Clone td1's pcb */
 	bcopy(td1->td_pcb, pcb2, sizeof(*pcb2));
@@ -116,8 +113,7 @@ cpu_fork(struct thread *td1, struct proc *p2, struct thread *td2, int flags)
 	mdp2 = &p2->p_md;
 	bcopy(&td1->td_proc->p_md, mdp2, sizeof(*mdp2));
 
-	/* Point the frame to the stack in front of pcb and copy td1's frame */
-	td2->td_frame = (struct trapframe *)pcb2 - 1;
+	/* Copy td1's frame */
 	*td2->td_frame = *td1->td_frame;
 
 	/*
@@ -129,7 +125,7 @@ cpu_fork(struct thread *td1, struct proc *p2, struct thread *td2, int flags)
 	pcb2->pcb_regs.sf_r4 = (register_t)fork_return;
 	pcb2->pcb_regs.sf_r5 = (register_t)td2;
 	pcb2->pcb_regs.sf_lr = (register_t)fork_trampoline;
-	pcb2->pcb_regs.sf_sp = STACKALIGN(td2->td_frame);
+	pcb2->pcb_regs.sf_sp = (register_t)STACKALIGN(td2->td_frame);
 	pcb2->pcb_regs.sf_tpidrurw = (register_t)get_tls();
 
 #ifdef VFP
@@ -194,7 +190,7 @@ cpu_copy_thread(struct thread *td, struct thread *td0)
 	td->td_pcb->pcb_regs.sf_r4 = (register_t)fork_return;
 	td->td_pcb->pcb_regs.sf_r5 = (register_t)td;
 	td->td_pcb->pcb_regs.sf_lr = (register_t)fork_trampoline;
-	td->td_pcb->pcb_regs.sf_sp = STACKALIGN(td->td_frame);
+	td->td_pcb->pcb_regs.sf_sp = (register_t)STACKALIGN(td->td_frame);
 
 	td->td_frame->tf_spsr &= ~PSR_C;
 	td->td_frame->tf_r0 = 0;
@@ -245,8 +241,12 @@ cpu_thread_exit(struct thread *td)
 void
 cpu_thread_alloc(struct thread *td)
 {
-	td->td_pcb = (struct pcb *)(td->td_kstack + td->td_kstack_pages *
-	    PAGE_SIZE) - 1;
+}
+
+void
+cpu_thread_new_kstack(struct thread *td)
+{
+	td->td_pcb = (struct pcb *)td_kstack_top(td) - 1;
 	/*
 	 * Ensure td_frame is aligned to an 8 byte boundary as it will be
 	 * placed into the stack pointer which must be 8 byte aligned in

@@ -41,6 +41,7 @@
 #include <dev/sound/pcm/ac97.h>
 #include <dev/sound/pcm/vchan.h>
 #include <dev/sound/pcm/dsp.h>
+#include <dev/sound/sndstat.h>
 #include <sys/limits.h>
 #include <sys/sysctl.h>
 
@@ -62,35 +63,6 @@ SYSCTL_NODE(_hw, OID_AUTO, snd, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
  */
 struct unrhdr *pcmsg_unrhdr = NULL;
 
-void *
-snd_mtxcreate(const char *desc, const char *type)
-{
-	struct mtx *m;
-
-	m = malloc(sizeof(*m), M_DEVBUF, M_WAITOK | M_ZERO);
-	mtx_init(m, desc, type, MTX_DEF);
-	return m;
-}
-
-void
-snd_mtxfree(void *m)
-{
-	struct mtx *mtx = m;
-
-	mtx_destroy(mtx);
-	free(mtx, M_DEVBUF);
-}
-
-void
-snd_mtxassert(void *m)
-{
-#ifdef INVARIANTS
-	struct mtx *mtx = m;
-
-	mtx_assert(mtx, MA_OWNED);
-#endif
-}
-
 int
 snd_setup_intr(device_t dev, struct resource *res, int flags, driver_intr_t hand, void *param, void **cookiep)
 {
@@ -103,6 +75,26 @@ snd_setup_intr(device_t dev, struct resource *res, int flags, driver_intr_t hand
 		d->flags |= SD_F_MPSAFE;
 
 	return bus_setup_intr(dev, res, flags, NULL, hand, param, cookiep);
+}
+
+static void
+pcm_hotswap(void)
+{
+	struct snddev_info *d;
+	char buf[32];
+
+	bus_topo_assert();
+	if (snd_unit >= 0) {
+		d = devclass_get_softc(pcm_devclass, snd_unit);
+		if (!PCM_REGISTERED(d))
+			return;
+		snprintf(buf, sizeof(buf), "cdev=dsp%d", snd_unit);
+		if (d->reccount > 0)
+			devctl_notify("SND", "CONN", "IN", buf);
+		if (d->playcount > 0)
+			devctl_notify("SND", "CONN", "OUT", buf);
+	} else
+		devctl_notify("SND", "CONN", "NODEV", NULL);
 }
 
 static int
@@ -122,6 +114,7 @@ sysctl_hw_snd_default_unit(SYSCTL_HANDLER_ARGS)
 		}
 		snd_unit = unit;
 		snd_unit_auto = 0;
+		pcm_hotswap();
 		bus_topo_unlock();
 	}
 	return (error);
@@ -263,7 +256,6 @@ pcm_getdevinfo(device_t dev)
 unsigned int
 pcm_getbuffersize(device_t dev, unsigned int minbufsz, unsigned int deflt, unsigned int maxbufsz)
 {
-	struct snddev_info *d = device_get_softc(dev);
 	int sz, x;
 
 	sz = 0;
@@ -284,8 +276,6 @@ pcm_getbuffersize(device_t dev, unsigned int minbufsz, unsigned int deflt, unsig
 	} else {
 		sz = deflt;
 	}
-
-	d->bufsz = sz;
 
 	return sz;
 }
@@ -342,7 +332,7 @@ sysctl_dev_pcm_mode(SYSCTL_HANDLER_ARGS)
 		mode |= PCM_MODE_PLAY;
 	if (d->reccount > 0)
 		mode |= PCM_MODE_REC;
-	if (d->mixer_dev != NULL)
+	if (d->mixer != NULL)
 		mode |= PCM_MODE_MIXER;
 	PCM_UNLOCK(d);
 
@@ -361,14 +351,10 @@ pcm_init(device_t dev, void *devinfo)
 
 	d = device_get_softc(dev);
 	d->dev = dev;
-	d->lock = snd_mtxcreate(device_get_nameunit(dev), "sound cdev");
+	mtx_init(&d->lock, device_get_nameunit(dev), "sound cdev", MTX_DEF);
 	cv_init(&d->cv, device_get_nameunit(dev));
 
 	i = 0;
-	if (resource_int_value(device_get_name(dev), device_get_unit(dev),
-	    "vpc", &i) != 0 || i != 0)
-		d->flags |= SD_F_VPC;
-
 	if (resource_int_value(device_get_name(dev), device_get_unit(dev),
 	    "bitperfect", &i) == 0 && i != 0)
 		d->flags |= SD_F_BITPERFECT;
@@ -397,6 +383,7 @@ int
 pcm_register(device_t dev, char *str)
 {
 	struct snddev_info *d = device_get_softc(dev);
+	int err;
 
 	/* should only be called once */
 	if (d->flags & SD_F_REGISTERED)
@@ -427,12 +414,6 @@ pcm_register(device_t dev, char *str)
 	    SYSCTL_CHILDREN(device_get_sysctl_tree(dev)), OID_AUTO, "rec",
 	    CTLFLAG_RD | CTLFLAG_MPSAFE, 0, "recording channels node");
 
-	/* XXX: a user should be able to set this with a control tool, the
-	   sysadmin then needs min+max sysctls for this */
-	SYSCTL_ADD_UINT(device_get_sysctl_ctx(dev),
-	    SYSCTL_CHILDREN(device_get_sysctl_tree(dev)),
-            OID_AUTO, "buffersize", CTLFLAG_RD, &d->bufsz, 0,
-	    "allocated buffer size");
 	SYSCTL_ADD_PROC(device_get_sysctl_ctx(dev),
 	    SYSCTL_CHILDREN(device_get_sysctl_tree(dev)), OID_AUTO,
 	    "bitperfect", CTLTYPE_INT | CTLFLAG_RWTUN | CTLFLAG_MPSAFE, d,
@@ -445,9 +426,23 @@ pcm_register(device_t dev, char *str)
 	    "mode (1=mixer, 2=play, 4=rec. The values are OR'ed if more than "
 	    "one mode is supported)");
 	vchan_initsys(dev);
-	if (d->flags & SD_F_EQ)
-		feeder_eq_initsys(dev);
+	feeder_eq_initsys(dev);
 
+	err = dsp_make_dev(dev);
+	if (err)
+		return (err);
+	if (d->mixer != NULL) {
+		err = mixer_make_dev(dev);
+		if (err) {
+			dsp_destroy_dev(dev);
+			return (err);
+		}
+	}
+
+	/* Publish only once registration really has finished properly. */
+	sndstat_register(dev, SNDST_TYPE_PCM, d->status);
+
+	bus_topo_lock();
 	if (snd_unit_auto < 0)
 		snd_unit_auto = (snd_unit < 0) ? 1 : 0;
 	if (snd_unit < 0 || snd_unit_auto > 1)
@@ -455,9 +450,11 @@ pcm_register(device_t dev, char *str)
 	else if (snd_unit_auto == 1)
 		snd_unit = pcm_best_unit(snd_unit);
 
-	sndstat_register(dev, d->status);
+	if (snd_unit == device_get_unit(dev))
+		pcm_hotswap();
+	bus_topo_unlock();
 
-	return (dsp_make_dev(dev));
+	return (0);
 }
 
 int
@@ -468,7 +465,7 @@ pcm_unregister(device_t dev)
 	d = device_get_softc(dev);
 
 	if (!PCM_ALIVE(d)) {
-		device_printf(dev, "unregister: device not configured\n");
+		device_printf(dev, "unregister: device not initialized\n");
 		return (0);
 	}
 
@@ -494,17 +491,22 @@ pcm_unregister(device_t dev)
 	}
 
 	sndstat_unregister(dev);
-	mixer_uninit(dev);
+	if (d->mixer != NULL)
+		mixer_uninit(dev);
 	dsp_destroy_dev(dev);
 
 	cv_destroy(&d->cv);
-	snd_mtxfree(d->lock);
+	mtx_destroy(&d->lock);
+	d->dev = NULL;
 
+	bus_topo_lock();
 	if (snd_unit == device_get_unit(dev)) {
 		snd_unit = pcm_best_unit(-1);
 		if (snd_unit_auto == 0)
 			snd_unit_auto = 1;
+		pcm_hotswap();
 	}
+	bus_topo_unlock();
 
 	return (0);
 }
@@ -515,7 +517,7 @@ pcm_unregister(device_t dev)
  * @brief	Handle OSSv4 SNDCTL_SYSINFO ioctl.
  *
  * @param si	Pointer to oss_sysinfo struct where information about the
- * 		sound subsystem will be written/copied.
+ *		sound subsystem will be written/copied.
  *
  * This routine returns information about the sound system, such as the
  * current OSS version, number of audio, MIDI, and mixer drivers, etc.
@@ -742,4 +744,4 @@ sound_modevent(module_t mod, int type, void *data)
 }
 
 DEV_MODULE(sound, sound_modevent, NULL);
-MODULE_VERSION(sound, SOUND_MODVER);
+MODULE_VERSION(sound, 1);

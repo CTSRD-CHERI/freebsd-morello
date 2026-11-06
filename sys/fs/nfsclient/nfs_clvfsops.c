@@ -38,6 +38,8 @@
 #include "opt_bootp.h"
 #include "opt_nfsroot.h"
 #include "opt_kern_tls.h"
+#include "opt_inet.h"
+#include "opt_inet6.h"
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -74,6 +76,7 @@
 #include <fs/nfsclient/nfs.h>
 #include <nfs/nfsdiskless.h>
 
+#include <rpc/krpc.h>
 #include <rpc/rpcsec_tls.h>
 
 FEATURE(nfscl, "NFSv4 client");
@@ -87,6 +90,7 @@ extern struct nfsmount *ncl_iodmount[NFS_MAXASYNCDAEMON];
 extern struct mtx ncl_iod_mutex;
 NFSCLSTATEMUTEX;
 extern struct mtx nfsrv_dslock_mtx;
+extern int newnfs_directio_enable;
 
 MALLOC_DEFINE(M_NEWNFSREQ, "newnfsclient_req", "NFS request header");
 MALLOC_DEFINE(M_NEWNFSMNT, "newnfsmnt", "NFS mount struct");
@@ -192,6 +196,7 @@ int
 newnfs_iosize(struct nfsmount *nmp)
 {
 	int iosize, maxio;
+	uint32_t rdma_maxio;
 
 	/* First, set the upper limit for iosize */
 	if (nmp->nm_flag & NFSMNT_NFSV4) {
@@ -204,6 +209,15 @@ newnfs_iosize(struct nfsmount *nmp)
 	} else {
 		maxio = NFS_V2MAXDATA;
 	}
+
+	/* For an RDMA mount, find out what the RDMA's limit is. */
+	if (NFSHASRDMA(nmp) && nmp->nm_sockreq.nr_client != NULL) {
+		CLNT_CONTROL(nmp->nm_sockreq.nr_client, CLGET_RDMAMAX_IO,
+		    &rdma_maxio);
+		if (rdma_maxio > 0)
+			maxio = MIN(maxio, rdma_maxio);
+	}
+
 	if (nmp->nm_rsize > maxio || nmp->nm_rsize == 0)
 		nmp->nm_rsize = maxio;
 	if (nmp->nm_rsize > NFS_MAXBSIZE)
@@ -228,6 +242,11 @@ newnfs_iosize(struct nfsmount *nmp)
 	iosize = imax(iosize, PAGE_SIZE);
 	iosize = imax(iosize, NFS_DIRBLKSIZ);
 	nmp->nm_mountp->mnt_stat.f_iosize = iosize;
+	if (NFSHASRDMA(nmp) && nmp->nm_sockreq.nr_client != NULL) {
+		rdma_maxio = iosize;
+		CLNT_CONTROL(nmp->nm_sockreq.nr_client, CLSET_RDMAMAX_IO,
+		    &rdma_maxio);
+	}
 	return (iosize);
 }
 
@@ -567,7 +586,7 @@ nfs_mountdiskless(char *path,
     struct vnode **vpp, struct mount *mp)
 {
 	struct sockaddr *nam;
-	int dirlen, error;
+	int dirlen, error, minvers;
 	char *dirpath;
 
 	/*
@@ -580,9 +599,12 @@ nfs_mountdiskless(char *path,
 	else
 		dirlen = 0;
 	nam = sodupsockaddr((struct sockaddr *)sin, M_WAITOK);
+	minvers = 0;
+	if ((args->flags & NFSMNT_NFSV4) != 0)
+		minvers = -1;
 	if ((error = mountnfs(args, mp, nam, path, NULL, 0, dirpath, dirlen,
 	    NULL, 0, vpp, td->td_ucred, td, NFS_DEFAULT_NAMETIMEO, 
-	    NFS_DEFAULT_NEGNAMETIMEO, 0, 0, NULL, 0)) != 0) {
+	    NFS_DEFAULT_NEGNAMETIMEO, minvers, 0, NULL, 0)) != 0) {
 		printf("nfs_mountroot: mount %s on /: %d\n", path, error);
 		return (error);
 	}
@@ -785,7 +807,7 @@ static const char *nfs_opts[] = { "from", "nfs_args",
     "nfsv3", "sec", "principal", "nfsv4", "gssname", "allgssname", "dirpath",
     "minorversion", "nametimeo", "negnametimeo", "nocto", "noncontigwr",
     "pnfs", "wcommitsize", "oneopenown", "tls", "tlscertname", "nconnect",
-    "syskrb5", NULL };
+    "syskrb5", "rdma", "nowritereduce", NULL };
 
 /*
  * Parse the "from" mountarg, passed by the generic mount(8) program
@@ -927,7 +949,7 @@ nfs_mount(struct mount *mp)
 	struct vnode *vp;
 	struct thread *td;
 	char *hst;
-	u_char nfh[NFSX_FHMAX], krbname[100], dirpath[100], srvkrbname[100];
+	u_char nfh[NFSX_FHMAX], krbname[100], *dirpath, srvkrbname[100];
 	char *cp, *opt, *name, *secname, *tlscertname;
 	int nametimeo = NFS_DEFAULT_NAMETIMEO;
 	int negnametimeo = NFS_DEFAULT_NEGNAMETIMEO;
@@ -936,13 +958,14 @@ nfs_mount(struct mount *mp)
 	    krbnamelen, srvkrbnamelen;
 	size_t hstlen;
 	uint32_t newflag;
-	int aconn = 0;
+	int aconn = 0, rdma_port = 0;	/* To shut up compiler. */
 
 	has_nfs_args_opt = 0;
 	has_nfs_from_opt = 0;
 	newflag = 0;
 	tlscertname = NULL;
 	hst = malloc(MNAMELEN, M_TEMP, M_WAITOK);
+	dirpath = malloc(MNAMELEN, M_TEMP, M_WAITOK);
 	if (vfs_filteropt(mp->mnt_optnew, nfs_opts)) {
 		error = EINVAL;
 		goto out;
@@ -1027,6 +1050,8 @@ nfs_mount(struct mount *mp)
 		args.flags |= NFSMNT_ONEOPENOWN;
 	if (vfs_getopt(mp->mnt_optnew, "tls", NULL, NULL) == 0)
 		newflag |= NFSMNT_TLS;
+	if (vfs_getopt(mp->mnt_optnew, "nowritereduce", NULL, NULL) == 0)
+		newflag |= NFSMNT_NOWRITEREDUCE;
 	if (vfs_getopt(mp->mnt_optnew, "tlscertname", (void **)&opt, &len) ==
 	    0) {
 		/*
@@ -1243,6 +1268,32 @@ nfs_mount(struct mount *mp)
 	}
 	if (vfs_getopt(mp->mnt_optnew, "syskrb5", NULL, NULL) == 0)
 		newflag |= NFSMNT_SYSKRB5;
+	if (vfs_getopt(mp->mnt_optnew, "rdma", (void **)&opt, NULL) ==
+	    0) {
+		ret = sscanf(opt, "%d", &rdma_port);
+		if (ret != 1 || rdma_port < 1 || rdma_port > IPPORT_MAX) {
+			vfs_mount_error(mp, "Bad RDMA port#: %s", opt);
+			error = EINVAL;
+			goto out;
+		}
+		if (PMAP_HAS_DMAP == 0) {
+			vfs_mount_error(mp, "RDMA requires a DMAP");
+			error = EINVAL;
+			goto out;
+		}
+		if (clnt_rdma_create_call == NULL) {
+			vfs_mount_error(mp, "RDMA requires the nfsclrdma.ko "
+			    "module be loaded");
+			error = EINVAL;
+			goto out;
+		}
+		newflag |= NFSMNT_RDMA;
+		/* Set readahead to 8, if not already set. */
+		if ((args.flags & NFSMNT_READAHEAD) == 0) {
+			args.readahead = 15;
+			args.flags |= NFSMNT_READAHEAD;
+		}
+	}
 	if (vfs_getopt(mp->mnt_optnew, "sec",
 		(void **) &secname, NULL) == 0)
 		nfs_sec_name(secname, &args.flags);
@@ -1329,7 +1380,7 @@ nfs_mount(struct mount *mp)
 			goto out;
 	} else if (nfs_mount_parse_from(mp->mnt_optnew,
 	    &args.hostname, (struct sockaddr_in **)&nam, dirpath,
-	    sizeof(dirpath), &dirlen) == 0) {
+	    MNAMELEN, &dirlen) == 0) {
 		has_nfs_from_opt = 1;
 		bcopy(args.hostname, hst, MNAMELEN);
 		hst[MNAMELEN - 1] = '\0';
@@ -1387,7 +1438,7 @@ nfs_mount(struct mount *mp)
 	if (has_nfs_from_opt == 0) {
 		if (vfs_getopt(mp->mnt_optnew,
 		    "dirpath", (void **)&name, NULL) == 0)
-			strlcpy(dirpath, name, sizeof (dirpath));
+			strlcpy(dirpath, name, MNAMELEN);
 		else
 			dirpath[0] = '\0';
 		dirlen = strlen(dirpath);
@@ -1410,19 +1461,26 @@ nfs_mount(struct mount *mp)
 		}
 	}
 
-	if (aconn > 0 && (args.sotype != SOCK_STREAM ||
-	    (args.flags & NFSMNT_NFSV4) == 0 || minvers == 0)) {
-		/*
-		 * RFC 5661 requires that an NFSv4.1/4.2 server
-		 * send an RPC reply on the same TCP connection
-		 * as the one it received the request on.
-		 * This property in required for "nconnect" and
-		 * might not be the case for NFSv3 or NFSv4.0 servers.
-		 */
-		vfs_mount_error(mp, "nconnect should only be used "
-		    "for NFSv4.1/4.2 mounts");
-		error = EINVAL;
-		goto out;
+	if (aconn > 0) {
+		if (args.sotype != SOCK_STREAM ||
+		    (args.flags & NFSMNT_NFSV4) == 0 || minvers == 0) {
+			/*
+			 * RFC 5661 requires that an NFSv4.1/4.2 server
+			 * send an RPC reply on the same TCP connection
+			 * as the one it received the request on.
+			 * This property in required for "nconnect" and
+			 * might not be the case for NFSv3 or NFSv4.0 servers.
+			 */
+			vfs_mount_error(mp, "nconnect should only be used "
+			    "for NFSv4.1/4.2 mounts");
+			error = EINVAL;
+			goto out;
+		} else if ((newflag & NFSMNT_RDMA) != 0) {
+			vfs_mount_error(mp, "nconnect cannot be used "
+			    "for RDMA mounts");
+			error = EINVAL;
+			goto out;
+		}
 	}
 
 	if ((newflag & NFSMNT_SYSKRB5) != 0 &&
@@ -1458,6 +1516,51 @@ nfs_mount(struct mount *mp)
 		goto out;
 	}
 
+	if ((newflag & NFSMNT_RDMA) != 0) {
+#ifdef INET
+		struct sockaddr_in *sin;
+#endif
+#ifdef INET6
+		struct sockaddr_in6 *sin6;
+#endif
+
+		if (rdma_check_route == NULL) {
+			vfs_mount_error(mp, "nfsclrdma module not loaded");
+			error = EINVAL;
+			goto out;
+		}
+
+		/* Replace the NFS port# with the NFS RDMA one. */
+		switch (nam->sa_family) {
+#ifdef INET
+		case AF_INET:
+			sin = (struct sockaddr_in *)nam;
+			sin->sin_port = htons(rdma_port);
+			break;
+#endif
+#ifdef INET6
+		case AF_INET6:
+			sin6 = (struct sockaddr_in6 *)nam;
+			sin6->sin6_port = htons(rdma_port);
+			break;
+#endif
+		default:
+			vfs_mount_error(mp, "rdma address not inet/inet6");
+			error = EINVAL;
+			goto out;
+		}
+#ifdef VIMAGE
+		error = rdma_check_route(vnet0, nam, NFSV4_CBSLOTS);
+#else
+		error = rdma_check_route(NULL, nam, NFSV4_CBSLOTS);
+#endif
+		if (error != 0) {
+			vfs_mount_error(mp, "rdma is not configured");
+			error = EINVAL;
+			goto out;
+		}
+	}
+
 	args.fh = nfh;
 	error = mountnfs(&args, mp, nam, hst, krbname, krbnamelen, dirpath,
 	    dirlen, srvkrbname, srvkrbnamelen, &vp, td->td_ucred, td,
@@ -1472,6 +1575,7 @@ out:
 		MNT_IUNLOCK(mp);
 	}
 	free(hst, M_TEMP);
+	free(dirpath, M_TEMP);
 	return (error);
 }
 
@@ -2233,6 +2337,10 @@ void nfscl_retopts(struct nfsmount *nmp, char *buffer, size_t buflen)
 	    &blen);
 	nfscl_printopt(nmp, (nmp->nm_newflag & NFSMNT_SYSKRB5) != 0,
 	    ",syskrb5", &buf, &blen);
+	nfscl_printopt(nmp, (nmp->nm_newflag & NFSMNT_RDMA) != 0,
+	    ",rdma", &buf, &blen);
+	nfscl_printopt(nmp, (nmp->nm_newflag & NFSMNT_NOWRITEREDUCE) != 0,
+	    ",nowritereduce", &buf, &blen);
 	nfscl_printopt(nmp, (nmp->nm_flag & NFSMNT_NOCONN) != 0, ",noconn",
 	    &buf, &blen);
 	nfscl_printoptval(nmp, nmp->nm_aconnect + 1, ",nconnect", &buf, &blen);

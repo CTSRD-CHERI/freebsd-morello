@@ -2309,7 +2309,8 @@ vxlan_ioctl_drvspec(struct vxlan_softc *sc, struct ifdrv *ifd, int get)
 	} args;
 	int out, error;
 
-	if (ifd->ifd_cmd >= vxlan_control_table_size)
+	if (ifd->ifd_cmd >= vxlan_control_table_size ||
+	    vxlan_control_table[ifd->ifd_cmd].vxlc_func == NULL)
 		return (EINVAL);
 
 	bzero(&args, sizeof(args));
@@ -2533,7 +2534,7 @@ vxlan_encap4(struct vxlan_softc *sc, const union vxlan_sockaddr *fvxlsa,
 
 	ifp = sc->vxl_ifp;
 	srcaddr = sc->vxl_src_addr.in4.sin_addr;
-	srcport = vxlan_pick_source_port(sc, m);
+	srcport = htons(vxlan_pick_source_port(sc, m));
 	dstaddr = fvxlsa->in4.sin_addr;
 	dstport = fvxlsa->in4.sin_port;
 
@@ -2644,7 +2645,7 @@ vxlan_encap6(struct vxlan_softc *sc, const union vxlan_sockaddr *fvxlsa,
 
 	ifp = sc->vxl_ifp;
 	srcaddr = &sc->vxl_src_addr.in6.sin6_addr;
-	srcport = vxlan_pick_source_port(sc, m);
+	srcport = htons(vxlan_pick_source_port(sc, m));
 	dstaddr = &fvxlsa->in6.sin6_addr;
 	dstport = fvxlsa->in6.sin6_port;
 
@@ -2824,8 +2825,7 @@ vxlan_rcv_udp_packet(struct mbuf *m, int offset, struct inpcb *inpcb,
 		goto out;
 
 	if (__predict_false(m->m_len < offset + sizeof(struct vxlan_header))) {
-		m_copydata(m, offset, sizeof(struct vxlan_header),
-		    (caddr_t) &vxlanhdr);
+		m_copydata(m, offset, sizeof(struct vxlan_header), &vxlanhdr);
 		vxh = &vxlanhdr;
 	} else
 		vxh = mtodo(m, offset);
@@ -2875,9 +2875,7 @@ vxlan_input(struct vxlan_socket *vso, uint32_t vni, struct mbuf **m0,
 		return (ENOENT);
 
 	ifp = sc->vxl_ifp;
-	if (m->m_len < ETHER_HDR_LEN &&
-	    (m = m_pullup(m, ETHER_HDR_LEN)) == NULL) {
-		*m0 = NULL;
+	if ((m = *m0 = m_pullup(m, ETHER_HDR_LEN)) == NULL) {
 		error = ENOBUFS;
 		goto out;
 	}
@@ -3616,8 +3614,6 @@ vxlan_ifdetach_event(void *arg __unused, struct ifnet *ifp)
 	struct vxlan_socket *vso;
 	struct vxlan_softc *sc, *tsc;
 
-	if (ifp->if_flags & IFF_RENAMING)
-		return;
 	if ((ifp->if_flags & IFF_MULTICAST) == 0)
 		return;
 

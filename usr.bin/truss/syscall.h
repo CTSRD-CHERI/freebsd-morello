@@ -224,12 +224,13 @@ struct syscall {
 	struct timespec time; /* Time spent for this call */
 	int ncalls;	/* Number of calls */
 	int nerror;	/* Number of calls that returned with error */
+	bool trace;	/* Selected for reporting by -t */
 	bool unknown;	/* Unknown system call */
 };
 
 struct syscall *get_syscall(struct threadinfo *, u_int, u_int);
 char *print_arg(struct syscall_arg *, syscallarg_t *, syscallarg_t *,
-    struct trussinfo *);
+    struct trussinfo *, struct syscall_decode *);
 
 /*
  * Linux Socket defines

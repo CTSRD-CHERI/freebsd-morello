@@ -646,10 +646,6 @@ FEATURE(compat_freebsd6, "Compatible with FreeBSD 6");
 FEATURE(compat_freebsd7, "Compatible with FreeBSD 7");
 #endif
 
-#ifdef COMPAT_FREEBSD8
-FEATURE(compat_freebsd8, "Compatible with FreeBSD 8");
-#endif
-
 #ifdef COMPAT_FREEBSD9
 FEATURE(compat_freebsd9, "Compatible with FreeBSD 9");
 #endif
@@ -777,9 +773,3 @@ SYSCTL_SIZEOF_STRUCT(kinfo_proc);
 const int pcb_size = sizeof(struct pcb);
 SYSCTL_SIZEOF_STRUCT(pcb);
 
-/* XXX compatibility, remove for 6.0 */
-#include <sys/imgact.h>
-#include <sys/imgact_elf.h>
-SYSCTL_INT(_kern, OID_AUTO, fallback_elf_brand, CTLFLAG_RW,
-    &__elfN(fallback_brand), sizeof(__elfN(fallback_brand)),
-    "compatibility for kern.fallback_elf_brand");

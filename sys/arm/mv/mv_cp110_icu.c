@@ -137,7 +137,7 @@ mv_cp110_icu_attach(device_t dev)
 		device_printf(dev, "cannot find msi-parent device\n");
 		return (ENXIO);
 	}
-	if (bus_alloc_resources(dev, mv_cp110_icu_res_spec, &sc->res) != 0) {
+	if (bus_alloc_resources(device_get_parent(dev), mv_cp110_icu_res_spec, &sc->res) != 0) {
 		device_printf(dev, "cannot allocate resources for device\n");
 		return (ENXIO);
 	}
@@ -164,7 +164,7 @@ mv_cp110_icu_attach(device_t dev)
 	return (0);
 
 fail:
-	bus_release_resources(dev, mv_cp110_icu_res_spec, &sc->res);
+	bus_release_resources(device_get_parent(dev), mv_cp110_icu_res_spec, &sc->res);
 	return (ENXIO);
 }
 
@@ -257,7 +257,7 @@ mv_cp110_icu_init(struct mv_cp110_icu_softc *sc, uint64_t addr)
 		WR4(sc, ICU_SETSPI_SEI_AH, (addr >> 32) & UINT32_MAX);
 		break;
 	default:
-		panic("Unkown ICU type.");
+		panic("Unknown ICU type.");
 	}
 
 	sc->initialized = true;

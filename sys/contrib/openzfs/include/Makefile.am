@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: CDDL-1.0
 if BUILD_LINUX
 include $(srcdir)/%D%/os/linux/Makefile.am
 endif
@@ -81,6 +82,7 @@ COMMON_H = \
 	sys/sa.h \
 	sys/sa_impl.h \
 	sys/sha2.h \
+	sys/simd_config.h \
 	sys/skein.h \
 	sys/spa.h \
 	sys/spa_checkpoint.h \
@@ -116,11 +118,6 @@ COMMON_H = \
 	sys/zap.h \
 	sys/zap_impl.h \
 	sys/zap_leaf.h \
-	sys/zcp.h \
-	sys/zcp_global.h \
-	sys/zcp_iter.h \
-	sys/zcp_prop.h \
-	sys/zcp_set.h \
 	sys/zfeature.h \
 	sys/zfs_acl.h \
 	sys/zfs_bootenv.h \
@@ -149,6 +146,7 @@ COMMON_H = \
 	sys/zio_checksum.h \
 	sys/zio_compress.h \
 	sys/zio_crypt.h \
+	sys/zio_crypt_os_icp.h \
 	sys/zio_impl.h \
 	sys/zrlock.h \
 	sys/zthr.h \
@@ -162,11 +160,6 @@ COMMON_H = \
 	sys/fm/fs/zfs.h \
 	\
 	sys/fs/zfs.h \
-	\
-	sys/lua/lauxlib.h \
-	sys/lua/lua.h \
-	sys/lua/luaconf.h \
-	sys/lua/lualib.h \
 	\
 	sys/sysevent/dev.h \
 	sys/sysevent/eventdefs.h \
@@ -184,25 +177,37 @@ KERNEL_H = \
 
 USER_H = \
 	libnvpair.h \
-	libuutil.h \
-	libuutil_common.h \
-	libuutil_impl.h \
 	libzdb.h \
 	libzfs.h \
 	libzfs_core.h \
 	libzfsbootenv.h \
-	libzutil.h \
-	thread_pool.h
+	libzpool.h \
+	libzutil.h
+
+if ZCP_ENABLED
+ZCP_H = \
+	sys/zcp.h \
+	sys/zcp_global.h \
+	sys/zcp_iter.h \
+	sys/zcp_prop.h \
+	sys/zcp_set.h \
+	\
+	sys/lua/lauxlib.h \
+	sys/lua/lua.h \
+	sys/lua/luaconf.h \
+	sys/lua/lualib.h
+endif
+
 
 
 if CONFIG_USER
 libzfsdir = $(includedir)/libzfs
-nobase_libzfs_HEADERS = $(COMMON_H) $(USER_H)
+nobase_libzfs_HEADERS = $(COMMON_H) $(ZCP_H) $(USER_H)
 endif
 
 kerneldir = $(prefix)/src/zfs-$(VERSION)/include
 if CONFIG_KERNEL
 if BUILD_LINUX
-nobase_kernel_HEADERS = $(COMMON_H) $(KERNEL_H)
+nobase_kernel_HEADERS = $(COMMON_H) $(ZCP_H) $(KERNEL_H)
 endif
 endif

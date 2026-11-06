@@ -49,6 +49,7 @@
 #include <sys/priv.h>
 #include <sys/proc.h>
 #include <sys/queue.h>
+#include <sys/sysctl.h>
 #include <sys/sysent.h>
 #include <sys/sysproto.h>
 
@@ -90,6 +91,11 @@ bool	dynamic_kenv;
 
 #define KENV_CHECK	if (!dynamic_kenv) \
 			    panic("%s: called before SI_SUB_KMEM", __func__)
+
+static int unprivileged_kenv_read = 1;
+SYSCTL_INT(_security_bsd, OID_AUTO, unprivileged_kenv_read, CTLFLAG_RWTUN,
+    &unprivileged_kenv_read, 1,
+    "Unprivileged processes can read the kernel environment");
 
 static int
 kenv_dump(struct thread *td, char **envp, int what, char *value, int len)
@@ -155,6 +161,33 @@ kenv_dump(struct thread *td, char **envp, int what, char *value, int len)
 	return (error);
 }
 
+static int
+kenv_read_allowed(struct thread *td, int which)
+{
+	int error;
+
+	if (!unprivileged_kenv_read) {
+		error = priv_check(td, PRIV_KENV_READ);
+		if (error)
+			return (error);
+	}
+
+	switch (which) {
+	case KENV_DUMP:
+	case KENV_DUMP_LOADER:
+	case KENV_DUMP_STATIC:
+#ifdef MAC
+		error = mac_kenv_check_dump(td->td_ucred);
+#endif
+		break;
+	default:
+		error = 0;
+		break;
+	}
+
+	return (error);
+}
+
 int
 sys_kenv(struct thread *td, struct kenv_args *uap)
 {
@@ -168,19 +201,15 @@ sys_kenv(struct thread *td, struct kenv_args *uap)
 
 	switch (uap->what) {
 	case KENV_DUMP:
-#ifdef MAC
-		error = mac_kenv_check_dump(td->td_ucred);
+		error = kenv_read_allowed(td, uap->what);
 		if (error)
 			return (error);
-#endif
 		return (kenv_dump(td, kenvp, uap->what, uap->value, uap->len));
 	case KENV_DUMP_LOADER:
 	case KENV_DUMP_STATIC:
-#ifdef MAC
-		error = mac_kenv_check_dump(td->td_ucred);
+		error = kenv_read_allowed(td, uap->what);
 		if (error)
 			return (error);
-#endif
 #ifdef PRESERVE_EARLY_KENV
 		return (kenv_dump(td,
 		    uap->what == KENV_DUMP_LOADER ? (char **)md_envp :
@@ -196,6 +225,11 @@ sys_kenv(struct thread *td, struct kenv_args *uap)
 
 	case KENV_UNSET:
 		error = priv_check(td, PRIV_KENV_UNSET);
+		if (error)
+			return (error);
+		break;
+	case KENV_GET:
+		error = kenv_read_allowed(td, uap->what);
 		if (error)
 			return (error);
 		break;
@@ -477,7 +511,7 @@ init_dynamic_kenv(void *data __unused)
 	mtx_init(&kenv_lock, "kernel environment", NULL, MTX_DEF);
 	dynamic_kenv = true;
 }
-SYSINIT(kenv, SI_SUB_KMEM + 1, SI_ORDER_FIRST, init_dynamic_kenv, NULL);
+SYSINIT(kenv, SI_SUB_KENV, SI_ORDER_FIRST, init_dynamic_kenv, NULL);
 
 void
 freeenv(char *env)
@@ -1098,65 +1132,65 @@ kernenv_next(char *cp)
 }
 
 void
-tunable_int_init(void *data)
+tunable_int_init(const void *data)
 {
-	struct tunable_int *d = (struct tunable_int *)data;
+	const struct tunable_int *d = data;
 
 	TUNABLE_INT_FETCH(d->path, d->var);
 }
 
 void
-tunable_long_init(void *data)
+tunable_long_init(const void *data)
 {
-	struct tunable_long *d = (struct tunable_long *)data;
+	const struct tunable_long *d = data;
 
 	TUNABLE_LONG_FETCH(d->path, d->var);
 }
 
 void
-tunable_ulong_init(void *data)
+tunable_ulong_init(const void *data)
 {
-	struct tunable_ulong *d = (struct tunable_ulong *)data;
+	const struct tunable_ulong *d = data;
 
 	TUNABLE_ULONG_FETCH(d->path, d->var);
 }
 
 void
-tunable_int64_init(void *data)
+tunable_int64_init(const void *data)
 {
-	struct tunable_int64 *d = (struct tunable_int64 *)data;
+	const struct tunable_int64 *d = data;
 
 	TUNABLE_INT64_FETCH(d->path, d->var);
 }
 
 void
-tunable_uint64_init(void *data)
+tunable_uint64_init(const void *data)
 {
-	struct tunable_uint64 *d = (struct tunable_uint64 *)data;
+	const struct tunable_uint64 *d = data;
 
 	TUNABLE_UINT64_FETCH(d->path, d->var);
 }
 
 void
-tunable_quad_init(void *data)
+tunable_quad_init(const void *data)
 {
-	struct tunable_quad *d = (struct tunable_quad *)data;
+	const struct tunable_quad *d = data;
 
 	TUNABLE_QUAD_FETCH(d->path, d->var);
 }
 
 void
-tunable_bool_init(void *data)
+tunable_bool_init(const void *data)
 {
-	struct tunable_bool *d = (struct tunable_bool *)data;
+	const struct tunable_bool *d = data;
 
 	TUNABLE_BOOL_FETCH(d->path, d->var);
 }
 
 void
-tunable_str_init(void *data)
+tunable_str_init(const void *data)
 {
-	struct tunable_str *d = (struct tunable_str *)data;
+	const struct tunable_str *d = data;
 
 	TUNABLE_STR_FETCH(d->path, d->var, d->size);
 }

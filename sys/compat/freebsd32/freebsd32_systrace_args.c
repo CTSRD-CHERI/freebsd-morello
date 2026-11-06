@@ -3124,7 +3124,7 @@ systrace_args(int sysnum, void *params, uint64_t *uarg, int *n_args)
 	case 564: {
 		struct getfhat_args *p = params;
 		iarg[a++] = p->fd; /* int */
-		uarg[a++] = (intptr_t)p->path; /* char * */
+		uarg[a++] = (intptr_t)p->path; /* const char * */
 		uarg[a++] = (intptr_t)p->fhp; /* struct fhandle * */
 		iarg[a++] = p->flags; /* int */
 		*n_args = 4;
@@ -3411,6 +3411,79 @@ systrace_args(int sysnum, void *params, uint64_t *uarg, int *n_args)
 		iarg[a++] = p->gidsetsize; /* int */
 		uarg[a++] = (intptr_t)p->gidset; /* const gid_t * */
 		*n_args = 2;
+		break;
+	}
+	/* jail_attach_jd */
+	case 597: {
+		struct jail_attach_jd_args *p = params;
+		iarg[a++] = p->fd; /* int */
+		*n_args = 1;
+		break;
+	}
+	/* jail_remove_jd */
+	case 598: {
+		struct jail_remove_jd_args *p = params;
+		iarg[a++] = p->fd; /* int */
+		*n_args = 1;
+		break;
+	}
+	/* pdrfork */
+	case 600: {
+		struct pdrfork_args *p = params;
+		uarg[a++] = (intptr_t)p->fdp; /* int * */
+		iarg[a++] = p->pdflags; /* int */
+		iarg[a++] = p->rfflags; /* int */
+		*n_args = 3;
+		break;
+	}
+	/* freebsd32_pdwait */
+	case 601: {
+		struct freebsd32_pdwait_args *p = params;
+		iarg[a++] = p->fd; /* int */
+		uarg[a++] = (intptr_t)p->status; /* int * */
+		iarg[a++] = p->options; /* int */
+		uarg[a++] = (intptr_t)p->wrusage; /* struct __wrusage32 * */
+		uarg[a++] = (intptr_t)p->info; /* struct __siginfo32 * */
+		*n_args = 5;
+		break;
+	}
+	/* renameat2 */
+	case 602: {
+		struct renameat2_args *p = params;
+		iarg[a++] = p->oldfd; /* int */
+		uarg[a++] = (intptr_t)p->old; /* const char * */
+		iarg[a++] = p->newfd; /* int */
+		uarg[a++] = (intptr_t)p->new; /* const char * */
+		iarg[a++] = p->flags; /* int */
+		*n_args = 5;
+		break;
+	}
+	/* pdopenpid */
+	case 603: {
+		struct pdopenpid_args *p = params;
+		iarg[a++] = p->pid; /* pid_t */
+		iarg[a++] = p->flags; /* int */
+		*n_args = 2;
+		break;
+	}
+	/* pddupfd */
+	case 604: {
+		struct pddupfd_args *p = params;
+		iarg[a++] = p->pd; /* int */
+		iarg[a++] = p->fd; /* int */
+		iarg[a++] = p->flags; /* int */
+		*n_args = 3;
+		break;
+	}
+	/* freebsd32_pdptrace */
+	case 605: {
+		struct freebsd32_pdptrace_args *p = params;
+		iarg[a++] = p->req; /* int */
+		iarg[a++] = p->pfd; /* int */
+		iarg[a++] = p->lwpid; /* int */
+		uarg[a++] = (intptr_t)p->addr; /* void * */
+		iarg[a++] = p->data; /* int */
+		*n_args = 5;
 		break;
 	}
 	default:
@@ -8714,7 +8787,7 @@ systrace_entry_setargdesc(int sysnum, int ndx, char *desc, size_t descsz)
 			p = "int";
 			break;
 		case 1:
-			p = "userland char *";
+			p = "userland const char *";
 			break;
 		case 2:
 			p = "userland struct fhandle *";
@@ -9217,6 +9290,137 @@ systrace_entry_setargdesc(int sysnum, int ndx, char *desc, size_t descsz)
 			break;
 		case 1:
 			p = "userland const gid_t *";
+			break;
+		default:
+			break;
+		};
+		break;
+	/* jail_attach_jd */
+	case 597:
+		switch (ndx) {
+		case 0:
+			p = "int";
+			break;
+		default:
+			break;
+		};
+		break;
+	/* jail_remove_jd */
+	case 598:
+		switch (ndx) {
+		case 0:
+			p = "int";
+			break;
+		default:
+			break;
+		};
+		break;
+	/* pdrfork */
+	case 600:
+		switch (ndx) {
+		case 0:
+			p = "userland int *";
+			break;
+		case 1:
+			p = "int";
+			break;
+		case 2:
+			p = "int";
+			break;
+		default:
+			break;
+		};
+		break;
+	/* freebsd32_pdwait */
+	case 601:
+		switch (ndx) {
+		case 0:
+			p = "int";
+			break;
+		case 1:
+			p = "userland int *";
+			break;
+		case 2:
+			p = "int";
+			break;
+		case 3:
+			p = "userland struct __wrusage32 *";
+			break;
+		case 4:
+			p = "userland struct __siginfo32 *";
+			break;
+		default:
+			break;
+		};
+		break;
+	/* renameat2 */
+	case 602:
+		switch (ndx) {
+		case 0:
+			p = "int";
+			break;
+		case 1:
+			p = "userland const char *";
+			break;
+		case 2:
+			p = "int";
+			break;
+		case 3:
+			p = "userland const char *";
+			break;
+		case 4:
+			p = "int";
+			break;
+		default:
+			break;
+		};
+		break;
+	/* pdopenpid */
+	case 603:
+		switch (ndx) {
+		case 0:
+			p = "pid_t";
+			break;
+		case 1:
+			p = "int";
+			break;
+		default:
+			break;
+		};
+		break;
+	/* pddupfd */
+	case 604:
+		switch (ndx) {
+		case 0:
+			p = "int";
+			break;
+		case 1:
+			p = "int";
+			break;
+		case 2:
+			p = "int";
+			break;
+		default:
+			break;
+		};
+		break;
+	/* freebsd32_pdptrace */
+	case 605:
+		switch (ndx) {
+		case 0:
+			p = "int";
+			break;
+		case 1:
+			p = "int";
+			break;
+		case 2:
+			p = "int";
+			break;
+		case 3:
+			p = "userland void *";
+			break;
+		case 4:
+			p = "int";
 			break;
 		default:
 			break;
@@ -11127,6 +11331,46 @@ systrace_return_setargdesc(int sysnum, int ndx, char *desc, size_t descsz)
 		break;
 	/* setgroups */
 	case 596:
+		if (ndx == 0 || ndx == 1)
+			p = "int";
+		break;
+	/* jail_attach_jd */
+	case 597:
+		if (ndx == 0 || ndx == 1)
+			p = "int";
+		break;
+	/* jail_remove_jd */
+	case 598:
+		if (ndx == 0 || ndx == 1)
+			p = "int";
+		break;
+	/* pdrfork */
+	case 600:
+		if (ndx == 0 || ndx == 1)
+			p = "int";
+		break;
+	/* freebsd32_pdwait */
+	case 601:
+		if (ndx == 0 || ndx == 1)
+			p = "int";
+		break;
+	/* renameat2 */
+	case 602:
+		if (ndx == 0 || ndx == 1)
+			p = "int";
+		break;
+	/* pdopenpid */
+	case 603:
+		if (ndx == 0 || ndx == 1)
+			p = "int";
+		break;
+	/* pddupfd */
+	case 604:
+		if (ndx == 0 || ndx == 1)
+			p = "int";
+		break;
+	/* freebsd32_pdptrace */
+	case 605:
 		if (ndx == 0 || ndx == 1)
 			p = "int";
 		break;

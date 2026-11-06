@@ -1620,6 +1620,7 @@ vm_map_insert1(vm_map_t map, vm_object_t object, vm_ooffset_t offset,
 	vm_inherit_t inheritance;
 	u_long bdry;
 	u_int bidx;
+	int cflags;
 
 	VM_MAP_ASSERT_LOCKED(map);
 	KASSERT(object != kernel_object ||
@@ -1696,20 +1697,36 @@ vm_map_insert1(vm_map_t map, vm_object_t object, vm_ooffset_t offset,
 	}
 
 	cred = NULL;
-	if ((cow & (MAP_ACC_NO_CHARGE | MAP_NOFAULT | MAP_CREATE_GUARD)) != 0)
-		goto charged;
-	if ((cow & MAP_ACC_CHARGED) || ((prot & VM_PROT_WRITE) &&
-	    ((protoeflags & MAP_ENTRY_NEEDS_COPY) || object == NULL))) {
-		if (!(cow & MAP_ACC_CHARGED) && !swap_reserve(end - start))
-			return (KERN_RESOURCE_SHORTAGE);
-		KASSERT(object == NULL ||
-		    (protoeflags & MAP_ENTRY_NEEDS_COPY) != 0 ||
-		    object->cred == NULL,
-		    ("overcommit: vm_map_insert o %p", object));
-		cred = curthread->td_ucred;
+	if ((cow & (MAP_ACC_NO_CHARGE | MAP_NOFAULT | MAP_CREATE_GUARD)) != 0) {
+		cflags = OBJCO_NO_CHARGE;
+	} else {
+		cflags = 0;
+		if ((cow & MAP_ACC_CHARGED) != 0 ||
+		    ((prot & VM_PROT_WRITE) != 0 &&
+		    ((protoeflags & MAP_ENTRY_NEEDS_COPY) != 0 ||
+		    object == NULL))) {
+			if ((cow & MAP_ACC_CHARGED) == 0) {
+				if (!swap_reserve(end - start))
+					return (KERN_RESOURCE_SHORTAGE);
+
+				/*
+				 * Only inform vm_object_coalesce()
+				 * that the object was charged if
+				 * there is no need for CoW, so the
+				 * swap amount reserved is applicable
+				 * to the prev_entry->object.
+				 */
+				if ((protoeflags & MAP_ENTRY_NEEDS_COPY) == 0)
+					cflags |= OBJCO_CHARGED;
+			}
+			KASSERT(object == NULL ||
+			    (protoeflags & MAP_ENTRY_NEEDS_COPY) != 0 ||
+			    object->cred == NULL,
+			    ("overcommit: vm_map_insert o %p", object));
+			cred = curthread->td_ucred;
+		}
 	}
 
-charged:
 	/* Expand the kernel pmap, if necessary. */
 	if (map == kernel_map && end > kernel_vm_end) {
 		int rv;
@@ -1741,8 +1758,7 @@ charged:
 	    vm_object_coalesce(prev_entry->object.vm_object,
 	    prev_entry->offset,
 	    (vm_size_t)(prev_entry->end - prev_entry->start),
-	    (vm_size_t)(end - prev_entry->end), cred != NULL &&
-	    (protoeflags & MAP_ENTRY_NEEDS_COPY) == 0)) {
+	    (vm_size_t)(end - prev_entry->end), cflags)) {
 		/*
 		 * We were able to extend the object.  Determine if we
 		 * can extend the previous map entry to include the
@@ -2412,7 +2428,7 @@ vm_map_entry_back(vm_map_entry_t entry)
 	KASSERT((entry->eflags & MAP_ENTRY_IS_SUB_MAP) == 0,
 	    ("map entry %p is a submap", entry));
 	object = vm_object_allocate_anon(atop(entry->end - entry->start), NULL,
-	    entry->cred, entry->end - entry->start);
+	    entry->cred);
 	entry->object.vm_object = object;
 	entry->offset = 0;
 	entry->cred = NULL;
@@ -2427,21 +2443,26 @@ vm_map_entry_back(vm_map_entry_t entry)
 static inline void
 vm_map_entry_charge_object(vm_map_t map, vm_map_entry_t entry)
 {
+	vm_object_t object;
 
 	VM_MAP_ASSERT_LOCKED(map);
 	KASSERT((entry->eflags & MAP_ENTRY_IS_SUB_MAP) == 0,
 	    ("map entry %p is a submap", entry));
-	if (entry->object.vm_object == NULL && !vm_map_is_system(map) &&
+	object = entry->object.vm_object;
+	if (object == NULL && !vm_map_is_system(map) &&
 	    (entry->eflags & MAP_ENTRY_GUARD) == 0)
 		vm_map_entry_back(entry);
-	else if (entry->object.vm_object != NULL &&
+	else if (object != NULL &&
 	    ((entry->eflags & MAP_ENTRY_NEEDS_COPY) == 0) &&
 	    entry->cred != NULL) {
-		VM_OBJECT_WLOCK(entry->object.vm_object);
-		KASSERT(entry->object.vm_object->cred == NULL,
+		VM_OBJECT_WLOCK(object);
+		KASSERT(object->cred == NULL,
 		    ("OVERCOMMIT: %s: both cred e %p", __func__, entry));
-		entry->object.vm_object->cred = entry->cred;
-		entry->object.vm_object->charge = entry->end - entry->start;
+		object->cred = entry->cred;
+		if (entry->end - entry->start < ptoa(object->size)) {
+			swap_reserve_force_by_cred(ptoa(object->size) -
+			    entry->end + entry->start, object->cred);
+		}
 		VM_OBJECT_WUNLOCK(entry->object.vm_object);
 		entry->cred = NULL;
 	}
@@ -2940,7 +2961,7 @@ again:
 		 * we cannot distinguish between non-charged and
 		 * charged clipped mapping of the same object later.
 		 */
-		KASSERT(obj->charge == 0,
+		KASSERT(obj->cred == NULL,
 		    ("vm_map_protect: object %p overcharged (entry %p)",
 		    obj, entry));
 		if (!swap_reserve(ptoa(obj->size))) {
@@ -2952,7 +2973,6 @@ again:
 
 		crhold(cred);
 		obj->cred = cred;
-		obj->charge = ptoa(obj->size);
 		VM_OBJECT_WUNLOCK(obj);
 	}
 
@@ -3926,7 +3946,7 @@ static void
 vm_map_entry_delete(vm_map_t map, vm_map_entry_t entry)
 {
 	vm_object_t object;
-	vm_pindex_t offidxstart, offidxend, size1;
+	vm_pindex_t offidxstart, offidxend, oldsize;
 	vm_size_t size;
 
 	vm_map_entry_unlink(map, entry, UNLINK_MERGE_NONE);
@@ -3973,15 +3993,11 @@ vm_map_entry_delete(vm_map_t map, vm_map_entry_t entry)
 			    OBJPR_NOTMAPPED);
 			if (offidxend >= object->size &&
 			    offidxstart < object->size) {
-				size1 = object->size;
+				oldsize = object->size;
 				object->size = offidxstart;
 				if (object->cred != NULL) {
-					size1 -= object->size;
-					KASSERT(object->charge >= ptoa(size1),
-					    ("object %p charge < 0", object));
-					swap_release_by_cred(ptoa(size1),
-					    object->cred);
-					object->charge -= ptoa(size1);
+					swap_release_by_cred(ptoa(oldsize -
+					    object->size), object->cred);
 				}
 			}
 		}
@@ -4147,6 +4163,38 @@ vm_map_check_protection(vm_map_t map, vm_offset_t start, vm_offset_t end,
 }
 
 /*
+ * Check whether the specified range partially overlaps a map entry with
+ * fixed boundaries, and return false if so.
+ *
+ * The map must be locked.
+ */
+bool
+vm_map_check_boundary(vm_map_t map, vm_offset_t start, vm_offset_t end)
+{
+	vm_map_entry_t entry;
+	int bdry_idx;
+
+	if (!vm_map_range_valid(map, start, end))
+		return (false);
+	if (start == end)
+		return (true);
+
+	if (vm_map_lookup_entry(map, start, &entry)) {
+		bdry_idx = MAP_ENTRY_SPLIT_BOUNDARY_INDEX(entry);
+		if (bdry_idx != 0 &&
+		    (start & (pagesizes[bdry_idx] - 1)) != 0)
+			return (false);
+	}
+	if (vm_map_lookup_entry(map, end - 1, &entry)) {
+		bdry_idx = MAP_ENTRY_SPLIT_BOUNDARY_INDEX(entry);
+		if (bdry_idx != 0 &&
+		    (end & (pagesizes[bdry_idx] - 1)) != 0)
+			return (false);
+	}
+	return (true);
+}
+
+/*
  *
  *	vm_map_copy_swap_object:
  *
@@ -4182,7 +4230,7 @@ vm_map_copy_swap_object(vm_map_entry_t src_entry, vm_map_entry_t dst_entry,
 		    ("OVERCOMMIT: vm_map_copy_anon_entry: cred %p",
 		     src_object));
 		src_object->cred = src_entry->cred;
-		src_object->charge = size;
+		*fork_charge += ptoa(src_object->size) - size;
 	}
 	dst_entry->object.vm_object = src_object;
 	if (charged) {
@@ -4439,7 +4487,7 @@ vmspace_fork(struct vmspace *vm1, vm_ooffset_t *fork_charge)
 					KASSERT(object->cred == NULL,
 					    ("vmspace_fork both cred"));
 					object->cred = old_entry->cred;
-					object->charge = old_entry->end -
+					*fork_charge += old_entry->end -
 					    old_entry->start;
 					old_entry->cred = NULL;
 				}
@@ -4675,6 +4723,11 @@ vm_map_stack_locked(vm_map_t map, vm_offset_t addrbos, vm_size_t max_ssize,
 	return (rv);
 }
 
+static bool report_stackoverflow = true;
+SYSCTL_BOOL(_vm, OID_AUTO, report_stackoverflow, CTLFLAG_RWTUN,
+    &report_stackoverflow, 0,
+    "uprintf() on stack overflow");
+
 /*
  * Attempts to grow a vm stack entry.  Returns KERN_SUCCESS if we
  * successfully grow the stack.
@@ -4683,6 +4736,7 @@ static int
 vm_map_growstack(vm_map_t map, vm_offset_t addr, vm_map_entry_t gap_entry)
 {
 	vm_map_entry_t stack_entry;
+	struct thread *td;
 	struct proc *p;
 	struct vmspace *vm;
 	vm_offset_t gap_end, gap_start, grow_start;
@@ -4698,7 +4752,8 @@ vm_map_growstack(vm_map_t map, vm_offset_t addr, vm_map_entry_t gap_entry)
 	int error __diagused;
 #endif
 
-	p = curproc;
+	td = curthread;
+	p = td->td_proc;
 	vm = p->p_vmspace;
 
 	/*
@@ -4706,15 +4761,14 @@ vm_map_growstack(vm_map_t map, vm_offset_t addr, vm_map_entry_t gap_entry)
 	 * debugger or AIO daemon.  The reason is that the wrong
 	 * resource limits are applied.
 	 */
-	if (p != initproc && (map != &p->p_vmspace->vm_map ||
-	    p->p_textvp == NULL))
+	if (p != initproc && (map != &vm->vm_map || p->p_textvp == NULL))
 		return (KERN_FAILURE);
 
 	MPASS(!vm_map_is_system(map));
 
-	lmemlim = lim_cur(curthread, RLIMIT_MEMLOCK);
-	stacklim = lim_cur(curthread, RLIMIT_STACK);
-	vmemlim = lim_cur(curthread, RLIMIT_VMEM);
+	lmemlim = lim_cur(td, RLIMIT_MEMLOCK);
+	stacklim = lim_cur(td, RLIMIT_STACK);
+	vmemlim = lim_cur(td, RLIMIT_VMEM);
 retry:
 	/* If addr is not in a hole for a stack grow area, no need to grow. */
 	if (gap_entry == NULL && !vm_map_lookup_entry(map, addr, &gap_entry))
@@ -4730,15 +4784,19 @@ retry:
 	} else {
 		return (KERN_FAILURE);
 	}
-	guard = ((curproc->p_flag2 & P2_STKGAP_DISABLE) != 0 ||
-	    (curproc->p_fctl0 & NT_FREEBSD_FCTL_STKGAP_DISABLE) != 0) ? 0 :
+	guard = ((p->p_flag2 & P2_STKGAP_DISABLE) != 0 ||
+	    (p->p_fctl0 & NT_FREEBSD_FCTL_STKGAP_DISABLE) != 0) ? 0 :
 	    gap_entry->next_read;
 	max_grow = gap_entry->end - gap_entry->start;
 	if (guard > max_grow)
 		return (KERN_NO_SPACE);
 	max_grow -= guard;
-	if (grow_amount > max_grow)
+	if (grow_amount > max_grow) {
+		if (report_stackoverflow)
+			uprintf("pid %d comm %s tid %d stack overflow\n",
+			    p->p_pid, p->p_comm, td->td_tid);
 		return (KERN_NO_SPACE);
+	}
 
 	/*
 	 * If this is the main process stack, see if we're over the stack
@@ -4746,8 +4804,12 @@ retry:
 	 */
 	is_procstack = addr >= (vm_offset_t)vm->vm_maxsaddr &&
 	    addr < (vm_offset_t)vm->vm_stacktop;
-	if (is_procstack && (ctob(vm->vm_ssize) + grow_amount > stacklim))
+	if (is_procstack && (ctob(vm->vm_ssize) + grow_amount > stacklim)) {
+		if (report_stackoverflow)
+			uprintf("pid %d comm %s tid %d stack overflow\n",
+			    p->p_pid, p->p_comm, td->td_tid);
 		return (KERN_NO_SPACE);
+	}
 
 #ifdef RACCT
 	if (racct_enable) {
@@ -4941,6 +5003,13 @@ vmspace_unshare(struct proc *p)
 	if (newvmspace == NULL)
 		return (ENOMEM);
 	if (!swap_reserve_by_cred(fork_charge, p->p_ucred)) {
+		/*
+		 * The swap reservation failed. The accounting from
+		 * the entries of the copied newvmspace will be
+		 * subtracted in vmspace_free(), so force the
+		 * reservation there.
+		 */
+		swap_reserve_force_by_cred(fork_charge, p->p_ucred);
 		vmspace_free(newvmspace);
 		return (ENOMEM);
 	}
@@ -5122,7 +5191,7 @@ RetryLookupLocked:
 		if (vm_map_lock_upgrade(map))
 			goto RetryLookup;
 		entry->object.vm_object = vm_object_allocate_anon(atop(size),
-		    NULL, entry->cred, size);
+		    NULL, entry->cred);
 		entry->offset = 0;
 		entry->cred = NULL;
 		vm_map_lock_downgrade(map);
@@ -5380,9 +5449,8 @@ vm_map_print(vm_map_t map)
 			    (void *)entry->object.vm_object,
 			    (uintmax_t)entry->offset);
 			if (entry->object.vm_object && entry->object.vm_object->cred)
-				db_printf(", obj ruid %d charge %jx",
-				    entry->object.vm_object->cred->cr_ruid,
-				    (uintmax_t)entry->object.vm_object->charge);
+				db_printf(", obj ruid %d ",
+				    entry->object.vm_object->cred->cr_ruid);
 			if (entry->eflags & MAP_ENTRY_COW)
 				db_printf(", copy (%s)",
 				    (entry->eflags & MAP_ENTRY_NEEDS_COPY) ? "needed" : "done");

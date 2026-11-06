@@ -535,6 +535,7 @@ struct bnxt_re_dev {
 	bool				is_virtfn;
 	u32				num_vfs;
 	u32				espeed;
+	u8				lanes;
 	/*
 	 * For storing the speed of slave interfaces.
 	 * Same as espeed when bond is not configured
@@ -557,8 +558,6 @@ struct bnxt_re_dev {
 	struct dentry                   *pdev_debug_dir;
 	struct dentry                   *pdev_qpinfo_dir;
 	struct bnxt_re_debug_entries	*dbg_ent;
-	struct workqueue_struct		*resolve_wq;
-	struct list_head		mac_wq_list;
 	struct workqueue_struct		*dcb_wq;
 	struct workqueue_struct		*aer_wq;
 	u32				event_bitmap[3];
@@ -605,16 +604,6 @@ struct bnxt_re_dev {
 	atomic_t dbq_intr_running;
 	u32 num_msix_requested;
 	unsigned char	*dev_addr; /* For netdev->dev_addr */
-};
-
-#define BNXT_RE_RESOLVE_RETRY_COUNT_US	5000000 /* 5 sec */
-struct bnxt_re_resolve_dmac_work{
-	struct work_struct      work;
-	struct list_head	list;
-	struct bnxt_re_dev 	*rdev;
-	struct ib_ah_attr	*ah_attr;
-	struct bnxt_re_ah_info *ah_info;
-	atomic_t		status_wait;
 };
 
 static inline u8 bnxt_re_get_prio(u8 prio_map)
@@ -716,7 +705,7 @@ void bnxt_re_remove_device(struct bnxt_re_dev *rdev, u8 removal_type,
 void bnxt_re_destroy_lag(struct bnxt_re_dev **rdev);
 int bnxt_re_add_device(struct bnxt_re_dev **rdev,
 		       struct ifnet *netdev,
-		       u8 qp_mode, u8 op_type, u8 wqe_mode, u32 num_msix_requested,
+		       u8 qp_mode, u8 op_type, u32 num_msix_requested,
 		       struct auxiliary_device *aux_dev);
 void bnxt_re_create_base_interface(bool primary);
 int bnxt_re_schedule_work(struct bnxt_re_dev *rdev, unsigned long event,
@@ -726,8 +715,6 @@ int bnxt_re_schedule_work(struct bnxt_re_dev *rdev, unsigned long event,
 void bnxt_re_get_link_speed(struct bnxt_re_dev *rdev);
 int _bnxt_re_ib_init(struct bnxt_re_dev *rdev);
 int _bnxt_re_ib_init2(struct bnxt_re_dev *rdev);
-void bnxt_re_init_resolve_wq(struct bnxt_re_dev *rdev);
-void bnxt_re_uninit_resolve_wq(struct bnxt_re_dev *rdev);
 
 /* The rdev ref_count is to protect immature removal of the device */
 static inline void bnxt_re_hold(struct bnxt_re_dev *rdev)
@@ -946,7 +933,7 @@ int bnxt_re_setup_cnp_cos(struct bnxt_re_dev *rdev, bool reset);
 
 static inline enum ib_port_state bnxt_re_get_link_state(struct bnxt_re_dev *rdev)
 {
-	if (if_getdrvflags(rdev->netdev) & IFF_DRV_RUNNING &&
+	if (iflib_is_running(rdev->en_dev->softc->ctx) &&
 	    if_getlinkstate(rdev->netdev) == LINK_STATE_UP)
 		return IB_PORT_ACTIVE;
 	return IB_PORT_DOWN;
@@ -1048,8 +1035,6 @@ int bnxt_re_set_dbq_throttling_reg(struct bnxt_re_dev *rdev,
 void bnxt_re_pacing_alert(struct bnxt_re_dev *rdev);
 int bnxt_re_hwrm_pri2cos_qcfg(struct bnxt_re_dev *rdev, struct bnxt_re_tc_rec *tc_rec,
 			      u16 target_id);
-void writel_fbsd(struct bnxt_softc *bp, u32, u8, u32);
-u32 readl_fbsd(struct bnxt_softc *bp, u32, u8);
 
 static inline unsigned int bnxt_re_get_total_mr_mw_count(struct bnxt_re_dev *rdev)
 {
@@ -1067,6 +1052,15 @@ static inline void bnxt_re_set_def_pacing_threshold(struct bnxt_re_dev *rdev)
 static inline void bnxt_re_set_def_do_pacing(struct bnxt_re_dev *rdev)
 {
 	rdev->qplib_res.pacing_data->do_pacing = rdev->dbr_def_do_pacing;
+}
+
+static inline bool bnxt_re_is_var_size_supported(struct bnxt_re_dev *rdev,
+						struct bnxt_re_ucontext *uctx)
+{
+	if (uctx)
+		return uctx->cmask & BNXT_RE_UCNTX_CAP_VAR_WQE_ENABLED;
+	else
+		return rdev->chip_ctx->modes.wqe_mode;
 }
 
 static inline void bnxt_re_set_pacing_dev_state(struct bnxt_re_dev *rdev)

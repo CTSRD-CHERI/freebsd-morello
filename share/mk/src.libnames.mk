@@ -12,6 +12,7 @@ __<src.libnames.mk>__:	.NOTMAIN
 .include <src.opts.mk>
 
 _PRIVATELIBS=	\
+		9p \
 		atf_c \
 		atf_cxx \
 		auditd \
@@ -29,6 +30,9 @@ _PRIVATELIBS=	\
 		heimipcs \
 		kldelf \
 		ldns \
+		opencsd \
+		pkgconf \
+		samplerate \
 		sqlite3 \
 		ssh \
 		ucl \
@@ -57,6 +61,7 @@ _INTERNALLIBS=	\
 		kadmin_common \
 		kprop_util \
 		krb5apputils \
+		krb5profile \
 		krb5ss \
 		lpr \
 		lua \
@@ -72,7 +77,6 @@ _INTERNALLIBS=	\
 		pfctl \
 		pkgecc \
 		pmcstat \
-		samplerate \
 		sl \
 		sm \
 		smdb \
@@ -106,7 +110,6 @@ _LIBRARIES=	\
 		${_INTERNALLIBS} \
 		${LOCAL_LIBRARIES} \
 		80211 \
-		9p \
 		alias \
 		archive \
 		asn1 \
@@ -115,6 +118,7 @@ _LIBRARIES=	\
 		be \
 		begemot \
 		bluetooth \
+		bsdconf \
 		bsdxml \
 		bsm \
 		bsnmp \
@@ -143,9 +147,7 @@ _LIBRARIES=	\
 		devdctl \
 		devinfo \
 		devstat \
-		dialog \
 		dl \
-		dpv \
 		dtrace \
 		dwarf \
 		edit \
@@ -153,7 +155,6 @@ _LIBRARIES=	\
 		elf \
 		execinfo \
 		fetch \
-		figpar \
 		formw \
 		geom \
 		gpio \
@@ -228,7 +229,6 @@ _LIBRARIES=	\
 		tacplus \
 		termcapw \
 		tinfow \
-		tpool \
 		ufs \
 		ugidfw \
 		ulog \
@@ -236,7 +236,7 @@ _LIBRARIES=	\
 		usb \
 		usbhid \
 		util \
-		uutil \
+		uvmem \
 		verto \
 		vmmapi \
 		wind \
@@ -264,8 +264,12 @@ _LIBRARIES+= \
 
 .if ${MK_BLACKLIST} != "no"
 _LIBRARIES+= \
-		blacklist \
+		blacklist
+.endif
 
+.if ${MK_BLOCKLIST} != "no"
+_LIBRARIES+= \
+		blocklist
 .endif
 
 .if ${MK_OFED} != "no"
@@ -279,6 +283,7 @@ _LIBRARIES+= \
 		irdma \
 		mlx4 \
 		mlx5 \
+		bnxtre \
 		rdmacm \
 		osmcomp \
 		opensm \
@@ -313,138 +318,13 @@ _DP_9p+=	casper cap_pwd cap_grp
 .if ${.MAKE.OS} == "FreeBSD" || !defined(BOOTSTRAPPING)
 _DP_archive=	z bz2 lzma bsdxml zstd
 .endif
+_DP_atf_cxx=	atf_c
 _DP_avl=	spl
+_DP_be=		zfs spl nvpair zfsbootenv
 _DP_bsddialog=	ncursesw tinfow
-_DP_zstd=	pthread
-.if ${MK_BLACKLIST} != "no"
-_DP_blacklist+=	pthread
-.endif
-_DP_crypto=	pthread
-# See comment by _DP_archive above
-.if ${.MAKE.OS} == "FreeBSD" || !defined(BOOTSTRAPPING)
-.if ${MK_OPENSSL} != "no"
-_DP_archive+=	crypto
-.else
-_DP_archive+=	md
-.endif
-.endif
-_DP_sqlite3=	pthread
-_DP_ssl=	crypto
-_DP_ssh=	crypto crypt z
-.if ${MK_LDNS} != "no"
-_DP_ssh+=	ldns
-.endif
-_DP_edit=	tinfow
 .if ${MK_OPENSSL} != "no"
 _DP_bsnmp=	crypto
 .endif
-_DP_geom=	bsdxml sbuf
-_DP_cam=	sbuf
-_DP_kldelf=	elf
-_DP_kvm=	elf
-_DP_casper=	nv
-_DP_cap_dns=	nv
-_DP_cap_fileargs=	nv
-_DP_cap_grp=	nv
-_DP_cap_pwd=	nv
-_DP_cap_sysctl=	nv
-_DP_cap_syslog=	nv
-_DP_crypt=	md
-.if ${MK_OFED} != "no"
-_DP_pcap=	ibverbs mlx5
-.endif
-_DP_pjdlog=	util
-_DP_usb=	pthread
-_DP_unbound=	ssl crypto pthread
-_DP_rt=	pthread
-.if ${MK_OPENSSL} == "no"
-_DP_radius=	md
-.else
-_DP_radius=	crypto
-.endif
-_DP_rtld_db=	elf procstat
-_DP_procstat=	kvm util elf
-_DP_proc=	cxxrt
-.if ${MK_CDDL} != "no"
-_DP_proc+=	ctf
-.endif
-_DP_proc+=	elf procstat rtld_db util z
-_DP_mp=	crypto
-_DP_memstat=	kvm
-_DP_magic=	z
-_DP_mt=		sbuf bsdxml
-_DP_nvmf=	nv
-_DP_ldns=	ssl crypto
-_DP_lua=	m
-_DP_lutok=	lua
-.if ${MK_OPENSSL} != "no"
-_DP_fetch=	ssl crypto
-.else
-_DP_fetch=	md
-.endif
-_DP_execinfo=	elf
-_DP_dwarf=	elf z
-_DP_dpv=	dialog figpar util tinfow ncursesw
-_DP_dialog=	tinfow ncursesw m
-_DP_cuse=	pthread
-_DP_atf_cxx=	atf_c
-_DP_gtest=	pthread regex
-_DP_gmock=	gtest
-_DP_gmock_main=	gmock
-_DP_gtest_main=	gtest
-_DP_devstat=	kvm
-_DP_pam=	radius tacplus md util
-.if ${MK_KERBEROS} != "no" && ${MK_MITKRB5} != "no"
-_DP_pam+=	krb5
-.endif
-.if ${MK_OPENSSH} != "no"
-_DP_fido2+=	crypto z
-_DP_pam+=	ssh
-.endif
-.if ${MK_NIS} != "no"
-_DP_pam+=	ypclnt
-.endif
-.if ${MK_KERBEROS} != "no"
-.if ${MK_MITKRB5} != "no"
-# _DP_krb5support=	no dependencies except for libc
-# _DP_verto=		no dependencies except for libc
-# _DP_apputils=		no dependencies except for libc
-_DP_com_err=		krb5support
-_DP_k5crypto=		com_err krb5support crypto
-_DP_krb5profile=	com_err krb5support
-_DP_gssapi_krb5=	krb5 k5crypto com_err krb5profile krb5support
-_DP_kadm5clnt_mit=	gssrpc gssapi_krb5 krb5 k5crypto krb5support com_err krb5profile
-_DP_kadm5srv_mit=	krb5profile gssrpc gssapi_krb5 kdb5 krb5 k5crypto krb5support com_err
-_DP_kdb5=		gssrpc krb5 k5crypto com_err krb5support gssapi_krb5 krb5profile
-_DP_krad=		krb5 k5crypto com_err krb5profile krb5support verto
-_DP_krb5=		krb5profile k5crypto com_err krb5support
-_DP_gssrpc=		gssapi_krb5 krb5 k5crypto com_err krb5support
-.else
-_DP_roken=	crypt
-_DP_kadm5clnt=	com_err krb5 roken
-_DP_kadm5srv=	com_err hdb krb5 roken
-_DP_heimntlm=	crypto com_err krb5 roken
-_DP_hx509=	asn1 com_err crypto roken wind
-_DP_hdb=	asn1 com_err krb5 roken sqlite3
-_DP_asn1=	com_err roken
-_DP_kdc=	roken hdb hx509 krb5 heimntlm asn1 crypto
-_DP_wind=	com_err roken
-_DP_heimbase=	pthread
-_DP_heimipcc=	heimbase roken pthread
-_DP_heimipcs=	heimbase roken pthread
-_DP_kafs5=	asn1 krb5 roken
-_DP_krb5=	asn1 com_err crypt crypto hx509 roken wind heimbase heimipcc
-_DP_gssapi_krb5=	gssapi krb5 crypto roken asn1 com_err
-.endif
-.endif
-_DP_lzma=	md pthread
-_DP_ucl=	m
-_DP_vmmapi=	util
-_DP_opencsd=	cxxrt
-_DP_ctf=	spl z
-_DP_dtrace=	ctf elf proc pthread rtld_db xo
-_DP_xo=		util
-_DP_ztest=	geom m nvpair umem zpool pthread avl zfs_core spl zutil zfs uutil icp
 # The libc dependencies are not strictly needed but are defined to make the
 # assert happy.
 _DP_c=		compiler_rt sys
@@ -453,6 +333,104 @@ _DP_c=		compiler_rt sys
 .if ${MK_SSP} != "no" && \
     (${MACHINE_ARCH} == "i386" || ${MACHINE_ARCH:Mpower*} != "")
 _DP_c+=		ssp_nonshared
+.endif
+_DP_cam=	sbuf
+_DP_cap_dns=	nv
+_DP_cap_fileargs=	nv
+_DP_cap_grp=	nv
+_DP_cap_pwd=	nv
+_DP_cap_sysctl=	nv
+_DP_cap_syslog=	nv
+_DP_casper=	nv
+# See comment by _DP_archive above
+.if ${.MAKE.OS} == "FreeBSD" || !defined(BOOTSTRAPPING)
+.if ${MK_OPENSSL} != "no"
+_DP_archive+=	crypto
+.else
+_DP_archive+=	md
+.endif
+.endif
+_DP_ctf=	spl z
+_DP_crypt=	md
+_DP_crypto=	pthread
+_DP_cuse=	pthread
+.if ${MK_BLACKLIST} != "no"
+_DP_blacklist+=	pthread
+.endif
+.if ${MK_BLOCKLIST} != "no"
+_DP_blocklist+=	pthread
+.endif
+_DP_devstat=	kvm
+_DP_dtrace=	ctf elf proc pthread rtld_db xo
+_DP_dwarf=	elf z
+_DP_edit=	tinfow
+_DP_execinfo=	elf
+.if ${MK_OPENSSL} != "no"
+_DP_fetch=	ssl crypto
+.else
+_DP_fetch=	md
+.endif
+.if ${MK_OPENSSH} != "no"
+_DP_fido2+=	crypto z
+.endif
+_DP_fifolog=	z
+_DP_formw=	ncursesw
+_DP_geom=	bsdxml sbuf
+_DP_gmock=	gtest
+_DP_gmock_main=	gmock
+_DP_gtest=	pthread regex
+_DP_gtest_main=	gtest
+_DP_ifconfig=	m
+_DP_ipf=	kvm
+_DP_iscsiutil=	md
+_DP_kldelf=	elf
+_DP_krb5ss=	edit
+_DP_kvm=	elf
+_DP_ldns=	ssl crypto
+_DP_lua=	m
+_DP_lutok=	lua
+_DP_lzma=	md pthread
+_DP_magic=	z
+_DP_memstat=	kvm
+_DP_mp=		crypto
+_DP_mt=		sbuf bsdxml
+_DP_ncursesw=	tinfow
+_DP_netmap=
+_DP_nvmf=	nv
+_DP_nvpair=	spl
+_DP_opencsd=	cxxrt
+_DP_panelw=	ncursesw
+_DP_pam=	radius tacplus md util
+.if ${MK_KERBEROS} != "no" && ${MK_MITKRB5} != "no"
+_DP_pam+=	krb5
+.endif
+.if ${MK_OPENSSH} != "no"
+_DP_pam+=	ssh
+.endif
+.if ${MK_NIS} != "no"
+_DP_pam+=	ypclnt
+.endif
+_DP_pfctl=	nv
+_DP_pjdlog=	util
+_DP_proc=	cxxrt
+.if ${MK_CTF} != "no"
+_DP_proc+=	ctf
+.endif
+_DP_proc+=	elf procstat rtld_db util z
+_DP_procstat=	kvm util elf
+.if ${MK_OPENSSL} == "no"
+_DP_radius=	md
+.else
+_DP_radius=	crypto
+.endif
+_DP_rt=		pthread
+_DP_rtld_db=	elf procstat
+_DP_smb=	kiconv
+_DP_sqlite3=	pthread
+_DP_ssl=	pthread crypto
+_DP_ssh=	crypto crypt z
+.if ${MK_LDNS} != "no"
+_DP_ssh+=	ldns
 .endif
 _DP_stats=	sbuf pthread
 _DP_stdthreads=	pthread
@@ -468,10 +446,55 @@ _DP_thr=	c sys
 _DP_pthread=	${_DP_thr}
 .endif
 _DP_tacplus=	md pam
-_DP_ncursesw=	tinfow
-_DP_formw=	ncursesw
-_DP_nvpair=	spl
-_DP_panelw=	ncursesw
+_DP_ucl=	m
+_DP_ulog=	md
+_DP_unbound=	ssl crypto pthread
+_DP_usb=	pthread
+_DP_uvmem=	pthread
+_DP_vmmapi=	util
+_DP_xo=		util
+_DP_zfs=	md pthread rt umem util m avl bsdxml crypto geom nvpair \
+	z zfs_core zutil
+_DP_zfs_core=	nvpair spl zutil
+_DP_zfsbootenv= zfs nvpair
+_DP_zpool=	md pthread z icp spl nvpair avl umem
+_DP_zstd=	pthread
+_DP_ztest=	geom m nvpair umem zpool pthread avl zfs_core spl zutil zfs icp
+_DP_zutil=	avl geom m
+
+# Kerberos support
+.if ${MK_KERBEROS} != "no"
+.if ${MK_MITKRB5} != "no"
+# _DP_krb5support=	no dependencies except for libc
+# _DP_verto=		no dependencies except for libc
+# _DP_apputils=		no dependencies except for libc
+_DP_com_err=		krb5support
+_DP_gssapi_krb5=	krb5 k5crypto com_err krb5profile krb5support
+_DP_gssrpc=		gssapi_krb5 krb5 k5crypto com_err krb5support
+_DP_k5crypto=		com_err krb5support crypto
+_DP_kadm5clnt_mit=	gssrpc gssapi_krb5 krb5 k5crypto krb5support com_err krb5profile
+_DP_kadm5srv_mit=	krb5profile gssrpc gssapi_krb5 kdb5 krb5 k5crypto krb5support com_err
+_DP_kdb5=		gssrpc krb5 k5crypto com_err krb5support gssapi_krb5 krb5profile
+_DP_krad=		krb5 k5crypto com_err krb5profile krb5support verto
+_DP_krb5=		krb5profile k5crypto com_err krb5support
+.else
+_DP_asn1=	com_err roken
+_DP_gssapi_krb5=	gssapi krb5 crypto roken asn1 com_err
+_DP_hdb=	asn1 com_err krb5 roken sqlite3 heimbase
+_DP_heimbase=	pthread
+_DP_heimipcc=	heimbase roken pthread
+_DP_heimipcs=	heimbase roken pthread
+_DP_heimntlm=	crypto com_err krb5 roken
+_DP_hx509=	asn1 com_err crypto roken wind
+_DP_kadm5clnt=	com_err krb5 roken
+_DP_kadm5srv=	com_err hdb krb5 roken
+_DP_kafs5=	asn1 krb5 roken
+_DP_kdc=	roken hdb hx509 krb5 heimntlm asn1 crypto
+_DP_krb5=	asn1 com_err crypt crypto hx509 roken wind heimbase heimipcc
+_DP_roken=	crypt
+_DP_wind=	com_err roken
+.endif
+.endif
 .if ${MK_MITKRB5} == "no"
 _DP_rpcsec_gss=	gssapi
 .else
@@ -481,14 +504,13 @@ _DP_smb=	kiconv
 _DP_ulog=	md
 _DP_fifolog=	z
 _DP_ipf=	kvm
-_DP_tpool=	spl
-_DP_uutil=	avl spl
-_DP_zfs=	md pthread rt umem util uutil m avl bsdxml crypto geom nvpair \
+_DP_uvmem=	pthread
+_DP_zfs=	md pthread rt umem util m avl bsdxml crypto geom nvpair \
 	z zfs_core zutil
 _DP_zfsbootenv= zfs nvpair
 _DP_zfs_core=	nvpair spl zutil
 _DP_zpool=	md pthread z icp spl nvpair avl umem
-_DP_zutil=	avl geom m tpool
+_DP_zutil=	avl geom m
 _DP_be=		zfs spl nvpair zfsbootenv
 _DP_netmap=
 _DP_ifconfig=	m
@@ -497,19 +519,21 @@ _DP_krb5ss=		edit
 
 # OFED support
 .if ${MK_OFED} != "no"
+_DP_bnxtre=	ibverbs pthread
 _DP_cxgb4=	ibverbs pthread
 _DP_ibcm=	ibverbs
 _DP_ibmad=	ibumad
 _DP_ibnetdisc=	osmcomp ibmad ibumad
-_DP_ibumad=	
+_DP_ibumad=
 _DP_ibverbs=
 _DP_irdma=	ibverbs pthread
 _DP_mlx4=	ibverbs pthread
 _DP_mlx5=	ibverbs pthread
-_DP_rdmacm=	ibverbs
-_DP_osmcomp=	pthread
 _DP_opensm=	pthread
+_DP_osmcomp=	pthread
 _DP_osmvendor=	ibumad pthread
+_DP_pcap=	ibverbs mlx5 bnxtre
+_DP_rdmacm=	ibverbs
 .endif
 
 # Define special cases
@@ -759,6 +783,9 @@ LIBSYS_PIC?=	${LIBSYS_PICDIR}/libsys_pic.a
 LIBSAMPLERATEDIR?=	${_LIB_OBJTOP}/lib/libsamplerate
 LIBSAMPLERATE?=	${LIBSAMPLERATEDIR}/libsamplerate${PIE_SUFFIX}.a
 
+LIBUVMEMDIR=	${OBJTOP}/lib/libuvmem
+LIBUVMEM?=	${LIBUVMEMDIR}/libuvmem${PIE_SUFFIX}.a
+
 # Define a directory for each library.  This is useful for adding -L in when
 # not using a --sysroot or for meta mode bootstrapping when there is no
 # Makefile.depend.  These are sorted by directory.
@@ -772,7 +799,6 @@ LIBICP_RESCUE?=	${LIBICP_RESCUEDIR}/libicp_rescue${PIE_SUFFIX}.a
 LIBNVPAIRDIR=	${_LIB_OBJTOP}/cddl/lib/libnvpair
 LIBNVPAIR?=	${LIBNVPAIRDIR}/libnvpair${PIE_SUFFIX}.a
 LIBUMEMDIR=	${_LIB_OBJTOP}/cddl/lib/libumem
-LIBUUTILDIR=	${_LIB_OBJTOP}/cddl/lib/libuutil
 LIBZDBDIR=	${_LIB_OBJTOP}/cddl/lib/libzdb
 LIBZDB?=	${LIBZDBDIR}/libzdb${PIE_SUFFIX}.a
 LIBZFSDIR=	${_LIB_OBJTOP}/cddl/lib/libzfs
@@ -785,7 +811,6 @@ LIBZPOOLDIR=	${_LIB_OBJTOP}/cddl/lib/libzpool
 LIBZPOOL?=	${LIBZPOOLDIR}/libzpool${PIE_SUFFIX}.a
 LIBZUTILDIR=	${_LIB_OBJTOP}/cddl/lib/libzutil
 LIBZUTIL?=	${LIBZUTILDIR}/libzutil${PIE_SUFFIX}.a
-LIBTPOOLDIR=	${_LIB_OBJTOP}/cddl/lib/libtpool
 
 # OFED support
 LIBCXGB4DIR=	${_LIB_OBJTOP}/lib/ofed/libcxgb4
@@ -797,12 +822,12 @@ LIBIBVERBSDIR=	${_LIB_OBJTOP}/lib/ofed/libibverbs
 LIBIRDMADIR=	${_LIB_OBJTOP}/lib/ofed/libirdma
 LIBMLX4DIR=	${_LIB_OBJTOP}/lib/ofed/libmlx4
 LIBMLX5DIR=	${_LIB_OBJTOP}/lib/ofed/libmlx5
+LIBBNXTREDIR=	${_LIB_OBJTOP}/lib/ofed/libbnxtre
 LIBRDMACMDIR=	${_LIB_OBJTOP}/lib/ofed/librdmacm
 LIBOSMCOMPDIR=	${_LIB_OBJTOP}/lib/ofed/complib
 LIBOPENSMDIR=	${_LIB_OBJTOP}/lib/ofed/libopensm
 LIBOSMVENDORDIR=${_LIB_OBJTOP}/lib/ofed/libvendor
 
-LIBDIALOGDIR=	${_LIB_OBJTOP}/gnu/lib/libdialog
 LIBSSPDIR=	${_LIB_OBJTOP}/lib/libssp
 LIBSSP_NONSHAREDDIR=	${_LIB_OBJTOP}/lib/libssp_nonshared
 .if ${MK_MITKRB5} != "no"
@@ -865,6 +890,7 @@ LIBGTESTDIR=	${_LIB_OBJTOP}/lib/googletest/gtest
 LIBGTEST_MAINDIR=	${_LIB_OBJTOP}/lib/googletest/gtest_main
 LIBALIASDIR=	${_LIB_OBJTOP}/lib/libalias/libalias
 LIBBLACKLISTDIR=	${_LIB_OBJTOP}/lib/libblacklist
+LIBBLOCKLISTDIR=	${_LIB_OBJTOP}/lib/libblocklist
 LIBBLOCKSRUNTIMEDIR=	${_LIB_OBJTOP}/lib/libblocksruntime
 LIBBSNMPDIR=	${_LIB_OBJTOP}/lib/libbsnmp/libbsnmp
 LIBCASPERDIR=	${_LIB_OBJTOP}/lib/libcasper/libcasper

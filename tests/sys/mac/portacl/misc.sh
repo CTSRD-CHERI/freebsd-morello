@@ -1,5 +1,7 @@
 #!/bin/sh
 
+dir=`dirname $0`
+
 sysctl security.mac.portacl >/dev/null 2>&1
 if [ $? -ne 0 ]; then
 	echo "1..0 # SKIP MAC_PORTACL is unavailable."
@@ -25,32 +27,29 @@ check_bind() {
 
 	[ "${proto}" = "udp" ] && udpflag="-u"
 
-	out=$(
-		case "${idtype}" in
-		uid|gid)
-			( echo -n | su -m ${name} -c "nc ${udpflag} -l -w ${timeout} $host $port" 2>&1 ) &
-			;;
-		jail)
-			kill $$
-			;;
-		*)
-			kill $$
-		esac
-		sleep 0.3
-		echo | nc ${udpflag} -w ${timeout} $host $port >/dev/null 2>&1
-		wait
-	)
-	case "${out}" in
-	"nc: Permission denied"*|"nc: Operation not permitted"*)
-		echo fl
+	case "${idtype}" in
+	uid|gid)
+		su -m ${name} -c "${dir}/bind 0 ${host} ${proto} ${port}" > /dev/null # unspec
+		retval1=$?
+		su -m ${name} -c "${dir}/bind 2 ${host} ${proto} ${port}" > /dev/null # inet
+		retval2=$?
+		if [ $retval1 -ne $retval2 ]; then
+			echo inconsistent
+			return
+		fi
+		if [ $retval1 -ne 0 ]; then
+			echo fl
+			return
+		fi
 		;;
-	"")
-		echo ok
+	jail)
+		kill $$
 		;;
 	*)
-		echo ${out}
-		;;
+		kill $$
 	esac
+	
+	echo ok
 }
 
 bind_test() {
@@ -67,7 +66,7 @@ bind_test() {
 	out=$(check_bind ${idtype} ${name} ${proto} ${port})
 	if [ "${out}" = "${expect_without_rule}" ]; then
 		echo "ok ${ntest}"
-	elif [ "${out}" = "ok" -o "${out}" = "fl" ]; then
+	elif [ "${out}" = "ok" -o "${out}" = "fl" -o "${out}" = "inconsistent" ]; then
 		echo "not ok ${ntest} # '${out}' != '${expect_without_rule}'"
 	else
 		echo "not ok ${ntest} # unexpected output: '${out}'"
@@ -95,6 +94,7 @@ bind_test() {
 	sysctl security.mac.portacl.rules= >/dev/null
 }
 
+portacl_enabled=$(sysctl -n security.mac.portacl.enabled)
 reserved_high=$(sysctl -n net.inet.ip.portrange.reservedhigh)
 suser_exempt=$(sysctl -n security.mac.portacl.suser_exempt)
 port_high=$(sysctl -n security.mac.portacl.port_high)
@@ -103,4 +103,5 @@ restore_settings() {
 	sysctl -n net.inet.ip.portrange.reservedhigh=${reserved_high} >/dev/null
 	sysctl -n security.mac.portacl.suser_exempt=${suser_exempt} >/dev/null
 	sysctl -n security.mac.portacl.port_high=${port_high} >/dev/null
+	sysctl -n security.mac.portacl.enabled=${portacl_enabled} >/dev/null
 }

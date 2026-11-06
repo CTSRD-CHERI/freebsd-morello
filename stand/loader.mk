@@ -48,16 +48,18 @@ SRCS+=	metadata.c
 # LOADER_GZIP_SUPPORT	Add support for gzip compressed files
 # LOADER_INSTALL_SUPPORT Add support for booting off of installl ISOs
 # LOADER_MBR_SUPPORT	Add support for MBR partitions
+# LOADER_MD_SUPPORT	Add support for Memory disks
 # LOADER_MSDOS_SUPPORT	Add support for FAT filesystems
 # LOADER_NET_SUPPORT	Adds networking support (useless w/o net drivers sometimes)
 # LOADER_NFS_SUPPORT	Add NFS support
 # LOADER_TFTP_SUPPORT	Add TFTP support
 # LOADER_UFS_SUPPORT	Add support for UFS filesystems
+# LOADER_XZ_SUPPORT	Add support for xz compressed files
 # LOADER_ZFS_SUPPORT	Add support for ZFS filesystems
 #
 
 .if ${LOADER_DISK_SUPPORT:Uyes} == "yes"
-CFLAGS.part.c+= -DHAVE_MEMCPY -I${SRCTOP}/sys/contrib/zlib
+CFLAGS.part.c+= ${ZLIB_CFLAGS}
 SRCS+=	disk.c part.c vdisk.c
 .endif
 
@@ -69,10 +71,11 @@ SRCS+= dev_net.c
 SRCS+=  bcache.c
 .endif
 
+.if ${LOADER_MD_SUPPORT:Uno} == "yes"
 .if defined(MD_IMAGE_SIZE)
 CFLAGS+= -DMD_IMAGE_SIZE=${MD_IMAGE_SIZE}
+.endif
 SRCS+=	md.c
-.else
 CLEANFILES+=	md.o
 .endif
 
@@ -89,7 +92,7 @@ SRCS+=	interp_lua.c
 .include "${BOOTSRC}/lua.mk"
 LDR_INTERP=	${LIBLUA}
 LDR_INTERP32=	${LIBLUA32}
-CFLAGS.interp_lua.c= -DLUA_PATH=\"${LUAPATH}\" -I${FLUASRC}/modules
+CFLAGS.interp_lua.c= -DLUA_PATH=\"${LUAPATH}\" -I${FLUASRC}/lfs
 .elif ${LOADER_INTERP} == "4th"
 SRCS+=	interp_forth.c
 .include "${BOOTSRC}/ficl.mk"
@@ -100,8 +103,6 @@ SRCS+=	interp_simple.c
 .else
 .error Unknown interpreter ${LOADER_INTERP}
 .endif
-
-.include "${BOOTSRC}/veriexec.mk"
 
 .if defined(BOOT_PROMPT_123)
 CFLAGS+=	-DBOOT_PROMPT_123
@@ -132,11 +133,11 @@ CFLAGS+=	-DLOADER_GZIP_SUPPORT
 .if ${LOADER_BZIP2_SUPPORT:Uno} == "yes"
 CFLAGS+=	-DLOADER_BZIP2_SUPPORT
 .endif
-
-# Network related things
-.if ${LOADER_NET_SUPPORT:Uno} == "yes"
-CFLAGS+=	-DLOADER_NET_SUPPORT
+.if ${LOADER_XZ_SUPPORT:Uno} == "yes"
+CFLAGS+=	-DLOADER_XZ_SUPPORT
 .endif
+
+# Network related things (LOADER_NET_SUPPORT itself: see defs.mk)
 .if ${LOADER_NFS_SUPPORT:Uno} == "yes"
 CFLAGS+=	-DLOADER_NFS_SUPPORT
 .endif
@@ -154,7 +155,7 @@ CFLAGS+= -DLOADER_MBR_SUPPORT
 
 .if ${HAVE_ZFS:Uno} == "yes"
 CFLAGS+=	-DLOADER_ZFS_SUPPORT
-CFLAGS+=	-I${ZFSSRC}
+CFLAGS+=	-I${SAZFSSRC}
 CFLAGS+=	-I${SYSDIR}/cddl/boot/zfs
 CFLAGS+=	-I${SYSDIR}/cddl/contrib/opensolaris/uts/common
 SRCS+=		zfs_cmd.c
@@ -164,14 +165,14 @@ LIBFICL=	${BOOTOBJ}/ficl/libficl.a
 .if ${MACHINE} == "i386"
 LIBFICL32=	${LIBFICL}
 .else
-LIBFICL32=	${BOOTOBJ}/ficl32/libficl.a
+LIBFICL32=	${BOOTOBJ}/${"${LOADER}" == "loader_ia32":?efi/ficl32efi:ficl32}/libficl.a
 .endif
 
 LIBLUA=		${BOOTOBJ}/liblua/liblua.a
 .if ${MACHINE} == "i386"
 LIBLUA32=	${LIBLUA}
 .else
-LIBLUA32=	${BOOTOBJ}/liblua32/liblua.a
+LIBLUA32=	${BOOTOBJ}/${"${LOADER}" == "loader_ia32":?efi/liblua32efi:liblua32}/liblua.a
 .endif
 
 CLEANFILES+=	vers.c

@@ -102,8 +102,8 @@ struct sc_chinfo {
 	struct sc_info		*parent;
 	struct pcm_channel	*channel;
 	struct snd_dbuf		*buffer;
-	u_int32_t		fmt, spd, phys_buf, bps;
-	u_int32_t		dma_active:1, dma_was_active:1;
+	uint32_t		fmt, spd, phys_buf, bps;
+	uint32_t		dma_active:1, dma_was_active:1;
 	int			dir;
 };
 
@@ -115,12 +115,12 @@ struct sc_info {
 	bus_dma_tag_t		parent_dmat;
 	struct resource		*reg, *irq;
 	int			regid, irqid;
-	void 			*ih;
-	struct mtx		*lock;
+	void			*ih;
+	struct mtx		lock;
 
 	int			spdif_enabled;
 	unsigned int		bufsz;
-	struct sc_chinfo 	pch, rch;
+	struct sc_chinfo	pch, rch;
 
 	struct mpu401	*mpu;
 	mpu401_intr_t		*mpu_intr;
@@ -132,7 +132,7 @@ struct sc_info {
 
 /* Channel caps */
 
-static u_int32_t cmi_fmt[] = {
+static uint32_t cmi_fmt[] = {
 	SND_FORMAT(AFMT_U8, 1, 0),
 	SND_FORMAT(AFMT_U8, 2, 0),
 	SND_FORMAT(AFMT_S16_LE, 1, 0),
@@ -145,7 +145,7 @@ static struct pcmchan_caps cmi_caps = {5512, 48000, cmi_fmt, 0};
 /* ------------------------------------------------------------------------- */
 /* Register Utilities */
 
-static u_int32_t
+static uint32_t
 cmi_rd(struct sc_info *sc, int regno, int size)
 {
 	switch (size) {
@@ -162,7 +162,7 @@ cmi_rd(struct sc_info *sc, int regno, int size)
 }
 
 static void
-cmi_wr(struct sc_info *sc, int regno, u_int32_t data, int size)
+cmi_wr(struct sc_info *sc, int regno, uint32_t data, int size)
 {
 	switch (size) {
 	case 1:
@@ -179,9 +179,9 @@ cmi_wr(struct sc_info *sc, int regno, u_int32_t data, int size)
 
 static void
 cmi_partial_wr4(struct sc_info *sc,
-		int reg, int shift, u_int32_t mask, u_int32_t val)
+		int reg, int shift, uint32_t mask, uint32_t val)
 {
-	u_int32_t r;
+	uint32_t r;
 
 	r = cmi_rd(sc, reg, 4);
 	r &= ~(mask << shift);
@@ -190,9 +190,9 @@ cmi_partial_wr4(struct sc_info *sc,
 }
 
 static void
-cmi_clr4(struct sc_info *sc, int reg, u_int32_t mask)
+cmi_clr4(struct sc_info *sc, int reg, uint32_t mask)
 {
-	u_int32_t r;
+	uint32_t r;
 
 	r = cmi_rd(sc, reg, 4);
 	r &= ~mask;
@@ -200,9 +200,9 @@ cmi_clr4(struct sc_info *sc, int reg, u_int32_t mask)
 }
 
 static void
-cmi_set4(struct sc_info *sc, int reg, u_int32_t mask)
+cmi_set4(struct sc_info *sc, int reg, uint32_t mask)
 {
-	u_int32_t r;
+	uint32_t r;
 
 	r = cmi_rd(sc, reg, 4);
 	r |= mask;
@@ -219,7 +219,7 @@ static int cmi_rates[] = {5512, 8000, 11025, 16000,
 /* cmpci_rate_to_regvalue returns sampling freq selector for FCR1
  * register - reg order is 5k,11k,22k,44k,8k,16k,32k,48k */
 
-static u_int32_t
+static uint32_t
 cmpci_rate_to_regvalue(int rate)
 {
 	int i, r;
@@ -237,7 +237,7 @@ cmpci_rate_to_regvalue(int rate)
 }
 
 static int
-cmpci_regvalue_to_rate(u_int32_t r)
+cmpci_regvalue_to_rate(uint32_t r)
 {
 	int i;
 
@@ -251,14 +251,14 @@ cmpci_regvalue_to_rate(u_int32_t r)
  * playback or capture.  We use ch0 for playback and ch1 for capture. */
 
 static void
-cmi_dma_prog(struct sc_info *sc, struct sc_chinfo *ch, u_int32_t base)
+cmi_dma_prog(struct sc_info *sc, struct sc_chinfo *ch, uint32_t base)
 {
-	u_int32_t s, i, sz;
+	uint32_t s, i, sz;
 
-	ch->phys_buf = sndbuf_getbufaddr(ch->buffer);
+	ch->phys_buf = ch->buffer->buf_addr;
 
 	cmi_wr(sc, base, ch->phys_buf, 4);
-	sz = (u_int32_t)sndbuf_getsize(ch->buffer);
+	sz = (uint32_t)ch->buffer->bufsize;
 
 	s = sz / ch->bps - 1;
 	cmi_wr(sc, base + 4, s, 2);
@@ -279,10 +279,10 @@ cmi_ch0_start(struct sc_info *sc, struct sc_chinfo *ch)
 	ch->dma_active = 1;
 }
 
-static u_int32_t
+static uint32_t
 cmi_ch0_stop(struct sc_info *sc, struct sc_chinfo *ch)
 {
-	u_int32_t r = ch->dma_active;
+	uint32_t r = ch->dma_active;
 
 	cmi_clr4(sc, CMPCI_REG_INTR_CTRL, CMPCI_REG_CH0_INTR_ENABLE);
 	cmi_clr4(sc, CMPCI_REG_FUNC_0, CMPCI_REG_CH0_ENABLE);
@@ -304,10 +304,10 @@ cmi_ch1_start(struct sc_info *sc, struct sc_chinfo *ch)
 	ch->dma_active = 1;
 }
 
-static u_int32_t
+static uint32_t
 cmi_ch1_stop(struct sc_info *sc, struct sc_chinfo *ch)
 {
-	u_int32_t r = ch->dma_active;
+	uint32_t r = ch->dma_active;
 
 	cmi_clr4(sc, CMPCI_REG_INTR_CTRL, CMPCI_REG_CH1_INTR_ENABLE);
 	cmi_clr4(sc, CMPCI_REG_FUNC_0, CMPCI_REG_CH1_ENABLE);
@@ -319,7 +319,7 @@ cmi_ch1_stop(struct sc_info *sc, struct sc_chinfo *ch)
 
 static void
 cmi_spdif_speed(struct sc_info *sc, int speed) {
-	u_int32_t fcr1, lcr, mcr;
+	uint32_t fcr1, lcr, mcr;
 
 	if (speed >= 44100) {
 		fcr1 = CMPCI_REG_SPDIF0_ENABLE;
@@ -352,7 +352,7 @@ cmichan_init(kobj_t obj, void *devinfo,
 	ch->channel    = c;
 	ch->bps        = 1;
 	ch->fmt        = SND_FORMAT(AFMT_U8, 1, 0);
-	ch->spd        = DSP_DEFAULT_SPEED;
+	ch->spd        = 8000;
 	ch->buffer     = b;
 	ch->dma_active = 0;
 	if (sndbuf_alloc(ch->buffer, sc->parent_dmat, 0, sc->bufsz) != 0) {
@@ -361,23 +361,23 @@ cmichan_init(kobj_t obj, void *devinfo,
 	}
 
 	ch->dir = dir;
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	if (ch->dir == PCMDIR_PLAY) {
 		cmi_dma_prog(sc, ch, CMPCI_REG_DMA0_BASE);
 	} else {
 		cmi_dma_prog(sc, ch, CMPCI_REG_DMA1_BASE);
 	}
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 
 	return ch;
 }
 
 static int
-cmichan_setformat(kobj_t obj, void *data, u_int32_t format)
+cmichan_setformat(kobj_t obj, void *data, uint32_t format)
 {
 	struct sc_chinfo *ch = data;
 	struct sc_info	*sc = ch->parent;
-	u_int32_t f;
+	uint32_t f;
 
 	if (format & AFMT_S16_LE) {
 		f = CMPCI_REG_FORMAT_16BIT;
@@ -394,7 +394,7 @@ cmichan_setformat(kobj_t obj, void *data, u_int32_t format)
 		f |= CMPCI_REG_FORMAT_MONO;
 	}
 
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	if (ch->dir == PCMDIR_PLAY) {
 		cmi_partial_wr4(ch->parent,
 				CMPCI_REG_CHANNEL_FORMAT,
@@ -408,21 +408,21 @@ cmichan_setformat(kobj_t obj, void *data, u_int32_t format)
 				CMPCI_REG_CH1_FORMAT_MASK,
 				f);
 	}
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 	ch->fmt = format;
 
 	return 0;
 }
 
-static u_int32_t
-cmichan_setspeed(kobj_t obj, void *data, u_int32_t speed)
+static uint32_t
+cmichan_setspeed(kobj_t obj, void *data, uint32_t speed)
 {
 	struct sc_chinfo *ch = data;
 	struct sc_info	*sc = ch->parent;
-	u_int32_t r, rsp __unused;
+	uint32_t r, rsp __unused;
 
 	r = cmpci_rate_to_regvalue(speed);
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	if (ch->dir == PCMDIR_PLAY) {
 		if (speed < 44100) {
 			/* disable if req before rate change */
@@ -439,7 +439,7 @@ cmichan_setspeed(kobj_t obj, void *data, u_int32_t speed)
 		}
 		rsp = cmi_rd(ch->parent, CMPCI_REG_FUNC_1, 4);
 		rsp >>= CMPCI_REG_DAC_FS_SHIFT;
-		rsp &= 	CMPCI_REG_DAC_FS_MASK;
+		rsp &=	CMPCI_REG_DAC_FS_MASK;
 	} else {
 		cmi_partial_wr4(ch->parent,
 				CMPCI_REG_FUNC_1,
@@ -448,9 +448,9 @@ cmichan_setspeed(kobj_t obj, void *data, u_int32_t speed)
 				r);
 		rsp = cmi_rd(ch->parent, CMPCI_REG_FUNC_1, 4);
 		rsp >>= CMPCI_REG_ADC_FS_SHIFT;
-		rsp &= 	CMPCI_REG_ADC_FS_MASK;
+		rsp &=	CMPCI_REG_ADC_FS_MASK;
 	}
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 	ch->spd = cmpci_regvalue_to_rate(r);
 
 	DEB(printf("cmichan_setspeed (%s) %d -> %d (%d)\n",
@@ -460,8 +460,8 @@ cmichan_setspeed(kobj_t obj, void *data, u_int32_t speed)
 	return ch->spd;
 }
 
-static u_int32_t
-cmichan_setblocksize(kobj_t obj, void *data, u_int32_t blocksize)
+static uint32_t
+cmichan_setblocksize(kobj_t obj, void *data, uint32_t blocksize)
 {
 	struct sc_chinfo *ch = data;
 	struct sc_info	 *sc = ch->parent;
@@ -470,7 +470,8 @@ cmichan_setblocksize(kobj_t obj, void *data, u_int32_t blocksize)
 	if (blocksize > sc->bufsz / CMI_INTR_PER_BUFFER) {
 		blocksize = sc->bufsz / CMI_INTR_PER_BUFFER;
 	}
-	sndbuf_resize(ch->buffer, CMI_INTR_PER_BUFFER, blocksize);
+	if (sndbuf_resize(ch->buffer, CMI_INTR_PER_BUFFER, blocksize) != 0)
+		return 0;
 
 	return blocksize;
 }
@@ -484,7 +485,7 @@ cmichan_trigger(kobj_t obj, void *data, int go)
 	if (!PCMTRIG_COMMON(go))
 		return 0;
 
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	if (ch->dir == PCMDIR_PLAY) {
 		switch(go) {
 		case PCMTRIG_START:
@@ -506,26 +507,26 @@ cmichan_trigger(kobj_t obj, void *data, int go)
 			break;
 		}
 	}
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 	return 0;
 }
 
-static u_int32_t
+static uint32_t
 cmichan_getptr(kobj_t obj, void *data)
 {
 	struct sc_chinfo	*ch = data;
 	struct sc_info		*sc = ch->parent;
-	u_int32_t physptr, bufptr, sz;
+	uint32_t physptr, bufptr, sz;
 
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	if (ch->dir == PCMDIR_PLAY) {
 		physptr = cmi_rd(sc, CMPCI_REG_DMA0_BASE, 4);
 	} else {
 		physptr = cmi_rd(sc, CMPCI_REG_DMA1_BASE, 4);
 	}
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 
-	sz = sndbuf_getsize(ch->buffer);
+	sz = ch->buffer->bufsize;
 	bufptr = (physptr - ch->phys_buf + sz - ch->bps) % sz;
 
 	return bufptr;
@@ -535,10 +536,10 @@ static void
 cmi_intr(void *data)
 {
 	struct sc_info *sc = data;
-	u_int32_t intrstat;
-	u_int32_t toclear;
+	uint32_t intrstat;
+	uint32_t toclear;
 
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	intrstat = cmi_rd(sc, CMPCI_REG_INTR_STATUS, 4);
 	if ((intrstat & CMPCI_REG_ANY_INTR) != 0) {
 		toclear = 0;
@@ -554,7 +555,7 @@ cmi_intr(void *data)
 
 		if (toclear) {
 			cmi_clr4(sc, CMPCI_REG_INTR_CTRL, toclear);
-			snd_mtxunlock(sc->lock);
+			mtx_unlock(&sc->lock);
 
 			/* Signal interrupts to channel */
 			if (intrstat & CMPCI_REG_CH0_INTR) {
@@ -565,14 +566,14 @@ cmi_intr(void *data)
 				chn_intr(sc->rch.channel);
 			}
 
-			snd_mtxlock(sc->lock);
+			mtx_lock(&sc->lock);
 			cmi_set4(sc, CMPCI_REG_INTR_CTRL, toclear);
 		}
 	}
 	if(sc->mpu_intr) {
 		(sc->mpu_intr)(sc->mpu);
 	}
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 	return;
 }
 
@@ -583,13 +584,13 @@ cmichan_getcaps(kobj_t obj, void *data)
 }
 
 static kobj_method_t cmichan_methods[] = {
-    	KOBJMETHOD(channel_init,		cmichan_init),
-    	KOBJMETHOD(channel_setformat,		cmichan_setformat),
-    	KOBJMETHOD(channel_setspeed,		cmichan_setspeed),
-    	KOBJMETHOD(channel_setblocksize,	cmichan_setblocksize),
-    	KOBJMETHOD(channel_trigger,		cmichan_trigger),
-    	KOBJMETHOD(channel_getptr,		cmichan_getptr),
-    	KOBJMETHOD(channel_getcaps,		cmichan_getcaps),
+	KOBJMETHOD(channel_init,		cmichan_init),
+	KOBJMETHOD(channel_setformat,		cmichan_setformat),
+	KOBJMETHOD(channel_setspeed,		cmichan_setspeed),
+	KOBJMETHOD(channel_setblocksize,	cmichan_setblocksize),
+	KOBJMETHOD(channel_trigger,		cmichan_trigger),
+	KOBJMETHOD(channel_getptr,		cmichan_getptr),
+	KOBJMETHOD(channel_getcaps,		cmichan_getcaps),
 	KOBJMETHOD_END
 };
 CHANNEL_DECLARE(cmichan);
@@ -598,26 +599,26 @@ CHANNEL_DECLARE(cmichan);
 /* Mixer - sb16 with kinks */
 
 static void
-cmimix_wr(struct sc_info *sc, u_int8_t port, u_int8_t val)
+cmimix_wr(struct sc_info *sc, uint8_t port, uint8_t val)
 {
 	cmi_wr(sc, CMPCI_REG_SBADDR, port, 1);
 	cmi_wr(sc, CMPCI_REG_SBDATA, val, 1);
 }
 
-static u_int8_t
-cmimix_rd(struct sc_info *sc, u_int8_t port)
+static uint8_t
+cmimix_rd(struct sc_info *sc, uint8_t port)
 {
 	cmi_wr(sc, CMPCI_REG_SBADDR, port, 1);
-	return (u_int8_t)cmi_rd(sc, CMPCI_REG_SBDATA, 1);
+	return (uint8_t)cmi_rd(sc, CMPCI_REG_SBDATA, 1);
 }
 
 struct sb16props {
-	u_int8_t  rreg;     /* right reg chan register */
-	u_int8_t  stereo:1; /* (no explanation needed, honest) */
-	u_int8_t  rec:1;    /* recording source */
-	u_int8_t  bits:3;   /* num bits to represent maximum gain rep */
-	u_int8_t  oselect;  /* output select mask */
-	u_int8_t  iselect;  /* right input select mask */
+	uint8_t  rreg;     /* right reg chan register */
+	uint8_t  stereo:1; /* (no explanation needed, honest) */
+	uint8_t  rec:1;    /* recording source */
+	uint8_t  bits:3;   /* num bits to represent maximum gain rep */
+	uint8_t  oselect;  /* output select mask */
+	uint8_t  iselect;  /* right input select mask */
 } static const cmt[SOUND_MIXER_NRDEVICES] = {
 	[SOUND_MIXER_SYNTH]   = {CMPCI_SB16_MIXER_FM_R,      1, 1, 5,
 				 CMPCI_SB16_SW_FM,   CMPCI_SB16_MIXER_FM_SRC_R},
@@ -649,7 +650,7 @@ static int
 cmimix_init(struct snd_mixer *m)
 {
 	struct sc_info	*sc = mix_getdevinfo(m);
-	u_int32_t	i,v;
+	uint32_t	i,v;
 
 	for(i = v = 0; i < SOUND_MIXER_NRDEVICES; i++) {
 		if (cmt[i].bits) v |= 1 << i;
@@ -673,8 +674,8 @@ static int
 cmimix_set(struct snd_mixer *m, unsigned dev, unsigned left, unsigned right)
 {
 	struct sc_info *sc = mix_getdevinfo(m);
-	u_int32_t r, l, max;
-	u_int8_t  v;
+	uint32_t r, l, max;
+	uint8_t  v;
 
 	max = (1 << cmt[dev].bits) - 1;
 
@@ -717,11 +718,11 @@ cmimix_set(struct snd_mixer *m, unsigned dev, unsigned left, unsigned right)
 	return 0;
 }
 
-static u_int32_t
-cmimix_setrecsrc(struct snd_mixer *m, u_int32_t src)
+static uint32_t
+cmimix_setrecsrc(struct snd_mixer *m, uint32_t src)
 {
 	struct sc_info *sc = mix_getdevinfo(m);
-	u_int32_t i, ml, sl;
+	uint32_t i, ml, sl;
 
 	ml = sl = 0;
 	for(i = 0; i < SOUND_MIXER_NRDEVICES; i++) {
@@ -754,10 +755,10 @@ cmi_initsys(struct sc_info* sc)
 	   to a device specific sysctl "dev.pcm.X.yyy" via
 	   device_get_sysctl_*() as discussed on multimedia@ in msg-id
 	   <861wujij2q.fsf@xps.des.no> */
-	SYSCTL_ADD_INT(device_get_sysctl_ctx(sc->dev), 
+	SYSCTL_ADD_INT(device_get_sysctl_ctx(sc->dev),
 		       SYSCTL_CHILDREN(device_get_sysctl_tree(sc->dev)),
-		       OID_AUTO, "spdif_enabled", CTLFLAG_RW, 
-		       &sc->spdif_enabled, 0, 
+		       OID_AUTO, "spdif_enabled", CTLFLAG_RW,
+		       &sc->spdif_enabled, 0,
 		       "enable SPDIF output at 44.1 kHz and above");
 
 	return 0;
@@ -778,10 +779,10 @@ MIXER_DECLARE(cmi_mixer);
 
 static unsigned char
 cmi_mread(struct mpu401 *arg, void *sc, int reg)
-{	
+{
 	unsigned int d;
 
-		d = bus_space_read_1(0,0, 0x330 + reg); 
+		d = bus_space_read_1(0,0, 0x330 + reg);
 	/*	printf("cmi_mread: reg %x %x\n",reg, d);
 	*/
 	return d;
@@ -799,18 +800,18 @@ cmi_muninit(struct mpu401 *arg, void *cookie)
 {
 	struct sc_info *sc = cookie;
 
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	sc->mpu_intr = NULL;
 	sc->mpu = NULL;
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 
 	return 0;
 }
 
 static kobj_method_t cmi_mpu_methods[] = {
-    	KOBJMETHOD(mpufoi_read,		cmi_mread),
-    	KOBJMETHOD(mpufoi_write,	cmi_mwrite),
-    	KOBJMETHOD(mpufoi_uninit,	cmi_muninit),
+	KOBJMETHOD(mpufoi_read,		cmi_mread),
+	KOBJMETHOD(mpufoi_write,	cmi_mwrite),
+	KOBJMETHOD(mpufoi_uninit,	cmi_muninit),
 	KOBJMETHOD_END
 };
 
@@ -821,19 +822,19 @@ cmi_midiattach(struct sc_info *sc) {
 /*
 	const struct {
 		int port,bits;
-	} *p, ports[] = { 
-		{0x330,0}, 
-		{0x320,1}, 
-		{0x310,2}, 
-		{0x300,3}, 
+	} *p, ports[] = {
+		{0x330,0},
+		{0x320,1},
+		{0x310,2},
+		{0x300,3},
 		{0,0} } ;
 	Notes, CMPCI_REG_VMPUSEL sets the io port for the mpu.  Does
 	anyone know how to bus_space tag?
 */
 	cmi_clr4(sc, CMPCI_REG_FUNC_1, CMPCI_REG_UART_ENABLE);
-	cmi_clr4(sc, CMPCI_REG_LEGACY_CTRL, 
+	cmi_clr4(sc, CMPCI_REG_LEGACY_CTRL,
 			CMPCI_REG_VMPUSEL_MASK << CMPCI_REG_VMPUSEL_SHIFT);
-	cmi_set4(sc, CMPCI_REG_LEGACY_CTRL, 
+	cmi_set4(sc, CMPCI_REG_LEGACY_CTRL,
 			0 << CMPCI_REG_VMPUSEL_SHIFT );
 	cmi_set4(sc, CMPCI_REG_FUNC_1, CMPCI_REG_UART_ENABLE);
 	sc->mpu = mpu401_init(&cmi_mpu_class, sc, cmi_intr, &sc->mpu_intr);
@@ -933,7 +934,8 @@ cmi_attach(device_t dev)
 	char			status[SND_STATUSLEN];
 
 	sc = malloc(sizeof(*sc), M_DEVBUF, M_WAITOK | M_ZERO);
-	sc->lock = snd_mtxcreate(device_get_nameunit(dev), "snd_cmi softc");
+	mtx_init(&sc->lock, device_get_nameunit(dev), "snd_cmi softc",
+	    MTX_DEF);
 	pci_enable_busmaster(dev);
 
 	sc->dev = dev;
@@ -979,10 +981,10 @@ cmi_attach(device_t dev)
 	if (cmi_init(sc))
 		goto bad;
 
+	pcm_init(dev, sc);
+
 	if (mixer_init(dev, &cmi_mixer_class, sc))
 		goto bad;
-
-	pcm_init(dev, sc);
 
 	cmi_initsys(sc);
 
@@ -1007,10 +1009,8 @@ cmi_attach(device_t dev)
 		bus_release_resource(dev, SYS_RES_IRQ, sc->irqid, sc->irq);
 	if (sc->reg)
 		bus_release_resource(dev, SYS_RES_IOPORT, sc->regid, sc->reg);
-	if (sc->lock)
-		snd_mtxfree(sc->lock);
-	if (sc)
-		free(sc, M_DEVBUF);
+	mtx_destroy(&sc->lock);
+	free(sc, M_DEVBUF);
 
 	return ENXIO;
 }
@@ -1037,7 +1037,7 @@ cmi_detach(device_t dev)
 	if (sc->mpu_reg)
 	    bus_release_resource(dev, SYS_RES_IOPORT, sc->mpu_regid, sc->mpu_reg);
 
-	snd_mtxfree(sc->lock);
+	mtx_destroy(&sc->lock);
 	free(sc, M_DEVBUF);
 
 	return 0;
@@ -1048,11 +1048,11 @@ cmi_suspend(device_t dev)
 {
 	struct sc_info *sc = pcm_getdevinfo(dev);
 
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	sc->pch.dma_was_active = cmi_ch0_stop(sc, &sc->pch);
 	sc->rch.dma_was_active = cmi_ch1_stop(sc, &sc->rch);
 	cmi_power(sc, 3);
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 	return 0;
 }
 
@@ -1061,17 +1061,17 @@ cmi_resume(device_t dev)
 {
 	struct sc_info *sc = pcm_getdevinfo(dev);
 
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	cmi_power(sc, 0);
 	if (cmi_init(sc) != 0) {
 		device_printf(dev, "unable to reinitialize the card\n");
-		snd_mtxunlock(sc->lock);
+		mtx_unlock(&sc->lock);
 		return ENXIO;
 	}
 
 	if (mixer_reinit(dev) == -1) {
 		device_printf(dev, "unable to reinitialize the mixer\n");
-		snd_mtxunlock(sc->lock);
+		mtx_unlock(&sc->lock);
                 return ENXIO;
         }
 
@@ -1086,7 +1086,7 @@ cmi_resume(device_t dev)
 		cmichan_setformat(NULL, &sc->rch, sc->rch.fmt);
 		cmi_ch1_start(sc, &sc->rch);
 	}
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 	return 0;
 }
 
@@ -1096,7 +1096,7 @@ static device_method_t cmi_methods[] = {
 	DEVMETHOD(device_detach,        cmi_detach),
 	DEVMETHOD(device_resume,        cmi_resume),
 	DEVMETHOD(device_suspend,       cmi_suspend),
-	{ 0, 0 }
+	DEVMETHOD_END
 };
 
 static driver_t cmi_driver = {
@@ -1106,6 +1106,6 @@ static driver_t cmi_driver = {
 };
 
 DRIVER_MODULE(snd_cmi, pci, cmi_driver, 0, 0);
-MODULE_DEPEND(snd_cmi, sound, SOUND_MINVER, SOUND_PREFVER, SOUND_MAXVER);
+MODULE_DEPEND(snd_cmi, sound, 1, 1, 1);
 MODULE_DEPEND(snd_cmi, midi, 1,1,1);
 MODULE_VERSION(snd_cmi, 1);

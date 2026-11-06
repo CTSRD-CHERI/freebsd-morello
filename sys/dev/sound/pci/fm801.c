@@ -107,7 +107,7 @@
 static int fm801ch_setup(struct pcm_channel *c);
 */
 
-static u_int32_t fmts[] = {
+static uint32_t fmts[] = {
 	SND_FORMAT(AFMT_U8, 1, 0),
 	SND_FORMAT(AFMT_U8, 2, 0),
 	SND_FORMAT(AFMT_S16_LE, 1, 0),
@@ -126,8 +126,8 @@ struct fm801_chinfo {
 	struct fm801_info	*parent;
 	struct pcm_channel	*channel;
 	struct snd_dbuf		*buffer;
-	u_int32_t		spd, dir, fmt;  /* speed, direction, format */
-	u_int32_t		shift;
+	uint32_t		spd, dir, fmt;  /* speed, direction, format */
+	uint32_t		shift;
 };
 
 struct fm801_info {
@@ -138,13 +138,13 @@ struct fm801_info {
 
 	device_t		dev;
 	int			num;
-	u_int32_t		unit;
+	uint32_t		unit;
 
 	struct resource		*reg, *irq;
 	int			regtype, regid, irqid;
 	void			*ih;
 
-	u_int32_t		play_flip,
+	uint32_t		play_flip,
 				play_nextblk,
 				play_start,
 				play_blksize,
@@ -152,7 +152,7 @@ struct fm801_info {
 				play_shift,
 				play_size;
 
-	u_int32_t		rec_flip,
+	uint32_t		rec_flip,
 				rec_nextblk,
 				rec_start,
 				rec_blksize,
@@ -168,7 +168,7 @@ struct fm801_info {
 };
 
 /* Bus Read / Write routines */
-static u_int32_t
+static uint32_t
 fm801_rd(struct fm801_info *fm801, int regno, int size)
 {
 	switch(size) {
@@ -184,7 +184,7 @@ fm801_rd(struct fm801_info *fm801, int regno, int size)
 }
 
 static void
-fm801_wr(struct fm801_info *fm801, int regno, u_int32_t data, int size)
+fm801_wr(struct fm801_info *fm801, int regno, uint32_t data, int size)
 {
 
 	switch(size) {
@@ -236,7 +236,7 @@ fm801_rdcd(kobj_t obj, void *devinfo, int regno)
 }
 
 static int
-fm801_wrcd(kobj_t obj, void *devinfo, int regno, u_int32_t data)
+fm801_wrcd(kobj_t obj, void *devinfo, int regno, uint32_t data)
 {
 	struct fm801_info *fm801 = (struct fm801_info *)devinfo;
 	int i;
@@ -272,8 +272,8 @@ fm801_wrcd(kobj_t obj, void *devinfo, int regno, u_int32_t data)
 }
 
 static kobj_method_t fm801_ac97_methods[] = {
-    	KOBJMETHOD(ac97_read,		fm801_rdcd),
-    	KOBJMETHOD(ac97_write,		fm801_wrcd),
+	KOBJMETHOD(ac97_read,		fm801_rdcd),
+	KOBJMETHOD(ac97_write,		fm801_wrcd),
 	DEVMETHOD_END
 };
 AC97_DECLARE(fm801_ac97);
@@ -286,8 +286,8 @@ AC97_DECLARE(fm801_ac97);
 static void
 fm801_intr(void *p)
 {
-	struct fm801_info 	*fm801 = (struct fm801_info *)p;
-	u_int32_t       	intsrc = fm801_rd(fm801, FM_INTSTATUS, 2);
+	struct fm801_info	*fm801 = (struct fm801_info *)p;
+	uint32_t	intsrc = fm801_rd(fm801, FM_INTSTATUS, 2);
 
 	DPRINT("\nfm801_intr intsrc 0x%x ", intsrc);
 
@@ -342,7 +342,7 @@ fm801ch_init(kobj_t obj, void *devinfo, struct snd_dbuf *b, struct pcm_channel *
 }
 
 static int
-fm801ch_setformat(kobj_t obj, void *data, u_int32_t format)
+fm801ch_setformat(kobj_t obj, void *data, uint32_t format)
 {
 	struct fm801_chinfo *ch = data;
 	struct fm801_info *fm801 = ch->parent;
@@ -370,8 +370,8 @@ fm801ch_setformat(kobj_t obj, void *data, u_int32_t format)
 }
 
 struct {
-	u_int32_t limit;
-	u_int32_t rate;
+	uint32_t limit;
+	uint32_t rate;
 } fm801_rates[11] = {
 	{  6600,  5500 },
 	{  8750,  8000 },
@@ -387,8 +387,8 @@ struct {
 /* anything above -> 48000 */
 };
 
-static u_int32_t
-fm801ch_setspeed(kobj_t obj, void *data, u_int32_t speed)
+static uint32_t
+fm801ch_setspeed(kobj_t obj, void *data, uint32_t speed)
 {
 	struct fm801_chinfo *ch = data;
 	struct fm801_info *fm801 = ch->parent;
@@ -413,8 +413,8 @@ fm801ch_setspeed(kobj_t obj, void *data, u_int32_t speed)
 	return fm801_rates[i].rate;
 }
 
-static u_int32_t
-fm801ch_setblocksize(kobj_t obj, void *data, u_int32_t blocksize)
+static uint32_t
+fm801ch_setblocksize(kobj_t obj, void *data, uint32_t blocksize)
 {
 	struct fm801_chinfo *ch = data;
 	struct fm801_info *fm801 = ch->parent;
@@ -440,8 +440,8 @@ fm801ch_trigger(kobj_t obj, void *data, int go)
 {
 	struct fm801_chinfo *ch = data;
 	struct fm801_info *fm801 = ch->parent;
-	u_int32_t baseaddr = sndbuf_getbufaddr(ch->buffer);
-	u_int32_t k1;
+	uint32_t baseaddr = ch->buffer->buf_addr;
+	uint32_t k1;
 
 	DPRINT("fm801ch_trigger go %d , ", go);
 
@@ -490,12 +490,12 @@ fm801ch_trigger(kobj_t obj, void *data, int go)
 }
 
 /* Almost ALSA copy */
-static u_int32_t
+static uint32_t
 fm801ch_getptr(kobj_t obj, void *data)
 {
 	struct fm801_chinfo *ch = data;
 	struct fm801_info *fm801 = ch->parent;
-	u_int32_t result = 0;
+	uint32_t result = 0;
 
 	if (ch->dir == PCMDIR_PLAY) {
 		result = fm801_rd(fm801,
@@ -519,13 +519,13 @@ fm801ch_getcaps(kobj_t obj, void *data)
 }
 
 static kobj_method_t fm801ch_methods[] = {
-    	KOBJMETHOD(channel_init,		fm801ch_init),
-    	KOBJMETHOD(channel_setformat,		fm801ch_setformat),
-    	KOBJMETHOD(channel_setspeed,		fm801ch_setspeed),
-    	KOBJMETHOD(channel_setblocksize,	fm801ch_setblocksize),
-    	KOBJMETHOD(channel_trigger,		fm801ch_trigger),
-    	KOBJMETHOD(channel_getptr,		fm801ch_getptr),
-    	KOBJMETHOD(channel_getcaps,		fm801ch_getcaps),
+	KOBJMETHOD(channel_init,		fm801ch_init),
+	KOBJMETHOD(channel_setformat,		fm801ch_setformat),
+	KOBJMETHOD(channel_setspeed,		fm801ch_setspeed),
+	KOBJMETHOD(channel_setblocksize,	fm801ch_setblocksize),
+	KOBJMETHOD(channel_trigger,		fm801ch_trigger),
+	KOBJMETHOD(channel_getptr,		fm801ch_getptr),
+	KOBJMETHOD(channel_getcaps,		fm801ch_getcaps),
 	DEVMETHOD_END
 };
 CHANNEL_DECLARE(fm801ch);
@@ -538,7 +538,7 @@ CHANNEL_DECLARE(fm801ch);
 static int
 fm801_init(struct fm801_info *fm801)
 {
-	u_int32_t k1;
+	uint32_t k1;
 
 	/* reset codec */
 	fm801_wr(fm801, FM_CODEC_CTL, 0x0020,2);
@@ -569,11 +569,11 @@ fm801_init(struct fm801_info *fm801)
 static int
 fm801_pci_attach(device_t dev)
 {
-	struct ac97_info 	*codec = NULL;
-	struct fm801_info 	*fm801;
-	int 			i;
-	int 			mapped = 0;
-	char 			status[SND_STATUSLEN];
+	struct ac97_info	*codec = NULL;
+	struct fm801_info	*fm801;
+	int			i;
+	int			mapped = 0;
+	char			status[SND_STATUSLEN];
 
 	fm801 = malloc(sizeof(*fm801), M_DEVBUF, M_WAITOK | M_ZERO);
 	fm801->type = pci_get_devid(dev);
@@ -588,7 +588,7 @@ fm801_pci_attach(device_t dev)
 		if(!fm801->reg)
 		{
 			fm801->regtype = SYS_RES_IOPORT;
-			fm801->reg = bus_alloc_resource_any(dev, 
+			fm801->reg = bus_alloc_resource_any(dev,
 							    fm801->regtype,
 							    &fm801->regid,
 							    RF_ACTIVE);
@@ -613,6 +613,7 @@ fm801_pci_attach(device_t dev)
 	codec = AC97_CREATE(dev, fm801, fm801_ac97);
 	if (codec == NULL) goto oops;
 
+	pcm_init(dev, fm801);
 	if (mixer_init(dev, ac97_getmixerclass(), codec) == -1) goto oops;
 
 	fm801->irqid = 0;
@@ -642,7 +643,6 @@ fm801_pci_attach(device_t dev)
 		device_get_nameunit(device_get_parent(dev)));
 
 #define FM801_MAXPLAYCH	1
-	pcm_init(dev, fm801);
 	pcm_addchan(dev, PCMDIR_PLAY, &fm801ch_class, fm801);
 	pcm_addchan(dev, PCMDIR_REC, &fm801ch_class, fm801);
 	if (pcm_register(dev, status))
@@ -708,15 +708,15 @@ fm801_pci_probe( device_t dev )
 }
 
 static struct resource *
-fm801_alloc_resource(device_t bus, device_t child, int type, int *rid,
+fm801_alloc_resource(device_t bus, device_t child, int type, int rid,
 		     rman_res_t start, rman_res_t end, rman_res_t count,
-		     u_int flags)
+		     unsigned int flags)
 {
 	struct fm801_info *fm801;
 
 	fm801 = pcm_getdevinfo(bus);
 
-	if (type == SYS_RES_IOPORT && *rid == PCIR_BAR(0))
+	if (type == SYS_RES_IOPORT && rid == PCIR_BAR(0))
 		return (fm801->reg);
 
 	return (NULL);
@@ -753,5 +753,5 @@ static driver_t fm801_driver = {
 };
 
 DRIVER_MODULE(snd_fm801, pci, fm801_driver, 0, 0);
-MODULE_DEPEND(snd_fm801, sound, SOUND_MINVER, SOUND_PREFVER, SOUND_MAXVER);
+MODULE_DEPEND(snd_fm801, sound, 1, 1, 1);
 MODULE_VERSION(snd_fm801, 1);

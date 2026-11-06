@@ -131,6 +131,8 @@ typedef void (*if_qflush_fn_t)(if_t);
 typedef int (*if_transmit_fn_t)(if_t, struct mbuf *);
 typedef	uint64_t (*if_get_counter_t)(if_t, ift_counter);
 typedef	void (*if_reassign_fn_t)(if_t, struct vnet *, char *);
+struct if_vf_status;
+typedef	int (*if_vf_status_fn_t)(if_t, struct if_vf_status **);
 typedef int (*if_spdadd_fn_t)(if_t ifp, void *sp, void *inp, void **priv);
 typedef int (*if_spddel_fn_t)(if_t ifp, void *sp, void *priv);
 typedef int (*if_sa_newkey_fn_t)(if_t ifp, void *sav, u_int drv_spi,
@@ -358,12 +360,28 @@ typedef void (*ifaddr_event_ext_handler_t)(void *, if_t, struct ifaddr *, int);
 EVENTHANDLER_DECLARE(ifaddr_event_ext, ifaddr_event_ext_handler_t);
 #define	IFADDR_EVENT_ADD	0
 #define	IFADDR_EVENT_DEL	1
-/* new interface arrival event */
-typedef void (*ifnet_arrival_event_handler_t)(void *, if_t);
-EVENTHANDLER_DECLARE(ifnet_arrival_event, ifnet_arrival_event_handler_t);
-/* interface departure event */
-typedef void (*ifnet_departure_event_handler_t)(void *, if_t);
-EVENTHANDLER_DECLARE(ifnet_departure_event, ifnet_departure_event_handler_t);
+
+/*
+ * Interface arrival & departure events.
+ * The ifnet_arrival_event is executed before the interface is yet globally
+ * visible.  Protocols shall use this event to attach themselves.  Protocols
+ * shall not expect other protocols to be fully attached.
+ * The ifnet_attached_event is executed after the interface is attached to all
+ * protocols, is globally visible and fully functional.
+ * The ifnet_departure_event is complementary to ifnet_arrival_event.  The
+ * interface is no longer globally visible, protocols may detach.
+ * XXXGL: immediate memory reclamation may not be safe in ifnet_departure_event.
+ * The ifnet_rename_event is executed after an interface is renamed.  The
+ * handlers would see the new name of the interface, and are also passed with
+ * old name in the argument.
+ */
+typedef void (*ifnet_event_handler_t)(void *, if_t);
+EVENTHANDLER_DECLARE(ifnet_arrival_event, ifnet_event_handler_t);
+EVENTHANDLER_DECLARE(ifnet_attached_event, ifnet_event_handler_t);
+EVENTHANDLER_DECLARE(ifnet_departure_event, ifnet_event_handler_t);
+typedef void (*ifnet_rename_event_handler_t)(void *, if_t, const char *);
+EVENTHANDLER_DECLARE(ifnet_rename_event, ifnet_rename_event_handler_t);
+
 /* Interface link state change event */
 typedef void (*ifnet_link_event_handler_t)(void *, if_t, int);
 EVENTHANDLER_DECLARE(ifnet_link_event, ifnet_link_event_handler_t);
@@ -383,18 +401,18 @@ struct ifg_group {
 	char				 ifg_group[IFNAMSIZ];
 	u_int				 ifg_refcnt;
 	void				*ifg_pf_kif;
-	CK_STAILQ_HEAD(, ifg_member)	 ifg_members; /* (CK_) */
-	CK_STAILQ_ENTRY(ifg_group)		 ifg_next; /* (CK_) */
+	CK_STAILQ_HEAD(, ifg_member)	 ifg_members;
+	CK_STAILQ_ENTRY(ifg_group)	 ifg_next;
 };
 
 struct ifg_member {
-	CK_STAILQ_ENTRY(ifg_member)	 ifgm_next; /* (CK_) */
+	CK_STAILQ_ENTRY(ifg_member)	 ifgm_next;
 	if_t				 ifgm_ifp;
 };
 
 struct ifg_list {
 	struct ifg_group	*ifgl_group;
-	CK_STAILQ_ENTRY(ifg_list)	 ifgl_next; /* (CK_) */
+	CK_STAILQ_ENTRY(ifg_list)	 ifgl_next;
 };
 
 #ifdef _SYS_EVENTHANDLER_H_
@@ -509,6 +527,8 @@ VNET_DECLARE(if_t, loif);	/* first loopback interface */
 #define MCDPRINTF(...)
 #endif
 
+typedef int (*if_foreach_group_cb_t)(struct ifg_group *, void *);
+int	if_foreach_group(if_t, if_foreach_group_cb_t, void *);
 int	if_addgroup(if_t, const char *);
 int	if_delgroup(if_t, const char *);
 int	if_addmulti(if_t, struct sockaddr *, struct ifmultiaddr **);
@@ -547,7 +567,9 @@ int	ifa_add_loopback_route(struct ifaddr *, struct sockaddr *);
 int	ifa_del_loopback_route(struct ifaddr *, struct sockaddr *);
 int	ifa_switch_loopback_route(struct ifaddr *, struct sockaddr *);
 
+struct	ifaddr *ifa_ifwithaddr_fib(const struct sockaddr *, int);
 struct	ifaddr *ifa_ifwithaddr(const struct sockaddr *);
+int		ifa_ifwithaddr_fib_check(const struct sockaddr *, int);
 int		ifa_ifwithaddr_check(const struct sockaddr *);
 struct	ifaddr *ifa_ifwithbroadaddr(const struct sockaddr *, int);
 struct	ifaddr *ifa_ifwithdstaddr(const struct sockaddr *, int);
@@ -620,8 +642,8 @@ const uint8_t *if_getbroadcastaddr(const if_t ifp);
 void if_setbroadcastaddr(if_t ifp, const uint8_t *);
 int if_setmtu(if_t ifp, int mtu);
 int if_getmtu(const if_t ifp);
-int if_getmtu_family(const if_t ifp, int family);
 void if_notifymtu(if_t ifp);
+void if_setppromisc(const if_t ifp, bool ppromisc);
 int if_setflagbits(if_t ifp, int set, int clear);
 int if_setflags(if_t ifp, int flags);
 int if_getflags(const if_t ifp);
@@ -662,7 +684,8 @@ void *if_getl2com(if_t ifp);
 struct ifvlantrunk *if_getvlantrunk(if_t ifp);
 bool if_altq_is_enabled(if_t ifp);
 
-void *if_getafdata(if_t ifp, int);
+struct in_ifinfo *if_getinet(if_t ifp);
+struct in6_ifextra *if_getinet6(if_t ifp);
 
 int if_snd_tag_alloc(if_t ifp, union if_snd_tag_alloc_params *params,
     struct m_snd_tag **mstp);
@@ -708,12 +731,14 @@ void if_setinitfn(if_t ifp, if_init_fn_t);
 void if_setinputfn(if_t ifp, if_input_fn_t);
 if_input_fn_t if_getinputfn(if_t ifp);
 void if_setioctlfn(if_t ifp, if_ioctl_fn_t);
+void if_setvfstatusfn(if_t ifp, if_vf_status_fn_t);
 void if_setoutputfn(if_t ifp, if_output_fn_t);
 void if_setstartfn(if_t ifp, if_start_fn_t);
 if_start_fn_t if_getstartfn(if_t ifp);
 void if_settransmitfn(if_t ifp, if_transmit_fn_t);
 if_transmit_fn_t if_gettransmitfn(if_t ifp);
 void if_setqflushfn(if_t ifp, if_qflush_fn_t);
+if_qflush_fn_t if_getqflushfn(if_t ifp);
 void if_setgetcounterfn(if_t ifp, if_get_counter_t);
 void if_setsndtagallocfn(if_t ifp, if_snd_tag_alloc_t);
 void if_setdebugnet_methods(if_t, struct debugnet_methods *);
@@ -744,6 +769,7 @@ void *ifr_buffer_get_buffer(void *data);
 size_t ifr_buffer_get_length(void *data);
 
 int ifhwioctl(u_long, if_t, caddr_t, struct thread *);
+int if_get_vf_status(if_t, struct if_vf_status **);
 
 #ifdef DEVICE_POLLING
 enum poll_cmd { POLL_ONLY, POLL_AND_CHECK_STATUS };

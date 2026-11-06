@@ -32,7 +32,7 @@
 #include <linux/device.h>
 #include <linux/uuid.h>
 
-#if defined(__aarch64__) || defined(__amd64__) || defined(__i386__)
+#if defined(__aarch64__) || defined(__amd64__) || defined(__i386__) || defined(__riscv)
 
 #include <acpi/acpi.h>
 #include <acpi/acpi_bus.h>
@@ -43,6 +43,14 @@
     ((dev) != NULL ? bsd_acpi_get_handle(dev) : NULL)
 static inline void acpi_dev_put(struct acpi_device *adev) {}
 #define	acpi_handle_debug(handle, fmt, ...)
+
+static inline struct acpi_device *
+to_acpi_device_node(const struct fwnode_handle *fwnode)
+{
+	return (NULL);
+}
+
+#define	ACPI_COMPANION(dev)	to_acpi_device_node((dev)->fwnode)
 
 #endif
 

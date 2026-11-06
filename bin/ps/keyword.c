@@ -35,10 +35,10 @@
  */
 
 #include <sys/param.h>
-#include <sys/time.h>
-#include <sys/resource.h>
 #include <sys/proc.h>
+#include <sys/resource.h>
 #include <sys/sysctl.h>
+#include <sys/time.h>
 #include <sys/user.h>
 
 #include <assert.h>
@@ -133,7 +133,7 @@ static VAR keywords[] = {
 	{"mwchan", {NULL}, "MWCHAN", "wait-channel", LJUST, mwchan, 0,
 	 UNSPEC, NULL},
 	{"ni", {"nice"}, NULL, NULL, 0, NULL, 0, UNSPEC, NULL},
-	{"nice", {NULL}, "NI", "nice", 0, kvar, KOFF(ki_nice), CHAR, "d"},
+	{"nice", {NULL}, "NI", "nice", 0, kvar, KOFF(ki_nice), SCHAR, "d"},
 	{"nivcsw", {NULL}, "NIVCSW", "involuntary-context-switches", USER, rvar,
 	 ROFF(ru_nivcsw), LONG, "ld"},
 	{"nlwp", {NULL}, "NLWP", "threads", 0, kvar, KOFF(ki_numthreads),

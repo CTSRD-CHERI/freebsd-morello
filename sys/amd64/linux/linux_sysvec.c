@@ -57,6 +57,7 @@
 
 #include <x86/linux/linux_x86.h>
 #include <amd64/linux/linux.h>
+#include <amd64/linux/linux_emul_md.h>
 #include <amd64/linux/linux_proto.h>
 #include <compat/linux/linux_elf.h>
 #include <compat/linux/linux_emul.h>
@@ -265,12 +266,16 @@ linux_exec_setregs(struct thread *td, struct image_params *imgp,
 	regs->tf_flags = TF_HASSEGS;
 
 	x86_clear_dbregs(pcb);
+	exec_splitlock(td);
 
 	/*
 	 * Drop the FP state if we hold it, so that the process gets a
 	 * clean FP state if it uses the FPU again.
 	 */
 	fpstate_drop(td);
+
+	/* Linux processes start with PKRU denying unallocated keys. */
+	linux_pkru_exec_init(td);
 }
 
 static int
@@ -699,8 +704,7 @@ struct sysentvec elf_linux_sysvec = {
 	.sv_setregs	= linux_exec_setregs,
 	.sv_fixlimit	= NULL,
 	.sv_maxssiz	= NULL,
-	.sv_flags	= SV_ABI_LINUX | SV_LP64 | SV_SHP | SV_SIG_DISCIGN |
-	    SV_SIG_WAITNDQ | SV_TIMEKEEP,
+	.sv_flags	= SV_ABI_LINUX_FLAGS | SV_LP64,
 	.sv_set_syscall_retval = linux_set_syscall_retval,
 	.sv_fetch_syscall_args = linux_fetch_syscall_args,
 	.sv_syscallnames = linux_syscallnames,
@@ -857,7 +861,7 @@ linux_vdso_reloc(char *mapping, Elf_Addr offset)
 	}
 }
 
-static Elf_Brandnote linux64_brandnote = {
+static const Elf_Brandnote linux64_brandnote = {
 	.hdr.n_namesz	= sizeof(GNU_ABI_VENDOR),
 	.hdr.n_descsz	= 16,
 	.hdr.n_type	= 1,
@@ -866,7 +870,7 @@ static Elf_Brandnote linux64_brandnote = {
 	.trans_osrel	= linux_trans_osrel
 };
 
-static Elf64_Brandinfo linux_glibc2brand = {
+static const Elf64_Brandinfo linux_glibc2brand = {
 	.brand		= ELFOSABI_LINUX,
 	.machine	= EM_X86_64,
 	.compat_3_brand	= "Linux",
@@ -877,7 +881,7 @@ static Elf64_Brandinfo linux_glibc2brand = {
 	.flags		= BI_CAN_EXEC_DYN | BI_BRAND_NOTE
 };
 
-static Elf64_Brandinfo linux_glibc2brandshort = {
+static const Elf64_Brandinfo linux_glibc2brandshort = {
 	.brand		= ELFOSABI_LINUX,
 	.machine	= EM_X86_64,
 	.compat_3_brand	= "Linux",
@@ -888,7 +892,7 @@ static Elf64_Brandinfo linux_glibc2brandshort = {
 	.flags		= BI_CAN_EXEC_DYN | BI_BRAND_NOTE
 };
 
-static Elf64_Brandinfo linux_muslbrand = {
+static const Elf64_Brandinfo linux_muslbrand = {
 	.brand		= ELFOSABI_LINUX,
 	.machine	= EM_X86_64,
 	.compat_3_brand	= "Linux",
@@ -900,7 +904,7 @@ static Elf64_Brandinfo linux_muslbrand = {
 			    LINUX_BI_FUTEX_REQUEUE
 };
 
-static Elf64_Brandinfo *linux_brandlist[] = {
+static const Elf64_Brandinfo *linux_brandlist[] = {
 	&linux_glibc2brand,
 	&linux_glibc2brandshort,
 	&linux_muslbrand,
@@ -910,7 +914,7 @@ static Elf64_Brandinfo *linux_brandlist[] = {
 static int
 linux64_elf_modevent(module_t mod, int type, void *data)
 {
-	Elf64_Brandinfo **brandinfo;
+	const Elf64_Brandinfo **brandinfo;
 	int error;
 	struct linux_ioctl_handler **lihp;
 

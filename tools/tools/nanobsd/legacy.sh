@@ -31,10 +31,14 @@
 [ -n "$NANO_SECTS" ] || NANO_SECTS=63
 [ -n "$NANO_HEADS" ] || NANO_HEADS=16
 
+# The first partition should start at offset 16,
+# because the first 16 sectors are reserved for metadata.
+METADATA_SECTS=16
+
 # Functions and variable definitions used by the legacy nanobsd
 # image building system.
 
-calculate_partitioning ( ) (
+calculate_partitioning() {
 	echo $NANO_MEDIASIZE $NANO_IMAGES \
 		$NANO_SECTS $NANO_HEADS \
 		$NANO_CODESIZE $NANO_CONFSIZE $NANO_DATASIZE |
@@ -90,38 +94,38 @@ calculate_partitioning ( ) (
 		}
 	}
 	' > ${NANO_LOG}/_.partitioning
-)
+}
 
-create_code_slice ( ) (
+create_code_slice() {
 	pprint 2 "build code slice"
 	pprint 3 "log: ${NANO_OBJ}/_.cs"
 
 	(
-	IMG=${NANO_DISKIMGDIR}/_.disk.image
+	IMG=${NANO_DISKIMGDIR}/${NANO_IMG1NAME}
 	MNT=${NANO_OBJ}/_.mnt
 	mkdir -p ${MNT}
-	CODE_SIZE=`head -n 1 ${NANO_LOG}/_.partitioning | awk '{ print $2 }'`
+	CODE_SIZE=$(awk '$3 == 1 {print $2}' "${NANO_LOG}/_.partitioning")
 
 	if [ "${NANO_MD_BACKING}" = "swap" ] ; then
-		MD=`mdconfig -a -t swap -s ${CODE_SIZE} -x ${NANO_SECTS} \
-			-y ${NANO_HEADS}`
+		MD=$(mdconfig -a -t swap -s ${CODE_SIZE} -x ${NANO_SECTS} \
+		    -y ${NANO_HEADS})
 	else
 		echo "Creating md backing file..."
 		rm -f ${IMG}
 		dd if=/dev/zero of=${IMG} seek=${CODE_SIZE} count=0
-		MD=`mdconfig -a -t vnode -f ${IMG} -x ${NANO_SECTS} \
-			-y ${NANO_HEADS}`
+		MD=$(mdconfig -a -t vnode -f ${IMG} -x ${NANO_SECTS} \
+		    -y ${NANO_HEADS})
 	fi
 
-	trap "echo 'Running exit trap code' ; df -i ${MNT} ; umount ${MNT} || true ; mdconfig -d -u $MD" 1 2 15 EXIT
+	trap "echo 'Running exit trap code' ; df -i ${MNT} ; nano_umount ${MNT} || true ; mdconfig -d -u $MD" 1 2 15 EXIT
 
 	gpart create -s bsd "${MD}"
-	gpart add -t freebsd-ufs -b 16 "${MD}"
+	gpart add -t freebsd-ufs -b "${METADATA_SECTS}" "${MD}"
 	if [ -f ${NANO_WORLDDIR}/boot/boot ]; then
-	    echo "Making bootable partition"
-	    gpart bootcode -b ${NANO_WORLDDIR}/boot/boot ${MD}
+		echo "Making bootable partition"
+		gpart bootcode -b ${NANO_WORLDDIR}/boot/boot ${MD}
 	else
-	    echo "Partition will not be bootable"
+		echo "Partition will not be bootable"
 	fi
 	gpart list ${MD}
 
@@ -134,18 +138,44 @@ create_code_slice ( ) (
 	nano_umount ${MNT}
 
 	if [ "${NANO_MD_BACKING}" = "swap" ] ; then
-		echo "Writing out _.disk.image..."
-		dd conv=sparse if=/dev/${MD} of=${NANO_DISKIMGDIR}/_.disk.image bs=64k
+		echo "Writing out ${NANO_IMG1NAME}..."
+		dd conv=sparse if=/dev/${MD} of=${IMG} bs=64k
 	fi
 	mdconfig -d -u $MD
 
 	trap - 1 2 15 EXIT
 
 	) > ${NANO_OBJ}/_.cs 2>&1
-)
+}
 
+_create_code_slice() {
+	pprint 2 "build code slice"
+	pprint 3 "log: ${NANO_OBJ}/_.cs"
 
-create_diskimage ( ) (
+	(
+	IMG=${NANO_DISKIMGDIR}/${NANO_IMG1NAME}
+	CODE_SIZE=$(awk '$3 == 1 {print $2}' "${NANO_LOG}/_.partitioning")
+
+	echo "Writing code image..."
+	if [ -f "${NANO_WORLDDIR}/boot/boot" ]; then
+		echo "Making bootable partition"
+		bootcode="-b ${NANO_WORLDDIR}/boot/boot"
+	else
+		echo "Partition will not be bootable"
+	fi
+	nano_makefs "-DxZ ${NANO_MAKEFS} -o minfree=0,optimization=space" \
+	    "${NANO_METALOG}" "$(( CODE_SIZE - METADATA_SECTS ))" \
+	    "${NANO_OBJ}/_.disk.part" "${NANO_WORLDDIR}"
+	mkimg -s bsd -S 512 --capacity $(( CODE_SIZE * 512 )) \
+	    ${bootcode} \
+	    -p freebsd-ufs:="${NANO_OBJ}/_.disk.part" \
+	    -o "${IMG}"
+	rm -f "${NANO_OBJ}/_.disk.part"
+
+	) > ${NANO_OBJ}/_.cs 2>&1
+}
+
+create_diskimage() {
 	pprint 2 "build diskimage"
 	pprint 3 "log: ${NANO_OBJ}/_.di"
 
@@ -156,14 +186,14 @@ create_diskimage ( ) (
 	mkdir -p ${MNT}
 
 	if [ "${NANO_MD_BACKING}" = "swap" ] ; then
-		MD=`mdconfig -a -t swap -s ${NANO_MEDIASIZE} -x ${NANO_SECTS} \
-			-y ${NANO_HEADS}`
+		MD=$(mdconfig -a -t swap -s ${NANO_MEDIASIZE} -x ${NANO_SECTS} \
+		    -y ${NANO_HEADS})
 	else
 		echo "Creating md backing file..."
 		rm -f ${IMG}
 		dd if=/dev/zero of=${IMG} seek=${NANO_MEDIASIZE} count=0
-		MD=`mdconfig -a -t vnode -f ${IMG} -x ${NANO_SECTS} \
-			-y ${NANO_HEADS}`
+		MD=$(mdconfig -a -t vnode -f ${IMG} -x ${NANO_SECTS} \
+		    -y ${NANO_HEADS})
 	fi
 
 	awk '
@@ -190,10 +220,11 @@ create_diskimage ( ) (
 	# XXX: pick up cached boot* files, they may not be in image anymore.
 	if [ -f ${NANO_WORLDDIR}/${NANO_BOOTLOADER} ]; then
 		gpart bootcode -b ${NANO_WORLDDIR}/${NANO_BOOTLOADER} ${NANO_BOOTFLAGS} ${MD}
+		boot0cfg ${NANO_BOOT0CFG} ${MD}
 	fi
 
 	echo "Writing code image..."
-	dd conv=sparse if=${NANO_DISKIMGDIR}/_.disk.image of=/dev/${MD}${NANO_SLICE_ROOT} bs=64k
+	dd conv=sparse if=${NANO_DISKIMGDIR}/${NANO_IMG1NAME} of=/dev/${MD}${NANO_SLICE_ROOT} bs=64k
 
 	if [ $NANO_IMAGES -gt 1 -a $NANO_INIT_IMG2 -gt 0 ] ; then
 		# Duplicate to second image (if present)
@@ -243,4 +274,81 @@ create_diskimage ( ) (
 	trap - 1 2 15 EXIT
 
 	) > ${NANO_LOG}/_.di 2>&1
-)
+}
+
+_create_diskimage() {
+	pprint 2 "build diskimage"
+	pprint 3 "log: ${NANO_OBJ}/_.di"
+
+	(
+	local altroot bootloader cfgimage dataimage diskimage
+
+	CODE_SIZE=$(awk '$3 == 1 {print $2}' "${NANO_LOG}/_.partitioning")
+	CONF_SIZE=$(awk '$3 == 3 {print $2}' "${NANO_LOG}/_.partitioning")
+	DATA_SIZE=$(awk '$3 == 4 {print $2}' "${NANO_LOG}/_.partitioning")
+	IMG=${NANO_DISKIMGDIR}/${NANO_IMGNAME}
+
+	if [ -f "${NANO_WORLDDIR}/${NANO_BOOTLOADER}" ]; then
+		[ -n "${NANO_NOPRIV_BUILD}" ] && chmod 666 ${NANO_WORLDDIR}/${NANO_BOOTLOADER}
+		boot0cfg ${NANO_BOOT0CFG} ${NANO_WORLDDIR}/${NANO_BOOTLOADER}
+		[ -n "${NANO_NOPRIV_BUILD}" ] && chmod 444 ${NANO_WORLDDIR}/${NANO_BOOTLOADER}
+		bootloader="-b ${NANO_WORLDDIR}/${NANO_BOOTLOADER}"
+	else
+		echo "Image will not be bootable"
+	fi
+
+	diskimage="-p freebsd:=${NANO_DISKIMGDIR}/${NANO_IMG1NAME}:$(( NANO_SECTS * 512 ))"
+
+	if [ "$NANO_IMAGES" -gt 1 ] ; then
+		if [ "$NANO_INIT_IMG2" -gt 0 ] ; then
+			echo "Duplicating to second image..."
+			tgt_switch_root_fstab "${NANO_SLICE_ROOT}" "${NANO_SLICE_ALTROOT}"
+			nano_makefs "-DxZ ${NANO_MAKEFS} -o minfree=0,optimization=space" \
+			    "${NANO_METALOG}" "$(( CODE_SIZE - METADATA_SECTS ))" \
+			    "${NANO_OBJ}/_.altroot.part" "${NANO_WORLDDIR}"
+			tgt_switch_root_fstab "${NANO_SLICE_ALTROOT}" "${NANO_SLICE_ROOT}"
+			if [ -f "${NANO_WORLDDIR}/boot/boot" ]; then
+				bootcode="-b ${NANO_WORLDDIR}/boot/boot"
+			fi
+			mkimg -s bsd -S 512 --capacity $(( CODE_SIZE * 512 )) \
+			    ${bootcode} \
+			    -p freebsd-ufs:="${NANO_OBJ}/_.altroot.part" \
+			    -o "${NANO_OBJ}/_.altroot.image"
+			altroot="-p freebsd:=${NANO_OBJ}/_.altroot.image:+$(( NANO_SECTS * 512 ))"
+			rm -f "${NANO_OBJ}/_.altroot.part"
+		else
+			altroot="-p freebsd::$(( CODE_SIZE * 512 )):+$(( NANO_SECTS * 512 ))"
+		fi
+	else
+		altroot="-p-"
+	fi
+
+	# Create Config slice
+	_populate_cfg_part "${NANO_OBJ}/_.cfg.part" "${NANO_CFGDIR}" \
+	    "${NANO_SLICE_CFG}" "${CONF_SIZE}" "${NANO_METALOG_CFG}"
+	cfgimage="-p freebsd:=${NANO_OBJ}/_.cfg.part"
+
+	# Create Data slice, if any.
+	if [ -n "${NANO_SLICE_DATA}" ] &&
+	    [ "${NANO_SLICE_CFG}" = "${NANO_SLICE_DATA}" ] &&
+	    [ "${NANO_DATASIZE}" -ne 0 ]; then
+		pprint 2 "NANO_SLICE_DATA is the same as NANO_SLICE_CFG, fix."
+		exit 2
+	fi
+	if [ "${NANO_DATASIZE}" -ne 0 ] && [ -n "${NANO_SLICE_DATA}" ] ; then
+		_populate_data_part "${NANO_OBJ}/_.data.part" "${NANO_DATADIR}" \
+		    "${NANO_SLICE_DATA}" "${DATA_SIZE}" "${NANO_METALOG_DATA}"
+		dataimage="-p freebsd:=${NANO_OBJ}/_.data.part"
+	fi
+
+	echo "Writing out ${NANO_IMGNAME}..."
+	mkimg -s mbr -S 512 --capacity $(( NANO_MEDIASIZE * 512 )) \
+	    ${bootloader} \
+	    ${diskimage} \
+	    ${altroot} \
+	    ${cfgimage} \
+	    ${dataimage} \
+	    -o ${IMG}
+
+	) > ${NANO_LOG}/_.di 2>&1
+}

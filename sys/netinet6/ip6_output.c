@@ -60,13 +60,11 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/cdefs.h>
 #include "opt_inet.h"
 #include "opt_inet6.h"
 #include "opt_ipsec.h"
 #include "opt_kern_tls.h"
 #include "opt_ratelimit.h"
-#include "opt_route.h"
 #include "opt_rss.h"
 #include "opt_sctp.h"
 
@@ -111,6 +109,7 @@
 #include <netinet/tcp_var.h>
 #include <netinet6/nd6.h>
 #include <netinet6/in6_rss.h>
+#include <netinet6/ip6_mroute.h>
 
 #include <netipsec/ipsec_support.h>
 #if defined(SCTP) || defined(SCTP_SUPPORT)
@@ -140,10 +139,9 @@ static int ip6_getpcbopt(struct inpcb *, int, struct sockopt *);
 static int ip6_setpktopt(int, u_char *, int, struct ip6_pktopts *,
 	struct ucred *, int, int, int);
 
-static int ip6_copyexthdr(struct mbuf **, caddr_t, int);
+static int ip6_copyexthdr(struct mbuf **, const void *, int);
 static int ip6_insertfraghdr(struct mbuf *, struct mbuf *, int,
 	struct ip6_frag **);
-static int ip6_insert_jumboopt(struct ip6_exthdrs *, u_int32_t);
 static int ip6_splithdr(struct mbuf *, struct ip6_exthdrs *);
 static void ip6_getpmtu(struct route_in6 *, int,
 	struct ifnet *, const struct in6_addr *, u_long *, u_int, u_int);
@@ -159,7 +157,7 @@ static int copypktopts(struct ip6_pktopts *, struct ip6_pktopts *, int);
 #define	MAKE_EXTHDR(hp, mp, _ol)					\
     do {								\
 	struct ip6_ext *eh = (struct ip6_ext *)(hp);		\
-	error = ip6_copyexthdr((mp), (caddr_t)(hp),		\
+	error = ip6_copyexthdr((mp), (hp),			\
 	    ((eh)->ip6e_len + 1) << 3);				\
 	if (error)						\
 		goto freehdrs;					\
@@ -200,7 +198,7 @@ in6_delayed_cksum(struct mbuf *m, uint32_t plen, u_short offset)
 	offset += m->m_pkthdr.csum_data;	/* checksum offset */
 
 	if (offset + sizeof(csum) > m->m_len)
-		m_copyback(m, offset, sizeof(csum), (caddr_t)&csum);
+		m_copyback(m, offset, sizeof(csum), &csum);
 	else
 		*(u_short *)mtodo(m, offset) = csum;
 }
@@ -543,20 +541,9 @@ ip6_output(struct mbuf *m0, struct ip6_pktopts *opt,
 	m->m_pkthdr.len += optlen;
 	plen = m->m_pkthdr.len - sizeof(*ip6);
 
-	/* If this is a jumbo payload, insert a jumbo payload option. */
 	if (plen > IPV6_MAXPACKET) {
-		if (!hdrsplit) {
-			if ((error = ip6_splithdr(m, &exthdrs)) != 0) {
-				m = NULL;
-				goto freehdrs;
-			}
-			m = exthdrs.ip6e_ip6;
-			ip6 = mtod(m, struct ip6_hdr *);
-			hdrsplit = true;
-		}
-		if ((error = ip6_insert_jumboopt(&exthdrs, plen)) != 0)
-			goto freehdrs;
-		ip6->ip6_plen = 0;
+		error = EMSGSIZE;
+		goto freehdrs;
 	} else
 		ip6->ip6_plen = htons(plen);
 	nexthdrp = &ip6->ip6_nxt;
@@ -902,7 +889,8 @@ nonh6lookup:
 			 * above, will be forwarded by the ip6_input() routine,
 			 * if necessary.
 			 */
-			if (V_ip6_mrouter && (flags & IPV6_FORWARDING) == 0) {
+			if (V_ip6_mrouting_enabled &&
+			    (flags & IPV6_FORWARDING) == 0) {
 				/*
 				 * XXX: ip6_mforward expects that rcvif is NULL
 				 * when it is called from the originating path.
@@ -982,7 +970,6 @@ nonh6lookup:
 	if (exthdrs.ip6e_hbh) {
 		struct ip6_hbh *hbh = mtod(exthdrs.ip6e_hbh, struct ip6_hbh *);
 		u_int32_t dummy; /* XXX unused */
-		u_int32_t plen = 0; /* XXX: ip6_process will check the value */
 
 #ifdef DIAGNOSTIC
 		if ((hbh->ip6h_len + 1) << 3 > exthdrs.ip6e_hbh->m_len)
@@ -998,7 +985,7 @@ nonh6lookup:
 		m->m_pkthdr.rcvif = ifp;
 		if (ip6_process_hopopts(m, (u_int8_t *)(hbh + 1),
 		    ((hbh->ip6h_len + 1) << 3) - sizeof(struct ip6_hbh),
-		    &dummy, &plen) < 0) {
+		    &dummy) < 0) {
 			/* m was already freed at this point. */
 			error = EINVAL;/* better error? */
 			goto done;
@@ -1147,7 +1134,7 @@ passout:
 		dontfrag = 1;
 	else
 		dontfrag = 0;
-	if (dontfrag && tlen > IN6_LINKMTU(ifp) && !tso) {	/* Case 2-b. */
+	if (dontfrag && tlen > in6_ifmtu(ifp) && !tso) {	/* Case 2-b. */
 		/*
 		 * If the DONTFRAG option is specified, we cannot send the
 		 * packet when the data length is larger than the MTU of the
@@ -1186,7 +1173,7 @@ passout:
 		in6_ifstat_inc(ifp, ifs6_out_fragfail);
 		goto bad;
 	} else if (ip6->ip6_plen == 0) {
-		/* Jumbo payload cannot be fragmented. */
+		/* We do not support jumbo payload. */
 		error = EMSGSIZE;
 		in6_ifstat_inc(ifp, ifs6_out_fragfail);
 		goto bad;
@@ -1291,7 +1278,7 @@ bad:
 }
 
 static int
-ip6_copyexthdr(struct mbuf **mp, caddr_t hdr, int hlen)
+ip6_copyexthdr(struct mbuf **mp, const void *hdr, int hlen)
 {
 	struct mbuf *m;
 
@@ -1306,98 +1293,10 @@ ip6_copyexthdr(struct mbuf **mp, caddr_t hdr, int hlen)
 		return (ENOBUFS);
 	m->m_len = hlen;
 	if (hdr)
-		bcopy(hdr, mtod(m, caddr_t), hlen);
+		bcopy(hdr, mtod(m, void *), hlen);
 
 	*mp = m;
 	return (0);
-}
-
-/*
- * Insert jumbo payload option.
- */
-static int
-ip6_insert_jumboopt(struct ip6_exthdrs *exthdrs, u_int32_t plen)
-{
-	struct mbuf *mopt;
-	u_char *optbuf;
-	u_int32_t v;
-
-#define JUMBOOPTLEN	8	/* length of jumbo payload option and padding */
-
-	/*
-	 * If there is no hop-by-hop options header, allocate new one.
-	 * If there is one but it doesn't have enough space to store the
-	 * jumbo payload option, allocate a cluster to store the whole options.
-	 * Otherwise, use it to store the options.
-	 */
-	if (exthdrs->ip6e_hbh == NULL) {
-		mopt = m_get(M_NOWAIT, MT_DATA);
-		if (mopt == NULL)
-			return (ENOBUFS);
-		mopt->m_len = JUMBOOPTLEN;
-		optbuf = mtod(mopt, u_char *);
-		optbuf[1] = 0;	/* = ((JUMBOOPTLEN) >> 3) - 1 */
-		exthdrs->ip6e_hbh = mopt;
-	} else {
-		struct ip6_hbh *hbh;
-
-		mopt = exthdrs->ip6e_hbh;
-		if (M_TRAILINGSPACE(mopt) < JUMBOOPTLEN) {
-			/*
-			 * XXX assumption:
-			 * - exthdrs->ip6e_hbh is not referenced from places
-			 *   other than exthdrs.
-			 * - exthdrs->ip6e_hbh is not an mbuf chain.
-			 */
-			int oldoptlen = mopt->m_len;
-			struct mbuf *n;
-
-			/*
-			 * XXX: give up if the whole (new) hbh header does
-			 * not fit even in an mbuf cluster.
-			 */
-			if (oldoptlen + JUMBOOPTLEN > MCLBYTES)
-				return (ENOBUFS);
-
-			/*
-			 * As a consequence, we must always prepare a cluster
-			 * at this point.
-			 */
-			n = m_getcl(M_NOWAIT, MT_DATA, 0);
-			if (n == NULL)
-				return (ENOBUFS);
-			n->m_len = oldoptlen + JUMBOOPTLEN;
-			bcopy(mtod(mopt, caddr_t), mtod(n, caddr_t),
-			    oldoptlen);
-			optbuf = mtod(n, caddr_t) + oldoptlen;
-			m_freem(mopt);
-			mopt = exthdrs->ip6e_hbh = n;
-		} else {
-			optbuf = mtod(mopt, u_char *) + mopt->m_len;
-			mopt->m_len += JUMBOOPTLEN;
-		}
-		optbuf[0] = IP6OPT_PADN;
-		optbuf[1] = 1;
-
-		/*
-		 * Adjust the header length according to the pad and
-		 * the jumbo payload option.
-		 */
-		hbh = mtod(mopt, struct ip6_hbh *);
-		hbh->ip6h_len += (JUMBOOPTLEN >> 3);
-	}
-
-	/* fill in the option. */
-	optbuf[2] = IP6OPT_JUMBO;
-	optbuf[3] = 4;
-	v = (u_int32_t)htonl(plen + JUMBOOPTLEN);
-	bcopy(&v, &optbuf[4], sizeof(u_int32_t));
-
-	/* finally, adjust the packet header length */
-	exthdrs->ip6e_ip6->m_pkthdr.len += JUMBOOPTLEN;
-
-	return (0);
-#undef JUMBOOPTLEN
 }
 
 /*
@@ -1425,7 +1324,7 @@ ip6_insertfraghdr(struct mbuf *m0, struct mbuf *m, int hlen,
 	if (M_WRITABLE(mlast) &&
 	    M_TRAILINGSPACE(mlast) >= sizeof(struct ip6_frag)) {
 		/* use the trailing space of the last mbuf for the fragment hdr */
-		*frghdrp = (struct ip6_frag *)(mtod(mlast, caddr_t) +
+		*frghdrp = (struct ip6_frag *)(mtod(mlast, char *) +
 		    mlast->m_len);
 		mlast->m_len += sizeof(struct ip6_frag);
 		m->m_pkthdr.len += sizeof(struct ip6_frag);
@@ -1561,7 +1460,7 @@ ip6_calcmtu(struct ifnet *ifp, const struct in6_addr *dst, u_long rt_mtu,
 	}
 
 	if (mtu == 0)
-		mtu = IN6_LINKMTU(ifp);
+		mtu = in6_ifmtu(ifp);
 
 	*mtup = mtu;
 }
@@ -1799,10 +1698,6 @@ do {									\
 						break;
 					}
 					INP_WLOCK(inp);
-					if (inp->inp_flags & INP_DROPPED) {
-						INP_WUNLOCK(inp);
-						return (ECONNRESET);
-					}
 					optp = &inp->in6p_outputopts;
 					error = ip6_pcbopt(IPV6_HOPLIMIT,
 					    (u_char *)&optval, sizeof(optval),
@@ -1928,10 +1823,6 @@ do {									\
 				{
 					struct ip6_pktopts **optp;
 					INP_WLOCK(inp);
-					if (inp->inp_flags & INP_DROPPED) {
-						INP_WUNLOCK(inp);
-						return (ECONNRESET);
-					}
 					optp = &inp->in6p_outputopts;
 					error = ip6_pcbopt(optname,
 					    (u_char *)&optval, sizeof(optval),
@@ -2020,10 +1911,6 @@ do {									\
 				optlen = sopt->sopt_valsize;
 				optbuf = optbuf_storage;
 				INP_WLOCK(inp);
-				if (inp->inp_flags & INP_DROPPED) {
-					INP_WUNLOCK(inp);
-					return (ECONNRESET);
-				}
 				optp = &inp->in6p_outputopts;
 				error = ip6_pcbopt(optname, optbuf, optlen,
 				    optp, (td != NULL) ? td->td_ucred : NULL,
@@ -2511,11 +2398,6 @@ ip6_pcbopt(int optname, u_char *buf, int len, struct ip6_pktopts **pktopt,
 		optdata = malloc(sopt->sopt_valsize, M_TEMP, M_WAITOK);	\
 		malloc_optdata = true;					\
 		INP_RLOCK(inp);						\
-		if (inp->inp_flags & INP_DROPPED) {			\
-			INP_RUNLOCK(inp);				\
-			free(optdata, M_TEMP);				\
-			return (ECONNRESET);				\
-		}							\
 		pktopt = inp->in6p_outputopts;				\
 		if (pktopt && pktopt->field) {				\
 			optdatalen = min(lenexpr, sopt->sopt_valsize);	\
@@ -2921,8 +2803,8 @@ ip6_setpktopt(int optname, u_char *buf, int len, struct ip6_pktopts *opt,
 			if (ifp == NULL)
 				return (ENXIO);
 		}
-		if (ifp != NULL && (ifp->if_afdata[AF_INET6] == NULL ||
-		    (ND_IFINFO(ifp)->flags & ND6_IFF_IFDISABLED) != 0))
+		if (ifp != NULL && (ifp->if_inet6 == NULL ||
+		    (ifp->if_inet6->nd_flags & ND6_IFF_IFDISABLED) != 0))
 			return (ENETDOWN);
 
 		if (ifp != NULL &&
@@ -3309,7 +3191,7 @@ ip6_splithdr(struct mbuf *m, struct ip6_exthdrs *exthdrs)
 		mh->m_next = m;
 		m = mh;
 		m->m_len = sizeof(*ip6);
-		bcopy((caddr_t)ip6, mtod(m, caddr_t), sizeof(*ip6));
+		bcopy(ip6, mtod(m, void *), sizeof(*ip6));
 	}
 	exthdrs->ip6e_ip6 = m;
 	return 0;

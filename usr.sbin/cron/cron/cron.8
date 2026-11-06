@@ -19,7 +19,7 @@
 .\"
 .\" $Id: cron.8,v 1.2 1998/08/14 00:32:36 vixie Exp $
 .\"
-.Dd February 9, 2022
+.Dd April 29, 2026
 .Dt CRON 8
 .Os
 .Sh NAME
@@ -53,14 +53,15 @@ for crontab files which are named after accounts in
 crontabs found are loaded into memory.
 The
 .Nm
-utility also searches for
+utility also searches
 .Pa /etc/crontab
 and files in
 .Pa /etc/cron.d
 and
-.Pa /usr/local/etc/cron.d
-which are in a different format (see
-.Xr crontab 5 ) .
+.Pa /usr/local/etc/cron.d ,
+which use the system crontab format described in
+.Xr crontab 5
+(including a user field).
 .Pp
 The
 .Nm
@@ -226,7 +227,14 @@ configuration file for
 .It Pa /usr/local/etc/cron.d
 Directory for third-party package provided crontab files.
 .It Pa /var/cron/tabs
-Directory for personal crontab files
+Directory for personal crontab files.
+Internally the daemon constructs the relative path
+.Pa tabs/ Ns Ar filename ,
+which must fit within
+.Dv MAXNAMLEN
+bytes; in practice this allows filenames up to 250 bytes.
+Longer entries are skipped and a diagnostic is logged via
+.Xr syslog 3 .
 .El
 .Sh SEE ALSO
 .Xr crontab 1 ,

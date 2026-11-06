@@ -230,7 +230,7 @@ struct vm_page {
 		} uma;
 	} plinks;
 	vm_object_t object;		/* which object am I in (O) */
-	vm_pindex_t pindex;		/* offset into object (O,P) */
+	vm_pindex_t pindex;		/* offset into object (O) */
 	vm_paddr_t phys_addr;		/* physical address of page (C) */
 	struct md_page md;		/* machine dependent stuff */
 	u_int ref_count;		/* page references (A) */
@@ -238,7 +238,7 @@ struct vm_page {
 	union vm_page_astate a;		/* state accessed atomically (A) */
 	uint8_t order;			/* index of the buddy queue (F) */
 	uint8_t pool;			/* vm_phys freepool index (F) */
-	uint8_t flags;			/* page PG_* flags (P) */
+	uint8_t flags;			/* page PG_* flags */
 	uint8_t oflags;			/* page VPO_* flags (O) */
 	int8_t psind;			/* pagesizes[] index (O) */
 	int8_t segind;			/* vm_phys segment index (C) */
@@ -350,8 +350,9 @@ extern vm_page_t bogus_page;
  * exclusive busied.  The MI VM layer must never access this flag
  * directly.  Instead, it should call pmap_page_is_write_mapped().
  *
- * PGA_EXECUTABLE may be set by pmap routines, and indicates that a page has
- * at least one executable mapping.  It is not consumed by the MI VM layer.
+ * PGA_PMAP_PRIV1 is reserved for use by the pmap, which defines its meaning.
+ * The MI VM layer does not consume it, except to assert that it is clear when
+ * a managed page is freed.
  *
  * PGA_NOSYNC must be set and cleared with the page busy lock held.
  *
@@ -383,7 +384,7 @@ extern vm_page_t bogus_page;
  */
 #define	PGA_WRITEABLE	0x0001		/* page may be mapped writeable */
 #define	PGA_REFERENCED	0x0002		/* page has been referenced */
-#define	PGA_EXECUTABLE	0x0004		/* page may be mapped executable */
+#define	PGA_PMAP_PRIV1	0x0004		/* reserved for use by the pmap */
 #define	PGA_ENQUEUED	0x0008		/* page is enqueued in a page queue */
 #define	PGA_DEQUEUE	0x0010		/* page is due to be dequeued */
 #define	PGA_REQUEUE	0x0020		/* page is due to be requeued */
@@ -461,6 +462,9 @@ extern long first_page;			/* first physical page number */
  */
 vm_page_t PHYS_TO_VM_PAGE(vm_paddr_t pa);
 
+#define	DMAP_TO_VM_PAGE(va)	PHYS_TO_VM_PAGE(DMAP_TO_PHYS(va))
+#define	VM_PAGE_TO_DMAP(entry)	PHYS_TO_DMAP(VM_PAGE_TO_PHYS(entry))
+
 /*
  * vm_page allocation arguments for the functions vm_page_alloc(),
  * vm_page_alloc_contig(), vm_page_alloc_noobj(), vm_page_grab(), and
@@ -487,6 +491,7 @@ vm_page_t PHYS_TO_VM_PAGE(vm_paddr_t pa);
 #define VM_ALLOC_INTERRUPT	1
 #define VM_ALLOC_SYSTEM		2
 #define	VM_ALLOC_CLASS_MASK	3
+#define	VM_ALLOC_AVAIL0		0x0004
 #define	VM_ALLOC_WAITOK		0x0008	/* (gnp) Sleep and retry */
 #define	VM_ALLOC_WAITFAIL	0x0010	/* (acgnp) Sleep and return error */
 #define	VM_ALLOC_WIRED		0x0020	/* (acgnp) Allocate a wired page */
@@ -771,6 +776,18 @@ vm_page_astate_load(vm_page_t m)
 }
 
 /*
+ *	Load a snapshot of a page's 32-bit atomic state, with acquire semantics.
+ */
+static inline vm_page_astate_t
+vm_page_astate_load_acq(vm_page_t m)
+{
+	vm_page_astate_t a;
+
+	a._bits = atomic_load_acq_32(&m->a._bits);
+	return (a);
+}
+
+/*
  *	Atomically compare and set a page's atomic state.
  */
 static inline bool
@@ -785,6 +802,26 @@ vm_page_astate_fcmpset(vm_page_t m, vm_page_astate_t *old, vm_page_astate_t new)
 	    ("%s: bits are unchanged", __func__));
 
 	return (atomic_fcmpset_32(&m->a._bits, &old->_bits, new._bits) != 0);
+}
+
+/*
+ *	Atomically compare and set a page's atomic state, with release
+ *	semantics.
+ */
+static inline bool
+vm_page_astate_fcmpset_rel(vm_page_t m, vm_page_astate_t *old,
+    vm_page_astate_t new)
+{
+
+	KASSERT(new.queue == PQ_INACTIVE || (new.flags & PGA_REQUEUE_HEAD) == 0,
+	    ("%s: invalid head requeue request for page %p", __func__, m));
+	KASSERT((new.flags & PGA_ENQUEUED) == 0 || new.queue != PQ_NONE,
+	    ("%s: setting PGA_ENQUEUED with PQ_NONE in page %p", __func__, m));
+	KASSERT(new._bits != old->_bits,
+	    ("%s: bits are unchanged", __func__));
+
+	return (atomic_fcmpset_rel_32(&m->a._bits, &old->_bits, new._bits) !=
+	    0);
 }
 
 /*

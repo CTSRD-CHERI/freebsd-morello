@@ -1,15 +1,8 @@
-# SPDX-License-Identifier: BSD-2-Clause
-#
-# $Id: meta.stage.mk,v 1.71 2025/03/14 20:28:42 sjg Exp $
+# $Id: meta.stage.mk,v 1.75 2025/12/08 17:44:57 sjg Exp $
 #
 #	@(#) Copyright (c) 2011-2025, Simon J. Gerraty
 #
-#	This file is provided in the hope that it will
-#	be of use.  There is absolutely NO WARRANTY.
-#	Permission to copy, redistribute or otherwise
-#	use this file is hereby granted provided that
-#	the above copyright notice and this notice are
-#	left intact.
+#	SPDX-License-Identifier: BSD-2-Clause
 #
 #	Please send copies of changes and bug-fixes to:
 #	sjg@crufty.net
@@ -38,14 +31,14 @@ CLEANFILES+= .dirdep
 	@echo '${_dirdep}' > $@
 .endif
 
-.if defined(NO_POSIX_SHELL) || ${type printf:L:sh:Mbuiltin} == ""
-_stage_file_basename = `basename $$f`
-_stage_file_dirname = `dirname $$f`
-_stage_target_dirname = `dirname $$t`
-.else
+.if ${isPOSIX_SHELL:U:Nfalse}
 _stage_file_basename = $${f\#\#*/}
 _stage_file_dirname = $${f%/*}
 _stage_target_dirname = $${t%/*}
+.else
+_stage_file_basename = `basename $$f`
+_stage_file_dirname = `dirname $$f`
+_stage_target_dirname = `dirname $$t`
 .endif
 
 _OBJROOT ?= ${OBJROOT:U${OBJTOP:H}}

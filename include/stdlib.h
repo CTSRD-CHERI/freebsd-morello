@@ -167,6 +167,20 @@ int	at_quick_exit(void (*)(void)) __noexcept;
 _Noreturn void
 	quick_exit(int) /* __noexcept -- not ready ABI issues? */;
 #endif /* __ISO_C_VISIBLE >= 2011 */
+
+/*
+ * C23 extensions
+ */
+#if __ISO_C_VISIBLE >= 2023
+size_t	memalignment(const void *) __pure2;
+void	free_sized(void *, size_t) __noexcept;
+void	free_aligned_sized(void *, size_t, size_t) __noexcept;
+int	strfromd(char * __restrict, size_t, const char * __restrict, double);
+int	strfromf(char * __restrict, size_t, const char * __restrict, float);
+int	strfroml(char * __restrict, size_t,
+	    const char * __restrict, long double);
+#endif /* __ISO_C_VISIBLE >= 2023 */
+
 /*
  * Extensions made by POSIX relative to C.
  */
@@ -314,6 +328,8 @@ int	 radixsort(const unsigned char **, int, const unsigned char *,
 	    unsigned);
 void	*reallocarray(void *, size_t, size_t) __result_use_check
 	    __alloc_size2(2, 3);
+void	*recallocarray(void *, size_t, size_t, size_t) __result_use_check
+	    __alloc_size2(3, 4);
 void	*reallocf(void *, size_t) __result_use_check __alloc_size(2);
 int	 rpmatch(const char *);
 char	*secure_getenv(const char *);
@@ -323,6 +339,8 @@ int	 sradixsort(const unsigned char **, int, const unsigned char *,
 void	 srandomdev(void);
 long long
 	strtonum(const char *, long long, long long, const char **);
+long long
+	strtonumx(const char *, long long, long long, const char **, int);
 
 /* Deprecated interfaces, to be removed. */
 __int64_t
@@ -393,11 +411,33 @@ _Noreturn void abort_handler_s(const char * __restrict, void * __restrict,
 /* K3.6.1.3 */
 void ignore_handler_s(const char * __restrict, void * __restrict, errno_t);
 /* K.3.6.3.2 */
+void	*bsearch_s(const void *, const void *, rsize_t, rsize_t,
+    int (*)(const void *, const void *, void *), void *);
+/* K.3.6.3.3 */
 errno_t	 qsort_s(void *, rsize_t, rsize_t,
     int (*)(const void *, const void *, void *), void *);
 #endif /* __EXT1_VISIBLE */
 
 __END_DECLS
 __NULLABILITY_PRAGMA_POP
+
+#if defined(__qualsel) && !defined(__cplusplus) && \
+    defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
+#define	bsearch(key, base, nmemb, size, compar)		__qualsel((base),    \
+	(const void *)(bsearch)((key), (base), (nmemb), (size), (compar)),   \
+	(bsearch)((key), (base), (nmemb), (size), (compar)))
+#ifdef __BLOCKS__
+#define	bsearch_b(key, base, nmemb, size, compar)	__qualsel((base),    \
+	(const void *)(bsearch_b)((key), (base), (nmemb), (size), (compar)), \
+	(bsearch_b)((key), (base), (nmemb), (size), (compar)))
+#endif
+#if __EXT1_VISIBLE
+#define	bsearch_s(key, base, nmemb, size, compar, context)		\
+	__qualsel((base),						\
+	(const void *)(bsearch_s)((key), (base), (nmemb), (size),	\
+	    (compar), (context)),					\
+	(bsearch_s)((key), (base), (nmemb), (size), (compar), (context)))
+#endif
+#endif
 
 #endif /* !_STDLIB_H_ */

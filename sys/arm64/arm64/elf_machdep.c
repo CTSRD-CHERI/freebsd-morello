@@ -99,8 +99,7 @@ static struct sysentvec elf64_freebsd_sysvec = {
 	.sv_setregs	= exec_setregs,
 	.sv_fixlimit	= NULL,
 	.sv_maxssiz	= NULL,
-	.sv_flags	= SV_SHP | SV_TIMEKEEP | SV_ABI_FREEBSD | SV_LP64 |
-	    SV_ASLR | SV_RNG_SEED_VER | SV_SIGSYS,
+	.sv_flags	= SV_ABI_FREEBSD_FLAGS | SV_LP64,
 	.sv_set_syscall_retval = cpu_set_syscall_retval,
 	.sv_fetch_syscall_args = cpu_fetch_syscall_args,
 	.sv_syscallnames = syscallnames,
@@ -121,7 +120,7 @@ static struct sysentvec elf64_freebsd_sysvec = {
 };
 INIT_SYSENTVEC(elf64_sysvec, &elf64_freebsd_sysvec);
 
-static Elf64_Brandinfo freebsd_brand_info = {
+static const Elf64_Brandinfo freebsd_brand_info = {
 	.brand		= ELFOSABI_FREEBSD,
 	.machine	= EM_AARCH64,
 	.compat_3_brand	= "FreeBSD",
@@ -131,8 +130,7 @@ static Elf64_Brandinfo freebsd_brand_info = {
 	.brand_note	= &elf64_freebsd_brandnote,
 	.flags		= BI_CAN_EXEC_DYN | BI_BRAND_NOTE
 };
-
-SYSINIT(elf64, SI_SUB_EXEC, SI_ORDER_FIRST,
+C_SYSINIT(elf64, SI_SUB_EXEC, SI_ORDER_FIRST,
     (sysinit_cfunc_t)elf64_insert_brand_entry, &freebsd_brand_info);
 
 static bool
@@ -336,7 +334,7 @@ elf_cpu_parse_dynamic(caddr_t loadbase __unused, Elf_Dyn *dynamic __unused)
 	return (0);
 }
 
-static Elf_Note gnu_property_note = {
+static const Elf_Note gnu_property_note = {
 	.n_namesz = sizeof(GNU_ABI_VENDOR),
 	.n_descsz = 16,
 	.n_type = NT_GNU_PROPERTY_TYPE_0,

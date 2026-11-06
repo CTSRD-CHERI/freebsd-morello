@@ -62,6 +62,8 @@ struct pfctl_status {
 	struct pfctl_status_counters	 lcounters;
 	struct pfctl_status_counters	 fcounters;
 	struct pfctl_status_counters	 scounters;
+	struct pfctl_status_counters	 ncounters;
+	uint64_t	fragments;
 	uint64_t	pcounters[2][2][2];
 	uint64_t	bcounters[2][2];
 };
@@ -247,6 +249,14 @@ struct pfctl_rule {
 	struct pf_rule_gid	 gid;
 	char			 rcv_ifname[IFNAMSIZ];
 	bool			 rcvifnot;
+	struct {
+		uint8_t		 id;
+		int		 limiter_action;
+	}			 statelim;
+	struct {
+		uint8_t		 id;
+		int		 limiter_action;
+	}			 sourcelim;
 
 	uint32_t		 rule_flag;
 	uint8_t			 action;
@@ -261,8 +271,8 @@ struct pfctl_rule {
 	uint8_t			 keep_state;
 	sa_family_t		 af;
 	uint8_t			 proto;
-	uint8_t			 type;
-	uint8_t			 code;
+	uint16_t		 type;
+	uint16_t		 code;
 	uint8_t			 flags;
 	uint8_t			 flagset;
 	uint8_t			 min_ttl;
@@ -283,6 +293,8 @@ struct pfctl_rule {
 		struct pf_addr		addr;
 		uint16_t		port;
 	}			divert;
+
+	time_t			exptime;
 };
 
 TAILQ_HEAD(pfctl_rulequeue, pfctl_rule);
@@ -347,6 +359,8 @@ struct pfctl_state_peer {
 	uint32_t			 seqdiff;
 	uint8_t				 state;
 	uint8_t				 wscale;
+	uint16_t			 max_win;
+	uint16_t			 mss;
 };
 
 struct pfctl_state_key {
@@ -357,8 +371,6 @@ struct pfctl_state_key {
 };
 
 struct pfctl_state {
-	TAILQ_ENTRY(pfctl_state)	entry;
-
 	uint64_t		 id;
 	uint32_t		 creatorid;
 	uint8_t		 	 direction;
@@ -394,11 +406,7 @@ struct pfctl_state {
 	char			 rt_ifname[IFNAMSIZ];
 	sa_family_t		 rt_af;
 	uint8_t			 src_node_flags;
-};
-
-TAILQ_HEAD(pfctl_statelist, pfctl_state);
-struct pfctl_states {
-	struct pfctl_statelist	states;
+	struct pfctl_rule	 created_by_rule;
 };
 
 enum pfctl_syncookies_mode {
@@ -436,8 +444,11 @@ struct pfctl_src_node {
 
 struct pfctl_handle;
 struct pfctl_handle	*pfctl_open(const char *pf_device);
+struct pfctl_handle	*pfctl_open_from_nl_fd(const char *pf_device,
+	    int nl_fd);
 void	pfctl_close(struct pfctl_handle *);
 int	pfctl_fd(struct pfctl_handle *);
+int	pfctl_nl_fd(struct pfctl_handle *);
 
 int	pfctl_startstop(struct pfctl_handle *h, int start);
 struct pfctl_status* pfctl_get_status_h(struct pfctl_handle *h);
@@ -492,12 +503,10 @@ struct pfctl_state_filter {
 	sa_family_t		af;
 	struct pf_addr		addr;
 	struct pf_addr		mask;
+	bool			include_rule;
 };
 typedef int (*pfctl_get_state_fn)(struct pfctl_state *, void *);
-int pfctl_get_states_iter(pfctl_get_state_fn f, void *arg);
-int pfctl_get_filtered_states_iter(struct pfctl_state_filter *filter, pfctl_get_state_fn f, void *arg);
-int	pfctl_get_states(int dev, struct pfctl_states *states);
-void	pfctl_free_states(struct pfctl_states *states);
+int pfctl_get_states_h(struct pfctl_handle *h, struct pfctl_state_filter *filter, pfctl_get_state_fn f, void *arg);
 int	pfctl_clear_states(int dev, const struct pfctl_kill *kill,
 	    unsigned int *killed);
 int	pfctl_kill_states(int dev, const struct pfctl_kill *kill,
@@ -519,9 +528,14 @@ int	pfctl_table_del_addrs_h(struct pfctl_handle *h, struct pfr_table *tbl,
 	    struct pfr_addr *addr, int size, int *ndel, int flags);
 int	pfctl_table_del_addrs(int dev, struct pfr_table *tbl, struct pfr_addr
 	    *addr, int size, int *ndel, int flags);
-int     pfctl_table_set_addrs(int dev, struct pfr_table *tbl, struct pfr_addr
+int	pfctl_table_set_addrs_h(struct pfctl_handle *h, struct pfr_table *tbl,
+	    struct pfr_addr *addr, int size, int *nadd, int *ndel,
+	    int *nchange, int flags);
+int	pfctl_table_set_addrs(int dev, struct pfr_table *tbl, struct pfr_addr
 	    *addr, int size, int *size2, int *nadd, int *ndel, int *nchange,
 	    int flags);
+int	pfctl_table_get_addrs_h(struct pfctl_handle *h, struct pfr_table *tbl, struct pfr_addr *addr,
+	    int *size, int flags);
 int	pfctl_table_get_addrs(int dev, struct pfr_table *tbl, struct pfr_addr
 	    *addr, int *size, int flags);
 int	pfctl_set_statusif(struct pfctl_handle *h, const char *ifname);
@@ -574,5 +588,130 @@ int	pfctl_clear_tstats(struct pfctl_handle *h, const struct pfr_table *filter,
 	    int *nzero, int flags);
 int	pfctl_clear_addrs(struct pfctl_handle *h, const struct pfr_table *filter,
 	    int *ndel, int flags);
+
+int	pfctl_get_astats(struct pfctl_handle *h, const struct pfr_table *tbl,
+	    struct pfr_astats *addr, int *size, int flags);
+int	pfctl_clr_astats(struct pfctl_handle *h, const struct pfr_table *tbl,
+	    struct pfr_addr *addr, int size, int *nzero, int flags);
+int	pfctl_test_addrs(struct pfctl_handle *h, const struct pfr_table *tbl,
+	    struct pfr_addr *addr, int size, int *nmatch, int flags);
+int	pfctl_ina_define(struct pfctl_handle *h, struct pfr_table *tbl,
+	    struct pfr_addr *addr, int size, int *nadd, int *naddr,
+	    int ticket, int flags);
+
+struct pfctl_limit_rate {
+	unsigned int	 limit;
+	unsigned int	 seconds;
+};
+
+struct pfctl_state_lim {
+	uint32_t		 ticket;
+	char			 name[PF_STATELIM_NAME_LEN];
+	uint32_t		 id;
+	unsigned int		 limit;
+
+	struct pfctl_limit_rate	 rate;
+
+	char			 description[PF_STATELIM_DESCR_LEN];
+
+	unsigned int		 inuse;
+	uint64_t		 admitted;
+	uint64_t		 hardlimited;
+	uint64_t		 ratelimited;
+};
+
+int	pfctl_state_limiter_nget(struct pfctl_handle *h, struct pfctl_state_lim *lim);
+int	pfctl_state_limiter_add(struct pfctl_handle *h, struct pfctl_state_lim *lim);
+
+struct pfctl_source_lim {
+	uint32_t	 ticket;
+
+	char		 name[PF_SOURCELIM_NAME_LEN];
+	uint32_t	 id;
+
+	/* limit on the total number of address entries */
+	unsigned int	 entries;
+
+	/* limit on the number of states per address entry */
+	unsigned int	 limit;
+
+	/* rate limit on the creation of states by an address entry */
+	struct pfctl_limit_rate	 rate;
+
+	/*
+	 * when the number of states on an entry exceeds hwm, add
+	 * the address to the specified table. when the number of
+	 * states goes below lwm, remove it from the table.
+	 */
+	char		 overload_tblname[PF_TABLE_NAME_SIZE];
+	unsigned int	 overload_hwm;
+	unsigned int	 overload_lwm;
+
+	/*
+	 * mask addresses before they're used for entries. /64s
+	 * everywhere for inet6 makes it easy to use too much memory.
+	 */
+	unsigned int	 inet_prefix;
+	unsigned int	 inet6_prefix;
+
+	char	 description[PF_SOURCELIM_DESCR_LEN];
+
+	unsigned int	 nentries;
+	unsigned int	 inuse;
+
+	uint64_t	 addrallocs;
+	uint64_t	 addrnomem;
+	uint64_t	 admitted;
+	uint64_t	 addrlimited;
+	uint64_t	 hardlimited;
+	uint64_t	 ratelimited;
+};
+
+int	pfctl_source_limiter_get(struct pfctl_handle *h, struct pfctl_source_lim *lim);
+int	pfctl_source_limiter_nget(struct pfctl_handle *h, struct pfctl_source_lim *lim);
+int	pfctl_source_limiter_add(struct pfctl_handle *h, struct pfctl_source_lim *lim);
+
+struct pfctl_source {
+	sa_family_t	 af;
+	unsigned int	 rdomain;
+	struct pf_addr	 addr;
+
+	unsigned int	 inet_prefix;
+	unsigned int	 inet6_prefix;
+
+	unsigned int	 limit;
+	unsigned int	 inuse;
+	uint64_t	 admitted;
+	uint64_t	 hardlimited;
+	uint64_t	 ratelimited;
+};
+typedef int (*pfctl_get_source_fn)(struct pfctl_source *, void *);
+int	pfctl_source_get(struct pfctl_handle *h, int id,
+	    pfctl_get_source_fn fn, void *arg);
+
+struct pfctl_source_clear {
+	char		 name[PF_SOURCELIM_NAME_LEN];
+	uint32_t	 id;
+	sa_family_t	 af;
+	unsigned int	 rdomain;
+	struct pf_addr	 addr;
+};
+int	pfctl_source_clear(struct pfctl_handle *h, struct pfctl_source_clear *);
+
+int	pfctl_flush_fingerprints(struct pfctl_handle *h);
+int	pfctl_get_fingerprint(struct pfctl_handle *h, int idx, struct pf_osfp_ioctl *fp);
+int	pfctl_add_fingerprint(struct pfctl_handle *h, struct pf_osfp_ioctl *fp);
+
+struct pfctl_trans;
+
+struct pfctl_trans*	pfctl_trans_alloc(void);
+void			pfctl_trans_free(struct pfctl_trans *t);
+size_t			pfctl_trans_size(struct pfctl_trans *t);
+int			pfctl_trans_add(struct pfctl_trans *t, int rs_num, const char *anchor);
+uint32_t		pfctl_get_ticket(struct pfctl_trans *t, int rs_num, const char *anchor);
+
+int			pfctl_trans_begin(struct pfctl_handle *h, struct pfctl_trans *t, size_t off);
+int			pfctl_trans_commit(struct pfctl_handle *h, struct pfctl_trans *t, size_t off);
+int			pfctl_trans_rollback(struct pfctl_handle *h, struct pfctl_trans *t, size_t off);
 
 #endif

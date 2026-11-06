@@ -34,8 +34,6 @@
  */
 
 #include <sys/cdefs.h>
-#include "opt_inet.h"
-#include "opt_inet6.h"
 
 #include <sys/capsicum.h>
 
@@ -47,11 +45,6 @@
 #include <sys/hash.h>
 #include <sys/sysctl.h>
 #include <fs/nfs/nfsport.h>
-#include <netinet/in_fib.h>
-#include <netinet/if_ether.h>
-#include <netinet6/ip6_var.h>
-#include <net/if_types.h>
-#include <net/route/nhop.h>
 
 #include <fs/nfsclient/nfs_kdtrace.h>
 
@@ -412,7 +405,7 @@ nfscl_warn_fileid(struct nfsmount *nmp, struct nfsvattr *oldnap,
 }
 
 void
-ncl_copy_vattr(struct vattr *dst, struct vattr *src)
+ncl_copy_vattr(struct vnode *vp, struct vattr *dst, struct vattr *src)
 {
 	dst->va_type = src->va_type;
 	dst->va_mode = src->va_mode;
@@ -429,7 +422,7 @@ ncl_copy_vattr(struct vattr *dst, struct vattr *src)
 	dst->va_birthtime = src->va_birthtime;
 	dst->va_gen = src->va_gen;
 	dst->va_flags = src->va_flags;
-	dst->va_rdev = src->va_rdev;
+	dst->va_rdev = VN_ISDEV(vp) ? src->va_rdev : NODEV;
 	dst->va_bytes = src->va_bytes;
 	dst->va_filerev = src->va_filerev;
 }
@@ -595,7 +588,7 @@ nfscl_loadattrcache(struct vnode **vpp, struct nfsvattr *nap, void *nvaper,
 		KDTRACE_NFS_ATTRCACHE_FLUSH_DONE(vp);
 	}
 	if (vaper != NULL) {
-		ncl_copy_vattr(vaper, vap);
+		ncl_copy_vattr(vp, vaper, vap);
 		if (np->n_flag & NCHG) {
 			if (np->n_flag & NACC)
 				vaper->va_atime = np->n_atim;
@@ -646,7 +639,7 @@ ncl_pager_setsize(struct vnode *vp, u_quad_t *nsizep)
 		    (curthread->td_pflags2 & TDP2_SBPAGES) == 0)
 			setnsize = true;
 		else
-			np->n_flag |= NVNSETSZSKIP;
+			vn_delayed_setsize(vp);
 	}
 	if (nsizep == NULL) {
 		NFSUNLOCKNODE(np);
@@ -657,6 +650,37 @@ ncl_pager_setsize(struct vnode *vp, u_quad_t *nsizep)
 		*nsizep = nsize;
 	}
 	return (setnsize);
+}
+
+/*
+ * If the uuid passed in is the DEFAULT_UUID, try and find an
+ * alternate to replace it with.
+ * If no alternate is available, set uuid to "" so that nfscl_fillclid()
+ * will use random bytes.
+ */
+void
+nfscl_uuidcheck(char *uuid)
+{
+	int ucplen, uuidlen;
+	char *ucp;
+
+	/*
+	 * If the uuid is the DEFAULT_UUID, try and get an alternative.
+	 */
+	uuidlen = strlen(uuid);
+	ucp = NULL;
+	if (uuidlen == strlen(DEFAULT_HOSTUUID) &&
+	    NFSBCMP(uuid, DEFAULT_HOSTUUID, uuidlen) == 0) {
+		*uuid = '\0';
+		/* Use smbios.system.uuid if it exists. */
+		if ((ucp = kern_getenv("smbios.system.uuid")) != NULL) {
+			ucplen = strlen(ucp);
+			if (ucplen < HOSTUUIDLEN && ucplen > 0)
+				strlcpy(uuid, ucp, HOSTUUIDLEN);
+		}
+	}
+	if (ucp != NULL)
+		freeenv(ucp);
 }
 
 /*
@@ -828,7 +852,7 @@ nfscl_wcc_data(struct nfsrv_descript *nd, struct vnode *vp,
 	    == (ND_NFSV4 | ND_V4WCCATTR)) {
 		error = nfsv4_loadattr(nd, NULL, &nfsva, NULL,
 		    NULL, 0, NULL, NULL, NULL, NULL, NULL, 0,
-		    NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+		    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
 		if (error)
 			return (error);
 		/*
@@ -1016,78 +1040,6 @@ nfscl_loadfsinfo(struct nfsmount *nmp, struct nfsfsinfo *fsp,
 }
 
 /*
- * Lookups source address which should be used to communicate with
- * @nmp and stores it inside @pdst.
- *
- * Returns 0 on success.
- */
-u_int8_t *
-nfscl_getmyip(struct nfsmount *nmp, struct in6_addr *paddr, int *isinet6p)
-{
-#if defined(INET6) || defined(INET)
-	int fibnum;
-
-	fibnum = curthread->td_proc->p_fibnum;
-#endif
-#ifdef INET
-	if (nmp->nm_nam->sa_family == AF_INET) {
-		struct epoch_tracker et;
-		struct nhop_object *nh;
-		struct sockaddr_in *sin;
-		struct in_addr addr = {};
-
-		sin = (struct sockaddr_in *)nmp->nm_nam;
-		NET_EPOCH_ENTER(et);
-		CURVNET_SET(CRED_TO_VNET(nmp->nm_sockreq.nr_cred));
-		nh = fib4_lookup(fibnum, sin->sin_addr, 0, NHR_NONE, 0);
-		if (nh != NULL) {
-			addr = IA_SIN(ifatoia(nh->nh_ifa))->sin_addr;
-			if (IN_LOOPBACK(ntohl(addr.s_addr))) {
-				/* Ignore loopback addresses */
-				nh = NULL;
-			}
-		}
-		CURVNET_RESTORE();
-		NET_EPOCH_EXIT(et);
-
-		if (nh == NULL)
-			return (NULL);
-		*isinet6p = 0;
-		*((struct in_addr *)paddr) = addr;
-
-		return (u_int8_t *)paddr;
-	}
-#endif
-#ifdef INET6
-	if (nmp->nm_nam->sa_family == AF_INET6) {
-		struct epoch_tracker et;
-		struct sockaddr_in6 *sin6;
-		int error;
-
-		sin6 = (struct sockaddr_in6 *)nmp->nm_nam;
-
-		NET_EPOCH_ENTER(et);
-		CURVNET_SET(CRED_TO_VNET(nmp->nm_sockreq.nr_cred));
-		error = in6_selectsrc_addr(fibnum, &sin6->sin6_addr,
-		    sin6->sin6_scope_id, NULL, paddr, NULL);
-		CURVNET_RESTORE();
-		NET_EPOCH_EXIT(et);
-		if (error != 0)
-			return (NULL);
-
-		if (IN6_IS_ADDR_LOOPBACK(paddr))
-			return (NULL);
-
-		/* Scope is embedded in */
-		*isinet6p = 1;
-
-		return (u_int8_t *)paddr;
-	}
-#endif
-	return (NULL);
-}
-
-/*
  * Copy NFS uid, gids from the cred structure.
  */
 void
@@ -1098,9 +1050,10 @@ newnfs_copyincred(struct ucred *cr, struct nfscred *nfscr)
 	KASSERT(cr->cr_ngroups >= 0,
 	    ("newnfs_copyincred: negative cr_ngroups"));
 	nfscr->nfsc_uid = cr->cr_uid;
-	nfscr->nfsc_ngroups = MIN(cr->cr_ngroups, NFS_MAXGRPS + 1);
-	for (i = 0; i < nfscr->nfsc_ngroups; i++)
-		nfscr->nfsc_groups[i] = cr->cr_groups[i];
+	nfscr->nfsc_ngroups = MIN(cr->cr_ngroups + 1, NFS_MAXGRPS + 1);
+	nfscr->nfsc_groups[0] = cr->cr_gid;
+	for (i = 1; i < nfscr->nfsc_ngroups; i++)
+		nfscr->nfsc_groups[i] = cr->cr_groups[i - 1];
 }
 
 /*
@@ -1301,7 +1254,7 @@ nfssvc_nfscl(struct thread *td, struct nfssvc_args *uap)
 	struct mount *mp;
 	struct nfsmount *nmp;
 
-	NFSD_CURVNET_SET(NFSD_TD_TO_VNET(td));
+	CURVNET_SET(TD_TO_VNET(td));
 	if (uap->flag & NFSSVC_CBADDSOCK) {
 		error = copyin(uap->argp, (caddr_t)&nfscbdarg, sizeof(nfscbdarg));
 		if (error)
@@ -1421,7 +1374,7 @@ nfssvc_nfscl(struct thread *td, struct nfssvc_args *uap)
 		error = EINVAL;
 	}
 out:
-	NFSD_CURVNET_RESTORE();
+	CURVNET_RESTORE();
 	return (error);
 }
 

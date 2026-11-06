@@ -173,13 +173,13 @@ struct option dhcp_options[256] = {
 	{ "option-105", "X",				&dhcp_universe, 105 },
 	{ "option-106", "X",				&dhcp_universe, 106 },
 	{ "option-107", "X",				&dhcp_universe, 107 },
-	{ "option-108", "X",				&dhcp_universe, 108 },
+	{ "ipv6only", "L",				&dhcp_universe, 108 },
 	{ "option-109", "X",				&dhcp_universe, 109 },
 	{ "option-110", "X",				&dhcp_universe, 110 },
 	{ "option-111", "X",				&dhcp_universe, 111 },
 	{ "option-112", "X",				&dhcp_universe, 112 },
 	{ "option-113", "X",				&dhcp_universe, 113 },
-	{ "url", "t",					&dhcp_universe, 114 },
+	{ "captive-portal", "t",			&dhcp_universe, 114 },
 	{ "option-115", "X",				&dhcp_universe, 115 },
 	{ "option-116", "X",				&dhcp_universe, 116 },
 	{ "option-117", "X",				&dhcp_universe, 117 },
@@ -225,7 +225,7 @@ struct option dhcp_options[256] = {
 	{ "option-157", "X",				&dhcp_universe, 157 },
 	{ "option-158", "X",				&dhcp_universe, 158 },
 	{ "option-159", "X",				&dhcp_universe, 159 },
-	{ "option-160", "X",				&dhcp_universe, 160 },
+	{ "captive-portal-legacy", "t",			&dhcp_universe, 160 },
 	{ "option-161", "X",				&dhcp_universe, 161 },
 	{ "option-162", "X",				&dhcp_universe, 162 },
 	{ "option-163", "X",				&dhcp_universe, 163 },
@@ -402,16 +402,18 @@ unsigned char dhcp_option_default_priority_list[] = {
 	DHO_STREETTALK_DA_SERVER,
 	DHO_DHCP_USER_CLASS_ID,
 	DHO_DOMAIN_SEARCH,
-	DHO_URL,
+	DHO_CAPTIVE_PORTAL,
+	DHO_IPV6_ONLY,
+	DHO_CAPTIVE_PORTAL_LEGACY,
 
 	/* Presently-undefined options... */
 	62, 63, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91,
 	92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105,
-	106, 107, 108, 109, 110, 111, 112, 113,      115, 116, 117,
+	106, 107,      109, 110, 111, 112, 113,      115, 116, 117,
 	118,      120, 122, 123, 124, 125, 126, 127, 128, 129, 130,
 	131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142,
 	143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154,
-	155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166,
+	155, 156, 157, 158, 159,      161, 162, 163, 164, 165, 166,
 	167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178,
 	179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190,
 	191, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202,
@@ -442,6 +444,9 @@ initialize_universes(void)
 		    (const unsigned char *)dhcp_options[i].name, 0,
 		    (unsigned char *)&dhcp_options[i]);
 	}
+	/* "url" is a deprecated alias for option 114. */
+	add_hash(dhcp_universe.hash, (const unsigned char *)"url", 0,
+	    (unsigned char *)&dhcp_options[DHO_CAPTIVE_PORTAL]);
 	universe_hash.hash_count = DEFAULT_HASH_SIZE;
 	add_hash(&universe_hash,
 	    (const unsigned char *)dhcp_universe.name, 0,

@@ -41,7 +41,7 @@ struct ifnet {
 	CK_STAILQ_ENTRY(ifnet) if_link; 	/* all struct ifnets are chained (CK_) */
 	LIST_ENTRY(ifnet) if_clones;	/* interfaces of a cloner */
 	CK_STAILQ_HEAD(, ifg_list) if_groups; /* linked list of groups per if (CK_) */
-					/* protected by if_addr_lock */
+					/* protected by ifnet_sxlock */
 	u_char	if_alloctype;		/* if_type at time of allocation */
 	uint8_t	if_numa_domain;		/* NUMA domain of device */
 	/* Driver and protocol specific information that remains stable. */
@@ -65,6 +65,7 @@ struct ifnet {
 	void	*if_linkmib;		/* link-type-specific MIB data */
 	size_t	if_linkmiblen;		/* length of above data */
 	u_int	if_refcount;		/* reference count */
+	u_int	if_linux_ethno;		/* linux name id for IFT_ETHER */
 
 	/* These fields are shared with struct if_data. */
 	uint8_t		if_type;	/* ethernet, tokenring, etc */
@@ -100,9 +101,8 @@ struct ifnet {
 	struct	ifaddr	*if_addr;	/* pointer to link-level address */
 	void	*if_hw_addr;		/* hardware link-level address */
 	const u_int8_t *if_broadcastaddr; /* linklevel broadcast bytestring */
-	struct	mtx if_afdata_lock;
-	void	*if_afdata[AF_MAX];
-	int	if_afdata_initialized;
+	struct in_ifinfo	*if_inet;
+	struct in6_ifextra	*if_inet6;
 
 	/* Additional features hung off the interface. */
 	u_int	if_fib;			/* interface FIB */
@@ -127,6 +127,7 @@ struct ifnet {
 	void (*if_bridge_linkstate)(struct ifnet *ifp);
 	if_start_fn_t	if_start;	/* initiate output routine */
 	if_ioctl_fn_t	if_ioctl;	/* ioctl routine */
+	if_vf_status_fn_t if_vf_status;	/* snapshot SR-IOV VF state */
 	if_init_fn_t	if_init;	/* Init routine */
 	int	(*if_resolvemulti)	/* validate/resolve multicast */
 		(struct ifnet *, struct sockaddr **, struct sockaddr *);
@@ -191,20 +192,6 @@ struct ifnet {
 	 */
 	int	if_ispare[4];		/* general use */
 };
-
-#define	IF_AFDATA_LOCK_INIT(ifp)	\
-	mtx_init(&(ifp)->if_afdata_lock, "if_afdata", NULL, MTX_DEF)
-
-#define	IF_AFDATA_WLOCK(ifp)	mtx_lock(&(ifp)->if_afdata_lock)
-#define	IF_AFDATA_WUNLOCK(ifp)	mtx_unlock(&(ifp)->if_afdata_lock)
-#define	IF_AFDATA_LOCK(ifp)	IF_AFDATA_WLOCK(ifp)
-#define	IF_AFDATA_UNLOCK(ifp)	IF_AFDATA_WUNLOCK(ifp)
-#define	IF_AFDATA_TRYLOCK(ifp)	mtx_trylock(&(ifp)->if_afdata_lock)
-#define	IF_AFDATA_DESTROY(ifp)	mtx_destroy(&(ifp)->if_afdata_lock)
-
-#define	IF_AFDATA_LOCK_ASSERT(ifp)	MPASS(in_epoch(net_epoch_preempt) || mtx_owned(&(ifp)->if_afdata_lock))
-#define	IF_AFDATA_WLOCK_ASSERT(ifp)	mtx_assert(&(ifp)->if_afdata_lock, MA_OWNED)
-#define	IF_AFDATA_UNLOCK_ASSERT(ifp)	mtx_assert(&(ifp)->if_afdata_lock, MA_NOTOWNED)
 
 #define IF_LLADDR(ifp)							\
     LLADDR((struct sockaddr_dl *)((ifp)->if_addr->ifa_addr))

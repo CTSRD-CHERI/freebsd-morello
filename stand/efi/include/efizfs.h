@@ -31,6 +31,13 @@
 #define _EFIZFS_H_
 
 #ifdef EFI_ZFS_BOOT
+/*
+ * EFI defines these, but libzfs.h includes stuff which includes stuff which
+ * include sys/param.h which defines these. This is easier than any of the other
+ * crazy we can do.
+ */
+#undef MIN
+#undef MAX
 #include <libzfs.h>
 
 typedef STAILQ_HEAD(zfsinfo_list, zfsinfo) zfsinfo_list_t;
@@ -41,8 +48,6 @@ typedef struct zfsinfo
 	EFI_HANDLE zi_handle;
         uint64_t zi_pool_guid;
 } zfsinfo_t;
-
-extern uint64_t pool_guid;
 
 void efi_zfs_probe(void);
 EFI_HANDLE efizfs_get_handle_by_guid(uint64_t);

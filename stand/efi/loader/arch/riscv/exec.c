@@ -41,10 +41,14 @@
 #include "bootstrap.h"
 #include "loader_efi.h"
 
+#include <Uefi.h>
+#include <Protocol/RiscVBootProtocol.h>
+
 static void
 riscv_set_boot_hart(struct preloaded_file *fp)
 {
-	EFI_GUID riscvboot = RISCV_EFI_BOOT_PROTOCOL_GUID;
+	// No #define in EDK2 for this
+	EFI_GUID riscvboot = { 0xccd15fec, 0x6f73, 0x4eec, { 0x83, 0x95, 0x3e, 0x69, 0xe4, 0xb9, 0x40, 0xbf }};
 	RISCV_EFI_BOOT_PROTOCOL *proto;
 	EFI_STATUS status = 0;
 	uint64_t boot_hartid = ULONG_MAX;
@@ -81,9 +85,6 @@ __elfN(exec)(struct preloaded_file *fp)
 
 	efi_time_fini();
 
-	entry = efi_translate(e->e_entry);
-
-	printf("Kernel entry at %p...\n", entry);
 	printf("Kernel args: %s\n", fp->f_args);
 
 	/*
@@ -97,13 +98,15 @@ __elfN(exec)(struct preloaded_file *fp)
 		return (error);
 	}
 
+	entry = efi_translate(e->e_entry);
+
 	(*entry)((void *)modulep);
 	panic("exec returned");
 }
 
 static struct file_format riscv_elf = {
-	__elfN(loadfile),
-	__elfN(exec)
+	.l_load = __elfN(loadfile),
+	.l_exec = __elfN(exec)
 };
 
 struct file_format *file_formats[] = {

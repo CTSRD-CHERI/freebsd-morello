@@ -6,6 +6,7 @@
 
 #include <sys/param.h>
 #include <sys/mount.h>
+#include <err.h>
 #include <errno.h>
 #include <libutil.h>
 #include <stdbool.h>
@@ -52,6 +53,7 @@ usage(bool explicit)
 	    "\tbectl [-r beroot] check\n"
 	    "\tbectl [-r beroot] create [-r] [-e {nonActiveBe | beName@snapshot}] beName\n"
 	    "\tbectl [-r beroot] create [-r] beName@snapshot\n"
+	    "\tbectl [-r beroot] create -E beName\n"
 	    "\tbectl [-r beroot] destroy [-Fo] {beName | beName@snapshot}\n"
 	    "\tbectl [-r beroot] export sourceBe\n"
 	    "\tbectl [-r beroot] import targetBe\n"
@@ -76,27 +78,28 @@ struct command_map_entry {
 	int (*fn)(int argc, char *argv[]);
 	/* True if libbe_print_on_error should be disabled */
 	bool silent;
+	bool save_history;
 };
 
 static struct command_map_entry command_map[] =
 {
-	{ "activate", bectl_cmd_activate,false   },
-	{ "create",   bectl_cmd_create,  false   },
-	{ "destroy",  bectl_cmd_destroy, false   },
-	{ "export",   bectl_cmd_export,  false   },
-	{ "import",   bectl_cmd_import,  false   },
+	{ "activate", bectl_cmd_activate,false, true    },
+	{ "create",   bectl_cmd_create,  false, true    },
+	{ "destroy",  bectl_cmd_destroy, false, true    },
+	{ "export",   bectl_cmd_export,  false, true    },
+	{ "import",   bectl_cmd_import,  false, true    },
 #if SOON
-	{ "add",      bectl_cmd_add,     false   },
+	{ "add",      bectl_cmd_add,     false, true    },
 #endif
-	{ "jail",     bectl_cmd_jail,    false   },
-	{ "list",     bectl_cmd_list,    false   },
-	{ "mount",    bectl_cmd_mount,   false   },
-	{ "rename",   bectl_cmd_rename,  false   },
-	{ "unjail",   bectl_cmd_unjail,  false   },
-	{ "ujail",    bectl_cmd_unjail,  false   },
-	{ "unmount",  bectl_cmd_unmount, false   },
-	{ "umount",   bectl_cmd_unmount, false   },
-	{ "check",    bectl_cmd_check,   true    },
+	{ "jail",     bectl_cmd_jail,    false, false   },
+	{ "list",     bectl_cmd_list,    false, false   },
+	{ "mount",    bectl_cmd_mount,   false, false   },
+	{ "rename",   bectl_cmd_rename,  false, true    },
+	{ "unjail",   bectl_cmd_unjail,  false, false   },
+	{ "ujail",    bectl_cmd_unjail,  false, false   },
+	{ "unmount",  bectl_cmd_unmount, false, false   },
+	{ "umount",   bectl_cmd_unmount, false, false   },
+	{ "check",    bectl_cmd_check,   true,  false   },
 };
 
 static struct command_map_entry *
@@ -182,14 +185,18 @@ bectl_cmd_create(int argc, char *argv[])
 	char snapshot[BE_MAXPATHLEN];
 	char *atpos, *bootenv, *snapname;
 	int err, opt;
-	bool recursive;
+	bool empty, recursive;
 
 	snapname = NULL;
+	empty = false;
 	recursive = false;
-	while ((opt = getopt(argc, argv, "e:r")) != -1) {
+	while ((opt = getopt(argc, argv, "e:Er")) != -1) {
 		switch (opt) {
 		case 'e':
 			snapname = optarg;
+			break;
+		case 'E':
+			empty = true;
 			break;
 		case 'r':
 			recursive = true;
@@ -219,6 +226,13 @@ bectl_cmd_create(int argc, char *argv[])
 		 */
 		*atpos++ = '\0';
 		err = be_snapshot(be, bootenv, atpos, recursive, NULL);
+	} else if (empty) {
+		if (snapname || recursive) {
+			fprintf(stderr,
+			    "bectl create: -E cannot be combined with -e or -r\n");
+			return (usage(false));
+		}
+		err = be_create_empty(be, bootenv);
 	} else {
 		if (snapname == NULL)
 			/* Create from currently booted BE */
@@ -523,12 +537,42 @@ bectl_cmd_check(int argc, char *argv[] __unused)
 	return (0);
 }
 
+static char *
+save_cmdline(int argc, char *argv[])
+{
+	char *cmdline, *basename, *p;
+	int len, n, i;
+
+	len = MAXPATHLEN * 2 + 1; /* HIS_MAX_RECORD_LEN from zfs.h */
+	cmdline = p = malloc(len);
+	if (cmdline == NULL)
+		err(2, "malloc");
+
+	basename = strrchr(argv[0], '/');
+	if (basename == NULL)
+		basename = argv[0];
+	else
+		basename++;
+
+	n = strlcpy(p, basename, len);
+	for (i = 1; i < argc; i++) {
+		if (n >= len)
+			break;
+		p += n;
+		*p++ = ' ';
+		len -= (n + 1);
+		n = strlcpy(p, argv[i], len);
+	}
+
+	return (cmdline);
+}
+
 int
 main(int argc, char *argv[])
 {
 	struct command_map_entry *cmd;
 	const char *command;
-	char *root = NULL;
+	char *root = NULL, *cmdline = NULL;
 	int opt, rc;
 
 	while ((opt = getopt(argc, argv, "hr:")) != -1) {
@@ -565,9 +609,18 @@ main(int argc, char *argv[])
 		return (-1);
 	}
 
+	if (cmd->save_history)
+		cmdline = save_cmdline(argc+optind, argv-optind);
+
 	libbe_print_on_error(be, !cmd->silent);
 
 	rc = cmd->fn(argc, argv);
+
+	if (cmd->save_history) {
+		if (rc == 0)
+			be_log_history(be, cmdline);
+		free(cmdline);
+	}
 
 	libbe_close(be);
 	return (rc);

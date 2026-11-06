@@ -30,6 +30,7 @@
 #include <string.h>
 
 #include "archive.h"
+#include "archive_private.h"
 
 struct write_memory_data {
 	size_t	used;
@@ -51,6 +52,9 @@ int
 archive_write_open_memory(struct archive *a, void *buff, size_t buffSize, size_t *used)
 {
 	struct write_memory_data *mine;
+
+	archive_check_magic(a, ARCHIVE_WRITE_MAGIC,
+	    ARCHIVE_STATE_NEW, "archive_write_open_memory");
 
 	mine = calloc(1, sizeof(*mine));
 	if (mine == NULL) {
@@ -104,11 +108,7 @@ memory_write(struct archive *a, void *client_data, const void *buff, size_t leng
 static int
 memory_write_free(struct archive *a, void *client_data)
 {
-	struct write_memory_data *mine;
 	(void)a; /* UNUSED */
-	mine = client_data;
-	if (mine == NULL)
-		return (ARCHIVE_OK);
-	free(mine);
+	free(client_data);
 	return (ARCHIVE_OK);
 }

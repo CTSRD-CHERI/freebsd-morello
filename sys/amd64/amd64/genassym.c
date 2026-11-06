@@ -32,11 +32,9 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/cdefs.h>
 #include "opt_hwpmc_hooks.h"
 #include "opt_kstack_pages.h"
 
-#include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/assym.h>
 #include <sys/bio.h>
@@ -46,7 +44,6 @@
 #include <sys/pmckern.h>
 #endif
 #include <sys/errno.h>
-#include <sys/mount.h>
 #include <sys/mutex.h>
 #include <sys/socket.h>
 #include <sys/resourcevar.h>
@@ -57,6 +54,7 @@
 #include <vm/vm_param.h>
 #include <vm/pmap.h>
 #include <vm/vm_map.h>
+#include <sys/kexec.h>
 #include <sys/proc.h>
 #include <x86/apicreg.h>
 #include <machine/cpu.h>
@@ -65,6 +63,7 @@
 #include <machine/proc.h>
 #include <machine/segments.h>
 #include <machine/efi.h>
+#include <machine/kexec.h>
 
 ASSYM(P_VMSPACE, offsetof(struct proc, p_vmspace));
 ASSYM(VM_PMAP, offsetof(struct vmspace, vm_pmap));
@@ -147,6 +146,12 @@ ASSYM(PCB_STAR, offsetof(struct pcb, pcb_star));
 ASSYM(PCB_LSTAR, offsetof(struct pcb, pcb_lstar));
 ASSYM(PCB_CSTAR, offsetof(struct pcb, pcb_cstar));
 ASSYM(PCB_SFMASK, offsetof(struct pcb, pcb_sfmask));
+ASSYM(PCB_FRED_RSP0, offsetof(struct pcb, pcb_fred_rsp0));
+ASSYM(PCB_FRED_RSP1, offsetof(struct pcb, pcb_fred_rsp1));
+ASSYM(PCB_FRED_RSP2, offsetof(struct pcb, pcb_fred_rsp2));
+ASSYM(PCB_FRED_RSP3, offsetof(struct pcb, pcb_fred_rsp3));
+ASSYM(PCB_FRED_STKLVLS, offsetof(struct pcb, pcb_fred_stklvls));
+ASSYM(PCB_FRED_CONFIG, offsetof(struct pcb, pcb_fred_config));
 ASSYM(PCB_SIZE, sizeof(struct pcb));
 ASSYM(PCB_FULL_IRET, PCB_FULL_IRET);
 ASSYM(PCB_DBREGS, PCB_DBREGS);
@@ -181,9 +186,25 @@ ASSYM(TF_DS, offsetof(struct trapframe, tf_ds));
 ASSYM(TF_ES, offsetof(struct trapframe, tf_es));
 ASSYM(TF_FS, offsetof(struct trapframe, tf_fs));
 ASSYM(TF_GS, offsetof(struct trapframe, tf_gs));
+ASSYM(TF_FRED_EVINFO2, offsetof(struct trapframe, tf_fred_evinfo2));
 ASSYM(TF_FLAGS, offsetof(struct trapframe, tf_flags));
 ASSYM(TF_SIZE, sizeof(struct trapframe));
 ASSYM(TF_HASSEGS, TF_HASSEGS);
+ASSYM(TF_FRED_EVINFO2_VECMASK, TF_FRED_EVINFO2_VECMASK);
+ASSYM(TF_FRED_EVINFO2_VEC_SYSCALL, TF_FRED_EVINFO2_VEC_SYSCALL);
+ASSYM(TF_FRED_EVINFO2_SYSCALLMASK, TF_FRED_EVINFO2_TYPEMASK |
+    TF_FRED_EVINFO2_VECMASK | TF_FRED_EVINFO2_LM);
+ASSYM(TF_FRED_EVINFO2_EXCMASK, TF_FRED_EVINFO2_TYPEMASK |
+    TF_FRED_EVINFO2_VECMASK);
+ASSYM(TF_FRED_EVINFO2_TYPE_EXC, TF_FRED_EVINFO2_TYPE_EXC);
+ASSYM(TF_FRED_EVINFO2_TYPE_SYSCALL, TF_FRED_EVINFO2_TYPE_SYSCALL);
+ASSYM(TF_FRED_EVINFO2_TYPE_INT3, TF_FRED_EVINFO2_TYPE_INT3);
+ASSYM(TF_FRED_EVINFO2_TYPEMASK, TF_FRED_EVINFO2_TYPEMASK);
+ASSYM(TF_FRED_EVINFO2_SYSCALLVAL, TF_FRED_EVINFO2_TYPE_SYSCALL |
+    TF_FRED_EVINFO2_VEC_SYSCALL | TF_FRED_EVINFO2_LM);
+ASSYM(TF_FRED_EVINFO2_INSTLENMASK, TF_FRED_EVINFO2_INSTLENMASK);
+ASSYM(TF_FRED_EVINFO2_INSTLENSHIFT, TF_FRED_EVINFO2_INSTLENSHIFT);
+ASSYM(TF_FRED_EVINFO1_NMI, TF_FRED_EVINFO1_NMI);
 
 ASSYM(PTI_RDX, offsetof(struct pti_frame, pti_rdx));
 ASSYM(PTI_RAX, offsetof(struct pti_frame, pti_rax));
@@ -273,6 +294,10 @@ ASSYM(TSSSEL, GSEL(GPROC0_SEL, SEL_KPL));
 ASSYM(LDTSEL, GSEL(GUSERLDT_SEL, SEL_KPL));
 ASSYM(SEL_RPL_MASK, SEL_RPL_MASK);
 
+ASSYM(IDT_NP, IDT_NP);
+ASSYM(IDT_GP, IDT_GP);
+ASSYM(IDT_BP, IDT_BP);
+
 ASSYM(__FreeBSD_version, __FreeBSD_version);
 
 #ifdef	HWPMC_HOOKS
@@ -295,3 +320,13 @@ ASSYM(EC_R13, offsetof(struct efirt_callinfo, ec_r13));
 ASSYM(EC_R14, offsetof(struct efirt_callinfo, ec_r14));
 ASSYM(EC_R15, offsetof(struct efirt_callinfo, ec_r15));
 ASSYM(EC_RFLAGS, offsetof(struct efirt_callinfo, ec_rflags));
+
+/* Kexec */
+ASSYM(KEXEC_ENTRY, offsetof(struct kexec_image, entry));
+ASSYM(KEXEC_SEGMENTS, offsetof(struct kexec_image, segments));
+ASSYM(KEXEC_SEGMENT_MAX, KEXEC_SEGMENT_MAX);
+ASSYM(KEXEC_IMAGE_SIZE, sizeof(struct kexec_image));
+ASSYM(KEXEC_STAGED_SEGMENT_SIZE, sizeof(struct kexec_segment_stage));
+ASSYM(KEXEC_SEGMENT_SIZE, offsetof(struct kexec_segment_stage, size));
+ASSYM(KEXEC_SEGMENT_MAP, offsetof(struct kexec_segment_stage, map_buf));
+ASSYM(KEXEC_SEGMENT_TARGET, offsetof(struct kexec_segment_stage, target));

@@ -275,8 +275,9 @@ cpu_init_small_core(void)
 void
 initializecpu(void)
 {
+	uint64_t irperf1, irperf2;
 	uint64_t msr;
-	uint32_t cr4;
+	uint64_t cr4;
 
 	TSENTER();
 	cr4 = rcr4();
@@ -289,6 +290,19 @@ initializecpu(void)
 
 	if (cpu_stdext_feature2 & CPUID_STDEXT2_PKU)
 		cr4 |= CR4_PKE;
+
+	/*
+	 * Any CPU having Linear Address Space Separation (LASS)
+	 * should have SMAP, but check it to be sure.  Otherwise
+	 * userspace accesses from kernel cannot work.
+	 */
+	if (IS_BSP() && (cpu_stdext_feature4 & CPUID_STDEXT4_LASS) != 0 &&
+	    (cpu_stdext_feature & CPUID_STDEXT_SMAP) != 0) {
+		lass_enabled = 1;
+		TUNABLE_INT_FETCH("hw.lass", &lass_enabled);
+	}
+	if (lass_enabled)
+		cr4 |= CR4_LASS;
 
 	/*
 	 * If SMEP is present, we only need to flush RSB (by default)
@@ -347,6 +361,40 @@ initializecpu(void)
 	    (cpu_stdext_feature2 & CPUID_STDEXT2_RDPID) != 0)
 		wrmsr(MSR_TSC_AUX, cpu_auxmsr());
 
+	/*
+	 * According to erratum #1054 "Instructions Retired Performance
+	 * Counter May Be Inaccurate", the IRPERF feature should be
+	 * enabled only for a subset of Zen 1 (Family 17h Models 30h and above)
+	 * and all later processors.
+	 *
+	 * Separately, verify IRPERF is actually incrementing across two
+	 * back-to-back reads. This only catches a dead/non-functional MSR
+	 * (e.g. a hypervisor or emulator exposing the CPUID feature bit
+	 * without real MSR support behind it) -- it cannot detect the
+	 * erratum's actual failure mode, a counter that increments but
+	 * returns inaccurate values. That case is handled entirely by the
+	 * family/model check above.
+	 *
+	 * Released versions of vmm erroneously advertise IRPERF support, so
+	 * ignore it when running under bhyve.
+	 *
+	 * This runs on every core (BSP and each AP) via initializecpu();
+	 * pmc_amd_initialize() later assumes IRPERF's enabled/disabled state
+	 * is consistent across all cores.
+	 */
+	if ((amd_extended_feature_extensions & AMDFEID_IRPERF) &&
+	    vm_guest != VM_GUEST_BHYVE &&
+	    ((CPUID_TO_FAMILY(cpu_id) > 0x17) ||
+	    (CPUID_TO_FAMILY(cpu_id) == 0x17 && CPUID_TO_MODEL(cpu_id) >= 0x30))) {
+		wrmsr(MSR_HWCR, rdmsr(MSR_HWCR) | HWCR_IRPERFEN);
+
+		irperf1 = rdmsr(MSR_IRPERF);
+		irperf2 = rdmsr(MSR_IRPERF);
+
+		if (irperf2 <= irperf1)
+			wrmsr(MSR_HWCR, rdmsr(MSR_HWCR) & ~HWCR_IRPERFEN);
+	}
+
 	if (!IS_BSP())
 		cpu_init_small_core();
 	TSEXIT();
@@ -383,4 +431,76 @@ initializecpucache(void)
 		cpu_feature &= ~CPUID_CLFSH;
 		cpu_stdext_feature &= ~CPUID_STDEXT_CLFLUSHOPT;
 	}
+}
+
+extern const char fred_events_handlers[], fred_events_handlers_end[];
+
+void
+amd64_cpu_init_fred(void)
+{
+	MPASS((((uintptr_t)fred_events_handlers) & PAGE_MASK) == 0);
+	/*
+	 * 128b = 0x2 * 64b redzone
+	 * SLC 0 for EXTINT
+	 * SLC 0 current
+	 */
+	wrmsr(MSR_FRED_CONFIG, (uintptr_t)fred_events_handlers |
+	    (0x2 << IA32_FRED_CONFIG_REDZONESZ_SHIFT) |
+	    (0 << IA32_FRED_CONFIG_EXTINT_SLC_SHIFT) | 0);
+
+	/*
+	 * With FRED, there is no need for workarounds requiring
+	 * dedicated stack for #DB.  Also, there is no need to have
+	 * separate stacks for NMI and #MC, because CSL rules ensure
+	 * that interrupted frame is safe even if NMI was interrupted
+	 * by machine check or vice versa.
+	 *
+	 * Still, we need to provide a stack for events that can occur
+	 * with the interrupts disabled, to avoid caring about the
+	 * ordering of the context update in cpu_switch.S.  Use CSL 1
+	 * for NMI and #MC.
+	 *
+	 * Since double fault handler is used to handle stack
+	 * overflow, it gets the dedicated stack, of the highest used
+	 * CSL 2.
+	 *
+	 * CSL 3 is unused, and we have some space to re-arrange this
+	 * if a need in the future appears.
+	 */
+	wrmsr(MSR_FRED_STKLVLS, (1ul << (IDT_NMI * 2)) |
+	    (1ul << (IDT_MC * 2)) | (2ul << (IDT_DF * 2)));
+	wrmsr(MSR_FRED_RSP3, 0);
+	load_cr4(rcr4() | CR4_FRED);
+	if (IS_BSP() && bootverbose)
+		printf("FRED enabled\n");
+
+}
+
+void
+amd64_init_splitlock(void)
+{
+	uint64_t msr;
+
+	if ((cpu_stdext_feature3 & CPUID_STDEXT3_CORE_CAP) != 0) {
+		if (rdmsr_safe(MSR_IA32_CORE_CAP, &msr) == 0)
+			ia32_splitlock = (msr & IA32_CORE_CAP_SPLITLOCK) != 0;
+	}
+	if (ia32_splitlock) {
+		TUNABLE_INT_FETCH("hw.splitlock_force", &ia32_splitlock_force);
+		if (ia32_splitlock_force != 0)
+			ia32_splitlock_force = 1;
+	} else {
+		ia32_splitlock_force = 0;
+	}
+}
+
+void
+amd64_cpu_init_msr_memctl(void)
+{
+	uint64_t msr;
+
+	if ((cpu_stdext_feature3 & CPUID_STDEXT3_CORE_CAP) != 0 &&
+	    rdmsr_safe(MSR_IA32_CORE_CAP, &msr) == 0 &&
+	    (msr & IA32_CORE_CAP_SPLITLOCK) != 0)
+		PCPU_SET(msr_memctl, rdmsr(MSR_MEMORY_CTL));
 }

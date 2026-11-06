@@ -67,9 +67,9 @@
 #include <net/if_var.h>
 #include <net/if_clone.h>
 #include <net/if_media.h>
-#include <net/if_var.h>
 #include <net/if_private.h>
 #include <net/if_types.h>
+#include <net/if_vlan_var.h>
 #include <net/netisr.h>
 #ifdef RSS
 #include <net/rss_config.h>
@@ -149,10 +149,6 @@ epair_clear_mbuf(struct mbuf *m)
 		m->m_pkthdr.snd_tag = NULL;
 		m->m_pkthdr.csum_flags &= ~CSUM_SND_TAG;
 	}
-
-	/* Clear vlan information. */
-	m->m_flags &= ~M_VLANTAG;
-	m->m_pkthdr.ether_vtag = 0;
 
 	m_tag_delete_nonpersistent(m);
 }
@@ -246,6 +242,9 @@ epair_prepare_mbuf(struct mbuf *m, struct ifnet *src_ifp)
 	epair_clear_mbuf(m);
 	if_setrcvif(m, src_ifp);
 	M_SETFIB(m, src_ifp->if_fib);
+	if ((if_getcapenable(src_ifp) & IFCAP_RXCSUM) == 0)
+		m->m_pkthdr.csum_flags &= ~(CSUM_L3_CALC | CSUM_L3_VALID |
+		    CSUM_L4_CALC | CSUM_L4_VALID);
 
 	MPASS(m->m_nextpkt == NULL);
 	MPASS((m->m_pkthdr.csum_flags & CSUM_SND_TAG) == 0);
@@ -355,6 +354,10 @@ epair_transmit(struct ifnet *ifp, struct mbuf *m)
 		return (E2BIG);
 	}
 
+	if ((ifp->if_capenable & IFCAP_MEXTPG) == 0) {
+		M_ASSERTMAPPED(m);
+	}
+
 	/*
 	 * We are not going to use the interface en/dequeue mechanism
 	 * on the TX side. We are called from ether_output_frame()
@@ -435,12 +438,27 @@ epair_media_status(struct ifnet *ifp __unused, struct ifmediareq *imr)
 	imr->ifm_active = IFM_ETHER | IFM_10G_T | IFM_FDX;
 }
 
+/*
+ * Update ifp->if_hwassist according to the current value of ifp->if_capenable.
+ */
+static void
+epair_caps_changed(struct ifnet *ifp)
+{
+	uint64_t hwassist = 0;
+
+	if (ifp->if_capenable & IFCAP_TXCSUM)
+		hwassist |= CSUM_IP_TCP | CSUM_IP_UDP;
+	if (ifp->if_capenable & IFCAP_TXCSUM_IPV6)
+		hwassist |= CSUM_IP6_TCP | CSUM_IP6_UDP;
+	ifp->if_hwassist = hwassist;
+}
+
 static int
 epair_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 {
 	struct epair_softc *sc;
 	struct ifreq *ifr;
-	int error;
+	int error, cap;
 
 	ifr = (struct ifreq *)data;
 	switch (cmd) {
@@ -459,6 +477,56 @@ epair_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 	case SIOCSIFMTU:
 		/* We basically allow all kinds of MTUs. */
 		ifp->if_mtu = ifr->ifr_mtu;
+		error = 0;
+		break;
+
+	case SIOCGIFCAP:
+		ifr->ifr_reqcap = ifp->if_capabilities;
+		ifr->ifr_curcap = ifp->if_capenable;
+		error = 0;
+		break;
+	case SIOCSIFCAP:
+		/*
+		 * Enable/disable capabilities as requested, but treat
+		 * IFCAP_RXCSUM and IFCAP_RXCSUM_IPV6 special as they can only
+		 * be set or unset as pair.
+		 */
+		cap = ifr->ifr_reqcap;
+		if (((cap & IFCAP_RXCSUM) == 0) !=
+		    ((cap & IFCAP_RXCSUM_IPV6) == 0)) {
+			if ((ifp->if_capenable & IFCAP_RXCSUM) == 0)
+				cap |= (IFCAP_RXCSUM | IFCAP_RXCSUM_IPV6);
+			else
+				cap &= ~(IFCAP_RXCSUM | IFCAP_RXCSUM_IPV6);
+		}
+		ifp->if_capenable = cap;
+		epair_caps_changed(ifp);
+		VLAN_CAPABILITIES(ifp);
+		/*
+		 * If IFCAP_TXCSUM(_IPV6) has been changed, change it on the
+		 * other epair interface as well.
+		 * A bridge disables IFCAP_TXCSUM(_IPV6) when adding one epair
+		 * interface if another interface in the bridge has it disabled.
+		 * In that case this capability needs to be disabled on the
+		 * other epair interface to avoid sending packets in the bridge
+		 * that rely on this capability.
+		 * Do the same for IFCAP_VLAN_HWTAGGING. If the sending epair
+		 * end has this capability enabled, the other end has to have
+		 * it enabled too. Otherwise, epair would have to add the VLAN
+		 * tag in the Ethernet header.
+		 */
+		sc = ifp->if_softc;
+		if ((ifp->if_capenable ^ sc->oifp->if_capenable) &
+		    (IFCAP_TXCSUM | IFCAP_TXCSUM_IPV6 | IFCAP_VLAN_HWTAGGING)) {
+			sc->oifp->if_capenable &=
+			    ~(IFCAP_TXCSUM | IFCAP_TXCSUM_IPV6 |
+			      IFCAP_VLAN_HWTAGGING);
+			sc->oifp->if_capenable |= ifp->if_capenable &
+			    (IFCAP_TXCSUM | IFCAP_TXCSUM_IPV6 |
+			     IFCAP_VLAN_HWTAGGING);
+			epair_caps_changed(sc->oifp);
+			VLAN_CAPABILITIES(sc->oifp);
+		}
 		error = 0;
 		break;
 
@@ -573,8 +641,13 @@ epair_setup_ifp(struct epair_softc *sc, char *name, int unit)
 	ifp->if_dname = epairname;
 	ifp->if_dunit = unit;
 	ifp->if_flags = IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST;
-	ifp->if_capabilities = IFCAP_VLAN_MTU;
-	ifp->if_capenable = IFCAP_VLAN_MTU;
+	ifp->if_capabilities =
+	    IFCAP_VLAN_MTU | IFCAP_VLAN_HWTAGGING |
+	    IFCAP_TXCSUM | IFCAP_RXCSUM |
+	    IFCAP_TXCSUM_IPV6 | IFCAP_RXCSUM_IPV6 |
+	    IFCAP_MEXTPG;
+	ifp->if_capenable = ifp->if_capabilities;
+	epair_caps_changed(ifp);
 	ifp->if_transmit = epair_transmit;
 	ifp->if_qflush = epair_qflush;
 	ifp->if_start = epair_start;
@@ -864,7 +937,7 @@ vnet_epair_uninit(const void *unused __unused)
 
 	ifc_detach_cloner(V_epair_cloner);
 }
-VNET_SYSUNINIT(vnet_epair_uninit, SI_SUB_INIT_IF, SI_ORDER_ANY,
+VNET_SYSUNINIT(vnet_epair_uninit, SI_SUB_PSEUDO, SI_ORDER_ANY,
     vnet_epair_uninit, NULL);
 
 static int

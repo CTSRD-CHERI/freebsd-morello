@@ -875,7 +875,7 @@ int bnxt_qplib_alloc_dpi(struct bnxt_qplib_res	*res,
 	dpi->umdbr = umaddr;
 	switch (type) {
 	case BNXT_QPLIB_DPI_TYPE_KERNEL:
-		/* priviledged dbr was already mapped just initialize it. */
+		/* privileged dbr was already mapped just initialize it. */
 		dpi->umdbr = dpit->ucreg.bar_base +
 			     dpit->ucreg.offset + bit_num * PAGE_SIZE;
 		dpi->dbr = dpit->priv_db;
@@ -1139,7 +1139,8 @@ int bnxt_qplib_map_db_bar(struct bnxt_qplib_res *res)
 	ucreg->bar_id = RCFW_DBR_PCI_BAR_REGION;
 	ucreg->bar_base = pci_resource_start(res->pdev, ucreg->bar_id);
 
-	ucreg->offset = 65536;
+	if (_is_chip_gen_p5(res->cctx))
+		ucreg->offset = 65536;
 
 	ucreg->len = ucreg->offset + PAGE_SIZE;
 
@@ -1150,7 +1151,7 @@ int bnxt_qplib_map_db_bar(struct bnxt_qplib_res *res)
 	}
 	ucreg->bar_reg = ioremap(ucreg->bar_base, ucreg->len);
 	if (!ucreg->bar_reg) {
-		dev_err(&res->pdev->dev, "priviledged dpi map failed!\n");
+		dev_err(&res->pdev->dev, "privileged dpi map failed!\n");
 		return -ENOMEM;
 	}
 

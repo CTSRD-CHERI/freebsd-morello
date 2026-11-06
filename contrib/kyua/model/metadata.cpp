@@ -30,7 +30,7 @@
 
 #include <memory>
 
-#include "engine/execenv/execenv.hpp"
+#include "engine/execenv/execenv_fwd.hpp"
 #include "model/exceptions.hpp"
 #include "model/types.hpp"
 #include "utils/config/exceptions.hpp"
@@ -255,10 +255,8 @@ init_tree(config::tree& tree)
     tree.define< config::strings_set_node >("required_configs");
     tree.define< bytes_node >("required_disk_space");
     tree.define< paths_set_node >("required_files");
-    tree.define< bytes_node >("required_memory");
-#ifdef __FreeBSD__
     tree.define< config::strings_set_node >("required_kmods");
-#endif
+    tree.define< bytes_node >("required_memory");
     tree.define< paths_set_node >("required_programs");
     tree.define< user_node >("required_user");
     tree.define< delta_node >("timeout");
@@ -284,10 +282,8 @@ set_defaults(config::tree& tree)
                                          model::strings_set());
     tree.set< bytes_node >("required_disk_space", units::bytes(0));
     tree.set< paths_set_node >("required_files", model::paths_set());
-    tree.set< bytes_node >("required_memory", units::bytes(0));
-#ifdef __FreeBSD__
     tree.set< config::strings_set_node >("required_kmods", model::strings_set());
-#endif
+    tree.set< bytes_node >("required_memory", units::bytes(0));
     tree.set< paths_set_node >("required_programs", model::paths_set());
     tree.set< user_node >("required_user", "");
     // TODO(jmmv): We shouldn't be setting a default timeout like this.  See
@@ -526,7 +522,7 @@ bool
 model::metadata::has_execenv(void) const
 {
     const std::string& name = execenv();
-    return !name.empty() && name != engine::execenv::default_execenv_name;
+    return !name.empty() && name != DEFAULT_EXECENV_NAME;
 }
 
 
@@ -589,6 +585,22 @@ model::metadata::required_files(void) const
 }
 
 
+/// Returns the list of kernel modules needed by the test.
+///
+/// \return Set of kernel module names.
+const model::strings_set&
+model::metadata::required_kmods(void) const
+{
+    if (_pimpl->props.is_set("required_kmods")) {
+        return _pimpl->props.lookup< config::strings_set_node >(
+            "required_kmods");
+    } else {
+        return get_defaults().lookup< config::strings_set_node >(
+            "required_kmods");
+    }
+}
+
+
 /// Returns the amount of memory required by the test.
 ///
 /// \return Number of bytes, or 0 if this does not apply.
@@ -601,22 +613,6 @@ model::metadata::required_memory(void) const
         return get_defaults().lookup< bytes_node >("required_memory");
     }
 }
-
-
-#ifdef __FreeBSD__
-/// Returns the list of kmods needed by the test.
-///
-/// \return Set of strings.
-const model::strings_set&
-model::metadata::required_kmods(void) const
-{
-    if (_pimpl->props.is_set("required_kmods")) {
-        return _pimpl->props.lookup< config::strings_set_node >("required_kmods");
-    } else {
-	return get_defaults().lookup< config::strings_set_node >("required_kmods");
-    }
-}
-#endif
 
 
 /// Returns the list of programs needed by the test.
@@ -1059,6 +1055,21 @@ model::metadata_builder&
 model::metadata_builder::set_required_files(const model::paths_set& files)
 {
     set< paths_set_node >(_pimpl->props, "required_files", files);
+    return *this;
+}
+
+
+/// Sets the list of required kernel modules.
+///
+/// \param vars Set of kernel module names.
+///
+/// \return A reference to this builder.
+///
+/// \throw model::error If the value is invalid.
+model::metadata_builder&
+model::metadata_builder::set_required_kmods(const model::strings_set& kmods)
+{
+    set< config::strings_set_node >(_pimpl->props, "required_kmods", kmods);
     return *this;
 }
 

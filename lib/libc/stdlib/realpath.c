@@ -49,7 +49,7 @@ realpath1(const char *path, char *resolved)
 {
 	struct stat sb;
 	char *p, *q;
-	size_t left_len, resolved_len, next_token_len;
+	size_t left_len, prev_len, resolved_len, next_token_len;
 	unsigned symlinks;
 	ssize_t slen;
 	char left[PATH_MAX], next_token[PATH_MAX], symlink[PATH_MAX];
@@ -128,13 +128,27 @@ realpath1(const char *path, char *resolved)
 		/*
 		 * Append the next path component and lstat() it.
 		 */
-		resolved_len = strlcat(resolved, next_token, PATH_MAX);
+		prev_len = resolved_len;
+		resolved_len += strlcpy(resolved + prev_len, next_token,
+		    PATH_MAX - prev_len);
 		if (resolved_len >= PATH_MAX) {
 			errno = ENAMETOOLONG;
 			return (NULL);
 		}
-		if (lstat(resolved, &sb) != 0)
+		if (lstat(resolved, &sb) != 0) {
+			/*
+			 * EACCES means the parent directory is not
+			 * readable, while ENOTDIR means the parent
+			 * directory is not a directory.  Rewind the path
+			 * to correctly indicate where the error lies.
+			 */
+			if (errno == EACCES || errno == ENOTDIR) {
+				if (prev_len > 1)
+					prev_len--;
+				resolved[prev_len] = '\0';
+			}
 			return (NULL);
+		}
 		if (S_ISLNK(sb.st_mode)) {
 			if (symlinks++ > MAXSYMLINKS) {
 				errno = ELOOP;

@@ -1,3 +1,6 @@
+.\"
+.\" SPDX-License-Identifier: BSD-2-Clause
+.\"
 .\" Copyright (c) 2000, 2003 Robert N. M. Watson
 .\" Copyright (c) 2008-2012 James Gritton
 .\" All rights reserved.
@@ -23,7 +26,7 @@
 .\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 .\" SUCH DAMAGE.
 .\"
-.Dd August 7, 2025
+.Dd August 13, 2026
 .Dt JAIL 8
 .Os
 .Sh NAME
@@ -500,6 +503,15 @@ pseudo-parameter set.
 The ID of the cpuset associated with this jail (read-only).
 .It Va dying
 This is true if the jail is in the process of shutting down (read-only).
+.It Va mac.label
+The
+.Xr mac 3
+label associated with this jail.
+Note that a
+.Dq jail
+entry in
+.Xr mac.conf 5
+may need to be configured in order to retrieve the MAC label.
 .It Va parent
 The
 .Va jid
@@ -671,7 +683,7 @@ to
 in the
 .Xr rc.conf 5
 file outside of the jails.
-Similarily, if the
+Similarly, if the
 .Xr gssd 8
 is to be run in a jail, either the kernel
 .Sy KGSSAPI
@@ -702,15 +714,15 @@ The super-user will be disabled automatically if its parent system has it
 disabled.
 The super-user is enabled by default.
 .It Va allow.extattr
-Allow privileged process in the jail to manipulate filesystem extended
+Allow privileged processes in the jail to manipulate filesystem extended
 attributes in the system namespace.
 .It Va allow.adjtime
-Allow privileged process in the jail to slowly adjusting global operating system
-time.
+Allow privileged processes in the jail to slowly adjusting global operating
+system time.
 For example through utilities like
 .Xr ntpd 8 .
 .It Va allow.settime
-Allow privileged process in the jail to set global operating system data
+Allow privileged processes in the jail to set global operating system data
 and time.
 For example through utilities like
 .Xr date 1 .
@@ -719,6 +731,17 @@ This permission includes also
 .It Va allow.routing
 Allow privileged process in the non-VNET jail to modify the system routing
 table.
+.It Va allow.setaudit
+Allow privileged processes in the jail to set
+.Xr audit 4
+session state using
+.Xr setaudit 2
+and related system calls.
+This is useful, for example, for allowing a jailed
+.Xr sshd 8
+to set the audit user ID for an authenticated session.
+However, it gives jailed processes the ability to modify or disable audit
+session state, so should be configured with care.
 .El
 .El
 .Pp
@@ -784,6 +807,14 @@ This permission is effective only together with
 and only when
 .Va enforce_statfs
 is set to a value lower than 2.
+.It Va allow.mount.tarfs
+privileged users inside the jail will be able to mount and unmount the
+tarfs file system.
+This permission is effective only together with
+.Va allow.mount
+and only when
+.Va enforce_statfs
+is set to a value lower than 2.
 .It Va allow.mount.tmpfs
 privileged users inside the jail will be able to mount and unmount the
 tmpfs file system.
@@ -807,6 +838,17 @@ within a jail.
 .It Va allow.vmm
 The jail may access
 .Xr vmm 4 .
+This flag is only available when the
+.Xr vmm 4
+kernel module is loaded.
+.It Va allow.vmm_ppt
+The jail may configure PCI passthrough devices for use by
+.Xr vmm 4
+virtual machine guests.
+This allows privileged users inside the jail to manipulate physical devices
+claimed by the
+.Dv ppt
+driver, and thus must not be configured in untrusted jails.
 This flag is only available when the
 .Xr vmm 4
 kernel module is loaded.
@@ -998,7 +1040,7 @@ jail is removed.
 .It Va ip4.addr
 In addition to the IP addresses that are passed to the kernel, an
 interface, netmask and additional parameters (as supported by
-.Xr ifconfig 8 Ns )
+.Xr ifconfig 8 )
 may also be specified, in the form
 .Dq Ar interface Ns | Ns Ar ip-address Ns / Ns Ar netmask param ... .
 If an interface is given before the IP address, an alias for the address
@@ -1012,11 +1054,12 @@ adding the IP alias.
 .It Va ip6.addr
 In addition to the IP addresses that are passed to the kernel,
 an interface, prefix and additional parameters (as supported by
-.Xr ifconfig 8 Ns )
+.Xr ifconfig 8 )
 may also be specified, in the form
 .Dq Ar interface Ns | Ns Ar ip-address Ns / Ns Ar prefix param ... .
 .It Va vnet.interface
-A list of network interfaces to give to a vnet-enabled jail after is it created.
+A comma separated list of network interfaces to give to a vnet-enabled jail
+after is it created.
 The interfaces will automatically be released when the jail is removed.
 .It Va zfs.dataset
 A list of ZFS datasets to be attached to the jail.
@@ -1108,7 +1151,7 @@ process.
 This manual page documents the configuration steps necessary to support
 either of these steps, although the configuration steps may need to be
 refined based on local requirements.
-.Ss "Setting up a Jail Directory Tree"
+.Ss Setting up a Jail Directory Tree From Source
 To set up a jail directory tree containing an entire
 .Fx
 distribution, the following
@@ -1121,8 +1164,26 @@ mkdir -p $D
 make world DESTDIR=$D
 make distribution DESTDIR=$D
 .Ed
+.Ss Setting up a Jail Directory Tree from Distribution Files
+To set up a jail directory tree containing an entire
+.Fx
+distribution, the following
+.Xr sh 1
+command script can be used:
+.Bd -literal -offset indent
+D=/here/is/the/jail
+mkdir -p $D
+tar -xf /usr/freebsd-dist/base.txz -C $D --unlink
+.Ed
+.Ss Setting up a Jail Directory Tree from System Packages
+To set up a jail directory tree containing an selectable
+.Fx
+distribution with the packages tech preview,
+the following command can be used:
 .Pp
-In many cases this example would put far more in the jail than needed.
+.Dl bsdinstall jail /here/is/the/jail
+.Pp
+In many cases these examples would put far more in the jail than needed.
 In the other extreme case a jail might contain only one file:
 the executable to be run in the jail.
 .Pp
@@ -1517,6 +1578,7 @@ environment of the first jail.
 .Xr clock_settime 2 ,
 .Xr jail_set 2 ,
 .Xr ntp_adjtime 2 ,
+.Xr mac 3 ,
 .Xr devfs 4 ,
 .Xr fdescfs 4 ,
 .Xr linprocfs 4 ,
@@ -1524,6 +1586,7 @@ environment of the first jail.
 .Xr procfs 4 ,
 .Xr vmm 4 ,
 .Xr jail.conf 5 ,
+.Xr mac.conf 5 ,
 .Xr rc.conf 5 ,
 .Xr sysctl.conf 5 ,
 .Xr bsdconfig 8 ,

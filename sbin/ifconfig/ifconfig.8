@@ -28,7 +28,7 @@
 .\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 .\" SUCH DAMAGE.
 .\"
-.Dd August 10, 2025
+.Dd September 10, 2026
 .Dt IFCONFIG 8
 .Os
 .Sh NAME
@@ -36,7 +36,7 @@
 .Nd configure network interface parameters
 .Sh SYNOPSIS
 .Nm
-.Op Fl j Ar jail
+.Op Fl j Ar jid
 .Op Fl DkLmn
 .Op Fl f Ar type Ns Cm \&: Ns Ar format
 .Ar interface
@@ -50,11 +50,11 @@
 .Oc
 .Op Ar parameters
 .Nm
-.Op Fl j Ar jail
+.Op Fl j Ar jid
 .Ar interface
 .Cm destroy
 .Nm
-.Op Fl j Ar jail
+.Op Fl j Ar jid
 .Fl a
 .Op Fl dDkLmuv
 .Op Fl f Ar type Ns Cm \&: Ns Ar format
@@ -64,16 +64,16 @@
 .Nm
 .Fl C
 .Nm
-.Op Fl j Ar jail
+.Op Fl j Ar jid
 .Fl g Ar groupname
 .Nm
-.Op Fl j Ar jail
+.Op Fl j Ar jid
 .Fl l
 .Op Fl du
 .Op Fl g Ar groupname
 .Op Ar address_family
 .Nm
-.Op Fl j Ar jail
+.Op Fl j Ar jid
 .Op Fl dkLmuv
 .Op Fl f Ar type Ns Cm \&: Ns Ar format
 .Sh DESCRIPTION
@@ -257,22 +257,22 @@ Setting
 to
 .Cm all
 selects all interfaces.
-.It Fl j Ar jail
-Perform the actions inside the
-.Ar jail .
+.It Fl j Ar jid
+Perform the actions inside the jail specified by
+.Ar jid ,
+which may be either a jail name or a numeric jail ID.
 .Pp
 The
-.Cm ifconfig
-will first attach to the
-.Ar jail
-(by jail id or jail name) before performing the effects.
+.Nm
+utility will attach to the specified jail immediately upon
+encountering the option on the command line.
+The option may be specified multiple times to attach to a nested jail
+(jail within a jail).
 .Pp
-This allow network interfaces of
-.Ar jail
-to be configured even if the
-.Cm ifconfig
-binary is not available in
-.Ar jail .
+This makes it possible to configure network interfaces within a vnet
+jail even if the
+.Nm
+binary is not available inside the jail.
 .It Fl k
 Print keying information for the
 .Ar interface ,
@@ -325,6 +325,78 @@ will attempt to load it.
 Display only the interfaces that are up.
 .It Fl v
 Get more verbose status for an interface.
+When supported, this includes the status of configured SR-IOV virtual
+functions.
+Fields that the PF driver cannot observe are omitted; an omitted field does
+not mean false or zero.
+The status begins with the PF link state and speed normally advertised to
+VFs, followed by the number of VFs and one record for each VF.
+PF link status does not demonstrate that a VF driver is operational.
+.Pp
+Per-VF fields are arranged in the following groups:
+.Bl -tag -width "driver.*"
+.It Cm identity
+The primary MAC address known to the PF.
+.It Cm state
+.Cm configured=yes
+means that the PF accepted the VF configuration.
+.Cm initialized=yes
+means that the VF completed its driver or mailbox handshake since its last
+reset.
+When available, this group also reports whether the PF permits traffic,
+whether fault containment blocked the VF, and whether it is quarantined.
+Traffic permission does not imply that the VF has enabled queues, has link,
+or is actively passing packets.
+.It Cm resources
+The numbers of transmit and receive queues allocated to the VF.
+These are not necessarily the numbers of queues currently used by its driver.
+When available, configured minimum and maximum aggregate transmit rates are
+also shown.
+A zero minimum is displayed as
+.Cm min-tx-rate=none
+(no guaranteed allocation), while a zero maximum is displayed as
+.Cm max-tx-rate=unlimited .
+.It Cm vlan
+An access VLAN is imposed by the PF; trunk mode means that no access VLAN is
+imposed and does not promise unlimited filter capacity.
+Access mode may also report the VLAN protocol.
+The VLAN identifier can be zero when the PF imposes priority tagging only.
+The PF-administered priority code point may be reported in access or trunk
+mode.
+An omitted priority is distinct from
+.Cm pcp=0 .
+The filter count includes explicit filters recorded by the PF and excludes
+implicit untagged and priority-tag membership.
+.It Cm policy
+Administrative permissions for VF requests, MAC anti-spoofing state, and an
+optional per-VF link-state policy.
+Permissions describe what the VF may request, not its current requests.
+.It Cm protocol
+The negotiated PF/VF mailbox API version, when known.
+.It Cm driver.*
+Driver-specific extension namespaces.
+The namespace version and scalar boolean, numeric, string, and binary fields
+are displayed using their stable schema names.
+See the PF driver's manual page for their meanings.
+.El
+.Pp
+For example:
+.Bd -literal -offset indent
+VF-visible PF link: state=up speed=10000Mbps
+virtual functions: 1
+	vf   0:
+		identity: mac=02:00:00:00:00:01
+		state: configured=yes initialized=yes traffic=allowed
+		resources: tx-queues=4 rx-queues=4
+		vlan: mode=trunk filters=0
+		policy: set-mac=denied set-vlan=allowed anti-spoof=on
+.Ed
+.Pp
+See
+.Xr iovctl.conf 5
+for VF configuration and
+.Xr iovctl 8
+for PCI attachment and passthrough status.
 .It Ar address
 For the inet family,
 the address is either a host name present in the host name data
@@ -630,6 +702,9 @@ This is useful for devices which have multiple physical layer interfaces
 .It Cm name Ar name
 Set the interface name to
 .Ar name .
+The
+.Ar name
+may not be longer than 15 characters.
 .It Cm rxcsum , txcsum , rxcsum6 , txcsum6
 If the driver supports user-configurable checksum offloading,
 enable receive (or transmit) checksum offloading on the interface.
@@ -1004,6 +1079,40 @@ Set a flag to disable Duplicate Address Detection.
 .It Cm -no_dad
 Clear a flag
 .Cm no_dad .
+.It Cm stableaddr
+Set a flag to create SLAAC addresses using a stable algorithm
+according to RFC 7217.
+The
+.Xr sysctl 8
+variable
+.Va net.inet6.ip6.use_stableaddr
+controls whether this flag is set by default
+or not for newly created interfaces.
+To get consistent defaults for interfaces created at boot
+it should be set as a tunable via
+.Xr loader.conf 8 .
+The
+.Xr sysctl 8
+variable
+.Va net.inet6.ip6.stableaddr_maxretries
+sets the maximum number of retries to generate a unique IPv6 address
+to be performed in case of DAD failures.
+This defaults to 3 which is also the reccommended minimum value.
+The interface ID source can be configured using the
+.Xr sysctl 8
+variable
+.Va net.inet6.ip6.stableaddr_netifsource :
+.Bl -tag -compact -width indent
+.It Cm 0
+uses the interface name string (the default)
+.It Cm 1
+uses the interface ID
+.It Cm 2
+uses the MAC address of the interface (if one can be obtained for it)
+.El
+.It Cm -stableaddr
+Clear the flag
+.Cm stableaddr .
 .El
 .Ss IPv6 Parameters
 The following parameters are specific for IPv6 addresses.
@@ -2769,7 +2878,7 @@ Set the untagged VLAN identifier for an interface.
 Frames received on this interface without an 802.1Q tag will be assigned
 to this VLAN instead of the default VLAN 0,
 and outgoing frames on this VLAN will have their 802.1Q tag removed.
-.It Cm -ifuntagged Ar interface Ar vlan-id
+.It Cm -ifuntagged Ar interface
 Clear the untagged VLAN identifier for an interface.
 .It Cm defuntagged Ar vlan-id
 Enable the
@@ -3218,6 +3327,117 @@ The forwarding table is not populated by received packets.
 .It Cm vxlanflush
 Delete all dynamically-learned addresses from the forwarding table.
 .It Cm vxlanflushall
+Delete all addresses, including static addresses, from the forwarding table.
+.El
+.Ss Generic Network Virtualization Encapsulation Parameters
+The following parameters are used to configure
+.Xr geneve 4
+interfaces.
+.Bl -tag -width indent
+.It Cm geneveid Ar identifier
+This value is a 24-bit Virtual Network Identifier (VNI) that identifies the
+virtual network identifier of the interface.
+.It Cm genevemode Ar mode
+Set the
+.Nm
+protocol operating
+.Ar mode
+value.
+Supported modes are currently:
+.Bl -tag -width indent
+.It Cm l2
+Default.
+.It Cm l3
+.El
+.It Cm genevelocal Ar address
+The source address used in the encapsulating IPv4/IPv6 header.
+The address should already be assigned to an existing interface.
+When the interface is configured in unicast mode, the listening socket
+is bound to this address.
+.It Cm geneveremote Ar address
+The interface can be configured in a unicast, or point-to-point, mode
+to create a tunnel between two hosts.
+This is the IP address of the remote end of the tunnel.
+.It Cm genevegroup Ar address
+The interface can be configured in a multicast mode
+to create a virtual network of hosts.
+This is the IP multicast group address the interface will join.
+.It Cm genevelocalport Ar port
+The port number the interface will listen on.
+The default port number is 6081.
+.It Cm geneveremoteport Ar port
+The destination port number used in the encapsulating IPv4/IPv6 header.
+The remote host should be listening on this port.
+The default port number is 6081.
+.It Cm geneveportrange Ar low high
+The range of source ports used in the encapsulating IPv4/IPv6 header.
+The port selected within the range is based on a hash of the inner frame.
+A range is useful to provide entropy within the outer IP header
+for more effective load balancing.
+The default range is between the
+.Xr sysctl 8
+variables
+.Va net.inet.ip.portrange.first
+and
+.Va net.inet.ip.portrange.last
+.It Cm genevetimeout Ar timeout
+The maximum time, in seconds, before an entry in the forwarding table
+is pruned.
+The default is 1200 seconds (20 minutes).
+.It Cm genevemaxaddr Ar max
+The maximum number of entries in the forwarding table.
+The default is 2000.
+.It Cm genevedev Ar dev
+When the interface is configured in multicast mode, the
+.Cm dev
+interface is used to transmit IP multicast packets.
+.It Cm genevedf Ar df
+Set the Do not fragment (DF) bit in the encapsulating header.
+Supported
+.Ar df
+values are currently:
+.Bl -tag -width indent
+.It Cm set
+Do not allow fragmentation on the output IPv4/IPv6 packets and
+set the Do not fragment (DF) bit in the encapsulating IPv4 header.
+.It Cm unset
+Default.
+.It Cm inherit
+The Do not fragment (DF) bit copied from inner IPv4 header to the
+outer IPv4 header.
+.El
+.It Cm genevettl Ar ttl
+The TTL used in the encapsulating IPv4/IPv6 header.
+.Bl -tag -width indent
+.It Cm 0-255
+The default is 64.
+.It Cm inherit
+The TTL copied from inner encapsulated header to the outer header.
+.El
+.It Cm genevedscpinherit
+Inherit DSCP or Traffic Class value from the inner IPv4/IPv6 header.
+.It Fl genevedscpinherit
+Unconfigure DSCP or Traffic Class inheritence from the inner IPv4/IPv6 header.
+This is the default.
+.It Cm genevelearn
+When in L2 unicast mode, The source IP address and inner source Ethernet
+MAC address of received packets are used to dynamically populate the
+forwarding table.
+When in L2 multicast mode, an entry in the forwarding table allows the
+interface to send the frame directly to the remote host instead of
+broadcasting the frame to the multicast group.
+This is the default.
+.It Fl genevelearn
+In L2 mode, geneve forwarding table is not populated by received packets.
+.It Cm geneveexternal
+make this tunnel externally controlled.
+.It Fl geneveexternal
+enable manual configuration for this tunnel.
+This is the default
+.It Cm geneveflush
+Delete all dynamically-learned addresses from the forwarding table when in L2
+mode.
+.It Cm geneveflushall
 Delete all addresses, including static addresses, from the forwarding table.
 .El
 .Ss CARP Parameters

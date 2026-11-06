@@ -1,5 +1,5 @@
 #
-# SPDX-License-Idendifier: BSD-2-Clause
+# SPDX-License-Identifier: BSD-2-Clause
 #
 # Copyright (c) 2025 FreeBSD Foundation
 #
@@ -7,12 +7,12 @@
 # under sponsorship from the FreeBSD Foundation.
 #
 
-PACKAGE=	kerberos-lib
-
 .include "../Makefile.inc"
+.include "../../Makefile.pc"
 
 SCRIPTS=	krb5-config.sh
 BINDIR?=	/usr/bin
+TAGS=		dev
 
 MAN=	krb5-config.1
 

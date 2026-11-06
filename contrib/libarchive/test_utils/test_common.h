@@ -30,15 +30,15 @@
  * The goal of this file (and the matching test.c) is to
  * simplify the very repetitive test-*.c test programs.
  */
-#if defined(HAVE_CONFIG_H)
+#if defined(PLATFORM_CONFIG_H)
+/* Use hand-built config.h in environments that need it. */
+#include PLATFORM_CONFIG_H
+#elif defined(HAVE_CONFIG_H)
 /* Most POSIX platforms use the 'configure' script to build config.h */
 #include "config.h"
 #elif defined(__FreeBSD__)
 /* Building as part of FreeBSD system requires a pre-built config.h. */
 #include "config_freebsd.h"
-#elif defined(__NetBSD__)
-/* Building as part of NetBSD system requires a pre-built config.h. */
-#include "config_netbsd.h"
 #elif defined(_WIN32) && !defined(__CYGWIN__)
 /* Win32 can't run the 'configure' script. */
 #include "config_windows.h"
@@ -163,6 +163,9 @@
 /* change file/directory permissions and errors if it fails */
 #define assertChmod(pathname, mode)				\
   assertion_chmod(__FILE__, __LINE__, pathname, mode)
+/* change file/directory ownership and errors if it fails */
+#define assertChown(pathname, user, group)			\
+  assertion_chown(__FILE__, __LINE__, pathname, user, group)
 /* Assert two files have the same file flags */
 #define assertEqualFflags(patha, pathb)	\
   assertion_compare_fflags(__FILE__, __LINE__, patha, pathb, 0)
@@ -279,6 +282,7 @@ void failure(const char *fmt, ...) __LA_PRINTFLIKE(1, 2);
 int assertion_assert(const char *, int, int, const char *, void *);
 int assertion_chdir(const char *, int, const char *);
 int assertion_chmod(const char *, int, const char *, int);
+int assertion_chown(const char *, int, const char *, int, int);
 int assertion_compare_fflags(const char *, int, const char *, const char *,
     int);
 int assertion_empty_file(const char *, int, const char *);
@@ -340,8 +344,14 @@ int canGrzip(void);
 /* Return true if this platform can run the "gzip" program. */
 int canGzip(void);
 
-/* Return true if this platform can run the specified command. */
-int canRunCommand(const char *);
+/* Return true if this platform can run the specified command.
+ *
+ * Result can be optionally cached with `*tested`:
+ *   - 0 if not tested yet
+ *   - <0 if already tested negative
+ *   - >0 if already tested positive
+ */
+int canRunCommand(const char *cmd, int *tested);
 
 /* Return true if this platform can run the "lrzip" program. */
 int canLrzip(void);
@@ -376,8 +386,8 @@ void *getXattr(const char *, const char *, size_t *);
 /* Set extended attribute */
 int setXattr(const char *, const char *, const void *, size_t);
 
-/* Return true if the file has large i-node number(>0xffffffff). */
-int is_LargeInode(const char *);
+/* Set locale and check its usability. */
+int setCheckedLocale(const char *, const char *, wchar_t);
 
 #if ARCHIVE_ACL_SUNOS
 /* Fetch ACLs on Solaris using acl() or facl() */

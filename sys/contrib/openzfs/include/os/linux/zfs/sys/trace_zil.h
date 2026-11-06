@@ -1,26 +1,15 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
-#if defined(_KERNEL)
 #if defined(HAVE_DECLARE_EVENT_CLASS)
 
 #undef TRACE_SYSTEM
@@ -139,18 +128,18 @@
 #define	ZCW_TP_STRUCT_ENTRY						    \
 		__field(lwb_t *,	zcw_lwb)			    \
 		__field(boolean_t,	zcw_done)			    \
-		__field(int,		zcw_zio_error)			    \
+		__field(int,		zcw_error)			    \
 
 #define	ZCW_TP_FAST_ASSIGN						    \
 		__entry->zcw_lwb		= zcw->zcw_lwb;		    \
 		__entry->zcw_done		= zcw->zcw_done;	    \
-		__entry->zcw_zio_error		= zcw->zcw_zio_error;
+		__entry->zcw_error		= zcw->zcw_error;
 
 #define	ZCW_TP_PRINTK_FMT						    \
 	"zcw { lwb %p done %u error %u }"
 
 #define	ZCW_TP_PRINTK_ARGS						    \
-	    __entry->zcw_lwb, __entry->zcw_done, __entry->zcw_zio_error
+	    __entry->zcw_lwb, __entry->zcw_done, __entry->zcw_error
 
 /*
  * Generic support for two argument tracepoints of the form:
@@ -271,4 +260,3 @@ DEFINE_DTRACE_PROBE2(zil__commit__io__error);
 DEFINE_DTRACE_PROBE3(zil__block__size);
 
 #endif /* HAVE_DECLARE_EVENT_CLASS */
-#endif /* _KERNEL */

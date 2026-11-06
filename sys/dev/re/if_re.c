@@ -34,7 +34,7 @@
 
 #include <sys/cdefs.h>
 /*
- * RealTek 8139C+/8169/8169S/8110S/8168/8111/8101E PCI NIC driver
+ * Realtek 8139C+/8169/8169S/8110S/8168/8111/8101E PCI NIC driver
  *
  * Written by Bill Paul <wpaul@windriver.com>
  * Senior Networking Software Engineer
@@ -42,7 +42,7 @@
  */
 
 /*
- * This driver is designed to support RealTek's next generation of
+ * This driver is designed to support Realtek's next generation of
  * 10/100 and 10/100/1000 PCI ethernet controllers. There are currently
  * seven devices in this family: the RTL8139C+, the RTL8169, the RTL8169S,
  * RTL8110S, the RTL8168, the RTL8111 and the RTL8101E.
@@ -97,7 +97,7 @@
  * (the 'S' stands for 'single-chip'). These devices have the same
  * programming API as the older 8169, but also have some vendor-specific
  * registers for the on-board PHY. The 8110S is a LAN-on-motherboard
- * part designed to be pin-compatible with the RealTek 8100 10/100 chip.
+ * part designed to be pin-compatible with the Realtek 8100 10/100 chip.
  *
  * This driver takes advantage of the RX and TX checksum offload and
  * VLAN tag insertion/extraction features. It also implements TX
@@ -167,6 +167,8 @@ static int msix_disable = 0;
 TUNABLE_INT("hw.re.msix_disable", &msix_disable);
 static int prefer_iomap = 0;
 TUNABLE_INT("hw.re.prefer_iomap", &prefer_iomap);
+static int aspm_disable = 1;
+TUNABLE_INT("hw.re.aspm_disable", &aspm_disable);
 
 #define RE_CSUM_FEATURES    (CSUM_IP | CSUM_TCP | CSUM_UDP)
 
@@ -179,21 +181,21 @@ static const struct rl_type re_devs[] = {
 	{ DLINK_VENDORID, DLINK_DEVICEID_530T_REVC, 0,
 	    "D-Link DGE-530(T) Gigabit Ethernet Adapter" },
 	{ RT_VENDORID, RT_DEVICEID_2600, 0,
-	   "RealTek Killer E2600 Gigabit Ethernet Controller" },
+	   "Realtek Killer E2600 Gigabit Ethernet Controller" },
 	{ RT_VENDORID, RT_DEVICEID_8139, 0,
-	    "RealTek 8139C+ 10/100BaseTX" },
+	    "Realtek 8139C+ 10/100BaseTX" },
 	{ RT_VENDORID, RT_DEVICEID_8101E, 0,
-	    "RealTek 810xE PCIe 10/100baseTX" },
+	    "Realtek 810xE PCIe 10/100baseTX" },
 	{ RT_VENDORID, RT_DEVICEID_8168, 0,
-	    "RealTek 8168/8111 B/C/CP/D/DP/E/F/G PCIe Gigabit Ethernet" },
+	    "Realtek 8168/8111 B/C/CP/D/DP/E/F/G PCIe Gigabit Ethernet" },
 	{ RT_VENDORID, RT_DEVICEID_8161, 0,
-	    "RealTek 8168 Gigabit Ethernet" },
+	    "Realtek 8168 Gigabit Ethernet" },
 	{ NCUBE_VENDORID, RT_DEVICEID_8168, 0,
 	    "TP-Link TG-3468 v2 (RTL8168) Gigabit Ethernet" },
 	{ RT_VENDORID, RT_DEVICEID_8169, 0,
-	    "RealTek 8169/8169S/8169SB(L)/8110S/8110SB(L) Gigabit Ethernet" },
+	    "Realtek 8169/8169S/8169SB(L)/8110S/8110SB(L) Gigabit Ethernet" },
 	{ RT_VENDORID, RT_DEVICEID_8169SC, 0,
-	    "RealTek 8169SC/8110SC Single-chip Gigabit Ethernet" },
+	    "Realtek 8169SC/8110SC Single-chip Gigabit Ethernet" },
 	{ COREGA_VENDORID, COREGA_DEVICEID_CGLAPCIGT, 0,
 	    "Corega CG-LAPCIGT (RTL8169S) Gigabit Ethernet" },
 	{ LINKSYS_VENDORID, LINKSYS_DEVICEID_EG1032, 0,
@@ -353,6 +355,8 @@ static driver_t re_driver = {
 
 DRIVER_MODULE(re, pci, re_driver, 0, 0);
 DRIVER_MODULE(miibus, re, miibus_driver, 0, 0);
+MODULE_PNP_INFO("U16:vendor;U16:device;U32:#;D:#", pci, re, re_devs,
+    nitems(re_devs) - 1);
 
 #define EE_SET(x)					\
 	CSR_WRITE_1(sc, RL_EECMD,			\
@@ -645,7 +649,7 @@ re_miibus_statchg(device_t dev)
 		}
 	}
 	/*
-	 * RealTek controllers do not provide any interface to the RX/TX
+	 * Realtek controllers do not provide any interface to the RX/TX
 	 * MACs for resolved speed, duplex and flow-control parameters.
 	 */
 }
@@ -701,7 +705,7 @@ re_set_rxmode(struct rl_softc *sc)
 
 	if (hashes[0] != 0 || hashes[1] != 0) {
 		/*
-		 * For some unfathomable reason, RealTek decided to
+		 * For some unfathomable reason, Realtek decided to
 		 * reverse the order of the multicast hash registers
 		 * in the PCI Express parts.  This means we have to
 		 * write the hash pattern in reverse order for those
@@ -930,7 +934,7 @@ done:
 #endif
 
 /*
- * Probe for a RealTek 8139C+/8169/8110 chip. Check the PCI vendor and device
+ * Probe for a Realtek 8139C+/8169/8110 chip. Check the PCI vendor and device
  * IDs against our list and return a device name if we find a match.
  */
 static int
@@ -1005,9 +1009,9 @@ re_allocmem(device_t dev, struct rl_softc *sc)
 	/*
 	 * Allocate the parent bus DMA tag appropriate for PCI.
 	 * In order to use DAC, RL_CPLUSCMD_PCI_DAC bit of RL_CPLUS_CMD
-	 * register should be set. However some RealTek chips are known
+	 * register should be set. However some Realtek chips are known
 	 * to be buggy on DAC handling, therefore disable DAC by limiting
-	 * DMA address space to 32bit. PCIe variants of RealTek chips
+	 * DMA address space to 32bit. PCIe variants of Realtek chips
 	 * may not have the limitation.
 	 */
 	lowaddr = BUS_SPACE_MAXADDR;
@@ -1367,8 +1371,14 @@ re_attach(device_t dev)
 		CSR_WRITE_1(sc, RL_EECMD, RL_EEMODE_OFF);
 	}
 
-	/* Disable ASPM L0S/L1 and CLKREQ. */
-	if (sc->rl_expcap != 0) {
+	/*
+	 * Disable ASPM L0S/L1 and CLKREQ.  ASPM is implicated in Tx
+	 * stalls and watchdog timeouts on many chip revisions, so it
+	 * is turned off by default; set the hw.re.aspm_disable tunable
+	 * to 0 to keep the firmware-configured ASPM state and trade
+	 * reliability under sustained load for link power management.
+	 */
+	if (aspm_disable != 0 && sc->rl_expcap != 0) {
 		cap = pci_read_config(dev, sc->rl_expcap +
 		    PCIER_LINK_CAP, 2);
 		if ((cap & PCIEM_LINK_CAP_ASPM) != 0) {
@@ -1955,7 +1965,7 @@ re_newbuf(struct rl_softc *sc, int idx)
 #ifdef RE_FIXUP_RX
 	/*
 	 * This is part of an evil trick to deal with non-x86 platforms.
-	 * The RealTek chip requires RX buffers to be aligned on 64-bit
+	 * The Realtek chip requires RX buffers to be aligned on 64-bit
 	 * boundaries, but that will hose non-x86 machines. To get around
 	 * this, we leave some empty space at the start of each buffer
 	 * and for non-x86 hosts, we copy the buffer back six bytes
@@ -2240,7 +2250,7 @@ re_rxeof(struct rl_softc *sc, int *rx_npktsp)
 		 * it is 13 bits (since the max RX frame length is 16K).
 		 * Unfortunately, all 32 bits in the status word
 		 * were already used, so to make room for the extra
-		 * length bit, RealTek took out the 'frame alignment
+		 * length bit, Realtek took out the 'frame alignment
 		 * error' bit and shifted the other status bits
 		 * over one slot. The OWN, EOR, FS and LS bits are
 		 * still in the same places. We have already extracted
@@ -2462,6 +2472,17 @@ re_txeof(struct rl_softc *sc)
 	/* No changes made to the TX ring, so no flush needed */
 
 	if (sc->rl_ldata.rl_tx_free != sc->rl_ldata.rl_tx_desc_cnt) {
+		/*
+		 * Some descriptors are still owned by the controller.  On PCIe
+		 * parts a TxPoll request can be lost when Tx packets are queued
+		 * too close together, leaving a non-empty ring with no transfer
+		 * in progress.  Re-arm the transmitter here -- this routine is
+		 * reached from the interrupt handlers, re_tick() and
+		 * re_watchdog() -- so a lost poll cannot stall the ring until
+		 * the watchdog fires.
+		 */
+		if ((sc->rl_flags & RL_FLAG_PCIE) != 0)
+			CSR_WRITE_1(sc, sc->rl_txstart, RL_TXSTART_START);
 #ifdef RE_TX_MODERATION
 		/*
 		 * If not all descriptors have been reaped yet, reload
@@ -2718,7 +2739,34 @@ re_intr_msi(void *xsc)
 	if ((if_getdrvflags(ifp) & IFF_DRV_RUNNING) != 0) {
 		if (!if_sendq_empty(ifp))
 			re_start_locked(ifp);
+		/*
+		 * A Tx completion can set a Tx status bit between the ISR ack
+		 * near the top of this routine and re-enabling interrupts
+		 * below.  These controllers do not re-assert the MSI for a
+		 * status bit that is already set, so the completion would not
+		 * be serviced until the next interrupt or the 1 Hz re_tick()
+		 * reclaim (this is why hw.re.msi_disable is a known
+		 * workaround).  If a Tx bit is pending, clear just that bit and
+		 * reap the ring now; leave any Rx bits set so they re-arm the
+		 * interrupt normally and the Rx moderation state is untouched.
+		 */
+		status = CSR_READ_2(sc, RL_ISR);
+		if ((status & (RL_ISR_TX_OK | RL_ISR_TX_ERR |
+		    RL_ISR_TX_DESC_UNAVAIL)) != 0) {
+			CSR_WRITE_2(sc, RL_ISR, status & (RL_ISR_TX_OK |
+			    RL_ISR_TX_ERR | RL_ISR_TX_DESC_UNAVAIL));
+			if ((status & (RL_ISR_TX_OK |
+			    RL_ISR_TX_DESC_UNAVAIL)) != 0 &&
+			    (sc->rl_flags & RL_FLAG_PCIE) != 0)
+				CSR_WRITE_1(sc, sc->rl_txstart,
+				    RL_TXSTART_START);
+			re_txeof(sc);
+			if (!if_sendq_empty(ifp))
+				re_start_locked(ifp);
+		}
 		CSR_WRITE_2(sc, RL_IMR, intrs);
+		/* Flush the posted IMR write. */
+		(void)CSR_READ_2(sc, RL_ISR);
 	}
 	RL_UNLOCK(sc);
 }
@@ -2740,7 +2788,7 @@ re_encap(struct rl_softc *sc, struct mbuf **m_head)
 	M_ASSERTPKTHDR((*m_head));
 
 	/*
-	 * With some of the RealTek chips, using the checksum offload
+	 * With some of the Realtek chips, using the checksum offload
 	 * support in conjunction with the autopadding feature results
 	 * in the transmission of corrupt frames. For example, if we
 	 * need to send a really small IP fragment that's less than 60
@@ -3558,7 +3606,10 @@ re_ioctl(if_t ifp, u_long command, caddr_t data)
 static void
 re_watchdog(struct rl_softc *sc)
 {
+	struct epoch_tracker et;
 	if_t ifp;
+	const char *imode;
+	uint32_t isr, imr, txcfg;
 
 	RL_LOCK_ASSERT(sc);
 
@@ -3566,19 +3617,75 @@ re_watchdog(struct rl_softc *sc)
 		return;
 
 	ifp = sc->rl_ifp;
+	/*
+	 * Snapshot the controller state before reclaim for the diagnostics
+	 * below.  Reading RL_ISR is side-effect free: the interrupt status
+	 * is cleared by writing ones, not by reading.
+	 */
+	imode = (sc->rl_flags & RL_FLAG_MSIX) ? "MSI-X" :
+	    (sc->rl_flags & RL_FLAG_MSI) ? "MSI" : "INTx";
+	isr = CSR_READ_2(sc, RL_ISR);
+	imr = CSR_READ_2(sc, RL_IMR);
 	re_txeof(sc);
 	if (sc->rl_ldata.rl_tx_free == sc->rl_ldata.rl_tx_desc_cnt) {
-		if_printf(ifp, "watchdog timeout (missed Tx interrupts) "
-		    "-- recovering\n");
+		/*
+		 * The retry reclaim drained the ring: a Tx completion interrupt
+		 * was lost.  Log the interrupt state so the lost-interrupt path
+		 * can be diagnosed without a debug build.
+		 */
+		if_printf(ifp, "watchdog timeout (missed Tx interrupts) -- "
+		    "recovering (ISR 0x%04x IMR 0x%04x %s)\n",
+		    isr, imr, imode);
 		if (!if_sendq_empty(ifp))
 			re_start_locked(ifp);
 		return;
 	}
 
-	if_printf(ifp, "watchdog timeout\n");
+	txcfg = CSR_READ_4(sc, RL_TXCFG);
+	/*
+	 * A genuine Tx stall.  Log the Tx ring position and controller
+	 * state in a single line -- enough to distinguish a lost doorbell,
+	 * a DMA stall, and a controller that has fallen off the bus.
+	 */
+	if_printf(ifp, "watchdog timeout -- resetting (tx %d/%d cons %d "
+	    "prod %d ISR 0x%04x IMR 0x%04x TXCFG 0x%08x %s)\n",
+	    sc->rl_ldata.rl_tx_free, sc->rl_ldata.rl_tx_desc_cnt,
+	    sc->rl_ldata.rl_tx_considx, sc->rl_ldata.rl_tx_prodidx,
+	    isr, imr, txcfg, imode);
 	if_inc_counter(ifp, IFCOUNTER_OERRORS, 1);
 
+	/*
+	 * If the controller reads back all-ones it has fallen off the bus;
+	 * re_init_locked() cannot recover it, so flag it and bail rather
+	 * than spinning through reset after reset.
+	 */
+	if (txcfg == 0xFFFFFFFF) {
+		if_printf(ifp,
+		    "controller not responding; not reinitializing\n");
+		return;
+	}
+
+	/*
+	 * ASPM is a common cause of these Tx timeouts.  Unless the
+	 * administrator has opted to keep ASPM enabled, make sure L0s/L1
+	 * and CLKREQ are still disabled on the link before reinitializing;
+	 * firmware or a power transition may have re-armed them.
+	 */
+	if (aspm_disable != 0 && sc->rl_expcap != 0) {
+		uint16_t ctl;
+
+		ctl = pci_read_config(sc->rl_dev,
+		    sc->rl_expcap + PCIER_LINK_CTL, 2);
+		if ((ctl & (PCIEM_LINK_CTL_ECPM | PCIEM_LINK_CTL_ASPMC)) != 0) {
+			ctl &= ~(PCIEM_LINK_CTL_ECPM | PCIEM_LINK_CTL_ASPMC);
+			pci_write_config(sc->rl_dev,
+			    sc->rl_expcap + PCIER_LINK_CTL, ctl, 2);
+		}
+	}
+
+	NET_EPOCH_ENTER(et);
 	re_rxeof(sc, NULL);
+	NET_EPOCH_EXIT(et);
 	if_setdrvflagbits(ifp, 0, IFF_DRV_RUNNING);
 	re_init_locked(sc);
 	if (!if_sendq_empty(ifp))
@@ -3625,7 +3732,37 @@ re_stop(struct rl_softc *sc)
 		    0x00080000);
 	}
 
-	if ((sc->rl_flags & RL_FLAG_WAIT_TXPOLL) != 0) {
+	if ((sc->rl_flags & RL_FLAG_8168G_PLUS) != 0) {
+		/*
+		 * RTL8168G and later.  The STOPREQ command is defined only for
+		 * earlier controllers; issuing it on these parts can leave the
+		 * MAC wedged.  With the RXDV gate enabled above, drain the TX
+		 * descriptor queue and the on-chip TX/RX FIFOs and clear the
+		 * TX/RX enable bits so the DMA engine is idle before the reset
+		 * and buffer free below.  All waits are bounded.
+		 */
+		DELAY(2000);
+		for (i = RL_TIMEOUT; i > 0; i--) {
+			if ((CSR_READ_4(sc, RL_TXCFG) &
+			    RL_TXCFG_QUEUE_EMPTY) != 0)
+				break;
+			DELAY(100);
+		}
+		if (i == 0)
+			device_printf(sc->rl_dev, "stopping TXQ timed out!\n");
+		CSR_WRITE_1(sc, RL_COMMAND, CSR_READ_1(sc, RL_COMMAND) &
+		    ~(RL_CMD_TX_ENB | RL_CMD_RX_ENB));
+		for (i = RL_TIMEOUT * 3; i > 0; i--) {
+			if ((CSR_READ_1(sc, RL_MCU_CMD) &
+			    (RL_MCU_TXFIFO_EMPTY | RL_MCU_RXFIFO_EMPTY)) ==
+			    (RL_MCU_TXFIFO_EMPTY | RL_MCU_RXFIFO_EMPTY))
+				break;
+			DELAY(20);
+		}
+		if (i == 0)
+			device_printf(sc->rl_dev,
+			    "TX/RX FIFO drain timed out!\n");
+	} else if ((sc->rl_flags & RL_FLAG_WAIT_TXPOLL) != 0) {
 		for (i = RL_TIMEOUT; i > 0; i--) {
 			if ((CSR_READ_1(sc, sc->rl_txstart) &
 			    RL_TXSTART_START) == 0)
@@ -3655,6 +3792,15 @@ re_stop(struct rl_softc *sc)
 	DELAY(1000);
 	CSR_WRITE_2(sc, RL_IMR, 0x0000);
 	CSR_WRITE_2(sc, RL_ISR, 0xFFFF);
+
+	/*
+	 * Reset the controller before freeing the DMA buffers below.  A
+	 * controller that has not fully quiesced can keep fetching stale,
+	 * still-owned descriptors that point at about-to-be-freed mbufs.
+	 * re_init_locked() resets again on the reinit path; the extra reset
+	 * is idempotent and cheap.
+	 */
+	re_reset(sc);
 
 	if (sc->rl_head != NULL) {
 		m_freem(sc->rl_head);

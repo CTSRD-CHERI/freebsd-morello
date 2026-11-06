@@ -46,13 +46,13 @@ struct cdevsw;
 struct domainset;
 
 /* These operate on kernel virtual addresses only. */
-vm_offset_t kva_alloc(vm_size_t);
-vm_offset_t kva_alloc_aligned(vm_size_t, vm_size_t);
-void kva_free(vm_offset_t, vm_size_t);
+void *kva_alloc(vm_size_t);
+void *kva_alloc_aligned(vm_size_t, vm_size_t);
+void kva_free(void *, vm_size_t);
 
 /* These operate on pageable virtual addresses. */
-vm_offset_t kmap_alloc_wait(vm_map_t, vm_size_t);
-void kmap_free_wakeup(vm_map_t, vm_offset_t, vm_size_t);
+void *kmap_alloc_wait(vm_map_t, vm_size_t, vm_size_t);
+void kmap_free_wakeup(vm_map_t, void *, vm_size_t);
 
 /* These operate on virtual addresses backed by memory. */
 void *kmem_alloc_attr(vm_size_t size, int flags,
@@ -83,14 +83,16 @@ void kmem_init(vm_offset_t, vm_offset_t);
 void kmem_init_zero_region(void);
 void kmeminit(void);
 
-bool kernacc(void *, int, int);
-bool useracc(void *, int, int);
+bool kernacc(void *, size_t, int);
+bool useracc(void *, size_t, int);
 int vm_fault(vm_map_t map, vm_offset_t vaddr, vm_prot_t fault_type,
     int fault_flags, vm_page_t *m_hold);
 void vm_fault_copy_entry(vm_map_t, vm_map_t, vm_map_entry_t, vm_map_entry_t,
     vm_ooffset_t *);
 int vm_fault_disable_pagefaults(void);
 void vm_fault_enable_pagefaults(int save);
+int vm_fault_hold_pages(vm_map_t map, vm_offset_t addr, vm_size_t len,
+    vm_prot_t prot, vm_page_t *ma, int max_count, int *ppages_count);
 int vm_fault_quick_hold_pages(vm_map_t map, vm_offset_t addr, vm_size_t len,
     vm_prot_t prot, vm_page_t *ma, int max_count);
 int vm_fault_trap(vm_map_t map, vm_offset_t vaddr, vm_prot_t fault_type,
@@ -162,5 +164,8 @@ vm_addr_ok(vm_paddr_t pa, vm_paddr_t size, u_long alignment,
 	return (vm_addr_align_ok(pa, alignment) &&
 	    vm_addr_bound_ok(pa, size, boundary));
 }
+
+extern bool vm_check_pg_zero;
+
 #endif				/* _KERNEL */
 #endif				/* !_VM_EXTERN_H_ */

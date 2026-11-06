@@ -86,6 +86,7 @@ bus_get_device_path_t	ofw_bus_gen_get_device_path;
 
 /* Routines for processing firmware interrupt maps */
 void	ofw_bus_setup_iinfo(phandle_t, struct ofw_bus_iinfo *, int);
+void	ofw_bus_destroy_iinfo(struct ofw_bus_iinfo *);
 int	ofw_bus_lookup_imap(phandle_t, struct ofw_bus_iinfo *, void *, int,
 	    void *, int, void *, int, phandle_t *);
 int	ofw_bus_search_intrmap(void *, int, void *, int, void *, int, void *,
@@ -116,6 +117,9 @@ phandle_t ofw_bus_find_iparent(phandle_t);
 int ofw_bus_is_compatible(device_t, const char *);
 int ofw_bus_is_compatible_strict(device_t, const char *);
 int ofw_bus_node_is_compatible(phandle_t, const char *);
+
+/* Check if machine (root node) is  compatible */
+bool ofw_bus_is_machine_compatible(const char *);
 
 /* 
  * Helper routine to search a list of compat properties.  The table is

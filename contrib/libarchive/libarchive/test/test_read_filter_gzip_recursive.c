@@ -29,8 +29,8 @@ DEFINE_TEST(test_read_filter_gzip_recursive)
 	const char *name = "test_read_filter_gzip_recursive.gz";
 	struct archive *a;
 
-	if (!canGzip()) {
-		skipping("gzip not available");
+	if (archive_zlib_version() == NULL) {
+		skipping("zlib not available");
 		return;
 	}
 
@@ -45,6 +45,6 @@ DEFINE_TEST(test_read_filter_gzip_recursive)
 	assertEqualInt(archive_filter_code(a, 0), ARCHIVE_FILTER_GZIP);
 	assertEqualString(archive_filter_name(a, 0), "gzip");
 
-	assertEqualInt(ARCHIVE_OK, archive_read_close(a));
+	assertEqualIntA(a, ARCHIVE_OK, archive_read_close(a));
 	assertEqualInt(ARCHIVE_OK, archive_read_free(a));
 }

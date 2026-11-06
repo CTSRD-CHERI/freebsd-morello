@@ -92,6 +92,12 @@ CWARNFLAGS.clang+=	-Wno-error=unused-but-set-parameter
 .if ${COMPILER_TYPE} == "clang" && ${COMPILER_VERSION} >= 190000
 # Similar to gcc >= 8.1 -Wno-error=cast-function-type below
 CWARNFLAGS.clang+=	-Wno-error=cast-function-type-mismatch
+CXXWARNFLAGS.clang+=	-Wno-c++20-extensions
+CXXWARNFLAGS.clang+=	-Wno-c++23-lambda-attributes
+CXXWARNFLAGS.clang+=	-Wno-nullability-completeness
+.endif
+.if ${COMPILER_TYPE} == "clang" && ${COMPILER_VERSION} >= 230000
+CWARNFLAGS.clang+=	-Wno-error=unused-but-set-global
 .endif
 .endif # WARNS <= 6
 .if ${WARNS} <= 3
@@ -127,6 +133,9 @@ NO_WBITWISE_INSTEAD_OF_LOGICAL=	-Wno-bitwise-instead-of-logical
 NO_WARRAY_PARAMETER=	-Wno-array-parameter
 NO_WSTRICT_PROTOTYPES=	-Wno-strict-prototypes
 NO_WDEPRECATED_NON_PROTOTYPE=-Wno-deprecated-non-prototype
+.endif
+.if ${COMPILER_TYPE} == "clang" && ${COMPILER_VERSION} >= 210000
+NO_WCHARACTER_CONVERSION=-Wno-character-conversion
 .endif
 .if ${COMPILER_TYPE} == "gcc" && ${COMPILER_VERSION} >= 50200
 NO_WUNUSED_BUT_SET_VARIABLE=-Wno-unused-but-set-variable
@@ -185,6 +194,11 @@ CWARNFLAGS+=	-Wno-error=address			\
 		-Wno-error=uninitialized		\
 		-Wno-error=unused-function		\
 		-Wno-error=unused-value
+
+# These warnings are raised by headers in libc++ so are disabled
+# globally for all C++
+CXXWARNFLAGS+=	-Wno-attributes				\
+		-Wno-deprecated-declarations
 .endif
 
 # GCC 6.1.0
@@ -236,7 +250,9 @@ CWARNFLAGS+=	-Wno-error=overflow
 .if ${COMPILER_VERSION} >= 120100
 # These warnings are raised by headers in libc++ so are disabled
 # globally for all C++
-CXXWARNFLAGS+=	-Wno-literal-suffix 			\
+CXXWARNFLAGS+=	-Wno-literal-suffix			\
+		-Wno-c++20-extensions			\
+		-Wno-attributes				\
 		-Wno-error=unknown-pragmas
 .endif
 
@@ -294,9 +310,6 @@ CLANG_OPT_SMALL+= -mllvm -simplifycfg-dup-ret
 CLANG_OPT_SMALL+= -mllvm -enable-load-pre=false
 CFLAGS.clang+=	 -Qunused-arguments
 
-# XXX This should be defaulted to 2 when WITH_SSP is in use after further
-# testing and soak time.
-FORTIFY_SOURCE?=	0
 .if ${MK_SSP} != "no"
 # Don't use -Wstack-protector as it breaks world with -Werror.
 .if ${COMPILER_FEATURES:Mstackclash}
@@ -306,9 +319,19 @@ SSP_CFLAGS?=	-fstack-protector-strong
 .endif
 CFLAGS+=	${SSP_CFLAGS}
 .endif # SSP
-.if ${FORTIFY_SOURCE} > 0
-CFLAGS+=	-D_FORTIFY_SOURCE=${FORTIFY_SOURCE}
-CXXFLAGS+=	-D_FORTIFY_SOURCE=${FORTIFY_SOURCE}
+
+# XXX This should be defaulted to 2 when WITH_SSP is in use after further
+# testing and soak time.
+FORTIFY_SOURCE?=	0
+
+# We want to avoid defining _FORTIFY_SOURCE if it's set to 0, but we rely on
+# deferred-evaluation for ${.IMPSRC} to expand.  The below construction
+# is, unfortunately, necessary.
+.if empty(CFLAGS:M-D_FORTIFY_SOURCE*)
+CFLAGS+=	${FORTIFY_SOURCE.${.IMPSRC:T}:U${FORTIFY_SOURCE}:S/^/-D_FORTIFY_SOURCE=/:N*=0}
+.endif
+.if empty(CXXFLAGS:M-D_FORTIFY_SOURCE*)
+CXXFLAGS+=	${FORTIFY_SOURCE.${.IMPSRC:T}:U${FORTIFY_SOURCE}:S/^/-D_FORTIFY_SOURCE=/:N*=0}
 .endif
 
 # Additional flags passed in CFLAGS and CXXFLAGS when MK_DEBUG_FILES is

@@ -249,7 +249,6 @@ struct ifconfig_args {
 	const char *matchgroup;		/* Group name to match */
 	const char *nogroup;		/* Group name to exclude */
 	const struct afswtch *afp;	/* AF we're operating on */
-	const char *jail_name;	/* Jail name or jail id specified */
 };
 
 struct option {
@@ -282,6 +281,9 @@ void	clone_setdefcallback_prefix(const char *, clone_callback_func *);
 void	clone_setdefcallback_filter(clone_match_func *, clone_callback_func *);
 
 void	sfp_status(if_ctx *ctx);
+#ifndef WITHOUT_NETLINK
+void	vf_status(if_ctx *);
+#endif
 
 struct sockaddr_dl;
 bool	match_ether(const struct sockaddr_dl *sdl);

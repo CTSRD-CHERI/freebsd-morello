@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
- *
  * This file and its contents are supplied under the terms of the
  * Common Development and Distribution License ("CDDL"), version 1.0.
  * You may only use this file in accordance with the terms of version
@@ -9,9 +7,7 @@
  *
  * A full copy of the text of the CDDL should have accompanied this
  * source.  A copy of the CDDL is also available via the Internet at
- * http://www.illumos.org/license/CDDL.
- *
- * CDDL HEADER END
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2013, 2017 by Delphix. All rights reserved.
@@ -81,7 +77,7 @@ multilist_create_impl(multilist_t *ml, size_t size, size_t offset,
 	ml->ml_num_sublists = num;
 	ml->ml_index_func = index_func;
 
-	ml->ml_sublists = kmem_zalloc(sizeof (multilist_sublist_t) *
+	ml->ml_sublists = vmem_zalloc(sizeof (multilist_sublist_t) *
 	    ml->ml_num_sublists, KM_SLEEP);
 
 	ASSERT3P(ml->ml_sublists, !=, NULL);
@@ -134,7 +130,7 @@ multilist_destroy(multilist_t *ml)
 	}
 
 	ASSERT3P(ml->ml_sublists, !=, NULL);
-	kmem_free(ml->ml_sublists,
+	vmem_free(ml->ml_sublists,
 	    sizeof (multilist_sublist_t) * ml->ml_num_sublists);
 
 	ml->ml_num_sublists = 0;

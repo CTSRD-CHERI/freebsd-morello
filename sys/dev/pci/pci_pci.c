@@ -437,6 +437,24 @@ pcib_alloc_window(struct pcib_softc *sc, struct pcib_window *w, int type,
 	if (!pcib_is_window_open(w))
 		return;
 
+	/*
+	 * Assume that a window where both the base and limit read as
+	 * zero is not really open, or at least not assigned a valid
+	 * range by the firmware.  This can happen if a bridge device
+	 * is never initialized by firmware, or if a platform driver
+	 * resets the bridge.
+	 *
+	 * If devices behind this bridge have firmware-assigned
+	 * resources in this range then the window will be reallocated
+	 * on-demand.
+	 */
+	if (w->base == 0 && w->limit == ((pci_addr_t)1 << w->step) - 1) {
+		w->base = max_address;
+		w->limit = 0;
+		pcib_write_windows(sc, w->mask);
+		return;
+	}
+
 	if (w->base > max_address || w->limit > max_address) {
 		device_printf(sc->dev,
 		    "initial %s window has too many bits, ignoring\n", w->name);
@@ -695,7 +713,7 @@ pcib_free_secbus(device_t dev, struct pcib_secbus *bus)
 }
 
 static struct resource *
-pcib_suballoc_bus(struct pcib_secbus *bus, device_t child, int *rid,
+pcib_suballoc_bus(struct pcib_secbus *bus, device_t child, int rid,
     rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
 {
 	struct resource *res;
@@ -708,9 +726,9 @@ pcib_suballoc_bus(struct pcib_secbus *bus, device_t child, int *rid,
 	if (bootverbose)
 		device_printf(bus->dev,
 		    "allocated bus range (%ju-%ju) for rid %d of %s\n",
-		    rman_get_start(res), rman_get_end(res), *rid,
+		    rman_get_start(res), rman_get_end(res), rid,
 		    pcib_child_name(child));
-	rman_set_rid(res, *rid);
+	rman_set_rid(res, rid);
 	rman_set_type(res, PCI_RES_BUS);
 	return (res);
 }
@@ -745,7 +763,7 @@ pcib_grow_subbus(struct pcib_secbus *bus, rman_res_t new_end)
 }
 
 struct resource *
-pcib_alloc_subbus(struct pcib_secbus *bus, device_t child, int *rid,
+pcib_alloc_subbus(struct pcib_secbus *bus, device_t child, int rid,
     rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
 {
 	struct resource *res;
@@ -1661,7 +1679,7 @@ pcib_write_ivar(device_t dev, device_t child, int which, uintptr_t value)
  */
 static struct resource *
 pcib_suballoc_resource(struct pcib_softc *sc, struct pcib_window *w,
-    device_t child, int type, int *rid, rman_res_t start, rman_res_t end,
+    device_t child, int type, int rid, rman_res_t start, rman_res_t end,
     rman_res_t count, u_int flags)
 {
 	struct resource *res;
@@ -1677,13 +1695,13 @@ pcib_suballoc_resource(struct pcib_softc *sc, struct pcib_window *w,
 	if (bootverbose)
 		device_printf(sc->dev,
 		    "allocated %s range (%#jx-%#jx) for rid %x of %s\n",
-		    w->name, rman_get_start(res), rman_get_end(res), *rid,
+		    w->name, rman_get_start(res), rman_get_end(res), rid,
 		    pcib_child_name(child));
-	rman_set_rid(res, *rid);
+	rman_set_rid(res, rid);
 	rman_set_type(res, type);
 
 	if (flags & RF_ACTIVE) {
-		if (bus_activate_resource(child, type, *rid, res) != 0) {
+		if (bus_activate_resource(child, type, rid, res) != 0) {
 			rman_release_resource(res);
 			return (NULL);
 		}
@@ -2032,7 +2050,7 @@ updatewin:
  * is set up to, or capable of handling them.
  */
 static struct resource *
-pcib_alloc_resource(device_t dev, device_t child, int type, int *rid,
+pcib_alloc_resource(device_t dev, device_t child, int type, int rid,
     rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
 {
 	struct pcib_softc *sc;
@@ -2328,7 +2346,8 @@ pcib_xlate_ari(device_t pcib, int bus, int *slot, int *func)
 	sc = device_get_softc(pcib);
 	ari_func = *func;
 
-	if (sc->flags & PCIB_ENABLE_ARI) {
+	/* ARI applies only to this port's secondary bus. */
+	if ((sc->flags & PCIB_ENABLE_ARI) && bus == sc->bus.sec) {
 		KASSERT(*slot == 0,
 		    ("Non-zero slot number with ARI enabled!"));
 		*slot = PCIE_ARI_SLOT(ari_func);

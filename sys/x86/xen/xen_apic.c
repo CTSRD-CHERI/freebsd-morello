@@ -217,7 +217,7 @@ static int
 xen_ipi_bitmap_handler(void *arg)
 {
 
-	ipi_bitmap_handler(*curthread->td_intr_frame);
+	ipi_bitmap_handler(curthread->td_intr_frame);
 	return (FILTER_HANDLED);
 }
 
@@ -296,7 +296,7 @@ static int
 xen_ipi_swi_handler(void *arg)
 {
 
-	ipi_swi_handler(*curthread->td_intr_frame);
+	ipi_swi_handler(curthread->td_intr_frame);
 	return (FILTER_HANDLED);
 }
 
@@ -330,7 +330,7 @@ xen_cpu_ipi_init(int cpu)
 }
 
 static void
-xen_setup_cpus(void)
+xen_setup_cpus(void *dummy __unused)
 {
 	uint32_t regs[4];
 	int i;

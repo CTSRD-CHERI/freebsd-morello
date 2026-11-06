@@ -327,7 +327,7 @@ static void	bridge_init(void *);
 static void	bridge_dummynet(struct mbuf *, struct ifnet *);
 static bool	bridge_same(const void *, const void *);
 static void	*bridge_get_softc(struct ifnet *);
-static void	bridge_stop(struct ifnet *, int);
+static void	bridge_stop(struct ifnet *);
 static int	bridge_transmit(struct ifnet *, struct mbuf *);
 #ifdef ALTQ
 static void	bridge_altq_start(if_t);
@@ -522,11 +522,11 @@ SYSCTL_BOOL(_net_link_bridge, OID_AUTO, log_mac_flap,
     "Log MAC address port flapping");
 
 /* allow IP addresses on bridge members */
-VNET_DEFINE_STATIC(bool, member_ifaddrs) = false;
+VNET_DEFINE_STATIC(bool, member_ifaddrs) = true;
 #define	V_member_ifaddrs	VNET(member_ifaddrs)
 SYSCTL_BOOL(_net_link_bridge, OID_AUTO, member_ifaddrs,
     CTLFLAG_RW | CTLFLAG_VNET, &VNET_NAME(member_ifaddrs), false,
-    "Allow layer 3 addresses on bridge members");
+    "Allow layer 3 addresses on bridge members (deprecated)");
 
 static bool
 bridge_member_ifaddrs(void)
@@ -801,8 +801,6 @@ bridge_reassign(struct ifnet *ifp, struct vnet *newvnet, char *arg)
 	}
 
 	BRIDGE_UNLOCK(sc);
-
-	ether_reassign(ifp, newvnet, arg);
 }
 #endif
 
@@ -936,11 +934,10 @@ bridge_clone_destroy(struct if_clone *ifc, struct ifnet *ifp, uint32_t flags)
 {
 	struct bridge_softc *sc = ifp->if_softc;
 	struct bridge_iflist *bif;
-	struct epoch_tracker et;
 
 	BRIDGE_LOCK(sc);
 
-	bridge_stop(ifp, 1);
+	bridge_stop(ifp);
 	ifp->if_flags &= ~IFF_UP;
 
 	while ((bif = CK_LIST_FIRST(&sc->sc_iflist)) != NULL)
@@ -955,8 +952,6 @@ bridge_clone_destroy(struct if_clone *ifc, struct ifnet *ifp, uint32_t flags)
 
 	BRIDGE_UNLOCK(sc);
 
-	NET_EPOCH_ENTER(et);
-
 	callout_drain(&sc->sc_brcallout);
 
 	BRIDGE_LIST_LOCK();
@@ -967,8 +962,6 @@ bridge_clone_destroy(struct if_clone *ifc, struct ifnet *ifp, uint32_t flags)
 #ifdef ALTQ
 	IFQ_PURGE(&ifp->if_snd);
 #endif
-	NET_EPOCH_EXIT(et);
-
 	ether_ifdetach(ifp);
 	if_free(ifp);
 
@@ -1075,9 +1068,9 @@ bridge_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 		    (ifp->if_drv_flags & IFF_DRV_RUNNING)) {
 			/*
 			 * If interface is marked down and it is running,
-			 * then stop and disable it.
+			 * then stop it.
 			 */
-			bridge_stop(ifp, 1);
+			bridge_stop(ifp);
 		} else if ((ifp->if_flags & IFF_UP) &&
 		    !(ifp->if_drv_flags & IFF_DRV_RUNNING)) {
 			/*
@@ -1448,24 +1441,30 @@ bridge_ioctl_add(struct bridge_softc *sc, void *arg)
 
 	/*
 	 * If member_ifaddrs is disabled, do not allow an interface with
-	 * assigned IP addresses to be added to a bridge.
+	 * assigned IP addresses to be added to a bridge.  Skip this check
+	 * for gif interfaces, because the IP address assigned to a gif
+	 * interface is separate from the bridge's Ethernet segment.
 	 */
-	if (!V_member_ifaddrs) {
+	if (ifs->if_type != IFT_GIF) {
 		struct ifaddr *ifa;
 
 		CK_STAILQ_FOREACH(ifa, &ifs->if_addrhead, ifa_link) {
-#ifdef INET
-			if (ifa->ifa_addr->sa_family == AF_INET)
+			if (ifa->ifa_addr->sa_family != AF_INET &&
+			    ifa->ifa_addr->sa_family != AF_INET6)
+				continue;
+
+			if (V_member_ifaddrs) {
+				if_printf(sc->sc_ifp,
+				    "WARNING: Adding member interface %s which "
+				    "has an IP address assigned is deprecated "
+				    "and will be unsupported in a future "
+				    "release.\n", ifs->if_xname);
+				break;
+			} else {
 				return (EXTERROR(EINVAL,
 				    "Member interface may not have "
-				    "an IPv4 address configured"));
-#endif
-#ifdef INET6
-			if (ifa->ifa_addr->sa_family == AF_INET6)
-				return (EXTERROR(EINVAL,
-				    "Member interface may not have "
-				    "an IPv6 address configured"));
-#endif
+				    "an IP address assigned"));
+			}
 		}
 	}
 
@@ -1986,9 +1985,6 @@ bridge_ioctl_sifvlanset(struct bridge_softc *sc, void *arg)
 	struct ifbif_vlan_req *req = arg;
 	struct bridge_iflist *bif;
 
-	if ((sc->sc_flags & IFBRF_VLANFILTER) == 0)
-		return (EXTERROR(EINVAL, "VLAN filtering not enabled"));
-
 	bif = bridge_lookup_member(sc, req->bv_ifname);
 	if (bif == NULL)
 		return (EXTERROR(ENOENT, "Interface is not a bridge member"));
@@ -2290,8 +2286,6 @@ bridge_ifdetach(void *arg __unused, struct ifnet *ifp)
 	if (bif)
 		sc = bif->bif_sc;
 
-	if (ifp->if_flags & IFF_RENAMING)
-		return;
 	if (V_bridge_cloner == NULL) {
 		/*
 		 * This detach handler can be called after
@@ -2352,7 +2346,7 @@ bridge_init(void *xsc)
  *	Stop the bridge interface.
  */
 static void
-bridge_stop(struct ifnet *ifp, int disable)
+bridge_stop(struct ifnet *ifp)
 {
 	struct bridge_softc *sc = ifp->if_softc;
 
@@ -2396,6 +2390,12 @@ bridge_enqueue(struct bridge_softc *sc, struct ifnet *dst_ifp, struct mbuf *m,
 		/* Perhaps the interface was removed from the bridge */
 		m_freem(m);
 		return (EINVAL);
+	}
+
+	/* Do VLAN filtering. */
+	if (!bridge_vfilter_out(bif, m)) {
+		m_freem(m);
+		return (0);
 	}
 
 	/* We may be sending a fragment so traverse the mbuf */
@@ -2520,11 +2520,8 @@ bridge_output(struct ifnet *ifp, struct mbuf *m, struct sockaddr *sa,
 
 	NET_EPOCH_ASSERT();
 
-	if (m->m_len < ETHER_HDR_LEN) {
-		m = m_pullup(m, ETHER_HDR_LEN);
-		if (m == NULL)
-			return (0);
-	}
+	if ((m = m_pullup(m, ETHER_HDR_LEN)) == NULL)
+		return (0);
 
 	sbif = ifp->if_bridge;
 	sc = sbif->bif_sc;
@@ -2817,10 +2814,6 @@ bridge_forward(struct bridge_softc *sc, struct bridge_iflist *sbif,
 	if (sbif->bif_flags & dbif->bif_flags & IFBIF_PRIVATE)
 		goto drop;
 
-	/* Do VLAN filtering. */
-	if (!bridge_vfilter_out(dbif, m))
-		goto drop;
-
 	if ((dbif->bif_flags & IFBIF_STP) &&
 	    dbif->bif_stp.bp_state == BSTP_IFSTATE_DISCARDING)
 		goto drop;
@@ -2859,14 +2852,8 @@ bridge_input(struct ifnet *ifp, struct mbuf *m)
 	NET_EPOCH_ASSERT();
 
 	/* We need the Ethernet header later, so make sure we have it now. */
-	if (m->m_len < ETHER_HDR_LEN) {
-		m = m_pullup(m, ETHER_HDR_LEN);
-		if (m == NULL) {
-			if_inc_counter(sc->sc_ifp, IFCOUNTER_IERRORS, 1);
-			m_freem(m);
-			return (NULL);
-		}
-	}
+	if ((m = m_pullup(m, ETHER_HDR_LEN)) == NULL)
+		return (NULL);
 
 	eh = mtod(m, struct ether_header *);
 	vlan = VLANTAGOF(m);
@@ -3189,10 +3176,6 @@ bridge_broadcast(struct bridge_softc *sc, struct ifnet *src_if,
 		if (sbif && (sbif->bif_flags & dbif->bif_flags & IFBIF_PRIVATE))
 			continue;
 
-		/* Do VLAN filtering. */
-		if (!bridge_vfilter_out(dbif, m))
-			continue;
-
 		if ((dbif->bif_flags & IFBIF_STP) &&
 		    dbif->bif_stp.bp_state == BSTP_IFSTATE_DISCARDING)
 			continue;
@@ -3357,6 +3340,14 @@ bridge_vfilter_out(const struct bridge_iflist *dbif, const struct mbuf *m)
 	ether_vlanid_t vlan;
 
 	NET_EPOCH_ASSERT();
+
+	/*
+	 * If the interface is in span mode, then bif_sc will be NULL.
+	 * Since the purpose of span interfaces is to receive all frames,
+	 * pass everything.
+	 */
+	if (dbif->bif_sc == NULL)
+		return (true);
 
 	/* If VLAN filtering isn't enabled, pass everything. */
 	if ((dbif->bif_sc->sc_flags & IFBRF_VLANFILTER) == 0)
@@ -3946,6 +3937,7 @@ bridge_pfil(struct mbuf **mp, struct ifnet *bifp, struct ifnet *ifp, int dir)
 #ifdef INET
 	struct ip *ip = NULL;
 	int hlen = 0;
+	struct ifnet *errifp = (bifp != NULL) ? bifp : ifp;
 #endif
 
 	snap = 0;
@@ -3959,13 +3951,9 @@ bridge_pfil(struct mbuf **mp, struct ifnet *bifp, struct ifnet *ifp, int dir)
 	if (V_pfil_bridge == 0 && V_pfil_member == 0 && V_pfil_ipfw == 0)
 		return (0); /* filtering is disabled */
 
-	i = min((*mp)->m_pkthdr.len, max_protohdr);
-	if ((*mp)->m_len < i) {
-	    *mp = m_pullup(*mp, i);
-	    if (*mp == NULL) {
+	if ((*mp = m_pullup(*mp, ETHER_HDR_LEN)) == NULL) {
 		printf("%s: m_pullup failed\n", __func__);
 		return (-1);
-	    }
 	}
 
 	eh1 = mtod(*mp, struct ether_header *);
@@ -3975,14 +3963,25 @@ bridge_pfil(struct mbuf **mp, struct ifnet *bifp, struct ifnet *ifp, int dir)
 	 * Check for SNAP/LLC.
 	 */
 	if (ether_type < ETHERMTU) {
-		struct llc *llc2 = (struct llc *)(eh1 + 1);
+		struct llc *llc2;
 
-		if ((*mp)->m_len >= ETHER_HDR_LEN + 8 &&
-		    llc2->llc_dsap == LLC_SNAP_LSAP &&
-		    llc2->llc_ssap == LLC_SNAP_LSAP &&
-		    llc2->llc_control == LLC_UI) {
-			ether_type = htons(llc2->llc_un.type_snap.ether_type);
-			snap = 1;
+		i = min((*mp)->m_pkthdr.len,
+		    ETHER_HDR_LEN + sizeof(struct llc));
+		if ((*mp = m_pullup(*mp, i)) == NULL) {
+			printf("%s: m_pullup failed\n", __func__);
+			return (-1);
+		}
+		eh1 = mtod(*mp, struct ether_header *);
+
+		if ((*mp)->m_len >= ETHER_HDR_LEN + sizeof(struct llc)) {
+			llc2 = (struct llc *)(eh1 + 1);
+			if (llc2->llc_dsap == LLC_SNAP_LSAP &&
+			    llc2->llc_ssap == LLC_SNAP_LSAP &&
+			    llc2->llc_control == LLC_UI) {
+				ether_type =
+				    htons(llc2->llc_un.type_snap.ether_type);
+				snap = 1;
+			}
 		}
 	}
 
@@ -4034,12 +4033,12 @@ bridge_pfil(struct mbuf **mp, struct ifnet *bifp, struct ifnet *ifp, int dir)
 	}
 
 	/* Strip off the Ethernet header and keep a copy. */
-	m_copydata(*mp, 0, ETHER_HDR_LEN, (caddr_t) &eh2);
+	m_copydata(*mp, 0, ETHER_HDR_LEN, &eh2);
 	m_adj(*mp, ETHER_HDR_LEN);
 
 	/* Strip off snap header, if present */
 	if (snap) {
-		m_copydata(*mp, 0, sizeof(struct llc), (caddr_t) &llc1);
+		m_copydata(*mp, 0, sizeof(struct llc), &llc1);
 		m_adj(*mp, sizeof(struct llc));
 	}
 
@@ -4107,6 +4106,9 @@ bridge_pfil(struct mbuf **mp, struct ifnet *bifp, struct ifnet *ifp, int dir)
 			if (i > ifp->if_mtu) {
 				error = bridge_fragment(ifp, mp, &eh2, snap,
 					    &llc1);
+				if (error != 0)
+					if_inc_counter(errifp,
+					    IFCOUNTER_OERRORS, 1);
 				return (error);
 			}
 		}
@@ -4116,13 +4118,9 @@ bridge_pfil(struct mbuf **mp, struct ifnet *bifp, struct ifnet *ifp, int dir)
 		hlen = ip->ip_hl << 2;
 		if (hlen < sizeof(struct ip))
 			goto bad;
-		if (hlen > (*mp)->m_len) {
-			if ((*mp = m_pullup(*mp, hlen)) == NULL)
-				goto bad;
-			ip = mtod(*mp, struct ip *);
-			if (ip == NULL)
-				goto bad;
-		}
+		if ((*mp = m_pullup(*mp, hlen)) == NULL)
+			goto bad;
+		ip = mtod(*mp, struct ip *);
 		ip->ip_sum = 0;
 		if (hlen == sizeof(struct ip))
 			ip->ip_sum = in_cksum_hdr(ip);
@@ -4172,13 +4170,13 @@ bridge_pfil(struct mbuf **mp, struct ifnet *bifp, struct ifnet *ifp, int dir)
 		M_PREPEND(*mp, sizeof(struct llc), M_NOWAIT);
 		if (*mp == NULL)
 			return (error);
-		bcopy(&llc1, mtod(*mp, caddr_t), sizeof(struct llc));
+		bcopy(&llc1, mtod(*mp, void *), sizeof(struct llc));
 	}
 
 	M_PREPEND(*mp, ETHER_HDR_LEN, M_NOWAIT);
 	if (*mp == NULL)
 		return (error);
-	bcopy(&eh2, mtod(*mp, caddr_t), ETHER_HDR_LEN);
+	bcopy(&eh2, mtod(*mp, void *), ETHER_HDR_LEN);
 
 	return (0);
 
@@ -4212,18 +4210,16 @@ bridge_ip_checkbasic(struct mbuf **mp)
 	if (*mp == NULL)
 		return (-1);
 
-	if (IP_HDR_ALIGNED_P(mtod(m, caddr_t)) == 0) {
+	if (IP_HDR_ALIGNED_P(mtod(m, char *)) == 0) {
 		if ((m = m_copyup(m, sizeof(struct ip),
 			(max_linkhdr + 3) & ~3)) == NULL) {
 			/* XXXJRT new stat, please */
 			KMOD_IPSTAT_INC(ips_toosmall);
 			goto bad;
 		}
-	} else if (__predict_false(m->m_len < sizeof (struct ip))) {
-		if ((m = m_pullup(m, sizeof (struct ip))) == NULL) {
-			KMOD_IPSTAT_INC(ips_toosmall);
-			goto bad;
-		}
+	} else if ((m = m_pullup(m, sizeof (struct ip))) == NULL) {
+		KMOD_IPSTAT_INC(ips_toosmall);
+		goto bad;
 	}
 	ip = mtod(m, struct ip *);
 	if (ip == NULL) goto bad;
@@ -4237,14 +4233,11 @@ bridge_ip_checkbasic(struct mbuf **mp)
 		KMOD_IPSTAT_INC(ips_badhlen);
 		goto bad;
 	}
-	if (hlen > m->m_len) {
-		if ((m = m_pullup(m, hlen)) == NULL) {
-			KMOD_IPSTAT_INC(ips_badhlen);
-			goto bad;
-		}
-		ip = mtod(m, struct ip *);
-		if (ip == NULL) goto bad;
+	if ((m = m_pullup(m, hlen)) == NULL) {
+		KMOD_IPSTAT_INC(ips_badhlen);
+		goto bad;
 	}
+	ip = mtod(m, struct ip *);
 
 	if (m->m_pkthdr.csum_flags & CSUM_IP_CHECKED) {
 		sum = !(m->m_pkthdr.csum_flags & CSUM_IP_VALID);
@@ -4301,6 +4294,7 @@ static int
 bridge_ip6_checkbasic(struct mbuf **mp)
 {
 	struct mbuf *m = *mp;
+	struct ifnet *inifp = m->m_pkthdr.rcvif;
 	struct ip6_hdr *ip6;
 
 	/*
@@ -4309,8 +4303,7 @@ bridge_ip6_checkbasic(struct mbuf **mp)
 	 * it.  Otherwise, if it is aligned, make sure the entire base
 	 * IPv6 header is in the first mbuf of the chain.
 	 */
-	if (IP6_HDR_ALIGNED_P(mtod(m, caddr_t)) == 0) {
-		struct ifnet *inifp = m->m_pkthdr.rcvif;
+	if (IP6_HDR_ALIGNED_P(mtod(m, char *)) == 0) {
 		if ((m = m_copyup(m, sizeof(struct ip6_hdr),
 			    (max_linkhdr + 3) & ~3)) == NULL) {
 			/* XXXJRT new stat, please */
@@ -4318,13 +4311,10 @@ bridge_ip6_checkbasic(struct mbuf **mp)
 			in6_ifstat_inc(inifp, ifs6_in_hdrerr);
 			goto bad;
 		}
-	} else if (__predict_false(m->m_len < sizeof(struct ip6_hdr))) {
-		struct ifnet *inifp = m->m_pkthdr.rcvif;
-		if ((m = m_pullup(m, sizeof(struct ip6_hdr))) == NULL) {
-			IP6STAT_INC(ip6s_toosmall);
-			in6_ifstat_inc(inifp, ifs6_in_hdrerr);
-			goto bad;
-		}
+	} else if ((m = m_pullup(m, sizeof(struct ip6_hdr))) == NULL) {
+		IP6STAT_INC(ip6s_toosmall);
+		in6_ifstat_inc(inifp, ifs6_in_hdrerr);
+		goto bad;
 	}
 
 	ip6 = mtod(m, struct ip6_hdr *);
@@ -4359,9 +4349,10 @@ bridge_fragment(struct ifnet *ifp, struct mbuf **mp, struct ether_header *eh,
 	struct ip *ip;
 	int error = -1;
 
-	if (m->m_len < sizeof(struct ip) &&
-	    (m = m_pullup(m, sizeof(struct ip))) == NULL)
+	if ((m = m_pullup(m, sizeof(struct ip))) == NULL) {
+		KMOD_IPSTAT_INC(ips_odropped);
 		goto dropit;
+	}
 	ip = mtod(m, struct ip *);
 
 	m->m_pkthdr.csum_flags |= CSUM_IP;
@@ -4380,21 +4371,23 @@ bridge_fragment(struct ifnet *ifp, struct mbuf **mp, struct ether_header *eh,
 			M_PREPEND(mcur, sizeof(struct llc), M_NOWAIT);
 			if (mcur == NULL) {
 				error = ENOBUFS;
+				KMOD_IPSTAT_INC(ips_odropped);
 				if (mprev != NULL)
 					mprev->m_nextpkt = nextpkt;
 				goto dropit;
 			}
-			bcopy(llc, mtod(mcur, caddr_t),sizeof(struct llc));
+			bcopy(llc, mtod(mcur, void *), sizeof(struct llc));
 		}
 
 		M_PREPEND(mcur, ETHER_HDR_LEN, M_NOWAIT);
 		if (mcur == NULL) {
 			error = ENOBUFS;
+			KMOD_IPSTAT_INC(ips_odropped);
 			if (mprev != NULL)
 				mprev->m_nextpkt = nextpkt;
 			goto dropit;
 		}
-		bcopy(eh, mtod(mcur, caddr_t), ETHER_HDR_LEN);
+		bcopy(eh, mtod(mcur, void *), ETHER_HDR_LEN);
 
 		/*
 		 * The previous two M_PREPEND could have inserted one or two

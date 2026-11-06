@@ -135,6 +135,19 @@ MTX_SYSINIT(vm_daemon, &vm_daemon_mtx, "vm daemon", MTX_DEF);
 static void vm_swapout_map_deactivate_pages(vm_map_t, long);
 static void vm_swapout_object_deactivate(pmap_t, vm_object_t, long);
 
+void
+vm_swapout_run(void)
+{
+	static int lastrun = 0;
+
+	mtx_lock(&vm_daemon_mtx);
+	if (ticks - lastrun >= hz || ticks < lastrun) {
+		wakeup(&vm_daemon_needed);
+		lastrun = ticks;
+	}
+	mtx_unlock(&vm_daemon_mtx);
+}
+
 static void
 vm_swapout_object_deactivate_page(pmap_t pmap, vm_page_t m, bool unmap)
 {
@@ -222,13 +235,11 @@ vm_swapout_map_deactivate_pages(vm_map_t map, long desired)
 {
 	vm_map_entry_t tmpe;
 	vm_object_t obj, bigobj;
-	int nothingwired;
 
 	if (!vm_map_trylock_read(map))
 		return;
 
 	bigobj = NULL;
-	nothingwired = TRUE;
 
 	/*
 	 * first, search out the biggest object, and try to free pages from
@@ -249,8 +260,6 @@ vm_swapout_map_deactivate_pages(vm_map_t map, long desired)
 					VM_OBJECT_RUNLOCK(obj);
 			}
 		}
-		if (tmpe->wired_count > 0)
-			nothingwired = FALSE;
 	}
 
 	if (bigobj != NULL) {
@@ -275,15 +284,6 @@ vm_swapout_map_deactivate_pages(vm_map_t map, long desired)
 		}
 	}
 
-	/*
-	 * Remove all mappings if a process is swapped out, this will free page
-	 * table pages.
-	 */
-	if (desired == 0 && nothingwired) {
-		pmap_remove(vm_map_pmap(map), vm_map_min(map),
-		    vm_map_max(map));
-	}
-
 	vm_map_unlock_read(map);
 }
 
@@ -295,20 +295,20 @@ vm_daemon(void)
 	struct thread *td;
 	struct vmspace *vm;
 	int breakout, tryagain, attempts;
-	uint64_t rsize, ravailable;
 
+#ifdef RACCT
 	if (racct_enable && vm_daemon_timeout == 0)
 		vm_daemon_timeout = hz;
+#endif
 
-	while (TRUE) {
+	while (true) {
 		mtx_lock(&vm_daemon_mtx);
 		msleep(&vm_daemon_needed, &vm_daemon_mtx, PPAUSE, "psleep",
 		    vm_daemon_timeout);
 		mtx_unlock(&vm_daemon_mtx);
 
 		/*
-		 * scan the processes for exceeding their rlimits or if
-		 * process is swapped out -- deactivate pages
+		 * Scan for processes exceeding their rlimits.
 		 */
 		tryagain = 0;
 		attempts = 0;
@@ -371,7 +371,10 @@ again:
 				    &vm->vm_map, limit);
 				size = vmspace_resident_count(vm);
 			}
+#ifdef RACCT
 			if (racct_enable) {
+				uint64_t ravailable, rsize;
+
 				rsize = IDX_TO_OFF(size);
 				PROC_LOCK(p);
 				if (p->p_state == PRS_NORMAL)
@@ -408,6 +411,7 @@ again:
 						tryagain = 1;
 				}
 			}
+#endif
 			vmspace_free(vm);
 			sx_slock(&allproc_lock);
 			PRELE(p);

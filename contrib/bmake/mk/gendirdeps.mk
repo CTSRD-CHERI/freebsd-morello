@@ -1,8 +1,8 @@
-# $Id: gendirdeps.mk,v 1.53 2025/05/20 17:42:49 sjg Exp $
+# $Id: gendirdeps.mk,v 1.57 2026/06/21 19:04:57 sjg Exp $
 
 # SPDX-License-Identifier: BSD-2-Clause
 #
-# Copyright (c) 2011-2025, Simon J. Gerraty
+# Copyright (c) 2011-2026, Simon J. Gerraty
 # Copyright (c) 2010-2018, Juniper Networks, Inc.
 # All rights reserved.
 #
@@ -87,6 +87,12 @@ _debug.gendirdeps = 0
 
 all:
 
+.if ${_debug.gendirdeps}
+.if ${DEBUG_GENDIRDEPS:M-d*}
+.MAKEFLAGS: ${DEBUG_GENDIRDEPS:M-d*}
+.endif
+.endif
+
 _CURDIR ?= ${.CURDIR}
 _OBJDIR ?= ${.OBJDIR}
 _OBJTOP ?= ${OBJTOP}
@@ -157,10 +163,12 @@ META2DEPS := ${META2DEPS}
 
 .if ${_debug.gendirdeps} && ${DEBUG_GENDIRDEPS:Mmeta2d*} != ""
 _time = time
+_set_x = set -x;
 _sh_x = sh -x
 _py_d = -ddd
 .else
 _time =
+_set_x =
 _sh_x =
 _py_d =
 .endif
@@ -238,7 +246,11 @@ x != echo; for m in $$_meta_files; do echo $$m; done > meta.list
 _meta_files_arg:= ${_meta_files}
 .endif
 
-dir_list != cd ${_OBJDIR} && \
+.if ${_debug.gendirdeps}
+.info ${RELDIR}: _meta_files_arg='${_meta_files_arg}'
+.endif
+
+dir_list != cd ${_OBJDIR} && ${_set_x} \
 	${META2DEPS_CMD} MACHINE=${MACHINE} \
 	SRCTOP=${SRCTOP} RELDIR=${RELDIR} CURDIR=${_CURDIR} \
 	${META2DEPS_ARGS} \
@@ -250,6 +262,9 @@ dir_list != cd ${_OBJDIR} && \
 .warning Skipping ${_DEPENDFILE:S,${SRCTOP}/,,}
 # we are not going to update anything
 .else
+.if ${_debug.gendirdeps}
+.info ${RELDIR}: raw_dir_list='${dir_list}'
+.endif
 dpadd_dir_list=
 .if !empty(DPADD)
 _nonlibs := ${DPADD:T:Nlib*:N*include}
@@ -270,7 +285,6 @@ ddeps != cat ${ddep_list:O:u} | ${META2DEPS_FILTER} ${_skip_gendirdeps} \
 	sed ${GENDIRDEPS_SEDCMDS}
 
 .if ${_debug.gendirdeps}
-.info ${RELDIR}: raw_dir_list='${dir_list}'
 .info ${RELDIR}: ddeps='${ddeps}'
 .endif
 dir_list += ${ddeps}
@@ -298,7 +312,8 @@ M2D_OBJROOTS := ${M2D_OBJROOTS:O:u:[-1..1]}
 # anything we use from an object dir other than ours
 # needs to be qualified with its .<machine> suffix
 # (we used the pseudo machine "host" for the HOST_TARGET).
-skip_ql= ${SRCTOP}* ${_objtops:@o@$o*@}
+skip_ql = ${SRCTOP}* ${_objtops:@o@$o*@}
+M_ListToSkip ?= O:u:S,^,N,:ts:
 .for o in ${M2D_OBJROOTS:${skip_ql:${M_ListToSkip}}}
 # we need := so only skip_ql to this point applies
 ql.$o := ${dir_list:${skip_ql:${M_ListToSkip}}:M$o*/*/*:C,$o([^/]+)/(.*),\2.\1,:S,.${HOST_TARGET},.host,}
@@ -330,7 +345,7 @@ DIRDEPS += \
 
 # what modifiers do we allow in GENDIRDEPS_FILTER
 GENDIRDEPS_FILTER_MASK += @CMNS
-DIRDEPS := ${DIRDEPS:${GENDIRDEPS_FILTER:UNno:M[${GENDIRDEPS_FILTER_MASK:O:u:ts}]*:ts:}:C,//+,/,g:O:u}
+DIRDEPS := ${DIRDEPS:${GENDIRDEPS_FILTER:UNno:M[${GENDIRDEPS_FILTER_MASK:O:u:ts}]*:ts:}:C,//+,/,g:S,/$,,:C,/(\.[^.]+)$,\1,:O:u}
 
 .if ${_debug.gendirdeps}
 .info ${RELDIR}: M2D_OBJROOTS=${M2D_OBJROOTS}
@@ -352,7 +367,7 @@ src_dirdep_list = \
 SRC_DIRDEPS = \
 	${src_dirdep_list:N${RELDIR}:N${RELDIR}/*:C,(/h)/.*,,}
 
-SRC_DIRDEPS := ${SRC_DIRDEPS:${GENDIRDEPS_SRC_FILTER:UN/*:ts:}:C,//+,/,g:O:u}
+SRC_DIRDEPS := ${SRC_DIRDEPS:${GENDIRDEPS_SRC_FILTER:UN/*:ts:}:C,//+,/,g:S,/$,,:C,/(\.[^.]+)$,\1,:O:u}
 
 # if you want to capture SRC_DIRDEPS in .MAKE.DEPENDFILE put
 # SRC_DIRDEPS_FILE = ${_DEPENDFILE}

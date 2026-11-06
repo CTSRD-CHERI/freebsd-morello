@@ -111,45 +111,83 @@ hdspe_intr(void *p)
 {
 	struct sc_pcminfo *scp;
 	struct sc_info *sc;
-	device_t *devlist;
-	int devcount;
+	unsigned int i;
 	int status;
-	int err;
-	int i;
 
 	sc = (struct sc_info *)p;
 
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 
 	status = hdspe_read_1(sc, HDSPE_STATUS_REG);
 	if (status & HDSPE_AUDIO_IRQ_PENDING) {
-		if ((err = device_get_children(sc->dev, &devlist, &devcount)) != 0)
-			return;
-
-		for (i = 0; i < devcount; i++) {
-			scp = device_get_ivars(devlist[i]);
-			if (scp->ih != NULL)
-				scp->ih(scp);
+		for (i = 0; i < HDSPE_MAX_PCMDEV; i++) {
+			scp = sc->pcms[i];
+			if (scp == NULL || sc->pcm_detaching[i] ||
+			    scp->ih == NULL)
+				continue;
+			sc->pcm_refs[i]++;
+			scp->ih(scp);
+			if (--sc->pcm_refs[i] == 0 && sc->pcm_detaching[i])
+				cv_broadcast(&sc->pcm_cv);
 		}
 
 		hdspe_write_1(sc, HDSPE_INTERRUPT_ACK, 0);
-		free(devlist, M_TEMP);
 	}
 
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 }
 
+struct hdspe_dma_map {
+	uint32_t	*pages;
+	unsigned int	npages;
+	int		error;
+};
+
 static void
-hdspe_dmapsetmap(void *arg, bus_dma_segment_t *segs, int nseg, int error)
+hdspe_dma_map_pages(void *arg, bus_dma_segment_t *segs, int nseg, int error)
 {
-#if 0
-	device_printf(sc->dev, "hdspe_dmapsetmap()\n");
-#endif
+	struct hdspe_dma_map *map;
+	bus_addr_t addr;
+	bus_size_t len;
+	int i;
+
+	map = arg;
+	map->npages = 0;
+	map->error = error;
+	if (error != 0)
+		return;
+
+	for (i = 0; i < nseg; i++) {
+		addr = segs[i].ds_addr;
+		len = segs[i].ds_len;
+		if (addr % HDSPE_DMA_PAGE_SIZE != 0 ||
+		    len % HDSPE_DMA_PAGE_SIZE != 0) {
+			map->error = EINVAL;
+			return;
+		}
+		while (len != 0) {
+			if (map->npages == HDSPE_DMA_PAGES) {
+				map->error = EFBIG;
+				return;
+			}
+			map->pages[map->npages++] = (uint32_t)addr;
+			addr += HDSPE_DMA_PAGE_SIZE;
+			len -= HDSPE_DMA_PAGE_SIZE;
+		}
+	}
+	if (map->npages != HDSPE_DMA_PAGES)
+		map->error = EFBIG;
 }
 
 static int
 hdspe_alloc_resources(struct sc_info *sc)
 {
+	struct hdspe_dma_map map;
+	bool pmap_loaded, rmap_loaded;
+	int error;
+
+	pmap_loaded = false;
+	rmap_loaded = false;
 
 	/* Allocate resource. */
 	sc->csid = PCIR_BAR(0);
@@ -165,84 +203,111 @@ hdspe_alloc_resources(struct sc_info *sc)
 	sc->csh = rman_get_bushandle(sc->cs);
 
 	/* Allocate interrupt resource. */
-	sc->irqid = 0;
-	sc->irq = bus_alloc_resource_any(sc->dev, SYS_RES_IRQ, &sc->irqid,
+	sc->rid = 0;
+	sc->irq = bus_alloc_resource_any(sc->dev, SYS_RES_IRQ, &sc->rid,
 	    RF_ACTIVE | RF_SHAREABLE);
 
 	if (!sc->irq ||
 	    bus_setup_intr(sc->dev, sc->irq, INTR_MPSAFE | INTR_TYPE_AV,
 		NULL, hdspe_intr, sc, &sc->ih)) {
 		device_printf(sc->dev, "Unable to alloc interrupt resource.\n");
-		return (ENXIO);
+		goto fail;
 	}
 
-	/* Allocate DMA resources. */
+	/* Allocate page-aligned DMA segments for each direction. */
 	if (bus_dma_tag_create(/*parent*/bus_get_dma_tag(sc->dev),
-		/*alignment*/4,
+		/*alignment*/HDSPE_DMA_PAGE_SIZE,
 		/*boundary*/0,
 		/*lowaddr*/BUS_SPACE_MAXADDR_32BIT,
 		/*highaddr*/BUS_SPACE_MAXADDR,
 		/*filter*/NULL,
 		/*filterarg*/NULL,
-		/*maxsize*/2 * HDSPE_DMASEGSIZE,
-		/*nsegments*/2,
+		/*maxsize*/HDSPE_DMASEGSIZE,
+		/*nsegments*/HDSPE_DMA_PAGES,
 		/*maxsegsz*/HDSPE_DMASEGSIZE,
 		/*flags*/0,
 		/*lockfunc*/NULL,
 		/*lockarg*/NULL,
 		/*dmatag*/&sc->dmat) != 0) {
 		device_printf(sc->dev, "Unable to create dma tag.\n");
-		return (ENXIO);
+		goto fail;
 	}
 
 	sc->bufsize = HDSPE_DMASEGSIZE;
 
 	/* pbuf (play buffer). */
-	if (bus_dmamem_alloc(sc->dmat, (void **)&sc->pbuf, BUS_DMA_WAITOK,
-	    &sc->pmap)) {
+	if (bus_dmamem_alloc(sc->dmat, (void **)&sc->pbuf,
+	    BUS_DMA_WAITOK | BUS_DMA_COHERENT | BUS_DMA_ZERO, &sc->pmap)) {
 		device_printf(sc->dev, "Can't alloc pbuf.\n");
-		return (ENXIO);
+		goto fail;
 	}
 
-	if (bus_dmamap_load(sc->dmat, sc->pmap, sc->pbuf, sc->bufsize,
-	    hdspe_dmapsetmap, sc, BUS_DMA_NOWAIT)) {
+	map.pages = sc->paddr;
+	map.error = 0;
+	error = bus_dmamap_load(sc->dmat, sc->pmap, sc->pbuf, sc->bufsize,
+	    hdspe_dma_map_pages, &map, BUS_DMA_NOWAIT);
+	if (error == 0)
+		pmap_loaded = true;
+	if (error != 0 || map.error != 0) {
 		device_printf(sc->dev, "Can't load pbuf.\n");
-		return (ENXIO);
+		goto fail;
 	}
 
 	/* rbuf (rec buffer). */
-	if (bus_dmamem_alloc(sc->dmat, (void **)&sc->rbuf, BUS_DMA_WAITOK,
-	    &sc->rmap)) {
+	if (bus_dmamem_alloc(sc->dmat, (void **)&sc->rbuf,
+	    BUS_DMA_WAITOK | BUS_DMA_COHERENT | BUS_DMA_ZERO, &sc->rmap)) {
 		device_printf(sc->dev, "Can't alloc rbuf.\n");
-		return (ENXIO);
+		goto fail;
 	}
 
-	if (bus_dmamap_load(sc->dmat, sc->rmap, sc->rbuf, sc->bufsize,
-	    hdspe_dmapsetmap, sc, BUS_DMA_NOWAIT)) {
+	map.pages = sc->raddr;
+	map.error = 0;
+	error = bus_dmamap_load(sc->dmat, sc->rmap, sc->rbuf, sc->bufsize,
+	    hdspe_dma_map_pages, &map, BUS_DMA_NOWAIT);
+	if (error == 0)
+		rmap_loaded = true;
+	if (error != 0 || map.error != 0) {
 		device_printf(sc->dev, "Can't load rbuf.\n");
-		return (ENXIO);
+		goto fail;
 	}
 
-	bzero(sc->pbuf, sc->bufsize);
-	bzero(sc->rbuf, sc->bufsize);
+	/* Synchronize the buffers before the first DMA cycle. */
+	bus_dmamap_sync(sc->dmat, sc->pmap, BUS_DMASYNC_PREWRITE);
+	bus_dmamap_sync(sc->dmat, sc->rmap, BUS_DMASYNC_PREREAD);
 
 	return (0);
+
+fail:
+	if (sc->ih != NULL)
+		bus_teardown_intr(sc->dev, sc->irq, sc->ih);
+	if (rmap_loaded)
+		bus_dmamap_unload(sc->dmat, sc->rmap);
+	if (sc->rbuf != NULL)
+		bus_dmamem_free(sc->dmat, sc->rbuf, sc->rmap);
+	if (pmap_loaded)
+		bus_dmamap_unload(sc->dmat, sc->pmap);
+	if (sc->pbuf != NULL)
+		bus_dmamem_free(sc->dmat, sc->pbuf, sc->pmap);
+	if (sc->dmat != NULL)
+		bus_dma_tag_destroy(sc->dmat);
+	if (sc->irq != NULL)
+		bus_release_resource(sc->dev, SYS_RES_IRQ, sc->rid, sc->irq);
+	if (sc->cs != NULL)
+		bus_release_resource(sc->dev, SYS_RES_MEMORY, sc->csid, sc->cs);
+	return (ENXIO);
 }
 
 static void
 hdspe_map_dmabuf(struct sc_info *sc)
 {
-	uint32_t paddr, raddr;
 	int i;
 
-	paddr = vtophys(sc->pbuf);
-	raddr = vtophys(sc->rbuf);
-
-	for (i = 0; i < HDSPE_MAX_SLOTS * 16; i++) {
+	/* Program the hardware page tables with DMA page addresses. */
+	for (i = 0; i < HDSPE_DMA_PAGES; i++) {
 		hdspe_write_4(sc, HDSPE_PAGE_ADDR_BUF_OUT + 4 * i,
-                    paddr + i * 4096);
+		    sc->paddr[i]);
 		hdspe_write_4(sc, HDSPE_PAGE_ADDR_BUF_IN + 4 * i,
-                    raddr + i * 4096);
+		    sc->raddr[i]);
 	}
 }
 
@@ -301,11 +366,11 @@ hdspe_sysctl_input_level(SYSCTL_HANDLER_ARGS)
 	/* Set input level in settings register. */
 	settings &= HDSPE_INPUT_LEVEL_MASK;
 	if (settings != (sc->settings_register & HDSPE_INPUT_LEVEL_MASK)) {
-		snd_mtxlock(sc->lock);
+		mtx_lock(&sc->lock);
 		sc->settings_register &= ~HDSPE_INPUT_LEVEL_MASK;
 		sc->settings_register |= settings;
 		hdspe_write_4(sc, HDSPE_SETTINGS_REG, sc->settings_register);
-		snd_mtxunlock(sc->lock);
+		mtx_unlock(&sc->lock);
 	}
 	return (0);
 }
@@ -365,11 +430,11 @@ hdspe_sysctl_output_level(SYSCTL_HANDLER_ARGS)
 	/* Set output level in settings register. */
 	settings &= HDSPE_OUTPUT_LEVEL_MASK;
 	if (settings != (sc->settings_register & HDSPE_OUTPUT_LEVEL_MASK)) {
-		snd_mtxlock(sc->lock);
+		mtx_lock(&sc->lock);
 		sc->settings_register &= ~HDSPE_OUTPUT_LEVEL_MASK;
 		sc->settings_register |= settings;
 		hdspe_write_4(sc, HDSPE_SETTINGS_REG, sc->settings_register);
-		snd_mtxunlock(sc->lock);
+		mtx_unlock(&sc->lock);
 	}
 	return (0);
 }
@@ -429,11 +494,11 @@ hdspe_sysctl_phones_level(SYSCTL_HANDLER_ARGS)
 	/* Set phones level in settings register. */
 	settings &= HDSPE_PHONES_LEVEL_MASK;
 	if (settings != (sc->settings_register & HDSPE_PHONES_LEVEL_MASK)) {
-		snd_mtxlock(sc->lock);
+		mtx_lock(&sc->lock);
 		sc->settings_register &= ~HDSPE_PHONES_LEVEL_MASK;
 		sc->settings_register |= settings;
 		hdspe_write_4(sc, HDSPE_SETTINGS_REG, sc->settings_register);
-		snd_mtxunlock(sc->lock);
+		mtx_unlock(&sc->lock);
 	}
 	return (0);
 }
@@ -540,11 +605,11 @@ hdspe_sysctl_clock_preference(SYSCTL_HANDLER_ARGS)
 	/* Set preferred clock source in settings register. */
 	if (clock->name != NULL) {
 		setting = clock->setting & HDSPE_SETTING_CLOCK_MASK;
-		snd_mtxlock(sc->lock);
+		mtx_lock(&sc->lock);
 		sc->settings_register &= ~HDSPE_SETTING_CLOCK_MASK;
 		sc->settings_register |= setting;
 		hdspe_write_4(sc, HDSPE_SETTINGS_REG, sc->settings_register);
-		snd_mtxunlock(sc->lock);
+		mtx_unlock(&sc->lock);
 	}
 	return (0);
 }
@@ -568,10 +633,10 @@ hdspe_sysctl_clock_source(SYSCTL_HANDLER_ARGS)
 		return (ENXIO);
 
 	/* Read current (autosync) clock source from status register. */
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	status = hdspe_read_4(sc, HDSPE_STATUS1_REG);
 	status &= HDSPE_STATUS1_CLOCK_MASK;
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 
 	/* Translate status register value to clock source. */
 	for (clock = clock_table; clock->name != NULL; ++clock) {
@@ -640,9 +705,9 @@ hdspe_sysctl_sync_status(SYSCTL_HANDLER_ARGS)
 		return (ENXIO);
 
 	/* Read current lock and sync bits from status register. */
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	status = hdspe_read_4(sc, HDSPE_STATUS1_REG);
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 
 	/* List clock sources with lock and sync state. */
 	for (clock = clock_table; clock->name != NULL; ++clock) {
@@ -749,8 +814,8 @@ hdspe_attach(device_t dev)
 #endif
 
 	sc = device_get_softc(dev);
-	sc->lock = snd_mtxcreate(device_get_nameunit(dev),
-	    "snd_hdspe softc");
+	mtx_init(&sc->lock, device_get_nameunit(dev), "snd_hdspe softc",
+	    MTX_DEF);
 	sc->dev = dev;
 
 	pci_enable_busmaster(dev);
@@ -772,6 +837,7 @@ hdspe_attach(device_t dev)
 	err = hdspe_alloc_resources(sc);
 	if (err) {
 		device_printf(dev, "Unable to allocate system resources.\n");
+		mtx_destroy(&sc->lock);
 		return (ENXIO);
 	}
 
@@ -844,6 +910,7 @@ hdspe_attach(device_t dev)
 		    "Analog input level ('LowGain', '+4dBU', '-10dBV')");
 	}
 
+	cv_init(&sc->pcm_cv, "snd_hdspe pcm");
 	bus_attach_children(dev);
 	return (0);
 }
@@ -858,6 +925,8 @@ static void
 hdspe_dmafree(struct sc_info *sc)
 {
 
+	bus_dmamap_sync(sc->dmat, sc->rmap, BUS_DMASYNC_POSTREAD);
+	bus_dmamap_sync(sc->dmat, sc->pmap, BUS_DMASYNC_POSTWRITE);
 	bus_dmamap_unload(sc->dmat, sc->rmap);
 	bus_dmamap_unload(sc->dmat, sc->pmap);
 	bus_dmamem_free(sc->dmat, sc->rbuf, sc->rmap);
@@ -888,11 +957,11 @@ hdspe_detach(device_t dev)
 	if (sc->dmat)
 		bus_dma_tag_destroy(sc->dmat);
 	if (sc->irq)
-		bus_release_resource(dev, SYS_RES_IRQ, 0, sc->irq);
+		bus_release_resource(dev, SYS_RES_IRQ, sc->rid, sc->irq);
 	if (sc->cs)
-		bus_release_resource(dev, SYS_RES_MEMORY, PCIR_BAR(0), sc->cs);
-	if (sc->lock)
-		snd_mtxfree(sc->lock);
+		bus_release_resource(dev, SYS_RES_MEMORY, sc->csid, sc->cs);
+	cv_destroy(&sc->pcm_cv);
+	mtx_destroy(&sc->lock);
 
 	return (0);
 }
@@ -902,13 +971,13 @@ static device_method_t hdspe_methods[] = {
 	DEVMETHOD(device_attach,    hdspe_attach),
 	DEVMETHOD(device_detach,    hdspe_detach),
 	DEVMETHOD(bus_child_deleted, hdspe_child_deleted),
-	{ 0, 0 }
+	DEVMETHOD_END
 };
 
 static driver_t hdspe_driver = {
 	"hdspe",
 	hdspe_methods,
-	PCM_SOFTC_SIZE,
+	sizeof(struct sc_info),
 };
 
 DRIVER_MODULE(snd_hdspe, pci, hdspe_driver, 0, 0);

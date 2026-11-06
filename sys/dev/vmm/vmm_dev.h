@@ -11,15 +11,19 @@
 
 #include <sys/types.h>
 #include <sys/ioccom.h>
+
 #include <machine/vmm_dev.h>
+
+#include <dev/vmm/vmm_param.h>
 
 #ifdef _KERNEL
 struct thread;
 struct vm;
 struct vcpu;
 
-int	vmmdev_init(void);
-int	vmmdev_cleanup(void);
+int	vmm_modinit(void);
+int	vmm_modcleanup(void);
+
 int	vmmdev_machdep_ioctl(struct vm *vm, struct vcpu *vcpu, u_long cmd,
 	    caddr_t data, int fflag, struct thread *td);
 
@@ -44,6 +48,7 @@ struct vmmdev_ioctl {
 #define	VMMDEV_IOCTL_LOCK_ALL_VCPUS	0x08
 #define	VMMDEV_IOCTL_ALLOC_VCPU		0x10
 #define	VMMDEV_IOCTL_MAYBE_ALLOC_VCPU	0x20
+#define	VMMDEV_IOCTL_PPT		0x40
 	int		flags;
 };
 
@@ -52,11 +57,26 @@ struct vmmdev_ioctl {
 extern const struct vmmdev_ioctl vmmdev_machdep_ioctls[];
 extern const size_t vmmdev_machdep_ioctl_count;
 
+/*
+ * Upper limit on vm_maxcpu.  Limited by use of uint16_t types for CPU counts as
+ * well as range of vpid values for VT-x on amd64 and by the capacity of
+ * cpuset_t masks.  The call to new_unrhdr() in vpid_init() in vmx.c requires
+ * 'vm_maxcpu + 1 <= 0xffff', hence the '- 1' below.
+ */
+#define	VM_MAXCPU	MIN(0xffff - 1, CPU_SETSIZE)
+
+/* Maximum number of vCPUs in a single VM. */
+extern u_int vm_maxcpu;
+
 #endif /* _KERNEL */
+
+#define VMMCTL_CREATE_DESTROY_ON_CLOSE 0x1
+#define VMMCTL_FLAGS_MASK	       (VMMCTL_CREATE_DESTROY_ON_CLOSE)
 
 struct vmmctl_vm_create {
 	char name[VM_MAX_NAMELEN + 1];
-	int reserved[16];
+	uint32_t flags;
+	int reserved[15];
 };
 
 struct vmmctl_vm_destroy {

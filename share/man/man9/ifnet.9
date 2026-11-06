@@ -482,7 +482,7 @@ This is initialized by driver at attach.
 .It Fn if_getaddrlen
 .It Fn if_gethwaddr
 .It Fn if_getbroadcastaddr Fn if_setbroadcastaddr
-Access the interface broadcast addess.
+Access the interface broadcast address.
 .It Fn if_setmtu
 .It Fn if_getmtu
 Access the interface MTU.
@@ -761,9 +761,6 @@ Set when the
 structure of this interface is being released and still has
 .Va if_refcount
 references.
-.It Dv IFF_RENAMING
-.Aq D
-Set when this interface is being renamed.
 .El
 .Ss "Interface Capabilities Flags"
 Interface capabilities are specialized features an interface may

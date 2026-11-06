@@ -98,10 +98,8 @@
 #include <sys/sbuf.h>
 #include <machine/smp.h>
 
-#ifdef RSS
 #include <net/rss_config.h>
 #include <netinet/in_rss.h>
-#endif
 
 #include "ifdi_if.h"
 #include "i40e_type.h"
@@ -202,6 +200,7 @@
 #define IXL_FLAGS_KEEP_TSO6	(1 << 1)
 #define IXL_FLAGS_USES_MSIX	(1 << 2)
 #define IXL_FLAGS_IS_VF		(1 << 3)
+#define IXL_FLAGS_MC_PROMISC	(1 << 4)
 
 #define IXL_VSI_IS_PF(v)	((v->flags & IXL_FLAGS_IS_VF) == 0)
 #define IXL_VSI_IS_VF(v)	((v->flags & IXL_FLAGS_IS_VF) != 0)
@@ -517,7 +516,6 @@ extern const uint8_t ixl_bcast_addr[ETHER_ADDR_LEN];
 /* Common function prototypes between PF/VF driver */
 void		ixl_debug_core(device_t dev, u32 enabled_mask, u32 mask, char *fmt, ...);
 void		 ixl_init_tx_ring(struct ixl_vsi *vsi, struct ixl_tx_queue *que);
-void		 ixl_get_default_rss_key(u32 *);
 const char *	i40e_vc_stat_str(struct i40e_hw *hw,
     enum virtchnl_status_code stat_err);
 void		ixl_init_tx_rsqs(struct ixl_vsi *vsi);

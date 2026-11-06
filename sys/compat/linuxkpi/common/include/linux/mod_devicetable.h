@@ -30,6 +30,7 @@
 #define	__LINUXKPI_LINUX_MOD_DEVICETABLE_H__
 
 #include <linux/types.h>
+#include <linux/uuid.h>
 
 enum dmi_field {
 	DMI_NONE,
@@ -79,5 +80,28 @@ struct dmi_system_id {
 #define	I2C_MODULE_PREFIX	"i2c:"
 
 #define	ACPI_ID_LEN		16
+
+struct x86_cpu_id {
+	uint16_t vendor;
+	uint16_t family;
+	uint16_t model;
+	uint16_t steppings;
+	uint16_t feature;
+	uint16_t flags;
+};
+
+#define	X86_VENDOR_ANY		0xffff
+#define	X86_FAMILY_ANY		0
+#define	X86_MODEL_ANY		0
+#define	X86_STEPPING_ANY	0
+#define	X86_STEP_MIN		0
+#define	X86_STEP_MAX		0xf
+#define	X86_FEATURE_ANY		0
+
+/* -----------------------------------------------------------------------------
+ * USB
+ */
+/* struct usb_device_id is defined in sys/dev/usb/usbdi.h. */
+/* MODULE_DEVICE_TABLE_BUS_usb we have in usb.h. */
 
 #endif	/* __LINUXKPI_LINUX_MOD_DEVICETABLE_H__ */

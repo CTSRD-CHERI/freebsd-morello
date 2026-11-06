@@ -36,94 +36,25 @@
 #endif
 
 #include <dev/sound/pcm/sound.h>
-#include <dev/sound/pcm/vchan.h>
 
 #include "feeder_if.h"
 
 static MALLOC_DEFINE(M_FEEDER, "feeder", "pcm feeder");
 
-#define MAXFEEDERS 	256
-
-struct feedertab_entry {
-	SLIST_ENTRY(feedertab_entry) link;
-	struct feeder_class *feederclass;
-	struct pcm_feederdesc *desc;
-
-	int idx;
-};
-static SLIST_HEAD(, feedertab_entry) feedertab;
-static int feedercnt = 0;
-
-/*****************************************************************************/
-
-static void
-feeder_register_root(void *p)
-{
-	struct feeder_class *fc = p;
-	struct feedertab_entry *fte;
-
-	MPASS(feedercnt == 0);
-	KASSERT(fc->desc == NULL, ("first feeder not root: %s", fc->name));
-
-	SLIST_INIT(&feedertab);
-	fte = malloc(sizeof(*fte), M_FEEDER, M_WAITOK | M_ZERO);
-	fte->feederclass = fc;
-	fte->desc = NULL;
-	fte->idx = feedercnt;
-	SLIST_INSERT_HEAD(&feedertab, fte, link);
-	feedercnt++;
-}
+static SLIST_HEAD(, feeder_class) feedertab = SLIST_HEAD_INITIALIZER(feedertab);
 
 void
 feeder_register(void *p)
 {
 	struct feeder_class *fc = p;
-	struct feedertab_entry *fte;
-	int i;
 
-	KASSERT(fc->desc != NULL, ("feeder '%s' has no descriptor", fc->name));
-
-	/*
-	 * beyond this point failure is non-fatal but may result in some
-	 * translations being unavailable
-	 */
-	i = 0;
-	while ((feedercnt < MAXFEEDERS) && (fc->desc[i].type > 0)) {
-		fte = malloc(sizeof(*fte), M_FEEDER, M_WAITOK | M_ZERO);
-		fte->feederclass = fc;
-		fte->desc = &fc->desc[i];
-		fte->idx = feedercnt;
-		fte->desc->idx = feedercnt;
-		SLIST_INSERT_HEAD(&feedertab, fte, link);
-		i++;
-	}
-	feedercnt++;
-	if (feedercnt >= MAXFEEDERS) {
-		printf("MAXFEEDERS (%d >= %d) exceeded\n",
-		    feedercnt, MAXFEEDERS);
-	}
+	SLIST_INSERT_HEAD(&feedertab, fc, link);
 }
 
 static void
-feeder_unregisterall(void *p)
+feeder_unregisterall(void *p __unused)
 {
-	struct feedertab_entry *fte, *next;
-
-	next = SLIST_FIRST(&feedertab);
-	while (next != NULL) {
-		fte = next;
-		next = SLIST_NEXT(fte, link);
-		free(fte, M_FEEDER);
-	}
-}
-
-static int
-cmpdesc(struct pcm_feederdesc *n, struct pcm_feederdesc *m)
-{
-	return ((n->type == m->type) &&
-		((n->in == 0) || (n->in == m->in)) &&
-		((n->out == 0) || (n->out == m->out)) &&
-		(n->flags == m->flags));
+	SLIST_INIT(&feedertab);
 }
 
 static void
@@ -143,21 +74,9 @@ feeder_create(struct feeder_class *fc, struct pcm_feederdesc *desc)
 	if (f == NULL)
 		return NULL;
 
-	f->data = fc->data;
-	f->source = NULL;
-	f->parent = NULL;
 	f->class = fc;
-	f->desc = &(f->desc_static);
-
-	if (desc) {
-		*(f->desc) = *desc;
-	} else {
-		f->desc->type = FEEDER_ROOT;
-		f->desc->in = 0;
-		f->desc->out = 0;
-		f->desc->flags = 0;
-		f->desc->idx = 0;
-	}
+	if (desc != NULL)
+		f->desc = *desc;
 
 	err = FEEDER_INIT(f);
 	if (err) {
@@ -171,17 +90,15 @@ feeder_create(struct feeder_class *fc, struct pcm_feederdesc *desc)
 }
 
 struct feeder_class *
-feeder_getclass(struct pcm_feederdesc *desc)
+feeder_getclass(uint32_t type)
 {
-	struct feedertab_entry *fte;
+	struct feeder_class *fc;
 
-	SLIST_FOREACH(fte, &feedertab, link) {
-		if ((desc == NULL) && (fte->desc == NULL))
-			return fte->feederclass;
-		if ((fte->desc != NULL) && (desc != NULL) && cmpdesc(desc, fte->desc))
-			return fte->feederclass;
+	SLIST_FOREACH(fc, &feedertab, link) {
+		if (fc->type == type)
+			return (fc);
 	}
-	return NULL;
+	return (NULL);
 }
 
 int
@@ -215,13 +132,13 @@ feeder_remove(struct pcm_channel *c)
 }
 
 struct pcm_feeder *
-feeder_find(struct pcm_channel *c, u_int32_t type)
+feeder_find(struct pcm_channel *c, uint32_t type)
 {
 	struct pcm_feeder *f;
 
 	f = c->feeder;
 	while (f != NULL) {
-		if (f->desc->type == type)
+		if (f->class->type == type)
 			return f;
 		f = f->source;
 	}
@@ -264,10 +181,10 @@ feeder_find(struct pcm_channel *c, u_int32_t type)
 #define score_val(s1)		((s1) & 0x3f00)
 #define score_cse(s1)		((s1) & 0x7f)
 
-u_int32_t
-snd_fmtscore(u_int32_t fmt)
+static uint32_t
+snd_fmtscore(uint32_t fmt)
 {
-	u_int32_t ret;
+	uint32_t ret;
 
 	ret = 0;
 	if (fmt & AFMT_SIGNED)
@@ -295,10 +212,10 @@ snd_fmtscore(u_int32_t fmt)
 	return ret;
 }
 
-static u_int32_t
-snd_fmtbestfunc(u_int32_t fmt, u_int32_t *fmts, int cheq)
+static uint32_t
+snd_fmtbestfunc(uint32_t fmt, uint32_t *fmts, int cheq)
 {
-	u_int32_t best, score, score2, oldscore;
+	uint32_t best, score, score2, oldscore;
 	int i;
 
 	if (fmt == 0 || fmts == NULL || fmts[0] == 0)
@@ -340,23 +257,23 @@ snd_fmtbestfunc(u_int32_t fmt, u_int32_t *fmts, int cheq)
 	return best;
 }
 
-u_int32_t
-snd_fmtbestbit(u_int32_t fmt, u_int32_t *fmts)
+static uint32_t
+snd_fmtbestbit(uint32_t fmt, uint32_t *fmts)
 {
 	return snd_fmtbestfunc(fmt, fmts, 0);
 }
 
-u_int32_t
-snd_fmtbestchannel(u_int32_t fmt, u_int32_t *fmts)
+static uint32_t
+snd_fmtbestchannel(uint32_t fmt, uint32_t *fmts)
 {
 	return snd_fmtbestfunc(fmt, fmts, 1);
 }
 
-u_int32_t
-snd_fmtbest(u_int32_t fmt, u_int32_t *fmts)
+uint32_t
+snd_fmtbest(uint32_t fmt, uint32_t *fmts)
 {
-	u_int32_t best1, best2;
-	u_int32_t score, score1, score2;
+	uint32_t best1, best2;
+	uint32_t score, score1, score2;
 
 	if (snd_fmtvalid(fmt, fmts))
 		return fmt;
@@ -386,24 +303,8 @@ snd_fmtbest(u_int32_t fmt, u_int32_t *fmts)
 		return best2;
 }
 
-void
-feeder_printchain(struct pcm_feeder *head)
-{
-	struct pcm_feeder *f;
-
-	printf("feeder chain (head @%p)\n", head);
-	f = head;
-	while (f != NULL) {
-		printf("%s/%d @ %p\n", f->class->name, f->desc->idx, f);
-		f = f->source;
-	}
-	printf("[end]\n\n");
-}
-
-/*****************************************************************************/
-
 static int
-feed_root(struct pcm_feeder *feeder, struct pcm_channel *ch, u_int8_t *buffer, u_int32_t count, void *source)
+feed_root(struct pcm_feeder *feeder, struct pcm_channel *ch, uint8_t *buffer, uint32_t count, void *source)
 {
 	struct snd_dbuf *src = source;
 	int l, offset;
@@ -433,9 +334,7 @@ feed_root(struct pcm_feeder *feeder, struct pcm_channel *ch, u_int8_t *buffer, u
 			    offset, count, l, ch->feedcount);
 
 		if (ch->feedcount == 1) {
-			memset(buffer,
-			    sndbuf_zerodata(sndbuf_getfmt(src)),
-			    offset);
+			memset(buffer, sndbuf_zerodata(src->fmt), offset);
 			if (l > 0)
 				sndbuf_dispose(src, buffer + offset, l);
 			else
@@ -443,9 +342,7 @@ feed_root(struct pcm_feeder *feeder, struct pcm_channel *ch, u_int8_t *buffer, u
 		} else {
 			if (l > 0)
 				sndbuf_dispose(src, buffer, l);
-			memset(buffer + l,
-			    sndbuf_zerodata(sndbuf_getfmt(src)),
-			    offset);
+			memset(buffer + l, sndbuf_zerodata(src->fmt), offset);
 			if (!(ch->flags & CHN_F_CLOSING))
 				ch->xruns++;
 		}
@@ -456,20 +353,19 @@ feed_root(struct pcm_feeder *feeder, struct pcm_channel *ch, u_int8_t *buffer, u
 }
 
 static kobj_method_t feeder_root_methods[] = {
-    	KOBJMETHOD(feeder_feed,		feed_root),
+	KOBJMETHOD(feeder_feed,		feed_root),
 	KOBJMETHOD_END
 };
 static struct feeder_class feeder_root_class = {
 	.name =		"feeder_root",
 	.methods =	feeder_root_methods,
 	.size =		sizeof(struct pcm_feeder),
-	.desc =		NULL,
-	.data =		NULL,
+	.type =		FEEDER_ROOT,
 };
 /*
  * Register the root feeder first so that pcm_addchan() and subsequent
  * functions can use it.
  */
-SYSINIT(feeder_root, SI_SUB_DRIVERS, SI_ORDER_FIRST, feeder_register_root,
+SYSINIT(feeder_root, SI_SUB_DRIVERS, SI_ORDER_FIRST, feeder_register,
     &feeder_root_class);
 SYSUNINIT(feeder_root, SI_SUB_DRIVERS, SI_ORDER_FIRST, feeder_unregisterall, NULL);

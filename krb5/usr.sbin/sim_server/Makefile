@@ -1,13 +1,11 @@
 #
-# SPDX-License-Idendifier: BSD-2-Clause
+# SPDX-License-Identifier: BSD-2-Clause
 #
 # Copyright (c) 2025 FreeBSD Foundation
 #
 # This sofware was developed by Cy Schubert <cy@FreeBSD.org>
 # under sponsorship from the FreeBSD Foundation.
 #
-
-PACKAGE=	kerberos
 
 PROG=	sim_server
 
@@ -17,7 +15,8 @@ SRCS=	sim_server.c
 
 CFLAGS+=-I${KRB5_DIR}/include \
 	-I${KRB5_SRCTOP}/include \
-	-I${KRB5_DIR}/appl/simple
+	-I${KRB5_DIR}/appl/simple \
+	-I${KRB5_OBJTOP}/util/profile
 
 MAN=
 

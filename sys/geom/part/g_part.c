@@ -122,19 +122,20 @@ struct g_part_alias_list {
 	{ "ntfs", G_PART_ALIAS_MS_NTFS },
 	{ "openbsd-data", G_PART_ALIAS_OPENBSD_DATA },
 	{ "prep-boot", G_PART_ALIAS_PREP_BOOT },
-        { "solaris-boot", G_PART_ALIAS_SOLARIS_BOOT },
-        { "solaris-root", G_PART_ALIAS_SOLARIS_ROOT },
-        { "solaris-swap", G_PART_ALIAS_SOLARIS_SWAP },
-        { "solaris-backup", G_PART_ALIAS_SOLARIS_BACKUP },
-        { "solaris-var", G_PART_ALIAS_SOLARIS_VAR },
-        { "solaris-home", G_PART_ALIAS_SOLARIS_HOME },
-        { "solaris-altsec", G_PART_ALIAS_SOLARIS_ALTSEC },
+	{ "solaris-boot", G_PART_ALIAS_SOLARIS_BOOT },
+	{ "solaris-root", G_PART_ALIAS_SOLARIS_ROOT },
+	{ "solaris-swap", G_PART_ALIAS_SOLARIS_SWAP },
+	{ "solaris-backup", G_PART_ALIAS_SOLARIS_BACKUP },
+	{ "solaris-var", G_PART_ALIAS_SOLARIS_VAR },
+	{ "solaris-home", G_PART_ALIAS_SOLARIS_HOME },
+	{ "solaris-altsec", G_PART_ALIAS_SOLARIS_ALTSEC },
 	{ "solaris-reserved", G_PART_ALIAS_SOLARIS_RESERVED },
 	{ "u-boot-env", G_PART_ALIAS_U_BOOT_ENV },
 	{ "vmware-reserved", G_PART_ALIAS_VMRESERVED },
 	{ "vmware-vmfs", G_PART_ALIAS_VMFS },
 	{ "vmware-vmkdiag", G_PART_ALIAS_VMKDIAG },
 	{ "vmware-vsanhdr", G_PART_ALIAS_VMVSANHDR },
+	{ "xbootldr", G_PART_ALIAS_XBOOTLDR },
 };
 
 SYSCTL_DECL(_kern_geom);
@@ -552,8 +553,6 @@ g_part_parm_provider(struct gctl_req *req, const char *name,
 	pname = gctl_get_asciiparam(req, name);
 	if (pname == NULL)
 		return (ENOATTR);
-	if (strncmp(pname, _PATH_DEV, sizeof(_PATH_DEV) - 1) == 0)
-		pname += sizeof(_PATH_DEV) - 1;
 	pp = g_provider_by_name(pname);
 	if (pp == NULL) {
 		gctl_error(req, "%d %s '%s'", EINVAL, name, pname);
@@ -927,7 +926,6 @@ g_part_ctl_commit(struct gctl_req *req, struct g_part_parms *gpp)
 
 	if (table->gpt_scheme == &g_part_null_scheme) {
 		g_topology_lock();
-		g_access(cp, -1, -1, -1);
 		g_part_wither(gp, ENXIO);
 		return (0);
 	}
@@ -998,7 +996,7 @@ g_part_ctl_create(struct gctl_req *req, struct g_part_parms *gpp)
 	}
 
 	if (null == NULL)
-		gp = g_new_geomf(&g_part_class, "%s", pp->name);
+		gp = g_new_geom(&g_part_class, pp->name);
 	gp->softc = kobj_create((kobj_class_t)gpp->gpp_scheme, M_GEOM,
 	    M_WAITOK);
 	table = gp->softc;
@@ -1046,7 +1044,7 @@ g_part_ctl_create(struct gctl_req *req, struct g_part_parms *gpp)
 	/*
 	 * Synthesize a disk geometry. Some partitioning schemes
 	 * depend on it and since some file systems need it even
-	 * when the partitition scheme doesn't, we do it here in
+	 * when the partition scheme doesn't, we do it here in
 	 * scheme-independent code.
 	 */
 	g_part_geometry(table, cp, pp->mediasize / pp->sectorsize);
@@ -1081,7 +1079,6 @@ g_part_ctl_create(struct gctl_req *req, struct g_part_parms *gpp)
 fail:
 	g_topology_lock();
 	if (null == NULL) {
-		g_access(cp, -1, -1, -1);
 		g_part_wither(gp, error);
 	} else {
 		kobj_delete((kobj_t)gp->softc, M_GEOM);
@@ -1530,7 +1527,6 @@ g_part_ctl_undo(struct gctl_req *req, struct g_part_parms *gpp)
 		error = g_part_probe(gp, cp, table->gpt_depth);
 		if (error) {
 			g_topology_lock();
-			g_access(cp, -1, -1, -1);
 			g_part_wither(gp, error);
 			return (0);
 		}
@@ -1539,7 +1535,7 @@ g_part_ctl_undo(struct gctl_req *req, struct g_part_parms *gpp)
 		/*
 		 * Synthesize a disk geometry. Some partitioning schemes
 		 * depend on it and since some file systems need it even
-		 * when the partitition scheme doesn't, we do it here in
+		 * when the partition scheme doesn't, we do it here in
 		 * scheme-independent code.
 		 */
 		pp = cp->provider;
@@ -1578,6 +1574,8 @@ g_part_wither(struct g_geom *gp, int error)
 
 	table = gp->softc;
 	if (table != NULL) {
+		if (table->gpt_opened)
+			g_access(LIST_FIRST(&gp->consumer), -1, -1, -1);
 		gp->softc = NULL;
 		while ((entry = LIST_FIRST(&table->gpt_entry)) != NULL) {
 			LIST_REMOVE(entry, gpe_entry);
@@ -1979,7 +1977,7 @@ g_part_taste(struct g_class *mp, struct g_provider *pp, int flags __unused)
 	 * With that we become part of the topology. Obtain read access
 	 * to the provider.
 	 */
-	gp = g_new_geomf(mp, "%s", pp->name);
+	gp = g_new_geom(mp, pp->name);
 	cp = g_new_consumer(gp);
 	cp->flags |= G_CF_DIRECT_SEND | G_CF_DIRECT_RECEIVE;
 	error = g_attach(cp, pp);
@@ -2023,7 +2021,7 @@ g_part_taste(struct g_class *mp, struct g_provider *pp, int flags __unused)
 	/*
 	 * Synthesize a disk geometry. Some partitioning schemes
 	 * depend on it and since some file systems need it even
-	 * when the partitition scheme doesn't, we do it here in
+	 * when the partition scheme doesn't, we do it here in
 	 * scheme-independent code.
 	 */
 	g_part_geometry(table, cp, pp->mediasize / pp->sectorsize);
@@ -2181,18 +2179,14 @@ g_part_resize(struct g_consumer *cp)
 		    "  Use `gpart commit %s` to save changes or "
 		    "`gpart undo %s` to revert them.\n", cp->geom->name,
 		    cp->geom->name, cp->geom->name);
-	if (g_part_check_integrity(table, cp) != 0) {
-		g_access(cp, -1, -1, -1);
-		table->gpt_opened = 0;
+	if (g_part_check_integrity(table, cp) != 0)
 		g_part_wither(table->gpt_gp, ENXIO);
-	}
 }
 
 static void
 g_part_orphan(struct g_consumer *cp)
 {
 	struct g_provider *pp;
-	struct g_part_table *table;
 
 	pp = cp->provider;
 	KASSERT(pp != NULL, ("%s", __func__));
@@ -2200,9 +2194,6 @@ g_part_orphan(struct g_consumer *cp)
 	g_topology_assert();
 
 	KASSERT(pp->error != 0, ("%s", __func__));
-	table = cp->geom->softc;
-	if (table != NULL && table->gpt_opened)
-		g_access(cp, -1, -1, -1);
 	g_part_wither(cp->geom, pp->error);
 }
 

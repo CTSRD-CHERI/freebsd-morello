@@ -24,7 +24,6 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/cdefs.h>
 /* PCI/PCI-X/PCIe bus interface for the Avago Tech (LSI) MPT3 controllers */
 
 /* TODO Move headers to mprvar */
@@ -77,7 +76,7 @@ static device_method_t mpr_methods[] = {
 	DEVMETHOD(device_resume,	mpr_pci_resume),
 	DEVMETHOD(bus_print_child,	bus_generic_print_child),
 	DEVMETHOD(bus_driver_added,	bus_generic_driver_added),
-	{ 0, 0 }
+	DEVMETHOD_END
 };
 
 static driver_t mpr_pci_driver = {

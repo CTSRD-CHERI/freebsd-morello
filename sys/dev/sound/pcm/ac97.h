@@ -40,7 +40,7 @@
 #define		AC97_CAP_ADC_20		(1 << 9)
 #define AC97_MIX_MASTER	0x02
 #define AC97_MIX_AUXOUT	0x04
-#define AC97_MIX_MONO 	0x06
+#define AC97_MIX_MONO	0x06
 #define AC97_MIX_TONE	0x08
 #define AC97_MIX_BEEP	0x0a
 #define AC97_MIX_PHONE	0x0c
@@ -63,9 +63,9 @@
 #define		AC97_POWER_STATUS	(AC97_POWER_ADC | AC97_POWER_DAC | \
 					 AC97_POWER_REF | AC97_POWER_ANL )
 #define AC97_REGEXT_ID		0x28
-#define 	AC97_EXTCAP_VRA		(1 << 0)
-#define 	AC97_EXTCAP_DRA		(1 << 1)
-#define 	AC97_EXTCAP_VRM		(1 << 3)
+#define	AC97_EXTCAP_VRA		(1 << 0)
+#define	AC97_EXTCAP_DRA		(1 << 1)
+#define	AC97_EXTCAP_VRM		(1 << 3)
 #define		AC97_EXTCAPS (AC97_EXTCAP_VRA | AC97_EXTCAP_DRA | AC97_EXTCAP_VRM)
 #define		AC97_EXTCAP_SDAC	(1 << 7)
 
@@ -94,14 +94,14 @@ extern kobj_class_t ac97_getmixerclass(void);
 
 struct ac97_info *ac97_create(device_t dev, void *devinfo, kobj_class_t cls);
 void ac97_destroy(struct ac97_info *codec);
-void ac97_setflags(struct ac97_info *codec, u_int32_t val);
-u_int32_t ac97_getflags(struct ac97_info *codec);
+void ac97_setflags(struct ac97_info *codec, uint32_t val);
+uint32_t ac97_getflags(struct ac97_info *codec);
 int ac97_setrate(struct ac97_info *codec, int which, int rate);
-int ac97_setextmode(struct ac97_info *codec, u_int16_t mode);
-u_int16_t ac97_getextmode(struct ac97_info *codec);
-u_int16_t ac97_getextcaps(struct ac97_info *codec);
-u_int16_t ac97_getcaps(struct ac97_info *codec);
-u_int32_t ac97_getsubvendor(struct ac97_info *codec);
+int ac97_setextmode(struct ac97_info *codec, uint16_t mode);
+uint16_t ac97_getextmode(struct ac97_info *codec);
+uint16_t ac97_getextcaps(struct ac97_info *codec);
+uint16_t ac97_getcaps(struct ac97_info *codec);
+uint32_t ac97_getsubvendor(struct ac97_info *codec);
 
-u_int16_t ac97_rdcd(struct ac97_info *codec, int reg);
-void	  ac97_wrcd(struct ac97_info *codec, int reg, u_int16_t val);
+uint16_t ac97_rdcd(struct ac97_info *codec, int reg);
+void	  ac97_wrcd(struct ac97_info *codec, int reg, uint16_t val);

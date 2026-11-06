@@ -47,7 +47,6 @@
  * MULTICAST Revision: 3.5.1.4
  */
 
-#include <sys/cdefs.h>
 #include "opt_ddb.h"
 
 #include <sys/param.h>
@@ -80,6 +79,7 @@
 #include <netinet/ip_options.h>
 #include <netinet/igmp.h>
 #include <netinet/igmp_var.h>
+#include <netinet/ip_mroute.h>
 
 #include <machine/in_cksum.h>
 
@@ -213,8 +213,8 @@ static MALLOC_DEFINE(M_IGMP, "igmp", "igmp state");
  * Obviously the IGMPv3 per-interface state has per-vimage granularity
  * also as a result.
  *
- * FUTURE: Stop using IFP_TO_IA/INADDR_ANY, and use source address selection
- * policy to control the address used by IGMP on the link.
+ * FUTURE: Use source address selection policy to control the address
+ * used by IGMP on the link.
  */
 VNET_DEFINE_STATIC(int, interface_timers_running);	/* IGMPv3 general
 							 * query response */
@@ -691,7 +691,7 @@ igmp_ifdetach(struct ifnet *ifp)
 	SLIST_INIT(&inm_free_tmp);
 	IGMP_LOCK();
 
-	igi = ((struct in_ifinfo *)ifp->if_afdata[AF_INET])->ii_igmp;
+	igi = ((struct in_ifinfo *)ifp->if_inet)->ii_igmp;
 	if (igi->igi_version == IGMP_VERSION_3) {
 		IF_ADDR_WLOCK(ifp);
 		NET_EPOCH_ENTER(et);
@@ -782,7 +782,7 @@ igmp_input_v1_query(struct ifnet *ifp, const struct ip *ip,
 	IN_MULTI_LIST_LOCK();
 	IGMP_LOCK();
 
-	igi = ((struct in_ifinfo *)ifp->if_afdata[AF_INET])->ii_igmp;
+	igi = ((struct in_ifinfo *)ifp->if_inet)->ii_igmp;
 	KASSERT(igi != NULL, ("%s: no igmp_ifsoftc for ifp %p", __func__, ifp));
 
 	if (igi->igi_flags & IGIF_LOOPBACK) {
@@ -875,7 +875,7 @@ igmp_input_v2_query(struct ifnet *ifp, const struct ip *ip,
 	IN_MULTI_LIST_LOCK();
 	IGMP_LOCK();
 
-	igi = ((struct in_ifinfo *)ifp->if_afdata[AF_INET])->ii_igmp;
+	igi = ((struct in_ifinfo *)ifp->if_inet)->ii_igmp;
 	KASSERT(igi != NULL, ("%s: no igmp_ifsoftc for ifp %p", __func__, ifp));
 
 	if (igi->igi_flags & IGIF_LOOPBACK) {
@@ -1067,7 +1067,7 @@ igmp_input_v3_query(struct ifnet *ifp, const struct ip *ip,
 	IN_MULTI_LIST_LOCK();
 	IGMP_LOCK();
 
-	igi = ((struct in_ifinfo *)ifp->if_afdata[AF_INET])->ii_igmp;
+	igi = ((struct in_ifinfo *)ifp->if_inet)->ii_igmp;
 	KASSERT(igi != NULL, ("%s: no igmp_ifsoftc for ifp %p", __func__, ifp));
 
 	if (igi->igi_flags & IGIF_LOOPBACK) {
@@ -1283,7 +1283,7 @@ igmp_input_v1_report(struct ifnet *ifp, /*const*/ struct ip *ip,
 	 * Replace 0.0.0.0 with the subnet address if told to do so.
 	 */
 	if (V_igmp_recvifkludge && in_nullhost(ip->ip_src)) {
-		IFP_TO_IA(ifp, ia);
+		ia = in_ifprimaryaddr(ifp);
 		if (ia != NULL)
 			ip->ip_src.s_addr = htonl(ia->ia_subnet);
 	}
@@ -1377,7 +1377,7 @@ igmp_input_v2_report(struct ifnet *ifp, /*const*/ struct ip *ip,
 	 * leave requires knowing that we are the only member of a
 	 * group.
 	 */
-	IFP_TO_IA(ifp, ia);
+	ia = in_ifprimaryaddr(ifp);
 	if (ia != NULL && in_hosteq(ip->ip_src, IA_SIN(ia)->sin_addr)) {
 		return (0);
 	}
@@ -1577,42 +1577,42 @@ igmp_input(struct mbuf **mp, int *offp, int proto)
 			break;
 
 		case IGMP_VERSION_3: {
-				struct igmpv3 *igmpv3;
-				uint16_t igmpv3len;
-				uint16_t nsrc;
+			struct igmpv3 *igmpv3;
+			uint16_t igmpv3len;
+			uint16_t nsrc;
 
-				IGMPSTAT_INC(igps_rcv_v3_queries);
-				igmpv3 = (struct igmpv3 *)igmp;
-				/*
-				 * Validate length based on source count.
-				 */
-				nsrc = ntohs(igmpv3->igmp_numsrc);
-				if (nsrc * sizeof(in_addr_t) >
-				    UINT16_MAX - iphlen - IGMP_V3_QUERY_MINLEN) {
-					IGMPSTAT_INC(igps_rcv_tooshort);
-					m_freem(m);
-					return (IPPROTO_DONE);
-				}
-				/*
-				 * m_pullup() may modify m, so pullup in
-				 * this scope.
-				 */
-				igmpv3len = iphlen + IGMP_V3_QUERY_MINLEN +
-				   sizeof(struct in_addr) * nsrc;
-				if ((!M_WRITABLE(m) ||
-				     m->m_len < igmpv3len) &&
-				    (m = m_pullup(m, igmpv3len)) == NULL) {
-					IGMPSTAT_INC(igps_rcv_tooshort);
-					return (IPPROTO_DONE);
-				}
-				igmpv3 = (struct igmpv3 *)(mtod(m, uint8_t *)
-				    + iphlen);
-				if (igmp_input_v3_query(ifp, ip, igmpv3) != 0) {
-					m_freem(m);
-					return (IPPROTO_DONE);
-				}
+			IGMPSTAT_INC(igps_rcv_v3_queries);
+			igmpv3 = (struct igmpv3 *)igmp;
+			/*
+			 * Validate length based on source count.
+			 */
+			nsrc = ntohs(igmpv3->igmp_numsrc);
+			if (nsrc * sizeof(in_addr_t) >
+			    UINT16_MAX - iphlen - IGMP_V3_QUERY_MINLEN) {
+				IGMPSTAT_INC(igps_rcv_tooshort);
+				m_freem(m);
+				return (IPPROTO_DONE);
+			}
+			/*
+			 * m_pullup() may modify m, so pullup in
+			 * this scope.
+			 */
+			igmpv3len = iphlen + IGMP_V3_QUERY_MINLEN +
+			   sizeof(struct in_addr) * nsrc;
+			if ((!M_WRITABLE(m) ||
+			     m->m_len < igmpv3len) &&
+			    (m = m_pullup(m, igmpv3len)) == NULL) {
+				IGMPSTAT_INC(igps_rcv_tooshort);
+				return (IPPROTO_DONE);
+			}
+			ip = mtod(m, struct ip *);
+			igmpv3 = (struct igmpv3 *)(mtod(m, uint8_t *) + iphlen);
+			if (igmp_input_v3_query(ifp, ip, igmpv3) != 0) {
+				m_freem(m);
+				return (IPPROTO_DONE);
 			}
 			break;
+		}
 		}
 		break;
 
@@ -2348,7 +2348,7 @@ igmp_change_state(struct in_multi *inm)
 
 	IGMP_LOCK();
 
-	igi = ((struct in_ifinfo *)ifp->if_afdata[AF_INET])->ii_igmp;
+	igi = ((struct in_ifinfo *)ifp->if_inet)->ii_igmp;
 	KASSERT(igi != NULL, ("%s: no igmp_ifsoftc for ifp %p", __func__, ifp));
 
 	/*
@@ -3326,10 +3326,12 @@ igmp_v3_merge_state_changes(struct in_multi *inm, struct mbufq *scq)
 			CTR2(KTR_IGMPV3,
 			    "%s: outbound queue full, skipping whole packet %p",
 			    __func__, m);
-			mt = m->m_nextpkt;
-			if (!docopy)
+			m0 = m->m_nextpkt;
+			if (!docopy) {
+				mbufq_remove(gq, m);
 				m_freem(m);
-			m = mt;
+			}
+			m = m0;
 			continue;
 		}
 
@@ -3489,7 +3491,7 @@ igmp_intr(struct mbuf *m)
 
 	imo.imo_multicast_ttl  = 1;
 	imo.imo_multicast_vif  = -1;
-	imo.imo_multicast_loop = (V_ip_mrouter != NULL);
+	imo.imo_multicast_loop = V_ip_mrouting_enabled;
 
 	/*
 	 * If the user requested that IGMP traffic be explicitly
@@ -3598,7 +3600,7 @@ igmp_v3_encap_report(struct ifnet *ifp, struct mbuf *m)
 	if (m->m_flags & M_IGMP_LOOP) {
 		struct in_ifaddr *ia;
 
-		IFP_TO_IA(ifp, ia);
+		ia = in_ifprimaryaddr(ifp);
 		if (ia != NULL)
 			ip->ip_src = ia->ia_addr.sin_addr;
 	}

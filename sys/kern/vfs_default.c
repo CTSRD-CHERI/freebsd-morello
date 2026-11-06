@@ -77,12 +77,10 @@ static int	dirent_exists(struct vnode *vp, const char *dirname,
 static int vop_stdis_text(struct vop_is_text_args *ap);
 static int vop_stdunset_text(struct vop_unset_text_args *ap);
 static int vop_stdadd_writecount(struct vop_add_writecount_args *ap);
-static int vop_stdcopy_file_range(struct vop_copy_file_range_args *ap);
 static int vop_stdfdatasync(struct vop_fdatasync_args *ap);
 static int vop_stdgetpages_async(struct vop_getpages_async_args *ap);
 static int vop_stdread_pgcache(struct vop_read_pgcache_args *ap);
 static int vop_stdstat(struct vop_stat_args *ap);
-static int vop_stdvput_pair(struct vop_vput_pair_args *ap);
 static int vop_stdgetlowvnode(struct vop_getlowvnode_args *ap);
 
 /*
@@ -148,6 +146,7 @@ struct vop_vector default_vnodeops = {
 	.vop_add_writecount =	vop_stdadd_writecount,
 	.vop_copy_file_range =	vop_stdcopy_file_range,
 	.vop_vput_pair =	vop_stdvput_pair,
+	.vop_delayed_setsize =	VOP_PANIC,
 };
 VFS_VOP_VECTOR_REGISTER(default_vnodeops);
 
@@ -458,6 +457,7 @@ vop_stdpathconf(struct vop_pathconf_args *ap)
 		case _PC_HAS_NAMEDATTR:
 		case _PC_HAS_HIDDENSYSTEM:
 		case _PC_CLONE_BLKSIZE:
+		case _PC_CASE_INSENSITIVE:
 			*ap->a_retval = 0;
 			return (0);
 		default:
@@ -708,7 +708,7 @@ vop_stdvptocnp(struct vop_vptocnp_args *ap)
 	if (error)
 		return (error);
 
-	VREF(vp);
+	vref(vp);
 	locked = VOP_ISLOCKED(vp);
 	VOP_UNLOCK(vp);
 	NDINIT_ATVP(&nd, LOOKUP, FOLLOW | LOCKSHARED | LOCKLEAF, UIO_SYSSPACE,
@@ -727,10 +727,10 @@ vop_stdvptocnp(struct vop_vptocnp_args *ap)
 	    ((*dvp)->v_vflag & VV_ROOT) &&
 	    ((*dvp)->v_mount->mnt_flag & MNT_UNION)) {
 		*dvp = (*dvp)->v_mount->mnt_vnodecovered;
-		VREF(mvp);
+		vref(mvp);
 		VOP_UNLOCK(mvp);
 		vn_close(mvp, FREAD, cred, td);
-		VREF(*dvp);
+		vref(*dvp);
 		vn_lock(*dvp, LK_SHARED | LK_RETRY);
 		covered = 1;
 	}
@@ -1425,7 +1425,7 @@ vfs_stdnosync(struct mount *mp, int waitfor)
 	return (0);
 }
 
-static int
+int
 vop_stdcopy_file_range(struct vop_copy_file_range_args *ap)
 {
 	int error;
@@ -1622,16 +1622,35 @@ vop_stdread_pgcache(struct vop_read_pgcache_args *ap __unused)
 	return (EJUSTRETURN);
 }
 
-static int
+/*
+ * vput(dvp).  If unlock_vp is true, vput(vp).  Both dvp and vp must
+ * be locked.  This is VOP because some filesystems might need to do
+ * additional actions on dvp when unlocked, and need to be aware of
+ * any other locked vnodes.  Also as the consequence, vp might become
+ * doomed even if unlock_vp is false.
+ *
+ * Special case: dvp == vp.  If unlock_vp is true, vunref(vp);
+ * vput(vp), else vunref(vp).  In other words, the VOP assumes that
+ * there are two references on the vnode on entry, and releases only
+ * one of them in case of !unlock_vp.
+ */
+int
 vop_stdvput_pair(struct vop_vput_pair_args *ap)
 {
 	struct vnode *dvp, *vp, **vpp;
 
 	dvp = ap->a_dvp;
 	vpp = ap->a_vpp;
-	vput(dvp);
-	if (vpp != NULL && ap->a_unlock_vp && (vp = *vpp) != NULL)
-		vput(vp);
+	vp = vpp != NULL ? *vpp : NULL;
+	if (dvp != vp) {
+		vput(dvp);
+		if (vp != NULL && ap->a_unlock_vp)
+			vput(vp);
+	} else {
+		vunref(vp);
+		if (ap->a_unlock_vp)
+			vput(vp);
+	}
 	return (0);
 }
 

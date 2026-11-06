@@ -61,6 +61,12 @@
 /* The guest can allocate resource IDs, we only need one */
 #define	VTGPU_RESOURCE_ID	1
 
+#if _BYTE_ORDER == _BIG_ENDIAN
+#define	VTGPU_FORMAT		VIRTIO_GPU_FORMAT_X8R8G8B8_UNORM
+#else
+#define	VTGPU_FORMAT		VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM
+#endif
+
 struct vtgpu_softc {
 	/* Must be first so we can cast from info -> softc */
 	struct fb_info 		 vtgpu_fb_info;
@@ -445,20 +451,32 @@ vtgpu_alloc_virtqueue(struct vtgpu_softc *sc)
 }
 
 static int
-vtgpu_req_resp(struct vtgpu_softc *sc, void *req, size_t reqlen,
-    void *resp, size_t resplen)
+vtgpu_req_resp2(struct vtgpu_softc *sc, void *req1, size_t req1len,
+    void *req2, size_t req2len, void *resp, size_t resplen)
 {
 	struct sglist sg;
-	struct sglist_seg segs[2];
-	int error;
+	struct sglist_seg segs[3];
+	int error, rcount;
 
-	sglist_init(&sg, 2, segs);
+	sglist_init(&sg, 3, segs);
 
-	error = sglist_append(&sg, req, reqlen);
+	rcount = 1;
+	error = sglist_append(&sg, req1, req1len);
 	if (error != 0) {
 		device_printf(sc->vtgpu_dev,
-		    "Unable to append the request to the sglist: %d\n", error);
+		    "Unable to append the request to the sglist: %d\n",
+		    error);
 		return (error);
+	}
+	if (req2 != NULL) {
+		error = sglist_append(&sg, req2, req2len);
+		if (error != 0) {
+			device_printf(sc->vtgpu_dev,
+			    "Unable to append the request to the sglist: %d\n",
+			    error);
+			return (error);
+		}
+		rcount++;
 	}
 	error = sglist_append(&sg, resp, resplen);
 	if (error != 0) {
@@ -467,7 +485,7 @@ vtgpu_req_resp(struct vtgpu_softc *sc, void *req, size_t reqlen,
 		    error);
 		return (error);
 	}
-	error = virtqueue_enqueue(sc->vtgpu_ctrl_vq, resp, &sg, 1, 1);
+	error = virtqueue_enqueue(sc->vtgpu_ctrl_vq, resp, &sg, rcount, 1);
 	if (error != 0) {
 		device_printf(sc->vtgpu_dev, "Enqueue failed: %d\n", error);
 		return (error);
@@ -477,6 +495,13 @@ vtgpu_req_resp(struct vtgpu_softc *sc, void *req, size_t reqlen,
 	virtqueue_poll(sc->vtgpu_ctrl_vq, NULL);
 
 	return (0);
+}
+
+static int
+vtgpu_req_resp(struct vtgpu_softc *sc, void *req, size_t reqlen,
+    void *resp, size_t resplen)
+{
+	return (vtgpu_req_resp2(sc, req, reqlen, NULL, 0, resp, resplen));
 }
 
 static int
@@ -537,7 +562,7 @@ vtgpu_create_2d(struct vtgpu_softc *sc)
 	    atomic_fetchadd_64(&sc->vtgpu_next_fence, 1));
 
 	s.req.resource_id = htole32(VTGPU_RESOURCE_ID);
-	s.req.format = htole32(VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM);
+	s.req.format = htole32(VTGPU_FORMAT);
 	s.req.width = htole32(sc->vtgpu_fb_info.fb_width);
 	s.req.height = htole32(sc->vtgpu_fb_info.fb_height);
 
@@ -547,7 +572,7 @@ vtgpu_create_2d(struct vtgpu_softc *sc)
 		return (error);
 
 	if (s.resp.type != htole32(VIRTIO_GPU_RESP_OK_NODATA)) {
-		device_printf(sc->vtgpu_dev, "Invalid reponse type %x\n",
+		device_printf(sc->vtgpu_dev, "Invalid response type %x\n",
 		    le32toh(s.resp.type));
 		return (EINVAL);
 	}
@@ -559,9 +584,15 @@ static int
 vtgpu_attach_backing(struct vtgpu_softc *sc)
 {
 	struct {
+		/*
+		 * Split the backing and mem request arguments as some
+		 * hypervisors, e.g. Parallels Desktop, don't work when
+		 * they are enqueued together.
+		 */
 		struct {
 			struct virtio_gpu_resource_attach_backing backing;
-			struct virtio_gpu_mem_entry mem[1];
+			char pad;
+			struct virtio_gpu_mem_entry mem;
 		} req;
 		char pad;
 		struct virtio_gpu_ctrl_hdr resp;
@@ -577,16 +608,16 @@ vtgpu_attach_backing(struct vtgpu_softc *sc)
 	s.req.backing.resource_id = htole32(VTGPU_RESOURCE_ID);
 	s.req.backing.nr_entries = htole32(1);
 
-	s.req.mem[0].addr = htole64(sc->vtgpu_fb_info.fb_pbase);
-	s.req.mem[0].length = htole32(sc->vtgpu_fb_info.fb_size);
+	s.req.mem.addr = htole64(sc->vtgpu_fb_info.fb_pbase);
+	s.req.mem.length = htole32(sc->vtgpu_fb_info.fb_size);
 
-	error = vtgpu_req_resp(sc, &s.req, sizeof(s.req), &s.resp,
-	    sizeof(s.resp));
+	error = vtgpu_req_resp2(sc, &s.req.backing, sizeof(s.req.backing),
+	    &s.req.mem, sizeof(s.req.mem), &s.resp, sizeof(s.resp));
 	if (error != 0)
 		return (error);
 
 	if (s.resp.type != htole32(VIRTIO_GPU_RESP_OK_NODATA)) {
-		device_printf(sc->vtgpu_dev, "Invalid reponse type %x\n",
+		device_printf(sc->vtgpu_dev, "Invalid response type %x\n",
 		    le32toh(s.resp.type));
 		return (EINVAL);
 	}
@@ -624,7 +655,7 @@ vtgpu_set_scanout(struct vtgpu_softc *sc, uint32_t x, uint32_t y,
 		return (error);
 
 	if (s.resp.type != htole32(VIRTIO_GPU_RESP_OK_NODATA)) {
-		device_printf(sc->vtgpu_dev, "Invalid reponse type %x\n",
+		device_printf(sc->vtgpu_dev, "Invalid response type %x\n",
 		    le32toh(s.resp.type));
 		return (EINVAL);
 	}
@@ -663,7 +694,7 @@ vtgpu_transfer_to_host_2d(struct vtgpu_softc *sc, uint32_t x, uint32_t y,
 		return (error);
 
 	if (s.resp.type != htole32(VIRTIO_GPU_RESP_OK_NODATA)) {
-		device_printf(sc->vtgpu_dev, "Invalid reponse type %x\n",
+		device_printf(sc->vtgpu_dev, "Invalid response type %x\n",
 		    le32toh(s.resp.type));
 		return (EINVAL);
 	}
@@ -700,7 +731,7 @@ vtgpu_resource_flush(struct vtgpu_softc *sc, uint32_t x, uint32_t y,
 		return (error);
 
 	if (s.resp.type != htole32(VIRTIO_GPU_RESP_OK_NODATA)) {
-		device_printf(sc->vtgpu_dev, "Invalid reponse type %x\n",
+		device_printf(sc->vtgpu_dev, "Invalid response type %x\n",
 		    le32toh(s.resp.type));
 		return (EINVAL);
 	}

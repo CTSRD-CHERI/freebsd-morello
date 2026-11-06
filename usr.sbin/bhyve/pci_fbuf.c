@@ -28,18 +28,22 @@
 
 #include <sys/types.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 
-#include <dev/vmm/vmm_mem.h>
 #include <machine/vmm.h>
 #include <machine/vmm_snapshot.h>
-#include <vmmapi.h>
 
+#include <dev/vmm/vmm_mem.h>
+
+#include <errno.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#include <errno.h>
 #include <unistd.h>
+
+#include <vmmapi.h>
 
 #include "bhyvegc.h"
 #include "bhyverun.h"
@@ -72,9 +76,8 @@ static int fbuf_debug = 1;
 #define	DMEMSZ	128
 
 #define	FB_SIZE		(32*MB)
-
-#define COLS_MAX	3840
-#define ROWS_MAX	2160
+_Static_assert(FB_SIZE >= GC_ROWS_MAX * GC_COLS_MAX * sizeof(uint32_t),
+    "Framebuffer size is too small for maximum resolution");
 
 #define COLS_DEFAULT	1024
 #define ROWS_DEFAULT	768
@@ -93,7 +96,10 @@ struct pci_fbuf_softc {
 		uint8_t  reserved[116];
 	} __packed memregs;
 
+	pthread_mutex_t mtx;
+
 	/* rfb server */
+	sa_family_t rfb_family;
 	char      *rfb_host;
 	char      *rfb_password;
 	int       rfb_port;
@@ -134,8 +140,8 @@ pci_fbuf_write(struct pci_devinst *pi, int baridx, uint64_t offset, int size,
 		return;
 	}
 
+	pthread_mutex_lock(&sc->mtx);
 	p = (uint8_t *)&sc->memregs + offset;
-
 	switch (size) {
 	case 1:
 		*p = value;
@@ -165,6 +171,7 @@ pci_fbuf_write(struct pci_devinst *pi, int baridx, uint64_t offset, int size,
 		DPRINTF(DEBUG_INFO, ("switching to VESA mode"));
 		sc->gc_image->vgamode = 0;
 	}
+	pthread_mutex_unlock(&sc->mtx);
 }
 
 static uint64_t
@@ -178,13 +185,13 @@ pci_fbuf_read(struct pci_devinst *pi, int baridx, uint64_t offset, int size)
 
 	sc = pi->pi_arg;
 
-
 	if (offset + size > DMEMSZ) {
 		printf("fbuf: read too large, offset %ld size %d\n",
 		       offset, size);
 		return (0);
 	}
 
+	pthread_mutex_lock(&sc->mtx);
 	p = (uint8_t *)&sc->memregs + offset;
 	value = 0;
 	switch (size) {
@@ -204,6 +211,7 @@ pci_fbuf_read(struct pci_devinst *pi, int baridx, uint64_t offset, int size)
 		printf("fbuf: read unknown size %d\n", size);
 		break;
 	}
+	pthread_mutex_unlock(&sc->mtx);
 
 	DPRINTF(DEBUG_VERBOSE,
 	    ("fbuf rd: offset 0x%lx, size: %d, value: 0x%lx",
@@ -252,11 +260,13 @@ pci_fbuf_parse_config(struct pci_fbuf_softc *sc, nvlist_t *nvl)
 		value = get_config_value_node(nvl, "tcp");
 	if (value != NULL) {
 		/*
+		 * UNIX -- unix:path/to/socket.sock
 		 * IPv4 -- host-ip:port
 		 * IPv6 -- [host-ip%zone]:port
 		 * XXX for now port is mandatory for IPv4.
 		 */
 		if (value[0] == '[') {
+			sc->rfb_family = AF_INET6;
 			cp = strchr(value + 1, ']');
 			if (cp == NULL || cp == value + 1) {
 				EPRINTLN("fbuf: Invalid IPv6 address: \"%s\"",
@@ -279,7 +289,21 @@ pci_fbuf_parse_config(struct pci_fbuf_softc *sc, nvlist_t *nvl)
 				    value);
 				return (-1);
 			}
+		} else if (strncmp("unix:", value, 5) == 0) {
+			if (strlen(value + 5) > SUNPATHLEN) {
+				EPRINTLN(
+				    "fbuf: UNIX socket path too long: \"%s\"",
+				    value + 5);
+				return (-1);
+			} else if (*(value + 5) == '\0') {
+				EPRINTLN("fbuf: UNIX socket path is empty");
+				return (-1);
+			} else {
+				sc->rfb_family = AF_UNIX;
+				sc->rfb_host = strdup(value + 5);
+			}
 		} else {
+			sc->rfb_family = AF_UNSPEC;
 			cp = strchr(value, ':');
 			if (cp == NULL) {
 				sc->rfb_port = atoi(value);
@@ -321,9 +345,10 @@ pci_fbuf_parse_config(struct pci_fbuf_softc *sc, nvlist_t *nvl)
 	if (value != NULL)
 		sc->memregs.height = strtol(value, NULL, 10);
 
-	if (sc->memregs.width > COLS_MAX ||
-	    sc->memregs.height > ROWS_MAX) {
-		EPRINTLN("fbuf: max resolution is %ux%u", COLS_MAX, ROWS_MAX);
+	if (sc->memregs.width > GC_COLS_MAX ||
+	    sc->memregs.height > GC_ROWS_MAX) {
+		EPRINTLN("fbuf: max resolution is %ux%u",
+		    GC_COLS_MAX, GC_ROWS_MAX);
 		return (-1);
 	}
 	if (sc->memregs.width < COLS_MIN ||
@@ -344,21 +369,32 @@ static void
 pci_fbuf_render(struct bhyvegc *gc, void *arg)
 {
 	struct pci_fbuf_softc *sc;
+	uint32_t width, height;
 
 	sc = arg;
-
+	pthread_mutex_lock(&sc->mtx);
 	if (sc->vga_full && sc->gc_image->vgamode) {
 		/* TODO: mode switching to vga and vesa should use the special
 		 *      EFI-bhyve protocol port.
 		 */
+		pthread_mutex_unlock(&sc->mtx);
 		vga_render(gc, sc->vgasc);
 		return;
 	}
-	if (sc->gc_width != sc->memregs.width ||
-	    sc->gc_height != sc->memregs.height) {
-		bhyvegc_resize(gc, sc->memregs.width, sc->memregs.height);
-		sc->gc_width = sc->memregs.width;
-		sc->gc_height = sc->memregs.height;
+	width = sc->memregs.width;
+	height = sc->memregs.height;
+	if (sc->gc_width != width || sc->gc_height != height) {
+		if (width > GC_COLS_MAX || height > GC_ROWS_MAX) {
+			/* Ignore an invalid resolution. */
+			pthread_mutex_unlock(&sc->mtx);
+		} else {
+			sc->gc_width = width;
+			sc->gc_height = height;
+			pthread_mutex_unlock(&sc->mtx);
+			bhyvegc_resize(gc, width, height);
+		}
+	} else {
+		pthread_mutex_unlock(&sc->mtx);
 	}
 }
 
@@ -377,6 +413,8 @@ pci_fbuf_init(struct pci_devinst *pi, nvlist_t *nvl)
 
 	pi->pi_arg = sc;
 
+	pthread_mutex_init(&sc->mtx, NULL);
+
 	/* initialize config space */
 	pci_set_cfgdata16(pi, PCIR_DEVICE, 0x40FB);
 	pci_set_cfgdata16(pi, PCIR_VENDOR, 0xFB5D);
@@ -390,11 +428,8 @@ pci_fbuf_init(struct pci_devinst *pi, nvlist_t *nvl)
 		goto done;
 	}
 
-	error = pci_emul_alloc_bar(pi, 0, PCIBAR_MEM32, DMEMSZ);
-	assert(error == 0);
-
-	error = pci_emul_alloc_bar(pi, 1, PCIBAR_MEM32, FB_SIZE);
-	assert(error == 0);
+	pci_emul_alloc_bar(pi, 0, PCIBAR_MEM32, DMEMSZ);
+	pci_emul_alloc_bar(pi, 1, PCIBAR_MEM32, FB_SIZE);
 
 	error = pci_emul_add_msicap(pi, PCI_FBUF_MSI_MSGS);
 	assert(error == 0);
@@ -433,10 +468,13 @@ pci_fbuf_init(struct pci_devinst *pi, nvlist_t *nvl)
 
 	memset((void *)sc->fb_base, 0, FB_SIZE);
 
-	error = rfb_init(sc->rfb_host, sc->rfb_port, sc->rfb_wait, sc->rfb_password);
+	error = rfb_init(sc->rfb_family, sc->rfb_host, sc->rfb_port,
+	    sc->rfb_wait, sc->rfb_password);
 done:
-	if (error)
+	if (error) {
+		pthread_mutex_destroy(&sc->mtx);
 		free(sc);
+	}
 
 	return (error);
 }

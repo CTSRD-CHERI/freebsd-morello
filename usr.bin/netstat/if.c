@@ -84,8 +84,10 @@ static const char* pfsyncacts[] = {
 	/* PFSYNC_ACT_BUS */		"bulk update mark",
 	/* PFSYNC_ACT_TDB */		"TDB replay counter update",
 	/* PFSYNC_ACT_EOF */		"end of frame mark",
-	/* PFSYNC_ACT_INS_1400 */	"state insert",
-	/* PFSYNC_ACT_UPD_1400 */	"state update",
+	/* PFSYNC_ACT_INS_1400 */	"14.0 state insert",
+	/* PFSYNC_ACT_UPD_1400 */	"14.0 state update",
+	/* PFSYNC_ACT_INS_1500 */	"state insert",
+	/* PFSYNC_ACT_UPD_1500 */	"state update",
 };
 
 static const char* pfsyncacts_name[] = {
@@ -102,8 +104,10 @@ static const char* pfsyncacts_name[] = {
 	/* PFSYNC_ACT_BUS */		"bulk-update-mark",
 	/* PFSYNC_ACT_TDB */		"TDB-replay-counter-update",
 	/* PFSYNC_ACT_EOF */		"end-of-frame-mark",
-	/* PFSYNC_ACT_INS_1400 */	"state-insert",
-	/* PFSYNC_ACT_UPD_1400 */	"state-update",
+	/* PFSYNC_ACT_INS_1400 */	"state-insert-1400",
+	/* PFSYNC_ACT_UPD_1400 */	"state-update-1400",
+	/* PFSYNC_ACT_INS_1500 */	"state-insert",
+	/* PFSYNC_ACT_UPD_1500 */	"state-update",
 };
 
 static void
@@ -278,7 +282,8 @@ next_ifma(struct ifmaddrs *ifma, const char *name, const sa_family_t family)
 
 		sdl = (struct sockaddr_dl *)ifma->ifma_name;
 		if (ifma->ifma_addr->sa_family == family &&
-		    strcmp(sdl->sdl_data, name) == 0)
+		    sdl->sdl_nlen == strlen(name) &&
+		    strncmp(sdl->sdl_data, name, sdl->sdl_nlen) == 0)
 			break;
 	}
 
@@ -378,6 +383,22 @@ max_num_len(int max_len, u_long num)
 	return (MAX(max_len, len));
 }
 
+static bool
+skip_ifa(const struct ifaddrs *ifa, sa_family_t af)
+{
+	if (af != AF_UNSPEC && ifa->ifa_addr->sa_family != af)
+		return (true);
+#ifndef INET6
+	/*
+	 * getifaddrs(3) may return AF_INET6 addresses even when
+	 * netstat(1) was built without INET6 support.
+	 */
+	if (ifa->ifa_addr->sa_family == AF_INET6)
+		return (true);
+#endif
+	return (false);
+}
+
 /*
  * Print a description of the network interfaces.
  */
@@ -391,7 +412,7 @@ intpr(void (*pfunc)(char *), int af)
 	u_int npkt_len = 8, nbyte_len = 10, nerr_len = 5;
 
 	if (interval)
-		return sidewaysintpr();
+		return (sidewaysintpr());
 
 	if (getifaddrs(&ifap) != 0)
 		xo_err(EX_OSERR, "getifaddrs");
@@ -402,7 +423,7 @@ intpr(void (*pfunc)(char *), int af)
 		if (interface != NULL &&
 		    strcmp(ifa->ifa_name, interface) != 0)
 			continue;
-		if (af != AF_UNSPEC && ifa->ifa_addr->sa_family != af)
+		if (skip_ifa(ifa, af))
 			continue;
 		ifn_len = strlen(ifa->ifa_name);
 		if ((ifa->ifa_flags & IFF_UP) == 0)
@@ -473,7 +494,7 @@ intpr(void (*pfunc)(char *), int af)
 			continue;
 		}
 
-		if (af != AF_UNSPEC && ifa->ifa_addr->sa_family != af)
+		if (skip_ifa(ifa, af))
 			continue;
 
 		xo_open_instance("interface");
@@ -647,6 +668,21 @@ catchalarm(int signo __unused)
 	signalled = true;
 }
 
+static void
+running_stats_banner(void)
+{
+	xo_emit("{T:/%17s} {T:/%14s} {T:/%16s}\n", "input",
+	    interface != NULL ? interface : "(Total)", "output");
+	xo_emit("{T:/%10s} {T:/%5s} {T:/%5s} {T:/%10s} {T:/%10s} {T:/%5s} "
+	    "{T:/%10s} {T:/%5s}",
+	    "packets", "errs", "idrops", "bytes", "packets", "errs", "bytes",
+	    "colls");
+	if (dflag)
+		xo_emit(" {T:/%5.5s}", "drops");
+	xo_emit("\n");
+	xo_flush();
+}
+
 /*
  * Print a running summary of interface statistics.
  * Repeat display every interval seconds, showing statistics
@@ -670,71 +706,82 @@ sidewaysintpr(void)
 	interval_it.it_interval.tv_usec = 0;
 	interval_it.it_value = interval_it.it_interval;
 	setitimer(ITIMER_REAL, &interval_it, NULL);
+
 	xo_open_list("interface-statistics");
 
-banner:
-	xo_emit("{T:/%17s} {T:/%14s} {T:/%16s}\n", "input",
-	    interface != NULL ? interface : "(Total)", "output");
-	xo_emit("{T:/%10s} {T:/%5s} {T:/%5s} {T:/%10s} {T:/%10s} {T:/%5s} "
-	    "{T:/%10s} {T:/%5s}",
-	    "packets", "errs", "idrops", "bytes", "packets", "errs", "bytes",
-	    "colls");
-	if (dflag)
-		xo_emit(" {T:/%5.5s}", "drops");
-	xo_emit("\n");
-	xo_flush();
+	/*
+	 * We print the first banner right away, even if we'll have to wait for
+	 * the specified interval to get the first statistics line.  Next
+	 * banners will be printed only when the next statistics line is
+	 * available.
+	 */
+	running_stats_banner();
+	/* Number of written statistics line since latest banner. */
 	line = 0;
 
-loop:
-	if ((noutputs != 0) && (--noutputs == 0)) {
-		xo_close_list("interface-statistics");
-		return;
+	for (;;) {
+		/* Wait for next interval. */
+		oldmask = sigblock(sigmask(SIGALRM));
+		while (!signalled)
+			sigpause(0);
+		signalled = false;
+		sigsetmask(oldmask);
+
+		fill_iftot(new);
+
+		/*
+		 * We want that, on a 24-line display, when the previous banner
+		 * reaches exactly the top of the screen, a new banner is
+		 * printed before the next statistics line.  This ensures that
+		 * at least one banner is visible on screen at all time
+		 * (provided the screen has at least 24 lines).  Since the
+		 * banner takes 2 lines, and the last screen line is occupied by
+		 * the cursor, it's after having written 21 statistics lines
+		 * that we must output the banner.
+		 */
+		if (line == 21) {
+			running_stats_banner();
+			line = 0;
+		}
+		++line;
+
+		xo_open_instance("stats");
+		show_stat("lu", 10, "received-packets",
+		    new->ift_ip - old->ift_ip, 1, 1);
+		show_stat("lu", 5, "received-errors",
+		    new->ift_ie - old->ift_ie, 1, 1);
+		show_stat("lu", 5, "dropped-packets",
+		    new->ift_id - old->ift_id, 1, 1);
+		show_stat("lu", 10, "received-bytes",
+		    new->ift_ib - old->ift_ib, 1, 0);
+		show_stat("lu", 10, "sent-packets",
+		    new->ift_op - old->ift_op, 1, 1);
+		show_stat("lu", 5, "send-errors",
+		    new->ift_oe - old->ift_oe, 1, 1);
+		show_stat("lu", 10, "sent-bytes",
+		    new->ift_ob - old->ift_ob, 1, 0);
+		show_stat("NRSlu", 5, "collisions",
+		    new->ift_co - old->ift_co, 1, 1);
+		if (dflag)
+			show_stat("LSlu", 5, "dropped-packets",
+			    new->ift_od - old->ift_od, 1, 1);
+		xo_close_instance("stats");
+		xo_emit("\n");
+		xo_flush();
+
+		if ((noutputs != 0) && (--noutputs == 0)) {
+			xo_close_list("interface-statistics");
+			return;
+		}
+
+		if (new == &ift[0]) {
+			new = &ift[1];
+			old = &ift[0];
+		} else {
+			new = &ift[0];
+			old = &ift[1];
+		}
 	}
-	oldmask = sigblock(sigmask(SIGALRM));
-	while (!signalled)
-		sigpause(0);
-	signalled = false;
-	sigsetmask(oldmask);
-	line++;
-
-	fill_iftot(new);
-
-	xo_open_instance("stats");
-	show_stat("lu", 10, "received-packets",
-	    new->ift_ip - old->ift_ip, 1, 1);
-	show_stat("lu", 5, "received-errors",
-	    new->ift_ie - old->ift_ie, 1, 1);
-	show_stat("lu", 5, "dropped-packets",
-	    new->ift_id - old->ift_id, 1, 1);
-	show_stat("lu", 10, "received-bytes",
-	    new->ift_ib - old->ift_ib, 1, 0);
-	show_stat("lu", 10, "sent-packets",
-	    new->ift_op - old->ift_op, 1, 1);
-	show_stat("lu", 5, "send-errors",
-	    new->ift_oe - old->ift_oe, 1, 1);
-	show_stat("lu", 10, "sent-bytes",
-	    new->ift_ob - old->ift_ob, 1, 0);
-	show_stat("NRSlu", 5, "collisions",
-	    new->ift_co - old->ift_co, 1, 1);
-	if (dflag)
-		show_stat("LSlu", 5, "dropped-packets",
-		    new->ift_od - old->ift_od, 1, 1);
-	xo_close_instance("stats");
-	xo_emit("\n");
-	xo_flush();
-
-	if (new == &ift[0]) {
-		new = &ift[1];
-		old = &ift[0];
-	} else {
-		new = &ift[0];
-		old = &ift[1];
-	}
-
-	if (line == 21)
-		goto banner;
-	else
-		goto loop;
 
 	/* NOTREACHED */
 }

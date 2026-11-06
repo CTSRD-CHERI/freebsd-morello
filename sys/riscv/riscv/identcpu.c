@@ -1,7 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * Copyright (c) 2015-2016 Ruslan Bukin <br@bsdpad.com>
+ * Copyright (c) 2015-2026 Ruslan Bukin <br@bsdpad.com>
  * All rights reserved.
  * Copyright (c) 2022 Mitchell Horne <mhorne@FreeBSD.org>
  * Copyright (c) 2023 The FreeBSD Foundation
@@ -75,14 +75,18 @@ u_int mmu_caps;
 
 /* Supervisor-mode extension support. */
 bool has_hyp;
+bool has_vector;
 bool __read_frequently has_sstc;
 bool __read_frequently has_sscofpmf;
 bool has_svpbmt;
+bool has_svinval;
 
 /* Z-extensions support. */
 bool has_zicbom;
 bool has_zicboz;
 bool has_zicbop;
+
+static char isa_extensions[PAGE_SIZE];
 
 struct cpu_desc {
 	const char	*cpu_mvendor_name;
@@ -130,6 +134,11 @@ static const struct marchid_entry sifive_marchids[] = {
 	MARCHID_END
 };
 
+static const struct marchid_entry spacemit_marchids[] = {
+	{ MARCHID_SPACEMIT_K1,	"SpacemiT(R) X60" },
+	MARCHID_END
+};
+
 /*
  * Known CPU vendor/manufacturer table.
  */
@@ -141,6 +150,7 @@ static const struct {
 	{ MVENDORID_UNIMPL,	"Unspecified",		NULL		},
 	{ MVENDORID_SIFIVE,	"SiFive",		sifive_marchids	},
 	{ MVENDORID_THEAD,	"T-Head",		NULL		},
+	{ MVENDORID_SPACEMIT,	"SpacemiT",		spacemit_marchids	},
 };
 
 /*
@@ -263,14 +273,7 @@ parse_riscv_isa(struct cpu_desc *desc, char *isa, int len)
 {
 	int i;
 
-	/* Check the string prefix. */
-	if (strncmp(isa, ISA_PREFIX, ISA_PREFIX_LEN) != 0) {
-		printf("%s: Unrecognized ISA string: %s\n", __func__, isa);
-		return (-1);
-	}
-
-	i = ISA_PREFIX_LEN;
-	while (i < len) {
+	for (i = 0; i < len; ) {
 		switch(isa[i]) {
 		case 'a':
 		case 'b':
@@ -280,6 +283,7 @@ parse_riscv_isa(struct cpu_desc *desc, char *isa, int len)
 		case 'h':
 		case 'i':
 		case 'm':
+		case 'v':
 			desc->isa_extensions |= HWCAP_ISA_BIT(isa[i]);
 			i++;
 			break;
@@ -363,14 +367,82 @@ parse_cbo_fdt(struct cpu_desc *desc, phandle_t node)
 		desc->cboz_block_size = 0;
 }
 
+static int
+parse_isa_extensions(phandle_t node, u_int cpu, struct cpu_desc *desc)
+{
+	ssize_t len, off, i;
+	char *ext;
+
+	len = OF_getprop(node, "riscv,isa-extensions", isa_extensions,
+	    sizeof(isa_extensions));
+	if (len == -1)
+		return (ESRCH);
+	if (len > sizeof(isa_extensions))
+		panic("isa_extensions string truncated");
+
+	for (i = 0; i < len; i++)
+		isa_extensions[i] = tolower(isa_extensions[i]);
+
+	for (off = 0; off < len; ) {
+		ext = isa_extensions + off;
+		if (*ext == '\0')
+			break;
+		if (bootverbose)
+			printf("riscv extension: %s\n", ext);
+		parse_riscv_isa(desc, ext, strlen(ext));
+		off += strlen(ext) + 1;
+	}
+
+	return (0);
+}
+
+static int
+parse_riscv_isa_legacy(phandle_t node, u_int cpu, struct cpu_desc *desc)
+{
+	u_int hart;
+	ssize_t len;
+	int i;
+
+	hart = pcpu_find(cpu)->pc_hart;
+
+	len = OF_getprop(node, "riscv,isa", isa_extensions,
+	    sizeof(isa_extensions));
+	if (len == -1) {
+		printf("%s: could not find 'riscv,isa' property "
+		    "for CPU %d, hart %u\n", __func__, cpu, hart);
+		return (ESRCH);
+	}
+	if (len > sizeof(isa_extensions))
+		panic("isa string truncated");
+
+	if (bootverbose)
+		printf("hart %d isa: %s\n", hart, isa_extensions);
+
+	/*
+	 * The string is specified to be lowercase, but let's be
+	 * certain.
+	 */
+	for (i = 0; i < len; i++)
+		isa_extensions[i] = tolower(isa_extensions[i]);
+
+	/* Check the string prefix. */
+	if (strncmp(isa_extensions, ISA_PREFIX, ISA_PREFIX_LEN) != 0) {
+		printf("%s: Unrecognized ISA string: %s\n", __func__,
+		    isa_extensions);
+		return (-1);
+	}
+
+	return (parse_riscv_isa(desc, &isa_extensions[ISA_PREFIX_LEN],
+	    len - ISA_PREFIX_LEN));
+}
+
 static void
 identify_cpu_features_fdt(u_int cpu, struct cpu_desc *desc)
 {
-	char isa[1024];
 	phandle_t node;
-	ssize_t len;
 	pcell_t reg;
 	u_int hart;
+	int error;
 
 	node = OF_finddevice("/cpus");
 	if (node == -1) {
@@ -394,22 +466,16 @@ identify_cpu_features_fdt(u_int cpu, struct cpu_desc *desc)
 		    reg != hart)
 			continue;
 
-		len = OF_getprop(node, "riscv,isa", isa, sizeof(isa));
-		KASSERT(len <= sizeof(isa), ("ISA string truncated"));
-		if (len == -1) {
-			printf("%s: could not find 'riscv,isa' property "
+		error = parse_isa_extensions(node, cpu, desc);
+		if (error != 0) {
+			/* Fall-back to the legacy riscv,isa string. */
+			error = parse_riscv_isa_legacy(node, cpu, desc);
+		}
+		if (error != 0) {
+			printf("%s: could not parse ISA string "
 			    "for CPU %d, hart %u\n", __func__, cpu, hart);
 			return;
 		}
-
-		/*
-		 * The string is specified to be lowercase, but let's be
-		 * certain.
-		 */
-		for (int i = 0; i < len; i++)
-			isa[i] = tolower(isa[i]);
-		if (parse_riscv_isa(desc, isa, len) != 0)
-			return;
 
 		/* Check MMU features. */
 		parse_mmu_fdt(desc, node);
@@ -462,10 +528,12 @@ update_global_capabilities(u_int cpu, struct cpu_desc *desc)
 	UPDATE_CAP(mmu_caps, desc->mmu_caps);
 
 	/* Supervisor-mode extension support. */
+	UPDATE_CAP(has_vector, (desc->isa_extensions & HWCAP_ISA_V) != 0);
 	UPDATE_CAP(has_hyp, (desc->isa_extensions & HWCAP_ISA_H) != 0);
 	UPDATE_CAP(has_sstc, (desc->smode_extensions & SV_SSTC) != 0);
 	UPDATE_CAP(has_sscofpmf, (desc->smode_extensions & SV_SSCOFPMF) != 0);
 	UPDATE_CAP(has_svpbmt, (desc->smode_extensions & SV_SVPBMT) != 0);
+	UPDATE_CAP(has_svinval, (desc->smode_extensions & SV_SVINVAL) != 0);
 
 	/* Z extension support. */
 	UPDATE_CAP(has_zicbom, (desc->z_extensions & Z_ZICBOM) != 0);
@@ -605,7 +673,8 @@ printcpuinfo(u_int cpu)
 		    "\04Double"
 		    "\06Float"
 		    "\10Hypervisor"
-		    "\15Mult/Div");
+		    "\15Mult/Div"
+		    "\26Vector");
 	}
 
 	if (SHOULD_PRINT(smode_extensions)) {

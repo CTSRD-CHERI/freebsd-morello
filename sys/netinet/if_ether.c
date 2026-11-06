@@ -35,7 +35,6 @@
  *	add "inuse/lock" bit (or ref. count) along with valid bit
  */
 
-#include <sys/cdefs.h>
 #include "opt_inet.h"
 
 #include <sys/param.h>
@@ -289,7 +288,7 @@ arptimer(void *arg)
 
 	/* XXX: LOR avoidance. We still have ref on lle. */
 	LLE_WUNLOCK(lle);
-	IF_AFDATA_LOCK(ifp);
+	LLTABLE_LOCK(LLTABLE(ifp));
 	LLE_WLOCK(lle);
 
 	/* Guard against race with other llentry_free(). */
@@ -297,7 +296,7 @@ arptimer(void *arg)
 		LLE_REMREF(lle);
 		lltable_unlink_entry(lle->lle_tbl, lle);
 	}
-	IF_AFDATA_UNLOCK(ifp);
+	LLTABLE_UNLOCK(LLTABLE(ifp));
 
 	size_t pkts_dropped = llentry_free(lle);
 
@@ -397,7 +396,7 @@ arprequest_internal(struct ifnet *ifp, const struct in_addr *sip,
 	m->m_pkthdr.len = m->m_len;
 	M_ALIGN(m, m->m_len);
 	ah = mtod(m, struct arphdr *);
-	bzero((caddr_t)ah, m->m_len);
+	bzero(ah, m->m_len);
 #ifdef MAC
 	mac_netinet_arp_send(ifp, m);
 #endif
@@ -489,13 +488,13 @@ arpresolve_full(struct ifnet *ifp, int is_gw, int flags, struct mbuf *m,
 			return (EINVAL);
 		}
 
-		IF_AFDATA_WLOCK(ifp);
+		LLTABLE_LOCK(LLTABLE(ifp));
 		LLE_WLOCK(la);
 		la_tmp = lla_lookup(LLTABLE(ifp), LLE_EXCLUSIVE, dst);
 		/* Prefer ANY existing lle over newly-created one */
 		if (la_tmp == NULL)
 			lltable_link_entry(LLTABLE(ifp), la);
-		IF_AFDATA_WUNLOCK(ifp);
+		LLTABLE_UNLOCK(LLTABLE(ifp));
 		if (la_tmp != NULL) {
 			lltable_free_entry(LLTABLE(ifp), la);
 			la = la_tmp;
@@ -658,8 +657,7 @@ arpintr(struct mbuf *m)
 
 	ifp = m->m_pkthdr.rcvif;
 
-	if (m->m_len < sizeof(struct arphdr) &&
-	    ((m = m_pullup(m, sizeof(struct arphdr))) == NULL)) {
+	if ((m = m_pullup(m, sizeof(struct arphdr))) == NULL) {
 		ARP_LOG(LOG_NOTICE, "packet with short header received on %s\n",
 		    if_name(ifp));
 		return;
@@ -667,15 +665,12 @@ arpintr(struct mbuf *m)
 	ar = mtod(m, struct arphdr *);
 
 	/* Check if length is sufficient */
-	if (m->m_len <  arphdr_len(ar)) {
-		m = m_pullup(m, arphdr_len(ar));
-		if (m == NULL) {
-			ARP_LOG(LOG_NOTICE, "short packet received on %s\n",
-			    if_name(ifp));
-			return;
-		}
-		ar = mtod(m, struct arphdr *);
+	if ((m = m_pullup(m, arphdr_len(ar))) == NULL) {
+		ARP_LOG(LOG_NOTICE, "short packet received on %s\n",
+		    if_name(ifp));
+		return;
 	}
+	ar = mtod(m, struct arphdr *);
 
 	hlen = 0;
 	layer = "";
@@ -962,7 +957,7 @@ match:
 		lltable_set_entry_addr(ifp, la, linkhdr, linkhdrsize,
 		    lladdr_off);
 
-		IF_AFDATA_WLOCK(ifp);
+		LLTABLE_LOCK(LLTABLE(ifp));
 		LLE_WLOCK(la);
 		la_tmp = lla_lookup(LLTABLE(ifp), LLE_EXCLUSIVE, dst);
 
@@ -984,7 +979,7 @@ match:
 		 */
 		if (la_tmp == NULL)
 			lltable_link_entry(LLTABLE(ifp), la);
-		IF_AFDATA_WUNLOCK(ifp);
+		LLTABLE_UNLOCK(LLTABLE(ifp));
 
 		if (la_tmp == NULL) {
 			arp_mark_lle_reachable(la, ifp);
@@ -1302,7 +1297,7 @@ arp_add_ifa_lle(struct ifnet *ifp, const struct sockaddr *dst)
 		return;
 	}
 
-	IF_AFDATA_WLOCK(ifp);
+	LLTABLE_LOCK(LLTABLE(ifp));
 	LLE_WLOCK(lle);
 	/* Unlink any entry if exists */
 	lle_tmp = lla_lookup(LLTABLE(ifp), LLE_EXCLUSIVE, dst);
@@ -1310,7 +1305,7 @@ arp_add_ifa_lle(struct ifnet *ifp, const struct sockaddr *dst)
 		lltable_unlink_entry(LLTABLE(ifp), lle_tmp);
 
 	lltable_link_entry(LLTABLE(ifp), lle);
-	IF_AFDATA_WUNLOCK(ifp);
+	LLTABLE_UNLOCK(LLTABLE(ifp));
 
 	if (lle_tmp != NULL)
 		EVENTHANDLER_INVOKE(lle_event, lle_tmp, LLENTRY_EXPIRED);
@@ -1486,8 +1481,8 @@ static void
 arp_iflladdr(void *arg __unused, struct ifnet *ifp)
 {
 	/* if_bridge can update its lladdr during if_vmove(), after we've done
-	 * if_detach_internal()/dom_ifdetach(). */
-	if (ifp->if_afdata[AF_INET] == NULL)
+	 * with in_ifdetach(). XXXGL: needs to be fixed. */
+	if (ifp->if_inet == NULL)
 		return;
 
 	lltable_update_ifaddr(LLTABLE(ifp));

@@ -2,6 +2,7 @@
 /btree_test
 /chg_usr_exec
 /clonefile
+/clone_after_trunc
 /clone_mmap_cached
 /clone_mmap_write
 /crypto_test
@@ -12,12 +13,16 @@
 /file_append
 /file_check
 /file_trunc
+/file_uncached
 /file_write
 /get_diff
+/getfsuuid
 /getversion
 /largest_file
 /libzfs_input_check
+/libzfs_mnttab_cache_check
 /manipulate_user_buffer
+/makedir
 /mkbusy
 /mkfile
 /mkfiles
@@ -25,10 +30,12 @@
 /mmap_exec
 /mmap_ftruncate
 /mmap_libaio
+/mmap_read_truncate
 /mmap_seek
 /mmap_sync
 /mmapwrite
 /mmap_write_sync
+/mount_null_source
 /nvlist_to_lua
 /randfree_file
 /randwritecomp
@@ -39,6 +46,7 @@
 /rm_lnkcnt_zero_file
 /send_doall
 /statx
+/statfs_nomount
 /stride_dd
 /threadsappend
 /user_ns_exec
@@ -58,3 +66,7 @@
 /sha2_test
 /idmap_util
 /statx
+/statfs_nomount
+/setlease
+/file_unlink_fh
+/zcp_support

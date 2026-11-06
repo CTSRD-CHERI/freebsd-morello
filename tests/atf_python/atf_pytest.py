@@ -117,7 +117,7 @@ class ATFHandler(object):
         reason: str
 
     def __init__(self, report_file_name: Optional[str]):
-        self._tests_state_map: Dict[str, ReportStatus] = {}
+        self._tests_state_map: Dict[str, self.ReportState] = {}
         self._report_file_name = report_file_name
         self._report_file_handle = None
 
@@ -256,7 +256,7 @@ class ATFHandler(object):
                 # Record failure  & override "skipped" state
                 self.set_report_state(test_name, state, reason)
             elif state == "skipped":
-                if hasattr(reason, "wasxfail"):
+                if hasattr(report, "wasxfail"):
                     # xfail() called in the test body
                     state = "expected_failure"
                 else:
@@ -264,7 +264,7 @@ class ATFHandler(object):
                     pass
                 self.set_report_state(test_name, state, reason)
             elif state == "passed":
-                if hasattr(reason, "wasxfail"):
+                if hasattr(report, "wasxfail"):
                     # the test was expected to fail but didn't
                     # mark as hard failure
                     state = "failed"

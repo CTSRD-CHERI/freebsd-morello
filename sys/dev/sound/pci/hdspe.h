@@ -125,6 +125,8 @@
 #define	HDSPE_CHANBUF_SAMPLES		(16 * 1024)
 #define	HDSPE_CHANBUF_SIZE		(4 * HDSPE_CHANBUF_SAMPLES)
 #define	HDSPE_DMASEGSIZE		(HDSPE_CHANBUF_SIZE * HDSPE_MAX_SLOTS)
+#define	HDSPE_DMA_PAGE_SIZE		4096
+#define	HDSPE_DMA_PAGES			(HDSPE_DMASEGSIZE / HDSPE_DMA_PAGE_SIZE)
 
 #define	HDSPE_CHAN_AIO_LINE		(1 << 0)
 #define	HDSPE_CHAN_AIO_EXT		(1 << 1)
@@ -211,10 +213,13 @@ struct sc_pcminfo {
 	struct hdspe_channel	*hc;
 };
 
+/* Maximum number of PCM children. */
+#define	HDSPE_MAX_PCMDEV		8
+
 /* HDSPe device private data */
 struct sc_info {
 	device_t		dev;
-	struct mtx		*lock;
+	struct mtx		lock;
 
 	uint32_t		ctrl_register;
 	uint32_t		settings_register;
@@ -227,7 +232,7 @@ struct sc_info {
 	bus_space_handle_t	csh;
 
 	struct resource		*irq;
-	int			irqid;
+	int			rid;
 	void			*ih;
 	bus_dma_tag_t		dmat;
 
@@ -237,10 +242,19 @@ struct sc_info {
 	uint32_t		bufsize;
 	bus_dmamap_t		pmap;
 	bus_dmamap_t		rmap;
+	/* DMA buffer page addresses. */
+	uint32_t		paddr[HDSPE_DMA_PAGES];
+	uint32_t		raddr[HDSPE_DMA_PAGES];
 	uint32_t		period;
 	uint32_t		speed;
 	uint32_t		force_period;
 	uint32_t		force_speed;
+
+	/* PCM children used for interrupt dispatch. */
+	struct sc_pcminfo	*pcms[HDSPE_MAX_PCMDEV];
+	unsigned int		pcm_refs[HDSPE_MAX_PCMDEV];
+	bool			pcm_detaching[HDSPE_MAX_PCMDEV];
+	struct cv		pcm_cv;
 };
 
 #define	hdspe_read_1(sc, regno)						\

@@ -79,7 +79,7 @@ static int dpaa2_rc_add_managed_child(struct dpaa2_rc_softc *,
 static int dpaa2_rc_enable_irq(struct dpaa2_mcp *, struct dpaa2_cmd *, uint8_t,
     bool, uint16_t);
 static int dpaa2_rc_configure_irq(device_t, device_t, int, uint64_t, uint32_t);
-static int dpaa2_rc_add_res(device_t, device_t, enum dpaa2_dev_type, int *, int);
+static int dpaa2_rc_add_res(device_t, device_t, enum dpaa2_dev_type, int, int);
 static int dpaa2_rc_print_type(struct resource_list *, enum dpaa2_dev_type);
 static struct dpaa2_mcp *dpaa2_rc_select_portal(device_t, device_t);
 
@@ -225,7 +225,7 @@ dpaa2_rc_delete_resource(device_t rcdev, device_t child, int type, int rid)
 }
 
 static struct resource *
-dpaa2_rc_alloc_multi_resource(device_t rcdev, device_t child, int type, int *rid,
+dpaa2_rc_alloc_multi_resource(device_t rcdev, device_t child, int type, int rid,
     rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
 {
 	struct resource_list *rl;
@@ -243,7 +243,7 @@ dpaa2_rc_alloc_multi_resource(device_t rcdev, device_t child, int type, int *rid
 	 *	 dedicated software portal interrupt wire.
 	 *	 See registers SWP_INTW0_CFG to SWP_INTW3_CFG for details.
 	 */
-	if (type == SYS_RES_IRQ && *rid == 0)
+	if (type == SYS_RES_IRQ && rid == 0)
 		return (NULL);
 
 	return (resource_list_alloc(rl, rcdev, child, type, rid,
@@ -251,7 +251,7 @@ dpaa2_rc_alloc_multi_resource(device_t rcdev, device_t child, int type, int *rid
 }
 
 static struct resource *
-dpaa2_rc_alloc_resource(device_t rcdev, device_t child, int type, int *rid,
+dpaa2_rc_alloc_resource(device_t rcdev, device_t child, int type, int rid,
     rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
 {
 	if (device_get_parent(child) != rcdev)
@@ -1391,9 +1391,10 @@ dpaa2_rc_ni_get_link_state(device_t dev, device_t child, struct dpaa2_cmd *cmd,
 {
 	struct __packed link_state_resp {
 		uint32_t	_reserved1;
-		uint32_t	flags;
+		uint8_t		flags;
+		uint8_t		_reserved2[3];
 		uint32_t	rate;
-		uint32_t	_reserved2;
+		uint32_t	_reserved3;
 		uint64_t	options;
 		uint64_t	supported;
 		uint64_t	advert;
@@ -1890,7 +1891,7 @@ dpaa2_rc_ni_get_statistics(device_t dev, device_t child, struct dpaa2_cmd *cmd,
 		uint16_t	param;
 	} *args;
 	struct __packed get_statistics_resp {
-		uint64_t	cnt[7];
+		uint64_t	cnt[DPAA2_NI_STAT_COUNTERS_PER_PAGE];
 	} *resp;
 	struct dpaa2_mcp *portal = dpaa2_rc_select_portal(dev, child);
 	int error;
@@ -1907,7 +1908,7 @@ dpaa2_rc_ni_get_statistics(device_t dev, device_t child, struct dpaa2_cmd *cmd,
 	error = dpaa2_rc_exec_cmd(portal, cmd, CMDID_NI_GET_STATISTICS);
 	if (!error) {
 		resp = (struct get_statistics_resp *) &cmd->params[0];
-		for (int i = 0; i < DPAA2_NI_STAT_COUNTERS; i++)
+		for (int i = 0; i < DPAA2_NI_STAT_COUNTERS_PER_PAGE; i++)
 			cnt[i] = resp->cnt[i];
 	}
 
@@ -2890,7 +2891,7 @@ dpaa2_rc_add_child(struct dpaa2_rc_softc *sc, struct dpaa2_cmd *cmd,
 	const char *devclass;
 	int dpio_n = 0; /* to limit DPIOs by # of CPUs */
 	int dpcon_n = 0; /* to limit DPCONs by # of CPUs */
-	int rid, error;
+	int error;
 
 	rcdev = sc->dev;
 	rcinfo = device_get_ivars(rcdev);
@@ -2944,7 +2945,6 @@ dpaa2_rc_add_child(struct dpaa2_rc_softc *sc, struct dpaa2_cmd *cmd,
 	for (; res_spec && res_spec->type != -1; res_spec++) {
 		if (res_spec->type < DPAA2_DEV_MC)
 			continue; /* Skip non-DPAA2 resource. */
-		rid = res_spec->rid;
 
 		/* Limit DPIOs and DPCONs by number of CPUs. */
 		if (res_spec->type == DPAA2_DEV_IO && dpio_n >= mp_ncpus) {
@@ -2956,8 +2956,8 @@ dpaa2_rc_add_child(struct dpaa2_rc_softc *sc, struct dpaa2_cmd *cmd,
 			continue;
 		}
 
-		error = dpaa2_rc_add_res(rcdev, dev, res_spec->type, &rid,
-		    res_spec->flags);
+		error = dpaa2_rc_add_res(rcdev, dev, res_spec->type,
+		    res_spec->rid, res_spec->flags);
 		if (error)
 			device_printf(rcdev, "%s: dpaa2_rc_add_res() failed: "
 			    "error=%d\n", __func__, error);
@@ -2993,7 +2993,7 @@ dpaa2_rc_add_managed_child(struct dpaa2_rc_softc *sc, struct dpaa2_cmd *cmd,
 	const char *devclass;
 	uint64_t start, end, count;
 	uint32_t flags = 0;
-	int rid, error;
+	int error;
 
 	rcdev = sc->dev;
 	child = sc->dev;
@@ -3088,10 +3088,9 @@ dpaa2_rc_add_managed_child(struct dpaa2_rc_softc *sc, struct dpaa2_cmd *cmd,
 	for (; res_spec && res_spec->type != -1; res_spec++) {
 		if (res_spec->type < DPAA2_DEV_MC)
 			continue; /* Skip non-DPAA2 resource. */
-		rid = res_spec->rid;
 
-		error = dpaa2_rc_add_res(rcdev, dev, res_spec->type, &rid,
-		    res_spec->flags);
+		error = dpaa2_rc_add_res(rcdev, dev, res_spec->type,
+		    res_spec->rid, res_spec->flags);
 		if (error)
 			device_printf(rcdev, "%s: dpaa2_rc_add_res() failed: "
 			    "error=%d\n", __func__, error);
@@ -3285,7 +3284,7 @@ dpaa2_rc_wait_for_cmd(struct dpaa2_mcp *mcp, struct dpaa2_cmd *cmd)
  */
 static int
 dpaa2_rc_add_res(device_t rcdev, device_t child, enum dpaa2_dev_type devtype,
-    int *rid, int flags)
+    int rid, int flags)
 {
 	device_t dpaa2_dev;
 	struct dpaa2_devinfo *dinfo = device_get_ivars(child);
@@ -3297,7 +3296,7 @@ dpaa2_rc_add_res(device_t rcdev, device_t child, enum dpaa2_dev_type devtype,
 	error = DPAA2_MC_GET_FREE_DEV(rcdev, &dpaa2_dev, devtype);
 	if (error && !(flags & RF_SHAREABLE)) {
 		device_printf(rcdev, "%s: failed to obtain a free %s (rid=%d) "
-		    "for: %s (id=%u)\n", __func__, dpaa2_ttos(devtype), *rid,
+		    "for: %s (id=%u)\n", __func__, dpaa2_ttos(devtype), rid,
 		    dpaa2_ttos(dinfo->dtype), dinfo->id);
 		return (error);
 	}
@@ -3308,7 +3307,7 @@ dpaa2_rc_add_res(device_t rcdev, device_t child, enum dpaa2_dev_type devtype,
 		if (error) {
 			device_printf(rcdev, "%s: failed to obtain a shared "
 			    "%s (rid=%d) for: %s (id=%u)\n", __func__,
-			    dpaa2_ttos(devtype), *rid, dpaa2_ttos(dinfo->dtype),
+			    dpaa2_ttos(devtype), rid, dpaa2_ttos(dinfo->dtype),
 			    dinfo->id);
 			return (error);
 		}
@@ -3316,7 +3315,7 @@ dpaa2_rc_add_res(device_t rcdev, device_t child, enum dpaa2_dev_type devtype,
 	}
 
 	/* Add DPAA2 device to the resource list of the child device. */
-	resource_list_add(&dinfo->resources, devtype, *rid,
+	resource_list_add(&dinfo->resources, devtype, rid,
 	    (rman_res_t) dpaa2_dev, (rman_res_t) dpaa2_dev, 1);
 
 	/* Reserve a newly added DPAA2 resource. */
@@ -3325,7 +3324,7 @@ dpaa2_rc_add_res(device_t rcdev, device_t child, enum dpaa2_dev_type devtype,
 	    flags & ~RF_ACTIVE);
 	if (!res) {
 		device_printf(rcdev, "%s: failed to reserve %s (rid=%d) for: %s "
-		    "(id=%u)\n", __func__, dpaa2_ttos(devtype), *rid,
+		    "(id=%u)\n", __func__, dpaa2_ttos(devtype), rid,
 		    dpaa2_ttos(dinfo->dtype), dinfo->id);
 		return (EBUSY);
 	}
@@ -3336,7 +3335,7 @@ dpaa2_rc_add_res(device_t rcdev, device_t child, enum dpaa2_dev_type devtype,
 		if (error) {
 			device_printf(rcdev, "%s: failed to reserve a shared "
 			    "%s (rid=%d) for: %s (id=%u)\n", __func__,
-			    dpaa2_ttos(devtype), *rid, dpaa2_ttos(dinfo->dtype),
+			    dpaa2_ttos(devtype), rid, dpaa2_ttos(dinfo->dtype),
 			    dinfo->id);
 			return (error);
 		}

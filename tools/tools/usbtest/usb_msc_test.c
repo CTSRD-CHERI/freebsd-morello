@@ -870,7 +870,7 @@ show_host_device_selection(uint8_t level, struct uaddr *puaddr)
 	const char *ptr;
 
 top:
-	pbe = libusb20_be_alloc_default();
+	pbe = libusb20_be_alloc_default(usb_be_ctx);
 	pdev = NULL;
 	index = 0;
 
@@ -916,7 +916,7 @@ top:
 struct libusb20_device *
 find_usb_device(struct uaddr uaddr)
 {
-	struct libusb20_backend *pbe = libusb20_be_alloc_default();
+	struct libusb20_backend *pbe = libusb20_be_alloc_default(usb_be_ctx);
 	struct libusb20_device *pdev = NULL;
 	struct LIBUSB20_DEVICE_DESC_DECODED *ddesc;
 
@@ -952,7 +952,6 @@ find_usb_endpoints(struct libusb20_device *pdev, uint8_t class,
 	struct libusb20_interface *iface;
 	struct libusb20_endpoint *ep;
 	uint8_t x;
-	uint8_t y;
 	uint8_t z;
 
 	*in_ep = 0;
@@ -966,9 +965,6 @@ find_usb_endpoints(struct libusb20_device *pdev, uint8_t class,
 		return;
 
 	for (x = 0; x != pcfg->num_interface; x++) {
-
-		y = alt_setting;
-
 		iface = (pcfg->interface + x);
 
 		if ((iface->desc.bInterfaceClass == class) &&

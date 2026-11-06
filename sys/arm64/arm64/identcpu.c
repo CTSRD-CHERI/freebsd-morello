@@ -92,7 +92,7 @@ static uint64_t update_special_reg_field(uint64_t user_reg, u_int type,
  * aliasing cache until we know otherwise.
  */
 void (*arm64_icache_sync_range)(void *, vm_size_t) =
-    &arm64_aliasing_icache_sync_range;
+    arm64_aliasing_icache_sync_range;
 
 static int
 sysctl_hw_machine(SYSCTL_HANDLER_ARGS)
@@ -232,6 +232,10 @@ static const struct cpu_parts cpu_parts_arm[] = {
 	{ CPU_PART_CORTEX_X2, "Cortex-X2" },
 	{ CPU_PART_CORTEX_X3, "Cortex-X3" },
 	{ CPU_PART_CORTEX_X4, "Cortex-X4" },
+	{ CPU_PART_C1_NANO, "C1-Nano" },
+	{ CPU_PART_C1_PRO, "C1-Pro" },
+	{ CPU_PART_C1_PREMIUM, "C1-Premium" },
+	{ CPU_PART_C1_ULTRA, "C1-Ultra" },
 	{ CPU_PART_NEOVERSE_E1, "Neoverse-E1" },
 	{ CPU_PART_NEOVERSE_N1, "Neoverse-N1" },
 	{ CPU_PART_NEOVERSE_N2, "Neoverse-N2" },
@@ -471,19 +475,19 @@ static const struct mrs_field_value ctr_erg[] = {
 };
 
 static const struct mrs_field_value ctr_dline[] = {
-	MRS_FIELD_VALUE_CACHE(CTR, DLINE, "4 byte D-cacheline",
+	MRS_FIELD_VALUE_CACHE(CTR, DminLine, "4 byte D-cacheline",
 	    "byte D-cacheline"),
 	MRS_FIELD_VALUE_END,
 };
 
 static const struct mrs_field_value ctr_l1ip[] = {
-	MRS_FIELD_VALUE(CTR_L1IP_VIPT, "VIPT I-cache"),
-	MRS_FIELD_VALUE(CTR_L1IP_PIPT, "PIPT I-cache"),
+	MRS_FIELD_VALUE(CTR_L1Ip_VIPT, "VIPT I-cache"),
+	MRS_FIELD_VALUE(CTR_L1Ip_PIPT, "PIPT I-cache"),
 	MRS_FIELD_VALUE_END,
 };
 
 static const struct mrs_field_value ctr_iline[] = {
-	MRS_FIELD_VALUE_CACHE(CTR, ILINE, "4 byte I-cacheline",
+	MRS_FIELD_VALUE_CACHE(CTR, IminLine, "4 byte I-cacheline",
 	    "byte I-cacheline"),
 	MRS_FIELD_VALUE_END,
 };
@@ -495,12 +499,12 @@ static const struct mrs_field ctr_fields[] = {
 	MRS_FIELD(CTR, IDC, false, MRS_LOWER, MRS_USERSPACE, ctr_idc),
 	MRS_FIELD(CTR, CWG, false, MRS_HIGHER_OR_ZERO, MRS_USERSPACE, ctr_cwg),
 	MRS_FIELD(CTR, ERG, false, MRS_HIGHER_OR_ZERO, MRS_USERSPACE, ctr_erg),
-	MRS_FIELD(CTR, DLINE, false, MRS_LOWER, MRS_USERSPACE, ctr_dline),
+	MRS_FIELD(CTR, DminLine, false, MRS_LOWER, MRS_USERSPACE, ctr_dline),
 	/* If the ICache types are different report the safe option */
-	MRS_FIELD(CTR, L1IP, false, MRS_EXACT_IF_DIFFERENT |
-	    MRS_SAFE(CTR_L1IP_VIPT >> CTR_L1IP_SHIFT), MRS_USERSPACE,
+	MRS_FIELD(CTR, L1Ip, false, MRS_EXACT_IF_DIFFERENT |
+	    MRS_SAFE(CTR_L1Ip_VIPT >> CTR_L1Ip_SHIFT), MRS_USERSPACE,
 	    ctr_l1ip),
-	MRS_FIELD(CTR, ILINE, false, MRS_LOWER, MRS_USERSPACE, ctr_iline),
+	MRS_FIELD(CTR, IminLine, false, MRS_LOWER, MRS_USERSPACE, ctr_iline),
 	MRS_FIELD_END,
 };
 
@@ -628,7 +632,7 @@ static const struct mrs_field id_aa64dfr0_fields[] = {
 	MRS_FIELD(ID_AA64DFR0, PMSS, false, MRS_LOWER, 0, id_aa64dfr0_pmss),
 	MRS_FIELD(ID_AA64DFR0, BRPs, false, MRS_LOWER, MRS_USERSPACE,
 	    id_aa64dfr0_brps),
-	MRS_FIELD(ID_AA64DFR0, PMUVer, true, MRS_LOWER, 0, id_aa64dfr0_pmuver),
+	MRS_FIELD(ID_AA64DFR0, PMUVer, false, MRS_LOWER, 0, id_aa64dfr0_pmuver),
 	MRS_FIELD(ID_AA64DFR0, TraceVer, false, MRS_LOWER, 0,
 	    id_aa64dfr0_tracever),
 	MRS_FIELD(ID_AA64DFR0, DebugVer, false, MRS_LOWER | MRS_SAFE(0x6), 0,
@@ -1090,6 +1094,11 @@ static const struct mrs_field_value id_aa64isar2_mops[] = {
 	MRS_FIELD_VALUE_END,
 };
 
+static const struct mrs_field_hwcap id_aa64isar2_mops_caps[] = {
+	MRS_HWCAP(2, HWCAP2_MOPS, ID_AA64ISAR2_MOPS_IMPL),
+	MRS_HWCAP_END
+};
+
 static const struct mrs_field_value id_aa64isar2_apa3[] = {
 	MRS_FIELD_VALUE(ID_AA64ISAR2_APA3_NONE, ""),
 	MRS_FIELD_VALUE(ID_AA64ISAR2_APA3_PAC, "APA3 PAC"),
@@ -1145,7 +1154,8 @@ static const struct mrs_field id_aa64isar2_fields[] = {
 	MRS_FIELD(ID_AA64ISAR2, PAC_frac, false, MRS_LOWER, 0,
 	    id_aa64isar2_pac_frac),
 	MRS_FIELD(ID_AA64ISAR2, BC, false, MRS_LOWER, 0, id_aa64isar2_bc),
-	MRS_FIELD(ID_AA64ISAR2, MOPS, false, MRS_LOWER, 0, id_aa64isar2_mops),
+	MRS_FIELD_HWCAP(ID_AA64ISAR2, MOPS, false, MRS_LOWER, MRS_USERSPACE,
+	    id_aa64isar2_mops, id_aa64isar2_mops_caps),
 	MRS_FIELD_HWCAP(ID_AA64ISAR2, APA3, false, MRS_LOWER, MRS_USERSPACE,
 	    id_aa64isar2_apa3, id_aa64isar2_apa3_caps),
 	MRS_FIELD_HWCAP(ID_AA64ISAR2, GPA3, false, MRS_LOWER, MRS_USERSPACE,
@@ -1285,8 +1295,8 @@ static const struct mrs_field_value id_aa64mmfr1_ecbhb[] = {
 	MRS_FIELD_VALUE_END,
 };
 
-static const struct mrs_field_value id_aa64mmfr1_cmovw[] = {
-	MRS_FIELD_VALUE_NONE_IMPL(ID_AA64MMFR1, CMOVW, NONE, IMPL),
+static const struct mrs_field_value id_aa64mmfr1_cmow[] = {
+	MRS_FIELD_VALUE_NONE_IMPL(ID_AA64MMFR1, CMOW, NONE, IMPL),
 	MRS_FIELD_VALUE_END,
 };
 
@@ -1376,7 +1386,7 @@ static const struct mrs_field_value id_aa64mmfr1_hafdbs[] = {
 
 static const struct mrs_field id_aa64mmfr1_fields[] = {
 	MRS_FIELD(ID_AA64MMFR1, ECBHB, false, MRS_LOWER, 0, id_aa64mmfr1_ecbhb),
-	MRS_FIELD(ID_AA64MMFR1, CMOVW, false, MRS_LOWER, 0, id_aa64mmfr1_cmovw),
+	MRS_FIELD(ID_AA64MMFR1, CMOW, false, MRS_LOWER, 0, id_aa64mmfr1_cmow),
 	MRS_FIELD(ID_AA64MMFR1, TIDCP1, false, MRS_LOWER, 0,
 	    id_aa64mmfr1_tidcp1),
 	MRS_FIELD(ID_AA64MMFR1, nTLBPA, false, MRS_LOWER, 0,
@@ -2272,37 +2282,25 @@ static const struct mrs_user_reg user_regs[] = {
 static bool
 user_ctr_has_neoverse_n1_1542419(uint32_t midr, uint64_t ctr)
 {
-	/* Skip non-Neoverse-N1 */
-	if (!CPU_MATCH(CPU_IMPL_MASK | CPU_PART_MASK, CPU_IMPL_ARM,
-	    CPU_PART_NEOVERSE_N1, 0, 0))
-		return (false);
-
-	switch (CPU_VAR(midr)) {
-	default:
-		break;
-	case 4:
-		/* Fixed in r4p1 */
-		if (CPU_REV(midr) > 0)
-			break;
-		/* FALLTHROUGH */
-	case 3:
-		/* If DIC is enabled (coherent icache) then we are affected */
-		return (CTR_DIC_VAL(ctr) != 0);
-	}
-
-	return (false);
+	/*
+	 * Neoverse-N1 erratum 1542419
+	 * Present in r3p0 - r4p0
+	 * Fixed in r4p1
+	 */
+	return (midr_check_var_rev_range(midr, CPU_IMPL_ARM,
+	    CPU_PART_NEOVERSE_N1, 3, 0, 4, 0) && CTR_DIC_VAL(ctr) != 0);
 }
 
-static bool
-user_ctr_check(const struct cpu_feat *feat __unused, u_int midr __unused)
+static cpu_feat_en
+user_ctr_check(const struct cpu_feat *feat __unused, u_int midr)
 {
 	if (emulate_ctr)
-		return (true);
+		return (FEAT_DEFAULT_ENABLE);
 
 	if (user_ctr_has_neoverse_n1_1542419(midr, READ_SPECIALREG(ctr_el0)))
-		return (true);
+		return (FEAT_DEFAULT_ENABLE);
 
-	return (false);
+	return (FEAT_ALWAYS_DISABLE);
 }
 
 static bool
@@ -2320,7 +2318,7 @@ user_ctr_has_errata(const struct cpu_feat *feat __unused, u_int midr,
 	return (false);
 }
 
-static void
+static bool
 user_ctr_enable(const struct cpu_feat *feat __unused,
     cpu_feat_errata errata_status, u_int *errata_list, u_int errata_count)
 {
@@ -2334,7 +2332,7 @@ user_ctr_enable(const struct cpu_feat *feat __unused,
 	if (errata_status != ERRATA_NONE && PCPU_GET(cpuid) == 0 &&
 	    cpu_feat_has_erratum(errata_list, errata_count, 1542419)) {
 		/* Clear fields we will change */
-		user_cpu_desc.ctr &= ~(CTR_DIC_MASK | CTR_ILINE_WIDTH);
+		user_cpu_desc.ctr &= ~(CTR_DIC_MASK | CTR_IminLine_WIDTH);
 
 		/*
 		 * Set DIC to none so userspace will execute an 'ic ivau'
@@ -2348,7 +2346,7 @@ user_ctr_enable(const struct cpu_feat *feat __unused,
 		 * 4-byte words the instruction covers. As PAGE_SHIFT is log2
 		 * of the number of bytes in a page we need to subtract 2.
 		 */
-		user_cpu_desc.ctr |= (PAGE_SHIFT - 2) << CTR_ILINE_SHIFT;
+		user_cpu_desc.ctr |= (PAGE_SHIFT - 2) << CTR_IminLine_SHIFT;
 
 		l_user_cpu_desc.ctr = user_cpu_desc.ctr;
 	}
@@ -2356,16 +2354,13 @@ user_ctr_enable(const struct cpu_feat *feat __unused,
 	WRITE_SPECIALREG(sctlr_el1,
 	    READ_SPECIALREG(sctlr_el1) & ~SCTLR_UCT);
 	isb();
+
+	return (true);
 }
 
-static struct cpu_feat user_ctr = {
-	.feat_name		= "Trap CTR_EL0",
-	.feat_check		= user_ctr_check,
-	.feat_has_errata	= user_ctr_has_errata,
-	.feat_enable		= user_ctr_enable,
-	.feat_flags		= CPU_FEAT_AFTER_DEV | CPU_FEAT_PER_CPU,
-};
-DATA_SET(cpu_feat_set, user_ctr);
+CPU_FEAT(trap_ctr, "Trap CTR_EL0",
+    user_ctr_check, user_ctr_has_errata, user_ctr_enable, NULL,
+    CPU_FEAT_AFTER_DEV | CPU_FEAT_PER_CPU);
 
 static bool
 user_ctr_handler(uint64_t esr, struct trapframe *frame)
@@ -2519,7 +2514,7 @@ mrs_field_cmp(uint64_t a, uint64_t b, u_int shift, int width, bool sign)
 	return (a - b);
 }
 
-bool
+void
 get_kernel_reg_iss(u_int iss, uint64_t *val)
 {
 	int i;
@@ -2527,18 +2522,18 @@ get_kernel_reg_iss(u_int iss, uint64_t *val)
 	for (i = 0; i < nitems(user_regs); i++) {
 		if (user_regs[i].iss == iss) {
 			*val = CPU_DESC_FIELD(kern_cpu_desc, i);
-			return (true);
+			return;
 		}
 	}
 
-	return (false);
+	panic("%s: Invalid register %x", __func__, iss);
 }
 
 /*
  * Fetch the specified register's value, ensuring that individual field values
  * do not exceed those in the mask.
  */
-bool
+void
 get_kernel_reg_iss_masked(u_int iss, uint64_t *valp, uint64_t mask)
 {
 	const struct mrs_field *fields;
@@ -2554,11 +2549,11 @@ get_kernel_reg_iss_masked(u_int iss, uint64_t *valp, uint64_t mask)
 				    fields[j].shift, fields[j].sign);
 			}
 			*valp = mask;
-			return (true);
+			return;
 		}
 	}
 
-	return (false);
+	panic("%s: Invalid register %x", __func__, iss);
 }
 
 bool
@@ -2680,14 +2675,15 @@ update_special_regs(u_int cpu)
 
 	if (cpu == 0) {
 		/* Create a user visible cpu description with safe values */
-		memset(&user_cpu_desc, 0, sizeof(user_cpu_desc));
+		memset_early(&user_cpu_desc, 0, sizeof(user_cpu_desc));
 		/* Safe values for these registers */
 		user_cpu_desc.id_aa64pfr0 = ID_AA64PFR0_AdvSIMD_NONE |
 		    ID_AA64PFR0_FP_NONE | ID_AA64PFR0_EL1_64 |
 		    ID_AA64PFR0_EL0_64;
 		user_cpu_desc.id_aa64dfr0 = ID_AA64DFR0_DebugVer_8;
 		/* Create the Linux user visible cpu description */
-		memcpy(&l_user_cpu_desc, &user_cpu_desc, sizeof(user_cpu_desc));
+		memcpy_early(&l_user_cpu_desc, &user_cpu_desc,
+		    sizeof(user_cpu_desc));
 	}
 
 	desc = get_cpu_desc(cpu);
@@ -2831,6 +2827,34 @@ identify_cpu_sysinit(void *dummy __unused)
 		prev_desc = desc;
 	}
 
+	if (dic && idc) {
+		arm64_icache_sync_range = arm64_dic_idc_icache_sync_range;
+		if (bootverbose)
+			printf("Enabling DIC & IDC ICache sync\n");
+	} else if (idc && icache_aliasing) {
+		arm64_icache_sync_range = arm64_idc_aliasing_icache_sync_range;
+		if (bootverbose)
+			printf("Enabling IDC ICache sync\n");
+	} else if (idc) {
+		arm64_icache_sync_range = arm64_idc_pipt_icache_sync_range;
+		if (bootverbose)
+			printf("Enabling IDC & PIPT ICache sync\n");
+	} else if (!icache_aliasing) {
+		arm64_icache_sync_range = arm64_pipt_icache_sync_range;
+		if (bootverbose)
+			printf("Enabling PIPT ICache sync\n");
+	}
+}
+/*
+ * This needs to run early to ensure the kernel ID registers have been
+ * updated for all CPUs before they are used by ifunc resolvers, etc.
+ */
+SYSINIT(identify_cpu, SI_SUB_CPU, SI_ORDER_MIDDLE,
+    identify_cpu_sysinit, NULL);
+
+static void
+identify_hwcaps_sysinit(void *dummy __unused)
+{
 #ifdef INVARIANTS
 	/* Check we dont update the special registers after this point */
 	hwcaps_set = true;
@@ -2853,16 +2877,6 @@ identify_cpu_sysinit(void *dummy __unused)
 	elf32_hwcap |= parse_cpu_features_hwcap32();
 #endif
 
-	if (dic && idc) {
-		arm64_icache_sync_range = &arm64_dic_idc_icache_sync_range;
-		if (bootverbose)
-			printf("Enabling DIC & IDC ICache sync\n");
-	} else if (idc) {
-		arm64_icache_sync_range = &arm64_idc_aliasing_icache_sync_range;
-		if (bootverbose)
-			printf("Enabling IDC ICache sync\n");
-	}
-
 	if ((elf_hwcap & HWCAP_ATOMICS) != 0) {
 		lse_supported = true;
 		if (bootverbose)
@@ -2877,11 +2891,14 @@ identify_cpu_sysinit(void *dummy __unused)
 	install_sys_handler(user_idreg_handler);
 }
 /*
- * This needs to be after the APs have stareted as they may have errata that
+ * This needs to be after the APs have started as they may have errata that
  * means we need to mask out ID registers & that could affect hwcaps, etc.
+ *
+ * The errata handling runs at SI_SUB_CONFIGURE, SI_ORDER_MIDDLE + 1, so this
+ * needs to be later than that.
  */
-SYSINIT(identify_cpu, SI_SUB_CONFIGURE, SI_ORDER_ANY, identify_cpu_sysinit,
-    NULL);
+SYSINIT(identify_hwcaps, SI_SUB_CONFIGURE, SI_ORDER_MIDDLE + 2,
+    identify_hwcaps_sysinit, NULL);
 
 static void
 cpu_features_sysinit(void *dummy __unused)
@@ -3077,10 +3094,10 @@ print_cpu_cache(struct cpu_desc *desc, struct sbuf *sb, uint64_t ccs,
 	 * register.
 	 */
 	if ((desc->id_aa64mmfr2 & ID_AA64MMFR2_CCIDX_64))
-		cache_size = (CCSIDR_NSETS_64(ccs) + 1) *
-		    (CCSIDR_ASSOC_64(ccs) + 1);
+		cache_size = (CCSIDR_NumSets64(ccs) + 1) *
+		    (CCSIDR_Assoc64(ccs) + 1);
 	else
-		cache_size = (CCSIDR_NSETS(ccs) + 1) * (CCSIDR_ASSOC(ccs) + 1);
+		cache_size = (CCSIDR_NumSets(ccs) + 1) * (CCSIDR_Assoc(ccs) + 1);
 
 	cache_size *= line_size;
 	sbuf_printf(sb, "%zuKB (%s)", cache_size / 1024,
@@ -3292,11 +3309,11 @@ identify_cache(uint64_t ctr)
 {
 
 	/* Identify the L1 cache type */
-	switch (CTR_L1IP_VAL(ctr)) {
-	case CTR_L1IP_PIPT:
+	switch (CTR_L1Ip_VAL(ctr)) {
+	case CTR_L1Ip_PIPT:
 		break;
 	default:
-	case CTR_L1IP_VIPT:
+	case CTR_L1Ip_VIPT:
 		icache_aliasing = true;
 		break;
 	}
@@ -3306,21 +3323,21 @@ identify_cache(uint64_t ctr)
 		    __func__, icache_line_size));
 
 		/* Get the D cache line size */
-		dcache_line_size = CTR_DLINE_SIZE(ctr);
+		dcache_line_size = CTR_DminLine_SIZE(ctr);
 		/* And the same for the I cache */
-		icache_line_size = CTR_ILINE_SIZE(ctr);
+		icache_line_size = CTR_IminLine_SIZE(ctr);
 
 		idcache_line_size = MIN(dcache_line_size, icache_line_size);
 	}
 
-	if (dcache_line_size != CTR_DLINE_SIZE(ctr)) {
+	if (dcache_line_size != CTR_DminLine_SIZE(ctr)) {
 		printf("WARNING: D-cacheline size mismatch %ld != %d\n",
-		    dcache_line_size, CTR_DLINE_SIZE(ctr));
+		    dcache_line_size, CTR_DminLine_SIZE(ctr));
 	}
 
-	if (icache_line_size != CTR_ILINE_SIZE(ctr)) {
+	if (icache_line_size != CTR_IminLine_SIZE(ctr)) {
 		printf("WARNING: I-cacheline size mismatch %ld != %d\n",
-		    icache_line_size, CTR_ILINE_SIZE(ctr));
+		    icache_line_size, CTR_IminLine_SIZE(ctr));
 	}
 }
 
@@ -3368,7 +3385,7 @@ identify_cpu(u_int cpu)
 		int j = 0;
 		if ((clidr & CLIDR_CTYPE_IO)) {
 			WRITE_SPECIALREG(csselr_el1,
-			    CSSELR_Level(i) | CSSELR_InD);
+			    CSSELR_Level(i) | CSSELR_InD_IC);
 			desc->ccsidr[i][j++] =
 			    READ_SPECIALREG(ccsidr_el1);
 		}

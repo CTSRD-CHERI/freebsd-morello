@@ -1,8 +1,6 @@
 #!/bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
-#
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
 # You may only use this file in accordance with the terms of version
@@ -10,9 +8,7 @@
 #
 # A full copy of the text of the CDDL should have accompanied this
 # source.  A copy of the CDDL is also available via the Internet at
-# http://www.illumos.org/license/CDDL.
-#
-# CDDL HEADER END
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -39,6 +35,12 @@
 #	8. Repeat for test for striped, mirrored, and RAIDZ pools.
 
 verify_runnable "global"
+
+# On FreeBSD, autotrim does not reclaim space on file vdevs stored
+# on a ZFS filesystem within the test framework.
+if is_freebsd; then
+	log_unsupported "Autotrim on file vdevs not supported on FreeBSD"
+fi
 
 log_assert "Set 'autotrim=on' verify pool disks were trimmed"
 
@@ -69,7 +71,7 @@ typeset vdev_min_ms_count=$(get_tunable VDEV_MIN_MS_COUNT)
 log_must set_tunable64 VDEV_MIN_MS_COUNT 32
 
 typeset VDEV_MAX_MB=$(( floor(4 * MINVDEVSIZE * 0.75 / 1024 / 1024) ))
-typeset VDEV_MIN_MB=$(( floor(4 * MINVDEVSIZE * 0.30 / 1024 / 1024) ))
+typeset VDEV_MIN_MB=$(( floor(4 * MINVDEVSIZE * 0.40 / 1024 / 1024) ))
 
 for type in "" "mirror" "raidz2" "draid"; do
 
@@ -83,12 +85,13 @@ for type in "" "mirror" "raidz2" "draid"; do
 		VDEVS="$TRIM_VDEV1 $TRIM_VDEV2 $TRIM_VDEV3 $TRIM_VDEV4"
 
 		# The per-vdev utilization is lower due to the capacity
-		# resilverd for the distributed spare.
+		# reserved for the distributed spare.
 		VDEV_MAX_MB=$(( floor(4 * MINVDEVSIZE * 0.50 / 1024 / 1024) ))
+		VDEV_MIN_MB=$(( floor(4 * MINVDEVSIZE * 0.45 / 1024 / 1024) ))
 	fi
 
 	log_must truncate -s $((4 * MINVDEVSIZE)) $VDEVS
-	log_must zpool create -f $TESTPOOL $VDEVS
+	log_must zpool create -f $TESTPOOL $type $VDEVS
 	log_must zpool set autotrim=on $TESTPOOL
 
 	typeset availspace=$(get_prop available $TESTPOOL)

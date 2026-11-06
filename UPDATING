@@ -12,8 +12,8 @@ Items affecting the ports and packages system can be found in
 /usr/ports/UPDATING.  Please read that file before updating system packages
 and/or ports.
 
-NOTE TO PEOPLE WHO THINK THAT FreeBSD 15.x IS SLOW:
-	FreeBSD 15.x has many debugging features turned on, in both the kernel
+NOTE TO PEOPLE WHO THINK THAT FreeBSD 16.x IS SLOW:
+	FreeBSD 16.x has many debugging features turned on, in both the kernel
 	and userland.  These features attempt to detect incorrect use of
 	system primitives, and encourage loud failure through extra sanity
 	checking and fail stop semantics.  They also substantially impact
@@ -26,6 +26,364 @@ NOTE TO PEOPLE WHO THINK THAT FreeBSD 15.x IS SLOW:
 	debugging, define WITH_MALLOC_PRODUCTION in /etc/src.conf and rebuild
 	world, or to merely disable the most expensive debugging functionality
 	at runtime, run "ln -s 'abort:false,junk:false' /etc/malloc.conf".)
+
+20261102:
+	The USB stack now supports SuperSpeedPlus links.  This adds new values
+	to enum usb_dev_speed and enum usb_revision, turns USB_SPEED_MAX and
+	the other USB_*_MAX macros into enum values, and changes the layout
+	of struct usb_port.  Out-of-tree USB kernel modules must be rebuilt.
+	__FreeBSD_version has been bumped to 1600030 for ports that need to
+	detect these changes.
+
+20261018:
+	The FreeBSD-base repository is now enabled in /etc/pkg/FreeBSD.conf.
+	To disable it, edit that file or put "FreeBSD-base: { enabled: no }"
+	into /usr/local/etc/pkg/repos/FreeBSD.conf.
+
+20260919:
+	less(1) has been updated to version 710, which removes the obsolete
+	lesskey(1) utility.  It is no longer built or installed, and the
+	manual page describing the lesskey file format has moved from
+	lesskey(1) to lesskey(5).
+
+	No separate compilation step is needed any more: less(1) has been
+	able to read plain-text lesskey files directly since version 590,
+	imported into FreeBSD in 2021.  Keep your key bindings in the
+	plain-text ~/.lesskey (or the file named by $LESSKEYIN) rather than
+	compiling them into the binary ~/.less; system-wide bindings belong
+	in /etc/syslesskey (or $LESSKEYIN_SYSTEM) rather than /etc/sysless.
+	If both forms are present, the plain-text one is used and the binary
+	one is ignored.
+
+	Existing binary lesskey files are still read, so nothing stops
+	working immediately, but they can no longer be generated or
+	regenerated.  Binary files produced by lesskey from less 240 or
+	older are no longer supported at all and must be rewritten in the
+	plain-text format.
+
+20260916:
+	mfiutil(8)/mrsasutil(8) now display and parse the Exx:Syy drive
+	location notation using the controller's enclosure device ID (EID)
+	instead of its firmware-internal enclosure position index, aligning
+	with Broadcom's storcli/MegaCli tooling.  This changes the numeric
+	value of "xx" for enclosures where the two differ; scripts relying
+	on the previous numbering should be updated to use "show drives"
+	output or storcli's EID column.
+
+20260914:
+	The size of multiple embedded structs have changed and may lead to
+	problems (pci_error_handlers in pci_driver, dev_pm_info in struct device).
+	Bump __FreeBSD_version to 1600026 to allow these LinuxKPI changes to
+	be detcted.
+
+20260414:
+	sysrc(8) has been moved from the "bsdconfig" package to the "rc"
+	package and no longer depends on bsdconfig at runtime.  For pkgbase
+	users, sysrc is now part of set-minimal instead of set-optional.
+
+20260902:
+	struct if_rxd_info now carries a receive timestamp.  iflib drivers
+	must be rebuilt.  __FreeBSD_version has been bumped to 1600022.
+
+20260827:
+	<sys/videoio.h> now provides the V4L2 cropping, control menu and
+	overlay definitions.  __FreeBSD_version has been bumped to 1600021
+	for ports that need to detect them.
+
+20260826:
+	bhyve(8) users who explicitly set the eui64 option for an NVMe
+	device may need to update their configuration.  Due to an incorrect
+	byte-order conversion, bhyve previously presented manually
+	configured EUI-64 values to the guest with their bytes reversed.
+	To preserve the identifier previously visible to the guest,
+	byte-reverse the value in the eui64 option.  Automatically
+	generated EUI-64 values, used when the option is omitted,
+	are unaffected.
+
+20260814:
+	libusb version has been upgraded to 1.0.27 compatible version.
+	All of the missing parts have been implemented.
+
+20260812:
+	The new video(4) framework has landed. <sys/videoio.h> is now provided
+	as the API for communicating with it. __FreeBSD_version has been bumped
+	to 1600020 for ports that need to detect this changeover.
+
+20260728:
+	The Intel 82576 and I350 Virtual Function devices have been split from
+	the igb(4) driver into the igbv driver.  Interfaces previously exposed
+	as igbN are now exposed as igbvN.  Network configuration files must be
+	updated accordingly.
+
+20260727:
+	The wait_for_pids() function in rc.subr, used by rc scripts
+	when stopping or restarting a service, has been modified to
+	use pwait(1)'s new -r option, which requires kernel support.
+	When upgrading across this change, you should install a new
+	kernel first, then reboot, then install a new world, run
+	etcupdate, and reboot again.  Otherwise, you may find that
+	rc.subr is unable to stop services because the running kernel
+	does not provide the support that the updated pwait(1) needs.
+	Alternatively, if you deem it safe, you may use fastboot(8) to
+	reboot without shutting down services first.
+
+20260620:
+	On powerpc64le, long double is now IEEE 754 binary128 (quad
+	precision, 113-bit mantissa) instead of 64-bit double.  This is an
+	ABI-incompatible change with no symbol versioning: all C and C++
+	code that passes, returns, or stores long double (or long double
+	complex) -- including printf/scanf "%Lf", strtold, and the libm
+	*l() routines -- must be rebuilt against the new world.  Mixing old
+	and new objects that exchange long double values will silently
+	corrupt data.  Rebuild all installed ports and any out-of-tree
+	software after upgrading.  Big-endian powerpc and powerpc64 are
+	unaffected and keep 64-bit long double.
+
+20260521:
+	Audio devices are now created with GID 43 / audio. You will need to add
+	users who need access to audio devices to this group.
+
+20260512:
+	"bsdinstall script" will now do a pkgbase installation by default.  To
+	revert to the legacy distset installation, set "DISTRIBUTIONS" in
+	your installerconfig.
+
+20260412:
+	The /etc/rc.d/NETWORKING script no longer provides the legacy
+	NETWORK alias. Third-party or local RC scripts that still use
+	"REQUIRE: NETWORK" shall be updated to use "REQUIRE: NETWORKING"
+	instead.
+
+20260129:
+	The "net.inet6.ip6.use_stableaddr" sysctl is now on by default.
+	This changes the default algorithm to choose IPv6 SLAAC autogenerated
+	addresses from embedding the interface hardware address to using
+	SHA256-HMAC hash as described in RFC 7217 to derive an opaque but
+	stable Address.  If you are using autoconfigured IPv6 addresses at
+	reboot they will be different after this change, but constant
+	thereafter, please update your DNS records if any.
+
+20260106:
+	Zstd has moved to the new "zstd" package.  If you have set-minimal
+	installed, this package will be installed automatically, otherwise
+	you might want to install it manually.  This change only affects
+	pkgbase users.
+
+20251222:
+	Commit 9f49f436a9ec changed the internal KAPI between the NFS
+	modules. As such, nfscommon, nfscl and nfsd must all be rebuilt
+	from sources.
+
+20251212:
+	Timeouts for SCSI bus probing have been drastically reduced. They are
+	now tuneables that can be set in the boot loader should you have a
+	device that requires a longer-than-standards imply timeout but
+	none-the-less works.
+
+	kern.cam.tur_timeout		(default was 60s, now 1s)
+	kern.cam.inquiry_timeout	(default was 60s, now 1s)
+	kern.cam.reportluns_timeout	(default is 60s)
+	kern.cam.modesense_timeout	(default was 60s, now 1s)
+
+20251115:
+	The FreeBSD-base repository is now defined in /etc/pkg/FreeBSD.conf,
+	disabled by default.  In -CURRENT and -STABLE this points at nightly
+	builds on pkg.freebsd.org; for BETA/RC/RELEASE builds it points at
+	release engineering builds on pkgbase.freebsd.org.
+
+	Users of pkgbase will need to replace any existing definition of the
+	FreeBSD-base repository in /usr/local/etc/pkg/repos/ with a single
+	line "FreeBSD-base: { enabled: yes }".
+
+20251110:
+	OpenPAM (including libpam and the PAM modules) has moved to the new
+	"pam" package.  The pam-lib subpackage, which includes libpam, will
+	be automatically installed when required.
+
+	If you have set-minimal(-jail) installed, the pam base package which
+	contains the PAM modules will also be automatically installed.
+	If you don't, you MUST manually install the FreeBSD-pam package if you
+	need to authenticate users, otherwise you won't be able to log in.
+
+	This change only affects pkgbase users.
+
+20251105:
+	pf(4) now supports nat64 via the af-to keyword.
+
+20251102:
+	Commit e5aa60d06958 changed the internal KAPI between
+	the NFS modules.  As such, they all need to be rebuilt
+	from sources.  __FreeBSD_version was bumped to 1600004 for this.
+
+20251025:
+	flua(1) has moved to the new FreeBSD-flua package.  If you use flua,
+	you may want to install this package if it's not otherwise installed
+	as a dependency of something else.  This change only affects pkgbase
+	users.
+
+20251021:
+	Bump __FreeBSD_version to 1600002 for LinuxKPI.  An embedded struct
+	has changed size and might possibly be an issue otherwise.
+
+20251016:
+	With the migration to OpenZFS in FreeBSD 13.x a number of ZFS sysctls
+	moved to new locations, but backwards compatibility aliases were
+	provided.  These aliases will be removed in the near future.  Please
+	update /etc/sysctl.conf to reference the new OIDs.  For example,
+
+	        vfs.zfs.min_auto_ashift=12
+
+	needs to be changed to
+
+	        vfs.zfs.vdev.min_auto_ashift=12
+
+20251015:
+	The "FreeBSD-unbound" package is renamed to "FreeBSD-local-unbound".
+	If you have set-optional or set-base installed, the new package will
+	be installed automatically, otherwise you should manually install the
+	new package and remove the old one.
+
+	This change only affects pkgbase users.
+
+20251012:
+	Blacklist has been renamed upstream to Blocklist.  If you have it
+	configured, rename all configuration files, firewall anchors or
+	sentinel files to reflect the new nomenclature.  Old setups will
+	continue to work emitting a warning.
+
+20251002:
+	Audio-related utilities including mixer(8) and virtual_oss(8) have
+	moved to the new FreeBSD-sound package.  If you have set-optional or
+	set-base installed this package will be installed automatically,
+	otherwise you should install it manually if you need these utilities.
+
+20250929:
+	Both drm-kmod and nividia-drm ports had to be updated to either no
+	longer conflict on LinuxKPI vs. native PCI changes and/or to keep
+	working after some LinuxKPI PCI adjustments which were previously
+	hidden behind native PCI.
+	Bump __FreeBSD_version 1600001 so users will pick up updated packages.
+
+20250929:
+	The deprecated ftpd(8) has been removed.  Users who still need ftpd
+	can install the ftp/freebsd-ftpd port.  pkgbase users should remove
+	the orphaned FreeBSD-ftpd package.
+
+20250923:
+	Several changes which affect pkgbase users (only):
+
+	powerd has been moved to a new FreeBSD-powerd package.  If you have
+	FreeBSD-set-minimal installed, the new package will be installed
+	automatically, otherwise you may want to install it by hand.
+
+	libpmc and related utilities (/usr/sbin/pmc*) have moved to the new
+	FreeBSD-pmc package.  If you use these, you may want to install the
+	package.
+
+	The libbz2 package has been renamed to bzip2, and /usr/bin/bzip2 has
+	been moved to the new package.  If you have set-minimal installed,
+	the new package will be added automatically, otherwise you may want
+	to manually install it.
+
+	This only affects pkgbase users.
+
+20250918:
+	mandoc (including /usr/bin/man) has been moved to a new package,
+	FreeBSD-mandoc.  If you have the minimal set installed, this package
+	will be installed automatically, otherwise you may want to install it.
+
+	Kyua has been moved to the FreeBSD-kyua package, and ATF has been moved
+	to the FreeBSD-atf* packages.  If you have FreeBSD-tests installed,
+	these packages will be installed automatically, otherwise you should
+	manually install them if you need these tools.
+
+	This only affects pkgbase users.
+
+20250912:
+	If SRCCONF is unset and a file named src.conf is present at
+	the top of the source tree, it will now be used instead of
+	/etc/src.conf.
+
+20250907:
+	The MANSPLITPKG knob has been turned off by default, so pkgbase builds
+	will no longer generate "-man" subpackages; instead the manpages will
+	be shipped in the packages they belong to.  If you want to continue
+	building split man packages, set WITH_MANSPLITPKG=1.
+
+20250905:
+	FreeBSD 16.0-CURRENT.
+
+20250903:
+	The BLOAT_KERNEL_WITH_EXTERR kernel config option has been renamed to
+	EXTERR_STRINGS.
+
+20250827:
+	The names of pkg repositories defined in /etc/pkg/FreeBSD.conf have
+	changed: "FreeBSD" is now "FreeBSD-ports", and "FreeBSD-kmods" is now
+	"FreeBSD-ports-kmods".  Users with /usr/local/etc/pkg/repos files
+	which override these will need to adjust their configuration to match
+	the new names.
+
+20250823:
+	The set of pkgbase packages for Kerberos and OpenSSL has changed.
+	After updating past 250e77d4f0a5, you should check 'pkg orphans'
+	and remove any orphaned packages, then examine the output of
+	'pkg install -r base -g FreeBSD-openssl\* FreeBSD-kerberos\*'
+	and install any new packages you need.
+
+20250823:
+	To restore bridge(4)'s ABI compatibility with ifconfig from 14.x or
+	earlier, the size of struct ifbreq has changed, so you must update
+	the kernel and /sbin/ifconfig at the same time or you will not be
+	able to add interfaces to bridge.  This is particularly important
+	if you require bridge for network access during boot, in which case
+	you should install the new kernel and the new /sbin/ifconfig prior
+	to rebooting.
+
+20250820:
+	The WITHOUT_GSSAPI src.conf knob has been removed.  This was already
+	a no-op for MIT Kerberos, so this only affects builds which set
+	WITHOUT_MITKRB5=1, in which case you now always get libgssapi.
+
+	Also, Heimdal's compile_et and libcom_err are now controlled by
+	WITHOUT_KERBEROS, not WITHOUT_KERBEROS_SUPPORT.  This matches
+	the behaviour of the MIT Kerberos versions.
+
+20250820:
+	Commits 08c7dd2fbe4f and a4197ea47777 have changed the ABI between
+	libvmmapi and the vmm device. If using a custom kernel configuration,
+	please ensure that the COMPAT_FREEBSD14 option is included so older
+	versions of libvmmapi continue working as expected.
+
+20250819:
+	The CLEAN option has been switched back from default-on to default-off.
+	This reverts the 20250808 change below, which had reverted the 20240729
+	change before it.  Note that some src.conf(5) options are known to break
+	ABI or compatibility in ways that may require a clean build initially
+	when switched.
+
+20250816:
+	Sendmail's libmilter has been moved to its own package.  If you want
+	to compile applications that use libmilter, you should install the
+	FreeBSD-libmilter* packages.
+
+	If you only have FreeBSD-sendmail installed for applications that
+	require libmilter, you can now remove it.
+
+20250815:
+	The behavior of the getgroups(2), setgroups(2), and initgroups(3)
+	interfaces has changed, and their version numbers have been incremented.
+	To keep existing binaries and libraries working, ensure that
+	COMPAT_FREEBSD14 is included in your kernel configuration.
+	Alternatively, rebuild and reinstall applications that use these
+	interfaces.
+
+20250815:
+	jemalloc 5.3.0 has been committed to the tree.
+
+20250815:
+	The removal of Secure RPC DES authentication noted in 20250810
+	has been reverted.  (However, it is still non-functional.)
 
 20250813:
 	Commit cce64f2e6851 changed the internal KAPI between the NFS
@@ -249,8 +607,8 @@ NOTE TO PEOPLE WHO THINK THAT FreeBSD 15.x IS SLOW:
 
 20250106:
 	A new SOC_ROCKCHIP options appeared, so if you have a custom kernel configuration
-	targetting Rockchip SoC you need to add it so shared and mandatory drivers for
-	this SoC familly will be selected.
+	targeting Rockchip SoC you need to add it so shared and mandatory drivers for
+	this SoC family will be selected.
 	Also a new rk8xx device was added, this select the base driver for Rockchip PMIC.
 
 20241223:
@@ -411,7 +769,7 @@ NOTE TO PEOPLE WHO THINK THAT FreeBSD 15.x IS SLOW:
 	custom kernel configurations without any additional change.
 
 20230922:
-	A new loader tunable net.pf.default_to_drop allows pf(4)’s default
+	A new loader tunable net.pf.default_to_drop allows pf(4)'s default
 	behaviour to be changed from pass to drop. Previously this required
 	recompiling the kernel with the option PF_DEFAULT_TO_DROP.
 
@@ -445,7 +803,7 @@ NOTE TO PEOPLE WHO THINK THAT FreeBSD 15.x IS SLOW:
 20230817:
 	Serial communication (in boot loaders, kernel, and userland) has
 	been changed to default to 115200 bps, in line with common industry
-	practice and typcial firmware serial console redirection
+	practice and typical firmware serial console redirection
 	configuration.
 
 	Note that the early x86 BIOS bootloader (i.e., boot0sio) does not
@@ -529,7 +887,7 @@ NOTE TO PEOPLE WHO THINK THAT FreeBSD 15.x IS SLOW:
 	runs
 		make -j${JOB_MAX} buildworld > ../buildworld.log 2>&1
 
-	where JOB_MAX is derrived from ncpus in local.sys.mk if not set in env.
+	where JOB_MAX is derived from ncpus in local.sys.mk if not set in env.
 
 20230316:
 	Video related devices for some arm devices have been renamed.
@@ -557,7 +915,7 @@ NOTE TO PEOPLE WHO THINK THAT FreeBSD 15.x IS SLOW:
 20230130:
 	As of commit 7c40e2d5f685, the dependency on netlink(4) has been added
 	to the linux_common(4) module. Users relying on linux_common may need
-	to complile netlink(4) module if it is not present in their kernel.
+	to compile netlink(4) module if it is not present in their kernel.
 
 20230126:
 	The WITHOUT_CXX option has been removed. C++ components in the base
@@ -568,7 +926,7 @@ NOTE TO PEOPLE WHO THINK THAT FreeBSD 15.x IS SLOW:
 	Bump _FreeBSD_version to 1400078 to be able to detect this change.
 
 20221212:
-	llvm-objump is now always installed as objdump.  Previously there was
+	llvm-objdump is now always installed as objdump.  Previously there was
 	no /usr/bin/objdump unless the WITH_LLVM_BINUTILS knob was used.
 
 	Some LLVM objdump options have a different output format compared to
@@ -577,7 +935,7 @@ NOTE TO PEOPLE WHO THINK THAT FreeBSD 15.x IS SLOW:
 
 20221205:
 	dma(8) has replaced sendmail(8) as the default mta.  For people willing
-	to reenable sendmail(8):
+	to re-enable sendmail(8):
 
 	$ cp /usr/share/examples/sendmail/mailer.conf /etc/mail/mailer.conf
 
@@ -661,6 +1019,10 @@ NOTE TO PEOPLE WHO THINK THAT FreeBSD 15.x IS SLOW:
 	belongs.  Consequently, users may experience surprising results with
 	such names when roaming to different homenets.
 
+20211118:
+	Mips has been removed from universe builds. It will be removed from the
+	tree shortly.
+
 20211110:
 	Commit b8d60729deef changed the TCP congestion control framework so
 	that any of the included congestion control modules could be
@@ -673,10 +1035,6 @@ NOTE TO PEOPLE WHO THINK THAT FreeBSD 15.x IS SLOW:
 	as the default. If no congestion control option is built into the
 	kernel and you are including networking, the kernel compile will
 	fail. Also if no default is declared the kernel compile will fail.
-
-20211118:
-	Mips has been removed from universe builds. It will be removed from the
-	tree shortly.
 
 20211106:
 	Commit f0c9847a6c47 changed the arguments for VOP_ALLOCATE.
@@ -2315,7 +2673,7 @@ COMMON ITEMS:
 	<reboot in single user>				[3]
 	etcupdate -p					[5]
 	make installworld
-	etcupdate -B					[4]
+	etcupdate					[4]
 	make delete-old					[6]
 	<reboot>
 
@@ -2353,7 +2711,7 @@ COMMON ITEMS:
 	<reboot in single user>				[3]
 	etcupdate -p					[5]
 	make installworld
-	etcupdate -B					[4]
+	etcupdate					[4]
 	make delete-old					[6]
 	<reboot>
 

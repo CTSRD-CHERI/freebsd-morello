@@ -84,7 +84,7 @@ static cpuset_t		suspcpus;
 static struct susppcb	**susppcbs;
 #endif
 
-static void		acpi_stop_beep(void *);
+static void		acpi_stop_beep(void *, enum power_stype);
 
 #ifdef SMP
 static int		acpi_wakeup_ap(struct acpi_softc *, int);
@@ -100,7 +100,7 @@ static void		acpi_wakeup_cpus(struct acpi_softc *);
 } while (0)
 
 static void
-acpi_stop_beep(void *arg)
+acpi_stop_beep(void *arg, enum power_stype stype)
 {
 
 	if (acpi_resume_beep != 0)
@@ -239,8 +239,12 @@ acpi_sleep_machdep(struct acpi_softc *sc, int state)
 		 */
 		pmap_remap_lowptdi(true);
 
-		/* Call ACPICA to enter the desired sleep state */
-		if (state == ACPI_STATE_S4 && sc->acpi_s4bios)
+		/*
+		 * Call ACPICA to enter the desired sleep state.  Currently,
+		 * reaching this code with 'state' being ACPI_STATE_S4 implies
+		 * a S4BIOS request.
+		 */
+		if (state == ACPI_STATE_S4)
 			status = AcpiEnterSleepStateS4bios();
 		else
 			status = AcpiEnterSleepState(state);

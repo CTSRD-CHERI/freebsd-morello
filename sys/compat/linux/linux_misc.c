@@ -35,6 +35,7 @@
 #include <sys/imgact.h>
 #include <sys/limits.h>
 #include <sys/lock.h>
+#include <sys/membarrier.h>
 #include <sys/msgbuf.h>
 #include <sys/mqueue.h>
 #include <sys/mutex.h>
@@ -54,6 +55,7 @@
 #include <sys/sysent.h>
 #include <sys/sysproto.h>
 #include <sys/time.h>
+#include <sys/unistd.h>
 #include <sys/vmmeter.h>
 #include <sys/vnode.h>
 
@@ -61,6 +63,7 @@
 #include <security/mac/mac_framework.h>
 
 #include <vm/pmap.h>
+#include <vm/vm_extern.h>
 #include <vm/vm_map.h>
 #include <vm/swap_pager.h>
 
@@ -113,6 +116,41 @@ struct l_pselect6arg {
 	l_uintptr_t	ss;
 	l_size_t	ss_len;
 };
+
+/**
+ * `SCHED_ATTR_SIZE_VER0` represents the size of the initial published structure.
+ *
+ * See `linux/kernel/sched/syscalls.c` for more details.
+ */
+#define LINUX_SCHED_ATTR_SIZE_VER0 48
+/**
+ * Linux struct sched_attr
+ */
+struct linux_sched_attr {
+	l_uint 		size;
+	l_uint 		sched_policy;
+	uint64_t 	sched_flags;
+	int32_t  	sched_nice;
+	l_uint 		sched_priority;
+
+	uint64_t 	sched_runtime;
+	uint64_t 	sched_deadline;
+	uint64_t 	sched_period;
+
+	l_uint 		sched_util_min;
+	l_uint 		sched_util_max;
+};
+/**
+ * `.size` must be checked at runtime as well in the syscall to match the
+ * Linux implementation.
+ *
+ * This `_Static_assert(..)` is a sanity check to ensure that the structure
+ * meets the minimum expected bar.
+ */
+_Static_assert(sizeof(struct linux_sched_attr) >= LINUX_SCHED_ATTR_SIZE_VER0,
+    "struct linux_sched_attr size");
+
+static int	bsd_sched_policy_to_linux_sched_policy(int);
 
 static int	linux_utimensat_lts_to_ts(struct l_timespec *,
 			struct timespec *);
@@ -324,7 +362,10 @@ linux_mremap(struct thread *td, struct linux_mremap_args *args)
 
 	if (args->new_len > args->old_len) {
 		td->td_retval[0] = 0;
-		return (ENOMEM);
+		if (useracc((void *)(uintptr_t)args->addr, args->old_len,
+		    VM_PROT_READ))
+			return (ENOMEM);
+		return (EFAULT);
 	}
 
 	if (args->new_len < args->old_len) {
@@ -355,6 +396,28 @@ linux_mprotect(struct thread *td, struct linux_mprotect_args *uap)
 
 	return (linux_mprotect_common(td, PTROUT(uap->addr), uap->len,
 	    uap->prot));
+}
+
+int
+linux_pkey_mprotect(struct thread *td, struct linux_pkey_mprotect_args *uap)
+{
+
+	return (linux_pkey_mprotect_common(td, uap->start, uap->len,
+	    uap->prot, uap->pkey));
+}
+
+int
+linux_pkey_alloc(struct thread *td, struct linux_pkey_alloc_args *uap)
+{
+
+	return (linux_pkey_alloc_common(td, uap->flags, uap->init_val));
+}
+
+int
+linux_pkey_free(struct thread *td, struct linux_pkey_free_args *uap)
+{
+
+	return (linux_pkey_free_common(td, uap->pkey));
 }
 
 int
@@ -749,6 +812,7 @@ linux_common_wait(struct thread *td, idtype_t idtype, int id, int *statusp,
 		error = linux_copyout_rusage(&wru.wru_self, rup);
 	if (error == 0 && infop != NULL && td->td_retval[0] != 0) {
 		sig = bsd_to_linux_signal(siginfo.si_signo);
+		memset(&lsi, 0, sizeof(lsi));
 		siginfo_to_lsiginfo(&siginfo, &lsi, sig);
 		error = copyout(&lsi, infop, sizeof(lsi));
 	}
@@ -1028,24 +1092,24 @@ linux_nice(struct thread *td, struct linux_nice_args *args)
 int
 linux_setgroups(struct thread *td, struct linux_setgroups_args *args)
 {
+	const int ngrp = args->gidsetsize;
 	struct ucred *newcred, *oldcred;
 	l_gid_t *linux_gidset;
-	int ngrp, error;
+	int error;
 	struct proc *p;
 
-	ngrp = args->gidsetsize;
-	if (ngrp < 0 || ngrp >= ngroups_max)
+	if (ngrp < 0 || ngrp > ngroups_max)
 		return (EINVAL);
 	linux_gidset = malloc(ngrp * sizeof(*linux_gidset), M_LINUX, M_WAITOK);
 	error = copyin(args->grouplist, linux_gidset, ngrp * sizeof(l_gid_t));
 	if (error)
 		goto out;
+
 	newcred = crget();
 	crextend(newcred, ngrp);
 	p = td->td_proc;
 	PROC_LOCK(p);
-	oldcred = p->p_ucred;
-	crcopy(newcred, oldcred);
+	oldcred = crcopysafe(p, newcred);
 
 	if ((error = priv_check_cred(oldcred, PRIV_CRED_SETGROUPS)) != 0) {
 		PROC_UNLOCK(p);
@@ -1071,34 +1135,29 @@ out:
 int
 linux_getgroups(struct thread *td, struct linux_getgroups_args *args)
 {
-	struct ucred *cred;
+	const struct ucred *const cred = td->td_ucred;
 	l_gid_t *linux_gidset;
-	gid_t *bsd_gidset;
-	int bsd_gidsetsz, ngrp, error;
+	int ngrp, error;
 
-	cred = td->td_ucred;
-	bsd_gidset = cred->cr_groups;
-	bsd_gidsetsz = cred->cr_ngroups;
+	ngrp = args->gidsetsize;
 
-	if ((ngrp = args->gidsetsize) == 0) {
-		td->td_retval[0] = bsd_gidsetsz;
+	if (ngrp == 0) {
+		td->td_retval[0] = cred->cr_ngroups;
 		return (0);
 	}
-
-	if (ngrp < bsd_gidsetsz)
+	if (ngrp < cred->cr_ngroups)
 		return (EINVAL);
 
-	ngrp = 0;
-	linux_gidset = malloc(bsd_gidsetsz * sizeof(*linux_gidset),
-	    M_LINUX, M_WAITOK);
-	while (ngrp < bsd_gidsetsz) {
-		linux_gidset[ngrp] = bsd_gidset[ngrp];
-		ngrp++;
-	}
+	ngrp = cred->cr_ngroups;
+
+	linux_gidset = malloc(ngrp * sizeof(*linux_gidset), M_LINUX, M_WAITOK);
+	for (int i = 0; i < ngrp; ++i)
+		linux_gidset[i] = cred->cr_groups[i];
 
 	error = copyout(linux_gidset, args->grouplist, ngrp * sizeof(l_gid_t));
 	free(linux_gidset, M_LINUX);
-	if (error)
+
+	if (error != 0)
 		return (error);
 
 	td->td_retval[0] = ngrp;
@@ -1330,6 +1389,82 @@ linux_sched_getscheduler(struct thread *td,
 	return (error);
 }
 
+static int
+bsd_sched_policy_to_linux_sched_policy(int bsd_policy)
+{
+
+	switch (bsd_policy) {
+	case SCHED_FIFO:
+		return (LINUX_SCHED_FIFO);
+	case SCHED_RR:
+		return (LINUX_SCHED_RR);
+	case SCHED_OTHER:
+		/* FALLTHROUGH */
+	default:
+		return (LINUX_SCHED_OTHER);
+	}
+}
+
+int
+linux_sched_getattr(struct thread *td, struct linux_sched_getattr_args *args)
+{
+	struct linux_sched_attr lattr;
+	struct sched_param bsd;
+	struct thread *tdt;
+	int error, policy;
+
+	if (args->attr == NULL || args->pid < 0 || args->flags != 0 ||
+	    args->size < LINUX_SCHED_ATTR_SIZE_VER0 || args->size > PAGE_SIZE)
+		return (EINVAL);
+
+	tdt = linux_tdfind(td, args->pid, -1);
+	if (tdt == NULL)
+		return (ESRCH);
+
+	error = kern_sched_getscheduler(td, tdt, &policy);
+	if (error != 0) {
+		PROC_UNLOCK(tdt->td_proc);
+		return (error);
+	}
+
+	error = kern_sched_getparam(td, tdt, &bsd);
+	PROC_UNLOCK(tdt->td_proc);
+	if (error != 0)
+		return (error);
+
+	memset(&lattr, 0, sizeof(lattr));
+	lattr.size = MIN(args->size, sizeof(lattr));
+	lattr.sched_policy = bsd_sched_policy_to_linux_sched_policy(policy);
+	/*
+	 * TODO(PR#299617,ngie): fill in `.sched_nice` with policies like
+	 * `LINUX_SCHED_NORMAL`, etc.
+	 */
+
+	if (linux_map_sched_prio) {
+		switch (lattr.sched_policy) {
+		case LINUX_SCHED_OTHER:
+			lattr.sched_priority = 0;
+			break;
+		case LINUX_SCHED_FIFO:
+		case LINUX_SCHED_RR:
+			/**
+			 * Map [0, RTP_PRIO_MAX - RTP_PRIO_MIN] to
+			 * [1, LINUX_MAX_RT_PRIO - 1] (rounding up).
+			 */
+			lattr.sched_priority =
+			    (bsd.sched_priority *
+				    (LINUX_MAX_RT_PRIO - 1) +
+				(RTP_PRIO_MAX - RTP_PRIO_MIN - 1)) /
+				(RTP_PRIO_MAX - RTP_PRIO_MIN) + 1;
+			break;
+		}
+	} else {
+		lattr.sched_priority = bsd.sched_priority;
+	}
+
+	return (copyout(&lattr, args->attr, lattr.size));
+}
+
 int
 linux_sched_get_priority_max(struct thread *td,
     struct linux_sched_get_priority_max_args *args)
@@ -1547,8 +1682,8 @@ linux_exit_group(struct thread *td, struct linux_exit_group_args *args)
 	 * SIGNAL_EXIT_GROUP is set. We ignore that (temporarily?)
 	 * as it doesnt occur often.
 	 */
-	exit1(td, args->error_code, 0);
-		/* NOTREACHED */
+	kern_exit(td, args->error_code, 0);
+	return (0);
 }
 
 #define _LINUX_CAPABILITY_VERSION_1  0x19980330
@@ -1807,15 +1942,59 @@ linux_prctl(struct thread *td, struct linux_prctl_args *args)
 
 		return (kern_procctl(td, P_PID, 0, PROC_REAP_ACQUIRE,
 		    NULL));
+	case LINUX_PR_GET_CHILD_SUBREAPER: {
+		struct procctl_reaper_status rs;
+		l_int val;
+
+		error = kern_procctl(td, P_PID, 0, PROC_REAP_STATUS, &rs);
+		if (error != 0)
+			return (error);
+		val = rs.rs_reaper == p->p_pid ? 1 : 0;
+		error = copyout(&val, (void *)(register_t)args->arg2,
+		    sizeof(val));
+		break;
+	}
 	case LINUX_PR_SET_NO_NEW_PRIVS:
 		arg = args->arg2 == 1 ?
 		    PROC_NO_NEW_PRIVS_ENABLE : PROC_NO_NEW_PRIVS_DISABLE;
 		error = kern_procctl(td, P_PID, p->p_pid,
 		    PROC_NO_NEW_PRIVS_CTL, &arg);
 		break;
+	case LINUX_PR_GET_NO_NEW_PRIVS:
+		error = kern_procctl(td, P_PID, p->p_pid,
+		    PROC_NO_NEW_PRIVS_STATUS, &arg);
+		if (error != 0)
+			return (error);
+		/* Linux returns the value as the syscall return */
+		td->td_retval[0] = arg == PROC_NO_NEW_PRIVS_ENABLE ? 1 : 0;
+		break;
 	case LINUX_PR_SET_PTRACER:
 		linux_msg(td, "unsupported prctl PR_SET_PTRACER");
 		error = EINVAL;
+		break;
+	case LINUX_PR_SET_VMA:
+		if (args->arg2 != LINUX_PR_SET_VMA_ANON_NAME) {
+			linux_msg(td, "unsupported prctl PR_SET_VMA attr %ju",
+			    (uintmax_t)args->arg2);
+			error = EINVAL;
+		}
+		break;
+	case LINUX_PR_GET_THP_DISABLE:
+		/*
+		 * THP not in play, since FreeBSD doesn't have THP. Although
+		 * similar, superpages don't have the crazy issues THP does, so
+		 * tell the best lie possible: there's no problems with crazy
+		 * latency spikes: this feature is disabled.
+		 */
+
+		td->td_retval[0] = 1;
+		break;
+	case LINUX_PR_SET_THP_DISABLE:
+		/*
+		 * Accept anything that's valid: Linux treats any nonzero
+		 * arg2 as "disable", so there's nothing to reject here.
+		 */
+		td->td_retval[0] = 0;
 		break;
 	default:
 		linux_msg(td, "unsupported prctl option %d", args->option);
@@ -2013,6 +2192,7 @@ linux_prlimit64(struct thread *td, struct linux_prlimit64_args *args)
 	u_int which;
 	int flags;
 	int error;
+	bool exec_blocked;
 
 	if (args->new == NULL && args->old != NULL) {
 		if (linux_get_dummy_limit(td, args->resource, &rlim)) {
@@ -2040,6 +2220,7 @@ linux_prlimit64(struct thread *td, struct linux_prlimit64_args *args)
 			return (error);
 	}
 
+	exec_blocked = false;
 	flags = PGET_HOLD | PGET_NOTWEXIT;
 	if (args->new != NULL)
 		flags |= PGET_CANDEBUG;
@@ -2052,6 +2233,14 @@ linux_prlimit64(struct thread *td, struct linux_prlimit64_args *args)
 		error = pget(args->pid, flags, &p);
 		if (error != 0)
 			return (error);
+		exec_blocked = true;
+		PROC_LOCK(p);
+		execve_block_wait(td, p);
+		error = args->new != NULL ? p_candebug(td, p) :
+		    p_cansee(td, p);
+		PROC_UNLOCK(p);
+		if (error != 0)
+			goto out;
 	}
 	if (args->old != NULL) {
 		PROC_LOCK(p);
@@ -2074,6 +2263,11 @@ linux_prlimit64(struct thread *td, struct linux_prlimit64_args *args)
 		error = kern_proc_setrlimit(td, p, which, &nrlim);
 
  out:
+	if (exec_blocked) {
+		PROC_LOCK(p);
+		execve_unblock(td, p);
+		PROC_UNLOCK(p);
+	}
 	PRELE(p);
 	return (error);
 }
@@ -3070,6 +3264,121 @@ linux_mq_getsetattr(struct thread *td, struct linux_mq_getsetattr_args *args)
 	}
 
 	return (error);
+}
+
+int
+linux_kcmp(struct thread *td, struct linux_kcmp_args *args)
+{
+	int type;
+
+	switch (args->type) {
+	case LINUX_KCMP_FILE:
+		type = KCMP_FILE;
+		break;
+	case LINUX_KCMP_FILES:
+		type = KCMP_FILES;
+		break;
+	case LINUX_KCMP_SIGHAND:
+		type = KCMP_SIGHAND;
+		break;
+	case LINUX_KCMP_VM:
+		type = KCMP_VM;
+		break;
+	default:
+		return (EINVAL);
+	}
+
+	return (kern_kcmp(td, args->pid1, args->pid2, type, args->idx1,
+	    args->idx));
+}
+
+int
+linux_membarrier(struct thread *td, struct linux_membarrier_args *args)
+{
+	static const struct {
+		int linux_cmd;
+		int freebsd_cmd;
+	} cmds[] = {
+		{ LINUX_MEMBARRIER_CMD_QUERY,
+		    MEMBARRIER_CMD_QUERY },
+		{ LINUX_MEMBARRIER_CMD_GLOBAL,
+		    MEMBARRIER_CMD_GLOBAL },
+		{ LINUX_MEMBARRIER_CMD_GLOBAL_EXPEDITED,
+		    MEMBARRIER_CMD_GLOBAL_EXPEDITED },
+		{ LINUX_MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED,
+		    MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED },
+		{ LINUX_MEMBARRIER_CMD_PRIVATE_EXPEDITED,
+		    MEMBARRIER_CMD_PRIVATE_EXPEDITED },
+		{ LINUX_MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED,
+		    MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED },
+		{ LINUX_MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE,
+		    MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE },
+		{ LINUX_MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE,
+		    MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE },
+		{ LINUX_MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ,
+		    MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ },
+		{ LINUX_MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ,
+		    MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ },
+		{ LINUX_MEMBARRIER_CMD_GET_REGISTRATIONS,
+		    MEMBARRIER_CMD_GET_REGISTRATIONS },
+	};
+	int cmd, error, flags, i, mask;
+
+	cmd = -1;
+	for (i = 0; i < nitems(cmds); i++) {
+		if (args->cmd == cmds[i].linux_cmd) {
+			cmd = cmds[i].freebsd_cmd;
+			break;
+		}
+	}
+
+	if (cmd == -1 || (args->flags & ~LINUX_MEMBARRIER_CMD_FLAG_CPU) != 0)
+		return (EINVAL);
+
+	flags = 0;
+	if ((args->flags & LINUX_MEMBARRIER_CMD_FLAG_CPU) != 0)
+		flags |= MEMBARRIER_CMD_FLAG_CPU;
+
+	error = kern_membarrier(td, cmd, flags, args->cpu_id);
+	if (error != 0)
+		return (error);
+
+	if (args->cmd == LINUX_MEMBARRIER_CMD_QUERY ||
+	    args->cmd == LINUX_MEMBARRIER_CMD_GET_REGISTRATIONS) {
+		mask = td->td_retval[0];
+		td->td_retval[0] = 0;
+		for (i = 0; i < nitems(cmds); i++)
+			if ((mask & cmds[i].freebsd_cmd) != 0)
+				td->td_retval[0] |= cmds[i].linux_cmd;
+	}
+
+	return (0);
+}
+
+/*
+ * setfsuid() & setfsgid() exist to decouple the Linux filesystem credentials
+ * from the effective credentials, avoiding signal exposure during privilege
+ * transitions. The signal permission model that motivated this was revised in
+ * Linux 2.0, making these syscalls obsolete for new applications.
+ *
+ * As there's no FreeBSD equivalent, implement both syscalls as no-ops that
+ * return the current effective UID/GID as the previous filesystem UID/GID.
+ * Linux returns the previous filesystem UID/GID for these syscalls, with no
+ * error indication.
+ */
+
+int
+linux_setfsuid(struct thread *td, struct linux_setfsuid_args *args)
+{
+	td->td_retval[0] = td->td_ucred->cr_uid;
+	return (0);
+}
+
+int
+linux_setfsgid(struct thread *td, struct linux_setfsgid_args *args)
+{
+	td->td_retval[0] = td->td_ucred->cr_gid;
+	return (0);
 }
 
 MODULE_DEPEND(linux, mqueuefs, 1, 1, 1);

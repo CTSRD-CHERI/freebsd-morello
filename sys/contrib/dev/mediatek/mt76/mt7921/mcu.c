@@ -1,5 +1,9 @@
-// SPDX-License-Identifier: ISC
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 /* Copyright (C) 2020 MediaTek Inc. */
+
+#if defined(__FreeBSD__)
+#define	LINUXKPI_PARAM_PREFIX	mt7921_
+#endif
 
 #include <linux/fs.h>
 #include <linux/firmware.h>
@@ -230,7 +234,11 @@ mt7921_mcu_debug_msg_event(struct mt792x_dev *dev, struct sk_buff *skb)
 			if (!msg->content[i])
 				msg->content[i] = ' ';
 		}
+#if defined(__linux__)
 		wiphy_info(mt76_hw(dev)->wiphy, "%.*s", len, msg->content);
+#elif defined(__FreeBSD__)
+		wiphy_info(mt76_hw(dev)->wiphy, "%.*s\n", len, msg->content);
+#endif
 	}
 }
 
@@ -655,10 +663,10 @@ int mt7921_run_firmware(struct mt792x_dev *dev)
 	if (err)
 		return err;
 
-	set_bit(MT76_STATE_MCU_RUNNING, &dev->mphy.state);
 	err = mt7921_load_clc(dev, mt792x_ram_name(dev));
 	if (err)
 		return err;
+	set_bit(MT76_STATE_MCU_RUNNING, &dev->mphy.state);
 
 	return mt7921_mcu_fw_log_2_host(dev, 1);
 }

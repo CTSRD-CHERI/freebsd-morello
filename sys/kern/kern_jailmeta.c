@@ -436,6 +436,10 @@ jm_osd_method_get(void *obj, void *data, const struct meta *meta)
 		p = osd;
 		key = opt->name + strlen(meta->name) + 1;
 		keylen = strlen(key);
+		if (keylen < 1) {
+			error = EINVAL;
+			break;
+		}
 		while ((p = strstr(p, key)) != NULL) {
 			if ((p == osd || *(p - 1) == '\n')
 			    && p[keylen] == '=') {
@@ -599,22 +603,18 @@ SYSCTL_PROC(_security_jail, OID_AUTO, env,
 
 /* Setup and tear down. */
 
-static int
+static void
 jm_sysinit(void *arg __unused)
 {
 	meta.osd_slot = osd_jail_register(jm_osd_destructor, meta.methods);
 	env.osd_slot = osd_jail_register(jm_osd_destructor, env.methods);
-
-	return (0);
 }
 
-static int
+static void
 jm_sysuninit(void *arg __unused)
 {
 	osd_jail_deregister(meta.osd_slot);
 	osd_jail_deregister(env.osd_slot);
-
-	return (0);
 }
 
 SYSINIT(jailmeta, SI_SUB_DRIVERS, SI_ORDER_ANY, jm_sysinit, NULL);

@@ -27,7 +27,7 @@
 .\" ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 .\" POSSIBILITY OF SUCH DAMAGE.
 .\"
-.Dd July 30, 2025
+.Dd April 22, 2026
 .Dt PF.CONF 5
 .Os
 .Sh NAME
@@ -92,14 +92,20 @@ keyword, for example:
 include "/etc/pf/sub.filter.conf"
 .Ed
 .Sh MACROS
-Macros can be defined that will later be expanded in context.
-Macro names must start with a letter, and may contain letters, digits
-and underscores.
-Macro names may not be reserved words (for example
+A macro is defined with a command of the form
+.Ar name Ns = Ns Ar value .
+The macro
+.Ar name
+can contain letters, digits, and underscores and cannot be a reserved word
+(for example,
 .Ar pass ,
 .Ar in ,
+or
 .Ar out ) .
-Macros are not expanded inside quotes.
+Within unquoted arguments, the string
+.Pf $ Ar name
+is later expanded to
+.Ar value .
 Ranges of network addresses used in macros that will be expanded in lists
 later on must be quoted with additional simple quotes.
 .Pp
@@ -267,6 +273,10 @@ which corresponds to the connection state.
 Each packet which matches this state will reset the TTL.
 Tuning these values may improve the performance of the
 firewall at the risk of dropping valid idle connections.
+Alternatively, these values may be adjusted collectively
+in a manner suitable for a specific environment using
+.Cm set optimization
+(see above).
 .Pp
 .Bl -tag -width xxxx -compact
 .It Ar tcp.first
@@ -274,6 +284,9 @@ The state after the first packet.
 .It Ar tcp.opening
 The state after the second packet but before both endpoints have
 acknowledged the connection.
+.It Ar tcp.tsdiff
+Maximum allowed time difference between RFC 1323 compliant packet timestamps.
+30 seconds by default.
 .It Ar tcp.established
 The fully established state.
 .It Ar tcp.closing
@@ -1416,7 +1429,7 @@ translated to 198.51.100.100.
 .Pp
 The current implementation will only extract IPv4 addresses from the
 IPv6 addresses with a prefix length of /96 and greater.
-.It Ar binat
+.It Ar binat-to
 A
 .Ar binat-to
 rule specifies a bidirectional mapping between an external IP netblock
@@ -1457,7 +1470,7 @@ match in ... port 2000:2999 rdr-to ... port 4000
 .Ed
 redirects ports 2000 to 2999 (inclusive) to port 4000.
 .Bd -literal -offset indent
-qmatch in ... port 2000:2999 rdr-to ... port 4000:*
+match in ... port 2000:2999 rdr-to ... port 4000:*
 .Ed
 redirects port 2000 to 4000, 2001 to 4001, ..., 2999 to 4999.
 .El
@@ -1477,7 +1490,7 @@ options and both implicitly and explicitly in the case of
 ones.
 A
 .Ar rdr-to
-opion may cause the source port to be modified if doing so avoids a conflict
+option may cause the source port to be modified if doing so avoids a conflict
 with an existing connection.
 A random source port in the range 50001-65535 is chosen in this case.
 Port numbers are never translated with a
@@ -2245,6 +2258,13 @@ When the rate is exceeded, all ICMP is blocked until the rate falls below
 .It Ar max-pkt-size Aq Ar number
 Limit each packet to be no more than the specified number of bytes.
 This includes the IP header, but not any layer 2 header.
+.It Ar once
+Create a one shot rule.
+The first matching packet marks the rule as expired.
+Expired rules are skipped and hidden, unless
+.Xr pfctl 8
+is used in debug or verbose mode.
+.Pp
 .It Xo Ar queue Aq Ar queue
 .No \*(Ba ( Aq Ar queue ,
 .Aq Ar queue )
@@ -2325,17 +2345,23 @@ Used to
 packets to the given divert
 .Ar port .
 Historically
-.Ox pf has another meaning for this, and
-.Fx pf uses
-this syntax to support
-.Xr divert 4 instead. Hence,
+.Ox
+.Sy pf
+has another meaning for this, and
+.Fx
+.Sy pf
+uses this syntax to support
+.Xr divert 4
+instead.
+Hence,
 .Ar host
 has no meaning and can be set to anything like 127.0.0.1.
 If a packet is re-injected and does not change direction then it will not be
 re-diverted.
 .It Ar divert-reply
 It has no meaning in
-.Fx pf .
+.Fx
+.Sy pf .
 .It Ar probability Aq Ar number
 A probability attribute can be attached to a rule, with a value set between
 0 and 1, bounds not included.
@@ -2345,6 +2371,32 @@ For example, the following rule will drop 20% of incoming ICMP packets:
 .Bd -literal -offset indent
 block in proto icmp probability 20%
 .Ed
+.It Cm state limiter Ar name Oo Cm (limiter options) Oc
+Use the specified state limiter to restrict the creation of states
+by this rule.
+By default if capacity is not available, the packet gets blocked
+and ruleset evaluation stops.
+Use
+.Ic no-match
+option to change default behavior such rule is ignored and ruleset
+evaluation continues with next rule.
+See the
+.Sx State Limiters
+section for more information.
+.Pp
+.It Cm source limiter Ar name Oo Cm (limiter options) Oc
+Use the specified source limiter to restrict the creation of states
+by this rule.
+By default if capacity is not available, the packet gets blocked
+and ruleset evaluation stops.
+Use
+.Ic no-match
+option to change default behavior such rule is ignored and ruleset
+evaluation continues with next rule.
+See the
+.Sx Source Limiters
+section for more information.
+.Pp
 .It Ar prio Aq Ar number
 Only match packets which have the given queueing priority assigned.
 .El
@@ -2357,7 +2409,7 @@ packets matching the same connection.
 .It Ar route-to
 The
 .Ar route-to
-option routes the packet to the specified interface with an optional address
+option routes the packet to the specified interface with an address
 for the next hop.
 When a
 .Ar route-to
@@ -2385,6 +2437,50 @@ option creates a duplicate of the packet and routes it like
 .Ar route-to .
 The original packet gets routed as it normally would.
 .El
+.Pp
+Unlike the kernel's normal forwarding path, the route option forwarding
+path does not drop broadcast or multicast traffic when the output
+interface has been overridden by a route option.
+If a
+.Ar route-to ,
+.Ar reply-to ,
+or
+.Ar dup-to
+rule matches traffic destined to a broadcast address (either the
+limited broadcast or a subnet-directed broadcast) or to an IPv4/IPv6
+multicast address, the packet is forwarded out the specified interface,
+which may cross broadcast domains.
+.Pp
+Rulesets that use
+.Ar route-to ,
+.Ar reply-to ,
+or
+.Ar dup-to
+with a permissive destination
+.Po e.g.\&
+.Li from any to any
+.Pc
+can plug this leak with explicit
+.Ar block out
+rules on the route option's target interface.
+To avoid blocking the router's own broadcast or multicast traffic,
+scope the block rules to forwarded packets with the
+.Ar received-on any
+qualifier.
+For example, assuming
+.Li $wan
+is the
+.Ar route-to
+target interface:
+.Bd -literal -offset indent
+block out quick on $wan inet  from any to 255.255.255.255  received-on any
+block out quick on $wan inet  from any to ($wan:broadcast) received-on any
+block out quick on $wan inet  from any to 224.0.0.0/4      received-on any
+block out quick on $wan inet6 from any to ff00::/8         received-on any
+.Ed
+.Pp
+One block-out rule set is needed per interface that may be used as
+a route option target.
 .Sh POOL OPTIONS
 For
 .Ar nat
@@ -2470,7 +2566,13 @@ NAT address and port.
 This feature implements "full-cone" NAT behavior.
 .El
 .Pp
-Additionally, the
+Additionally, options
+.Ar sticky-address
+and
+.Ar prefer-ipv6-nexthop
+can be specified to influence how IP addresses selected from pools.
+.Pp
+The
 .Ar sticky-address
 option can be specified to help ensure that multiple connections from the
 same source are mapped to the same redirection address.
@@ -2486,6 +2588,14 @@ beyond the lifetime of the states, increase the global options with
 See
 .Sx STATEFUL TRACKING OPTIONS
 for more ways to control the source tracking.
+.Pp
+The
+.Ar prefer-ipv6-nexthop
+option allows for IPv6 addresses to be used as the nexthop
+for IPv4 packets routed with the
+.Ar route-to
+rule option. If a table is used with IPv4 and IPv6 addresses, first the IPv6 addresses
+will be used in round-robin fashion, then IPv4 addresses.
 .Sh STATE MODULATION
 Much of the security derived from TCP is attributable to how well the
 initial sequence numbers (ISNs) are chosen.
@@ -2574,6 +2684,145 @@ Also they act on incoming SYN packets only.
 Example:
 .Bd -literal -offset indent
 pass in proto tcp from any to any port www synproxy state
+.Ed
+.Ss State Limiters
+State limiters provide a mechanism to limit the number of states created,
+or the rate of state creation,
+by a set of rules.
+State limiters are configured and loaded with the main ruleset, but
+can be used by rules in any anchor.
+The overall number of states is still subject to the limit set with
+.Cm set limit states ,
+but the number of states created by a subset of rules can be provided
+by a state limiter.
+.Pp
+A state limiter is configured with the following statement:
+.Pp
+.Bl -tag -width xxxx -compact
+.It Cm state limiter Ar name
+Each state limiter is identified by a unique name.
+.El
+.Pp
+State limiters support the following configuration:
+.Pp
+.Bl -tag -width xxxx -compact
+.It Cm id Ar number
+A unique identifier between 1 and 255.
+This configuration is required.
+.It Cm limit Ar number
+Specify the maximum number of states.
+This configuration is required.
+.It Cm rate Ar number Ns / Ns Ar seconds
+Limit the rate at which states can be created over a time interval.
+The connection rate is an approximation calculated as a moving
+average.
+.El
+.Pp
+Pass rules can specify a state limiter using the
+.Cm state limiter Ar name
+option.
+If the number of states allowed has hit the limit, the pass rule
+does not match and ruleset evaluation continues past it.
+.Pp
+An example use case for a state limiter is to restrict the number of
+connections allowed to a service that is accessible via multiple
+protocols, e.g. a DNS server that can be accessed by both TCP and
+UDP on port 53, DNS-over-TLS on TCP port 853, and DNS-over-HTTPS
+on TCP port 443 can be limited to 1000 concurrent connections:
+.Pp
+.Bd -literal -offset indent -compact
+state limiter "dns-server" id 1 limit 1000
+
+pass in proto { tcp udp } to port domain state limiter "dns-server"
+pass in proto tcp to port { 853 443 } state limiter "dns-server"
+.Ed
+.Ss Source Limiters
+Source limiters apply limits on the number of states,
+or the rate of state creation,
+for connections coming from a source address or network for a set
+of rules.
+Source limiters are configured and loaded with the main ruleset, but
+can be used by rules in any anchor.
+The overall number of states is still subject to the limit set with
+.Cm set limit states ,
+but limits on states for a subset of source addresses and rules can
+be provided with source limiters.
+.Pp
+Source address entries in source pools are created on demand,
+and are used to account for the states created for each source
+address or network.
+A source limiter specifies the maximum number of source address
+entries it will track, and can be configured to mask bits in network
+prefixes to have source entries cover larger portions of the address
+space if needed.
+.Pp
+A source limiter is configured with the following statement:
+.Pp
+.Bl -tag -width xxxx -compact
+.It Cm source limiter Ar name
+Each source limiter is uniquely identified by the specified name.
+.El
+.Pp
+Source limiter support the following configuration:
+.Pp
+.Bl -tag -width xxxx -compact
+.It Cm id Ar number
+A unique identifier between 1 and 255.
+This configuration is required.
+.It Cm entries Ar number
+Specify the maximum number of source address entries.
+This configuration is required.
+.It Cm limit Ar number
+Specify the maximum number of states for each source address entry.
+This configuration is required.
+.It Cm rate Ar number Ns / Ns Ar seconds
+Limit the rate at which states can be created by each source address
+entry over a time interval.
+The connection rate is an approximation calculated as a moving
+average.
+.It Cm inet mask Ar prefixlen
+Mask IPv4 source addresses using the prefix length specified with
+.Ar prefixlen
+when creating an address entry.
+The default IPv4 prefix length is 32 bits.
+.It Cm inet6 mask Ar prefixlen
+Mask IPv6 source addresses using the prefix length specified with
+.Ar prefixlen
+when creating an address entry.
+The default IPv6 prefix length is 128 bits.
+.It Cm table < Ns Ar table Ns > Cm above Ar hwm Op Cm below Ar lwm
+Add the address to the specified
+.Ar table
+when the number of states goes above the
+.Ar hwm
+high water mark.
+The address will be removed from the table when the number of states
+drops below the
+.Ar lwm
+low water mark.
+The default low water mark is 0.
+.El
+.Pp
+Pass rules can specify a source limiter using the
+.Cm source limiter Ar name
+option.
+.Pp
+An example use for a source limiter is the mitigation of denial of
+service caused by the exhaustion of firewall resources by network
+or port scans from outside the network.
+The states created by any one scanner from any one source address
+can be limited to avoid impacting other sources.
+Below, up to 10000 IPv4 hosts and IPv6 /64 networks from the external
+network are each limited to a maximum of 1000 connections, and are
+rate limited to creating 100 states over a 10 second interval:
+.Pp
+.Bd -literal -offset indent -compact
+source limiter "internet" id 1 entries 10000 \e
+       limit 1000 rate 100/10 \e
+       inet6 mask 64
+
+block in on egress
+pass in on egress source limiter "internet"
 .Ed
 .Sh STATEFUL TRACKING OPTIONS
 A number of options related to stateful tracking can be applied on a
@@ -3416,16 +3665,26 @@ filteropt      = user | group | flags | icmp-type | icmp6-type | "tos" tos |
                  [ "(" state-opts ")" ] |
                  "fragment" | "no-df" | "min-ttl" number | "set-tos" tos |
                  "max-mss" number | "random-id" | "reassemble tcp" |
-                 fragmentation | "allow-opts" |
+                 fragmentation | "allow-opts" | "once" |
                  "label" string | "tag" string | [ "!" ] "tagged" string |
                  "max-pkt-rate" number "/" seconds |
                  "set prio" ( number | "(" number [ [ "," ] number ] ")" ) |
                  "max-pkt-size" number |
                  "queue" ( string | "(" string [ [ "," ] string ] ")" ) |
                  "rtable" number | "probability" number"%" | "prio" number |
+                 "state limiter" name |
+                 "state limiter" name "(" limiter-opts ")" |
+                 "source limiter" name |
+                 "source limiter" name "(" limiter-opts ")" | "prio" number |
                  "dnpipe" ( number | "(" number "," number ")" ) |
                  "dnqueue" ( number | "(" number "," number ")" ) |
                  "ridentifier" number |
+                 "binat-to" ( redirhost | "{" redirhost-list "}" )
+                 [ portspec ] [ pooltype ] |
+                 "rdr-to" ( redirhost | "{" redirhost-list "}" )
+                 [ portspec ] [ pooltype ] |
+                 "nat-to" ( redirhost | "{" redirhost-list "}" )
+                 [ portspec ] [ pooltype ] [ "static-port" ] |
                  [ ! ] "received-on" ( interface-name | interface-group )
 
 nat-rule       = [ "no" ] "nat" [ "pass" [ "log" [ "(" logopts ")" ] ] ]
@@ -3518,7 +3777,7 @@ hosts          = "all" |
 ipspec         = "any" | host | "{" host-list "}"
 host           = [ "!" ] ( address [ "/" mask-bits ] | "<" string ">" )
 redirhost      = address [ "/" mask-bits ]
-routehost      = "(" interface-name [ address [ "/" mask-bits ] ] ")"
+routehost      = "(" interface-name address [ "/" mask-bits ] ")"
 address        = ( interface-name | interface-group |
                  "(" ( interface-name | interface-group ) ")" |
                  hostname | ipv4-dotted-quad | ipv6-coloned-hex )
@@ -3566,7 +3825,7 @@ fragmentation  = [ "fragment reassemble" ]
 
 timeout-list   = timeout [ [ "," ] timeout-list ]
 timeout        = ( "tcp.first" | "tcp.opening" | "tcp.established" |
-                 "tcp.closing" | "tcp.finwait" | "tcp.closed" |
+                 "tcp.closing" | "tcp.finwait" | "tcp.closed" | "tcp.tsdiff" |
                  "sctp.first" | "sctp.opening" | "sctp.established" |
                  "sctp.closing" | "sctp.closed" |
                  "udp.first" | "udp.single" | "udp.multiple" |
@@ -3580,7 +3839,7 @@ limit-item     = ( "states" | "frags" | "src-nodes" ) number
 
 pooltype       = ( "bitmask" | "random" |
                  "source-hash" [ ( hex-key | string-key ) ] |
-                 "round-robin" ) [ sticky-address ]
+                 "round-robin" ) [ sticky-address | prefer-ipv6-nexthop ]
 
 subqueue       = string | "{" queue-list "}"
 queue-list     = string [ [ "," ] string ]
@@ -3596,6 +3855,7 @@ realtime-sc    = "realtime" sc-spec
 upperlimit-sc  = "upperlimit" sc-spec
 sc-spec        = ( bandwidth-spec |
                  "(" bandwidth-spec number bandwidth-spec ")" )
+limiter-opts   = "block" | "no-match"
 include        = "include" filename
 .Ed
 .Sh FILES

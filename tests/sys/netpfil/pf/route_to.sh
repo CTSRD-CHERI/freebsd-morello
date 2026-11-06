@@ -28,6 +28,146 @@
 
 common_dir=$(atf_get_srcdir)/../common
 
+# We need to somehow test if the random algorithm of pf_map_addr() is working.
+# The table or prefix contains multiple IP next-hop addresses. For each one,
+# repeatedly try to establish connections until the "good" target has been chosen.
+# However, since this choice is random, the test might still ocasionally fail
+# due to timeout.
+check_random() {
+	if [ "$1" = "IPv4" ]; then
+		ping_from="${net_clients_4}.1"
+		ping_to="${host_server_4}"
+	else
+		ping_from="${net_clients_6}::1"
+		ping_to="${host_server_6}"
+	fi
+	good_targets="$2"
+	bad_targets="$3"
+
+	port=42000
+	states=$(mktemp) || exit 1
+	for good_target in $good_targets; do
+		# Loop until either the "good" target has been chosen
+		# or the test times out.
+		while :; do
+			port=$(( port + 1 ))
+			jexec router pfctl -Fs
+			atf_check -s exit:0 ${common_dir}/pft_ping.py \
+				--sendif ${epair_tester}a --replyif ${epair_tester}a \
+				--fromaddr ${ping_from} --to ${ping_to} \
+				--ping-type=tcp3way --send-sport=${port}
+			jexec router pfctl -qvvss | normalize_pfctl_s > $states
+			cat $states
+			if [ -n "${bad_targets}" ]; then
+				for bad_target in $bad_targets; do
+					if grep -qE "route-to: ${bad_target}@" $states; then
+						atf_fail "Bad target ${bad_target} selected!"
+					fi
+				done
+			fi;
+			if grep -qE "route-to: ${good_target}@" $states; then
+				break
+			fi
+		done
+	done
+}
+
+pf_map_addr_common()
+{
+	setup_router_server_nat64
+
+	# Clients will connect from another network behind the router.
+	# This allows for using multiple source addresses.
+	jexec router route add -6 ${net_clients_6}::/${net_clients_6_mask} ${net_tester_6_host_tester}
+	jexec router route add    ${net_clients_4}.0/${net_clients_4_mask} ${net_tester_4_host_tester}
+
+	# The servers are reachable over additional IP addresses for
+	# testing of tables and subnets. The addresses are noncontinougnus
+	# for pf_map_addr() counter tests.
+	for i in 0 1 4 5; do
+		a1=$((24 + i))
+		jexec server1 ifconfig ${epair_server1}b inet  ${net_server1_4}.${a1}/32 alias
+		jexec server1 ifconfig ${epair_server1}b inet6 ${net_server1_6}::42:${i}/128 alias
+		a2=$((40 + i))
+		jexec server2 ifconfig ${epair_server2}b inet  ${net_server2_4}.${a2}/32 alias
+		jexec server2 ifconfig ${epair_server2}b inet6 ${net_server2_6}::42:${i}/128 alias
+	done
+}
+
+# Setup the environment for bcast_* and mcast_* tests.
+rt_leak_setup()
+{
+	pft_init
+
+	epair_lan=$(vnet_mkepair)
+	epair_wan=$(vnet_mkepair)
+
+	# client (lan)
+	vnet_mkjail client ${epair_lan}a
+	jexec client ifconfig ${epair_lan}a 192.0.2.2/24 up
+	jexec client ifconfig ${epair_lan}a inet6 2001:db8:1::2/64 no_dad up
+	jexec client route add default 192.0.2.1
+	jexec client route add -inet6 default 2001:db8:1::1
+
+	# router
+	vnet_mkjail router ${epair_lan}b ${epair_wan}a
+	jexec router ifconfig ${epair_lan}b 192.0.2.1/24 up
+	jexec router ifconfig ${epair_lan}b inet6 2001:db8:1::1/64 no_dad up
+	jexec router ifconfig ${epair_wan}a 198.51.100.1/24 up
+	jexec router ifconfig ${epair_wan}a inet6 2001:db8:2::1/64 no_dad up
+	jexec router sysctl net.inet.ip.forwarding=1
+	jexec router sysctl net.inet6.ip6.forwarding=1
+	jexec router route add 255.255.255.255 -iface ${epair_wan}a
+	jexec router route add 224.0.0.0/4 -iface ${epair_wan}a
+	jexec router route add -inet6 ff00::/8 -iface ${epair_wan}a
+	jexec router pfctl -e
+
+	# wan
+	vnet_mkjail wan ${epair_wan}b
+	jexec wan ifconfig ${epair_wan}b 198.51.100.2/24 up
+	jexec wan ifconfig ${epair_wan}b inet6 2001:db8:2::2/64 no_dad up
+	jexec wan pfctl -e
+	pft_set_rules wan \
+		"pass" \
+		"pass in on ${epair_wan}b inet  proto udp from any to any port 5000 label rt_leak_probe" \
+		"pass in on ${epair_wan}b inet6 proto udp from any to any port 5000 label rt_leak_probe"
+
+	# Sanity check before proceeding.
+	atf_check -s exit:0 -o ignore jexec client ping -c 1 -t 1 192.0.2.1
+}
+
+# Install the router ruleset for bcast_* and mcast_* tests.
+rt_leak_install_rules()
+{
+	pft_set_rules router \
+		"block all" \
+		"pass out keep state" \
+		"pass in on ${epair_lan}b inet  proto icmp  all keep state" \
+		"pass in on ${epair_lan}b inet6 proto icmp6 all keep state" \
+		"pass inet6 proto icmp6 icmp6-type { neighbrsol, neighbradv, routersol, routeradv } keep state" \
+		"$@"
+}
+
+# Packet count observed by the probe rule in the wan jail.
+rt_leak_probe_pkts()
+{
+	jexec wan pfctl -sl | awk '$1 == "rt_leak_probe" { print $3 }'
+}
+
+# Send one UDP datagram from $1 (a jail name) to $2 (a destination address).
+rt_leak_send()
+{
+	atf_check -s exit:0 -o ignore jexec "$1" python3 -c "
+import socket
+dst = '$2'
+af = socket.AF_INET6 if ':' in dst else socket.AF_INET
+s = socket.socket(af, socket.SOCK_DGRAM)
+if af == socket.AF_INET:
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+s.sendto(b'rt_leak_probe', (dst, 5000))
+"
+}
+
 atf_test_case "v4" "cleanup"
 v4_head()
 {
@@ -893,7 +1033,6 @@ empty_pool_cleanup()
 	pft_cleanup
 }
 
-
 atf_test_case "table_loop" "cleanup"
 
 table_loop_head()
@@ -905,24 +1044,7 @@ table_loop_head()
 
 table_loop_body()
 {
-	setup_router_server_nat64
-
-	# Clients will connect from another network behind the router.
-	# This allows for using multiple source addresses.
-	jexec router route add -6 ${net_clients_6}::/${net_clients_6_mask} ${net_tester_6_host_tester}
-	jexec router route add    ${net_clients_4}.0/${net_clients_4_mask} ${net_tester_4_host_tester}
-
-	# The servers are reachable over additional IP addresses for
-	# testing of tables and subnets. The addresses are noncontinougnus
-	# for pf_map_addr() counter tests.
-	for i in 0 1 4 5; do
-		a1=$((24 + i))
-		jexec server1 ifconfig ${epair_server1}b inet  ${net_server1_4}.${a1}/32 alias
-		jexec server1 ifconfig ${epair_server1}b inet6 ${net_server1_6}::42:${i}/128 alias
-		a2=$((40 + i))
-		jexec server2 ifconfig ${epair_server2}b inet  ${net_server2_4}.${a2}/32 alias
-		jexec server2 ifconfig ${epair_server2}b inet6 ${net_server2_6}::42:${i}/128 alias
-	done
+	pf_map_addr_common
 
 	jexec router pfctl -e
 	pft_set_rules router \
@@ -976,6 +1098,970 @@ table_loop_cleanup()
 }
 
 
+atf_test_case "roundrobin" "cleanup"
+
+roundrobin_head()
+{
+	atf_set descr 'multiple gateways of mixed AF, including prefixes and tables, for IPv6 packets'
+	atf_set require.user root
+	atf_set require.progs python3 scapy
+}
+
+roundrobin_body()
+{
+	pf_map_addr_common
+
+	# The rule is defined as "inet6 proto tcp" so directly given IPv4 hosts
+	# will be removed from the pool by pfctl. Tables will still be loaded
+	# and pf_map_addr() will only use IPv6 addresses from them. It will
+	# iterate over members of the pool and inside of tables and prefixes.
+
+	jexec router pfctl -e
+	pft_set_rules router \
+		"set debug loud" \
+		"set reassemble yes" \
+		"set state-policy if-bound" \
+		"table <rt_targets> { ${net_server2_4}.40/31 ${net_server2_4}.44 ${net_server2_6}::42:0/127 ${net_server2_6}::42:4 }" \
+		"pass in on ${epair_tester}b \
+			route-to { \
+				(${epair_server1}a ${net_server1_4_host_server}) \
+				(${epair_server2}a <rt_targets_empty>) \
+				(${epair_server1}a ${net_server1_6}::42:0/127) \
+				(${epair_server2}a <rt_targets_empty>) \
+				(${epair_server2}a <rt_targets>) \
+			} \
+			inet6 proto tcp \
+			keep state"
+
+	for port in $(seq 1 6); do
+		port=$((4200 + port))
+		atf_check -s exit:0 ${common_dir}/pft_ping.py \
+			--sendif ${epair_tester}a --replyif ${epair_tester}a \
+			--fromaddr ${net_clients_6}::1 --to ${host_server_6} \
+			--ping-type=tcp3way --send-sport=${port}
+	done
+
+	states=$(mktemp) || exit 1
+	jexec router pfctl -qvvss | normalize_pfctl_s > $states
+
+	for state_regexp in \
+		"${epair_tester}b tcp ${host_server_6}\[9\] <- ${net_clients_6}::1\[4201\] .* route-to: ${net_server1_6}::42:0@${epair_server1}a" \
+		"${epair_tester}b tcp ${host_server_6}\[9\] <- ${net_clients_6}::1\[4202\] .* route-to: ${net_server1_6}::42:1@${epair_server1}a" \
+		"${epair_tester}b tcp ${host_server_6}\[9\] <- ${net_clients_6}::1\[4203\] .* route-to: ${net_server2_6}::42:0@${epair_server2}a" \
+		"${epair_tester}b tcp ${host_server_6}\[9\] <- ${net_clients_6}::1\[4204\] .* route-to: ${net_server2_6}::42:1@${epair_server2}a" \
+		"${epair_tester}b tcp ${host_server_6}\[9\] <- ${net_clients_6}::1\[4205\] .* route-to: ${net_server2_6}::42:4@${epair_server2}a" \
+		"${epair_tester}b tcp ${host_server_6}\[9\] <- ${net_clients_6}::1\[4206\] .* route-to: ${net_server1_6}::42:0@${epair_server1}a" \
+	; do
+		grep -qE "${state_regexp}" $states || atf_fail "State not found for '${state_regexp}'"
+	done
+}
+
+roundrobin_cleanup()
+{
+	pft_cleanup
+}
+
+atf_test_case "random_table" "cleanup"
+
+random_table_head()
+{
+	atf_set descr 'Pool with random flag and a table for IPv6'
+	atf_set require.user root
+	atf_set require.progs python3 scapy
+}
+
+random_table_body()
+{
+	pf_map_addr_common
+
+	# The "random" flag will pick random hosts from the table but will
+	# not dive into prefixes, always choosing the 0th address.
+	# Proper address family will be choosen.
+
+	jexec router pfctl -e
+	pft_set_rules router \
+		"set debug loud" \
+		"set reassemble yes" \
+		"set state-policy if-bound" \
+		"table <rt_targets> { ${net_server2_4}.40/31 ${net_server2_4}.44 ${net_server2_6}::42:0/127 ${net_server2_6}::42:4 }" \
+		"pass in on ${epair_tester}b \
+			route-to { (${epair_server2}a <rt_targets>) } random \
+			inet6 proto tcp \
+			keep state"
+
+	good_targets="${net_server2_6}::42:0 ${net_server2_6}::42:4"
+	bad_targets="${net_server2_6}::42:1"
+	check_random IPv6 "${good_targets}" "${bad_targets}"
+}
+
+random_table_cleanup()
+{
+	pft_cleanup
+}
+
+atf_test_case "random_prefix" "cleanup"
+
+random_prefix_head()
+{
+	atf_set descr 'Pool with random flag and a table for IPv4'
+	atf_set require.user root
+	atf_set require.progs python3 scapy
+}
+
+random_prefix_body()
+{
+	pf_map_addr_common
+
+	# The "random" flag will pick random hosts from given prefix.
+	# The choice being random makes testing it non-trivial. We do 10
+	# attempts to have each target chosen. Hopefully this is enough to have
+	# this test pass often enough.
+
+	jexec router pfctl -e
+	pft_set_rules router \
+		"set debug loud" \
+		"set reassemble yes" \
+		"set state-policy if-bound" \
+		"pass in on ${epair_tester}b \
+			route-to { (${epair_server2}a ${net_server2_6}::42:0/127) } random \
+			inet6 proto tcp \
+			keep state"
+
+	good_targets="${net_server2_6}::42:0 ${net_server2_6}::42:1"
+	check_random IPv6 "${good_targets}"
+}
+
+random_prefix_cleanup()
+{
+	pft_cleanup
+}
+
+atf_test_case "prefer_ipv6_nexthop_single_ipv4" "cleanup"
+
+prefer_ipv6_nexthop_single_ipv4_head()
+{
+	atf_set descr 'prefer-ipv6-nexthop option for a single IPv4 gateway'
+	atf_set require.user root
+	atf_set require.progs python3 scapy
+}
+
+prefer_ipv6_nexthop_single_ipv4_body()
+{
+	pf_map_addr_common
+
+	# Basic forwarding test for prefer-ipv6-nexthop pool option.
+	# A single IPv4 gateway will work only for IPv4 traffic.
+
+	jexec router pfctl -e
+	pft_set_rules router \
+		"set reassemble yes" \
+		"set state-policy if-bound" \
+		"pass in on ${epair_tester}b \
+			route-to (${epair_server1}a ${net_server1_4_host_server}) prefer-ipv6-nexthop \
+			proto tcp \
+			keep state"
+
+	atf_check -s exit:0 ${common_dir}/pft_ping.py \
+		--sendif ${epair_tester}a --replyif ${epair_tester}a \
+		--fromaddr ${net_clients_4}.1 --to ${host_server_4} \
+		--ping-type=tcp3way --send-sport=4201 \
+
+	atf_check -s exit:1 ${common_dir}/pft_ping.py \
+		--sendif ${epair_tester}a --replyif ${epair_tester}a \
+		--fromaddr ${net_clients_6}::1 --to ${host_server_6} \
+		--ping-type=tcp3way --send-sport=4202
+
+	states=$(mktemp) || exit 1
+	jexec router pfctl -qvvss | normalize_pfctl_s > $states
+
+	for state_regexp in \
+		"${epair_tester}b tcp ${host_server_4}:9 <- ${net_clients_4}.1:4201 .* route-to: ${net_server1_4_host_server}@${epair_server1}a" \
+	; do
+		grep -qE "${state_regexp}" $states || atf_fail "State not found for '${state_regexp}'"
+	done
+
+	# The IPv6 packet could not have been routed over IPv4 gateway.
+	atf_check -o "match:map-failed +1 +" -x "jexec router pfctl -qvvsi 2> /dev/null"
+}
+
+prefer_ipv6_nexthop_single_ipv4_cleanup()
+{
+	pft_cleanup
+}
+
+atf_test_case "prefer_ipv6_nexthop_single_ipv6" "cleanup"
+
+prefer_ipv6_nexthop_single_ipv6_head()
+{
+	atf_set descr 'prefer-ipv6-nexthop option for a single IPv6 gateway'
+	atf_set require.user root
+	atf_set require.progs python3 scapy
+}
+
+prefer_ipv6_nexthop_single_ipv6_body()
+{
+	pf_map_addr_common
+
+	# Basic forwarding test for prefer-ipv6-nexthop pool option.
+	# A single IPve gateway will work both for IPv4 and IPv6 traffic.
+
+	jexec router pfctl -e
+	pft_set_rules router \
+		"set reassemble yes" \
+		"set state-policy if-bound" \
+		"pass in on ${epair_tester}b \
+			route-to (${epair_server1}a ${net_server1_6_host_server}) prefer-ipv6-nexthop \
+			proto tcp \
+			keep state"
+
+	atf_check -s exit:0 ${common_dir}/pft_ping.py \
+		--sendif ${epair_tester}a --replyif ${epair_tester}a \
+		--fromaddr ${net_clients_4}.1 --to ${host_server_4} \
+		--ping-type=tcp3way --send-sport=4201 \
+
+	atf_check -s exit:0 ${common_dir}/pft_ping.py \
+		--sendif ${epair_tester}a --replyif ${epair_tester}a \
+		--fromaddr ${net_clients_6}::1 --to ${host_server_6} \
+		--ping-type=tcp3way --send-sport=4202
+
+	states=$(mktemp) || exit 1
+	jexec router pfctl -qvvss | normalize_pfctl_s > $states
+
+	for state_regexp in \
+		"${epair_tester}b tcp ${host_server_4}:9 <- ${net_clients_4}.1:4201 .* route-to: ${net_server1_6_host_server}@${epair_server1}a" \
+		"${epair_tester}b tcp ${host_server_6}\[9\] <- ${net_clients_6}::1\[4202\] .* route-to: ${net_server1_6_host_server}@${epair_server1}a" \
+	; do
+		grep -qE "${state_regexp}" $states || atf_fail "State not found for '${state_regexp}'"
+	done
+}
+
+prefer_ipv6_nexthop_single_ipv6_cleanup()
+{
+	pft_cleanup
+}
+
+atf_test_case "prefer_ipv6_nexthop_mixed_af_roundrobin_ipv4" "cleanup"
+
+prefer_ipv6_nexthop_mixed_af_roundrobin_ipv4_head()
+{
+	atf_set descr 'prefer-ipv6-nexthop option for multiple gateways of mixed AF with prefixes and tables, round robin selection, for IPv4 packets'
+	atf_set require.user root
+	atf_set require.progs python3 scapy
+}
+
+prefer_ipv6_nexthop_mixed_af_roundrobin_ipv4_body()
+{
+	pf_map_addr_common
+
+	# pf_map_addr() starts iterating over hosts of the pool from the 2nd
+	# host. This behaviour was here before adding prefer-ipv6-nexthop
+	# support, we test for it. Some targets are hosts and some are tables.
+	# Those are iterated too. Finally the iteration loops back
+	# to the beginning of the pool. Send out IPv4 probes.  They will use all
+	# IPv4 and IPv6 addresses from the pool.
+
+	jexec router pfctl -e
+	pft_set_rules router \
+		"set reassemble yes" \
+		"set state-policy if-bound" \
+		"table <rt_targets> { ${net_server2_4}.40/31 ${net_server2_4}.44 ${net_server2_6}::42:4/127 }" \
+		"pass in on ${epair_tester}b \
+			route-to { \
+				(${epair_server1}a ${net_server1_6_host_server}) \
+				(${epair_server1}a ${net_server1_6}::42:0/127) \
+				(${epair_server2}a ${net_server2_4_host_server}) \
+				(${epair_server2}a <rt_targets_empty>) \
+				(${epair_server1}a ${net_server1_4}.24/31) \
+				(${epair_server2}a <rt_targets>) \
+			} prefer-ipv6-nexthop \
+			proto tcp \
+			keep state"
+
+	for port in $(seq 1 12); do
+		port=$((4200 + port))
+		atf_check -s exit:0 ${common_dir}/pft_ping.py \
+			--sendif ${epair_tester}a --replyif ${epair_tester}a \
+			--fromaddr ${net_clients_4}.1 --to ${host_server_4} \
+			--ping-type=tcp3way --send-sport=${port}
+	done
+
+	states=$(mktemp) || exit 1
+	jexec router pfctl -qvvss | normalize_pfctl_s > $states
+
+	for state_regexp in \
+		"${epair_tester}b tcp ${host_server_4}:9 <- ${net_clients_4}.1:4201 .* route-to: ${net_server1_6}::42:0@${epair_server1}a" \
+		"${epair_tester}b tcp ${host_server_4}:9 <- ${net_clients_4}.1:4202 .* route-to: ${net_server1_6}::42:1@${epair_server1}a" \
+		"${epair_tester}b tcp ${host_server_4}:9 <- ${net_clients_4}.1:4203 .* route-to: ${net_server2_4_host_server}@${epair_server2}a" \
+		"${epair_tester}b tcp ${host_server_4}:9 <- ${net_clients_4}.1:4204 .* route-to: ${net_server1_4}.24@${epair_server1}a" \
+		"${epair_tester}b tcp ${host_server_4}:9 <- ${net_clients_4}.1:4205 .* route-to: ${net_server1_4}.25@${epair_server1}a" \
+		"${epair_tester}b tcp ${host_server_4}:9 <- ${net_clients_4}.1:4206 .* route-to: ${net_server2_6}::42:4@${epair_server2}a" \
+		"${epair_tester}b tcp ${host_server_4}:9 <- ${net_clients_4}.1:4207 .* route-to: ${net_server2_6}::42:5@${epair_server2}a" \
+		"${epair_tester}b tcp ${host_server_4}:9 <- ${net_clients_4}.1:4208 .* route-to: ${net_server2_4}.40@${epair_server2}a" \
+		"${epair_tester}b tcp ${host_server_4}:9 <- ${net_clients_4}.1:4209 .* route-to: ${net_server2_4}.41@${epair_server2}a" \
+		"${epair_tester}b tcp ${host_server_4}:9 <- ${net_clients_4}.1:4210 .* route-to: ${net_server2_4}.44@${epair_server2}a" \
+		"${epair_tester}b tcp ${host_server_4}:9 <- ${net_clients_4}.1:4211 .* route-to: ${net_server1_6_host_server}@${epair_server1}a" \
+		"${epair_tester}b tcp ${host_server_4}:9 <- ${net_clients_4}.1:4212 .* route-to: ${net_server1_6}::42:0@${epair_server1}a" \
+	; do
+		grep -qE "${state_regexp}" $states || atf_fail "State not found for '${state_regexp}'"
+	done
+}
+
+prefer_ipv6_nexthop_mixed_af_roundrobin_ipv4_cleanup()
+{
+	pft_cleanup
+}
+
+prefer_ipv6_nexthop_mixed_af_roundrobin_ipv6_head()
+{
+	atf_set descr 'prefer-ipv6-nexthop option for multiple gateways of mixed AF with prefixes and tables, round-robin selection, for IPv6 packets'
+	atf_set require.user root
+	atf_set require.progs python3 scapy
+}
+
+prefer_ipv6_nexthop_mixed_af_roundrobin_ipv6_body()
+{
+	pf_map_addr_common
+
+	# The "random" flag will pick random hosts from the table but will
+	# not dive into prefixes, always choosing the 0th address.
+	# Proper address family will be choosen. The choice being random makes
+	# testing it non-trivial.
+
+	# pf_map_addr() starts iterating over hosts of the pool from the 2nd
+	# host. This behaviour was here before adding prefer-ipv6-nexthop
+	# support, we test for it. Some targets are hosts and some are tables.
+	# Those are iterated too. Finally the iteration loops back
+	# to the beginning of the pool. Send out IPv6 probes. They will use only
+	#  IPv6 addresses from the pool.
+
+	jexec router pfctl -e
+	pft_set_rules router \
+		"set reassemble yes" \
+		"set state-policy if-bound" \
+		"table <rt_targets> { ${net_server2_4}.40/31 ${net_server2_4}.44 ${net_server2_6}::42:4/127 }" \
+		"pass in on ${epair_tester}b \
+			route-to { \
+				(${epair_server1}a ${net_server1_6_host_server}) \
+				(${epair_server1}a ${net_server1_6}::42:0/127) \
+				(${epair_server2}a ${net_server2_4_host_server}) \
+				(${epair_server2}a <rt_targets_empty>) \
+				(${epair_server1}a ${net_server1_4}.24/31) \
+				(${epair_server2}a <rt_targets>) \
+			} prefer-ipv6-nexthop \
+			proto tcp \
+			keep state"
+
+	for port in $(seq 1 6); do
+		port=$((4200 + port))
+		atf_check -s exit:0 ${common_dir}/pft_ping.py \
+			--sendif ${epair_tester}a --replyif ${epair_tester}a \
+			--fromaddr ${net_clients_6}::1 --to ${host_server_6} \
+			--ping-type=tcp3way --send-sport=${port}
+	done
+
+	states=$(mktemp) || exit 1
+	jexec router pfctl -qvvss | normalize_pfctl_s > $states
+
+	for state_regexp in \
+		"${epair_tester}b tcp ${host_server_6}\[9\] <- ${net_clients_6}::1\[4201\] .* route-to: ${net_server1_6}::42:0@${epair_server1}a" \
+		"${epair_tester}b tcp ${host_server_6}\[9\] <- ${net_clients_6}::1\[4202\] .* route-to: ${net_server1_6}::42:1@${epair_server1}a" \
+		"${epair_tester}b tcp ${host_server_6}\[9\] <- ${net_clients_6}::1\[4203\] .* route-to: ${net_server2_6}::42:4@${epair_server2}a" \
+		"${epair_tester}b tcp ${host_server_6}\[9\] <- ${net_clients_6}::1\[4204\] .* route-to: ${net_server2_6}::42:5@${epair_server2}a" \
+		"${epair_tester}b tcp ${host_server_6}\[9\] <- ${net_clients_6}::1\[4205\] .* route-to: ${net_server1_6_host_server}@${epair_server1}a" \
+		"${epair_tester}b tcp ${host_server_6}\[9\] <- ${net_clients_6}::1\[4206\] .* route-to: ${net_server1_6}::42:0@${epair_server1}a" \
+	; do
+		grep -qE "${state_regexp}" $states || atf_fail "State not found for '${state_regexp}'"
+	done
+}
+
+prefer_ipv6_nexthop_mixed_af_roundrobin_ipv6_cleanup()
+{
+	pft_cleanup
+}
+
+atf_test_case "prefer_ipv6_nexthop_mixed_af_random_ipv4" "cleanup"
+
+prefer_ipv6_nexthop_mixed_af_random_table_ipv4_head()
+{
+	atf_set descr 'prefer-ipv6-nexthop option for a mixed-af table with random selection for IPv4 packets'
+	atf_set require.user root
+	atf_set require.progs python3 scapy
+}
+
+prefer_ipv6_nexthop_mixed_af_random_table_ipv4_body()
+{
+	pf_map_addr_common
+
+	# Similarly to the test "random_table" the algorithm will choose
+	# IP addresses from the table not diving into prefixes.
+	# *prefer*-ipv6-nexthop means that IPv6 nexthops are preferred,
+	# so IPv4 ones will not be chosen as long as there are IPv6 ones
+	# available. With this tested there is no need for a test for IPv6-only
+	# next-hops table.
+
+	jexec router pfctl -e
+	pft_set_rules router \
+		"set reassemble yes" \
+		"set state-policy if-bound" \
+		"table <rt_targets> { ${net_server2_4}.40/31 ${net_server2_4}.44 ${net_server2_6}::42:0/127 ${net_server2_6}::42:4 }" \
+		"pass in on ${epair_tester}b \
+			route-to { (${epair_server2}a <rt_targets>) } random prefer-ipv6-nexthop \
+			proto tcp \
+			keep state"
+
+	good_targets="${net_server2_6}::42:0 ${net_server2_6}::42:4"
+	bad_targets="${net_server2_4}.40 ${net_server2_4}.41 ${net_server2_4}.44 ${net_server2_6}::42:1"
+	check_random IPv4 "${good_targets}" "${bad_targets}"
+}
+
+prefer_ipv6_nexthop_mixed_af_random_table_ipv4_cleanup()
+{
+	pft_cleanup
+}
+
+prefer_ipv6_nexthop_ipv4_random_table_ipv4_head()
+{
+	atf_set descr 'prefer-ipv6-nexthop option for an IPv4-only table with random selection for IPv4 packets'
+	atf_set require.user root
+	atf_set require.progs python3 scapy
+}
+
+prefer_ipv6_nexthop_ipv4_random_table_ipv4_body()
+{
+	pf_map_addr_common
+
+	# Similarly to the test pf_map_addr:random_table the algorithm will
+	# choose IP addresses from the table not diving into prefixes.
+	# There are no IPv6 nexthops in the table, so the algorithm will
+	# fall back to IPv4.
+
+	jexec router pfctl -e
+	pft_set_rules router \
+		"set reassemble yes" \
+		"set state-policy if-bound" \
+		"table <rt_targets> { ${net_server2_4}.40/31 ${net_server2_4}.44 }" \
+		"pass in on ${epair_tester}b \
+			route-to { (${epair_server2}a <rt_targets>) } random prefer-ipv6-nexthop \
+			proto tcp \
+			keep state"
+
+	good_targets="${net_server2_4}.40 ${net_server2_4}.44"
+	bad_targets="${net_server2_4}.41"
+	check_random IPv4 "${good_targets}" "${bad_targets}"
+}
+
+prefer_ipv6_nexthop_ipv4_random_table_ipv4_cleanup()
+{
+	pft_cleanup
+}
+
+prefer_ipv6_nexthop_ipv4_random_table_ipv6_head()
+{
+	atf_set descr 'prefer-ipv6-nexthop option for an IPv4-only table with random selection for IPv6 packets'
+	atf_set require.user root
+	atf_set require.progs python3 scapy
+}
+
+prefer_ipv6_nexthop_ipv4_random_table_ipv6_body()
+{
+	pf_map_addr_common
+
+	# IPv6 packets can't be forwarded over IPv4 next-hops.
+	# The failure happens in pf_map_addr() and increases the respective
+	# error counter.
+
+	jexec router pfctl -e
+	pft_set_rules router \
+		"set reassemble yes" \
+		"set state-policy if-bound" \
+		"table <rt_targets> { ${net_server2_4}.40/31 ${net_server2_4}.44 }" \
+		"pass in on ${epair_tester}b \
+			route-to { (${epair_server2}a <rt_targets>) } random prefer-ipv6-nexthop \
+			proto tcp \
+			keep state"
+
+	atf_check -s exit:1 ${common_dir}/pft_ping.py \
+		--sendif ${epair_tester}a --replyif ${epair_tester}a \
+		--fromaddr ${net_clients_6}::1 --to ${host_server_6} \
+		--ping-type=tcp3way --send-sport=4201
+
+	atf_check -o "match:map-failed +1 +" -x "jexec router pfctl -qvvsi 2> /dev/null"
+}
+
+prefer_ipv6_nexthop_ipv4_random_table_ipv6_cleanup()
+{
+	pft_cleanup
+}
+
+prefer_ipv6_nexthop_ipv6_random_prefix_ipv4_head()
+{
+	atf_set descr 'prefer-ipv6-nexthop option for an IPv6 prefix with random selection for IPv4 packets'
+	atf_set require.user root
+	atf_set require.progs python3 scapy
+}
+
+prefer_ipv6_nexthop_ipv6_random_prefix_ipv4_body()
+{
+	pf_map_addr_common
+
+	jexec router pfctl -e
+	pft_set_rules router \
+		"set reassemble yes" \
+		"set state-policy if-bound" \
+		"pass in on ${epair_tester}b \
+			route-to { (${epair_server2}a ${net_server2_6}::42:0/127) } random prefer-ipv6-nexthop \
+			proto tcp \
+			keep state"
+
+	good_targets="${net_server2_6}::42:0 ${net_server2_6}::42:1"
+	check_random IPv4 "${good_targets}"
+}
+
+prefer_ipv6_nexthop_ipv6_random_prefix_ipv4_cleanup()
+{
+	pft_cleanup
+}
+
+prefer_ipv6_nexthop_ipv6_random_prefix_ipv6_head()
+{
+	atf_set descr 'prefer-ipv6-nexthop option for an IPv6 prefix with random selection for IPv6 packets'
+	atf_set require.user root
+	atf_set require.progs python3 scapy
+}
+
+prefer_ipv6_nexthop_ipv6_random_prefix_ipv6_body()
+{
+	pf_map_addr_common
+
+	jexec router pfctl -e
+	pft_set_rules router \
+		"set reassemble yes" \
+		"set state-policy if-bound" \
+		"pass in on ${epair_tester}b \
+			route-to { (${epair_server2}a ${net_server2_6}::42:0/127) } random prefer-ipv6-nexthop \
+			proto tcp \
+			keep state"
+
+	good_targets="${net_server2_6}::42:0 ${net_server2_6}::42:1"
+	check_random IPv6 "${good_targets}"
+}
+
+prefer_ipv6_nexthop_ipv6_random_prefix_ipv6_cleanup()
+{
+	pft_cleanup
+}
+
+prefer_ipv6_nexthop_ipv4_random_prefix_ipv4_head()
+{
+	atf_set descr 'prefer-ipv6-nexthop option for an IPv4 prefix with random selection for IPv4 packets'
+	atf_set require.user root
+	atf_set require.progs python3 scapy
+}
+
+prefer_ipv6_nexthop_ipv4_random_prefix_ipv4_body()
+{
+	pf_map_addr_common
+
+	jexec router pfctl -e
+	pft_set_rules router \
+		"set reassemble yes" \
+		"set state-policy if-bound" \
+		"pass in on ${epair_tester}b \
+			route-to { (${epair_server2}a ${net_server2_4}.40/31) } random prefer-ipv6-nexthop \
+			proto tcp \
+			keep state"
+
+	good_targets="${net_server2_4}.40 ${net_server2_4}.41"
+	check_random IPv4 "${good_targets}"
+}
+
+prefer_ipv6_nexthop_ipv4_random_prefix_ipv4_cleanup()
+{
+	pft_cleanup
+}
+
+prefer_ipv6_nexthop_ipv4_random_prefix_ipv6_head()
+{
+	atf_set descr 'prefer-ipv6-nexthop option for an IPv4 prefix with random selection for IPv6 packets'
+	atf_set require.user root
+	atf_set require.progs python3 scapy
+}
+
+prefer_ipv6_nexthop_ipv4_random_prefix_ipv6_body()
+{
+	pf_map_addr_common
+
+	# IPv6 packets can't be forwarded over IPv4 next-hops.
+	# The failure happens in pf_map_addr() and increases the respective
+	# error counter.
+
+	jexec router pfctl -e
+	pft_set_rules router \
+		"set reassemble yes" \
+		"set state-policy if-bound" \
+		"pass in on ${epair_tester}b \
+			route-to { (${epair_server2}a ${net_server2_4}.40/31) } random prefer-ipv6-nexthop \
+			proto tcp \
+			keep state"
+
+	atf_check -s exit:1 ${common_dir}/pft_ping.py \
+		--sendif ${epair_tester}a --replyif ${epair_tester}a \
+		--fromaddr ${net_clients_6}::1 --to ${host_server_6} \
+		--ping-type=tcp3way --send-sport=4201
+
+	atf_check -o "match:map-failed +1 +" -x "jexec router pfctl -qvvsi 2> /dev/null"
+}
+
+prefer_ipv6_nexthop_ipv4_random_prefix_ipv6_cleanup()
+{
+	pft_cleanup
+}
+
+atf_test_case "bcast_directed_forwarded" "cleanup"
+bcast_directed_forwarded_head()
+{
+	atf_set descr 'Forwarded subnet directed broadcast is blocked by a received-on-scoped block-out rule'
+	atf_set require.user root
+	atf_set require.progs python3
+}
+bcast_directed_forwarded_body()
+{
+	rt_leak_setup
+
+	# pf_route() does not guard against forwarding broadcast traffic
+	# across broadcast domains. Operators who use route-to with a
+	# permissive destination must plug the leak manually with a
+	# block-out rule matching the target interface's broadcast
+	# address. Scope the rule to forwarded traffic with received-on
+	# so the router's own broadcasts are *not* affected.
+	rt_leak_install_rules \
+		"block out quick on ${epair_wan}a inet from any to (${epair_wan}a:broadcast) received-on any" \
+		"pass in on ${epair_lan}b route-to (${epair_wan}a 198.51.100.2) inet proto udp from any to any keep state"
+
+	rt_leak_send client 198.51.100.255
+
+	pkts=$(rt_leak_probe_pkts)
+	if [ "${pkts:-0}" -ne 0 ]; then
+		jexec wan pfctl -vvsr
+		atf_fail "directed broadcast leaked to wan despite block-out rule (${pkts} packet(s))"
+	fi
+}
+bcast_directed_forwarded_cleanup()
+{
+	pft_cleanup
+}
+
+atf_test_case "bcast_limited_forwarded" "cleanup"
+bcast_limited_forwarded_head()
+{
+	atf_set descr 'Forwarded limited broadcast is blocked by a received-on-scoped block-out rule'
+	atf_set require.user root
+	atf_set require.progs python3
+}
+bcast_limited_forwarded_body()
+{
+	rt_leak_setup
+
+	# pf_route() does not guard against forwarding broadcast traffic
+	# across broadcast domains. Operators who use route-to with a
+	# permissive destination must plug the leak manually with a
+	# block-out rule matching 255.255.255.255 on the route-to target
+	# interface. Scope the rule to forwarded traffic with received-on
+	# so the router's own broadcasts are *not* affected.
+	rt_leak_install_rules \
+		"block out quick on ${epair_wan}a inet from any to 255.255.255.255 received-on any" \
+		"pass in on ${epair_lan}b route-to (${epair_wan}a 198.51.100.2) inet proto udp from any to any keep state"
+
+	rt_leak_send client 255.255.255.255
+
+	pkts=$(rt_leak_probe_pkts)
+	if [ "${pkts:-0}" -ne 0 ]; then
+		jexec wan pfctl -vvsr
+		atf_fail "limited broadcast leaked to wan despite block-out rule (${pkts} packet(s))"
+	fi
+}
+bcast_limited_forwarded_cleanup()
+{
+	pft_cleanup
+}
+
+atf_test_case "bcast_directed_local" "cleanup"
+bcast_directed_local_head()
+{
+	atf_set descr 'Router-originated directed broadcast is not blocked by a received-on-scoped rule'
+	atf_set require.user root
+	atf_set require.progs python3
+}
+bcast_directed_local_body()
+{
+	rt_leak_setup
+
+	# Install the same ruleset used by bcast_{directed,limited}_forwarded.
+	# The received-on qualifier should restrict the block to forwarded
+	# packets, leaving router-originated broadcasts to pass normally.
+	rt_leak_install_rules \
+		"block out quick on ${epair_wan}a inet from any to (${epair_wan}a:broadcast) received-on any" \
+		"block out quick on ${epair_wan}a inet from any to 255.255.255.255 received-on any" \
+		"pass in on ${epair_lan}b route-to (${epair_wan}a 198.51.100.2) inet proto udp from any to any keep state"
+
+	# Router emits a directed broadcast on its own wan subnet.
+	rt_leak_send router 198.51.100.255
+
+	pkts=$(rt_leak_probe_pkts)
+	if [ "${pkts:-0}" -eq 0 ]; then
+		jexec router pfctl -vvsr
+		atf_fail "router-originated broadcast was incorrectly blocked by received-on-scoped rule"
+	fi
+}
+bcast_directed_local_cleanup()
+{
+	pft_cleanup
+}
+
+atf_test_case "bcast_limited_local" "cleanup"
+bcast_limited_local_head()
+{
+	atf_set descr 'Router-originated limited broadcast is not blocked by a received-on-scoped rule'
+	atf_set require.user root
+	atf_set require.progs python3
+}
+bcast_limited_local_body()
+{
+	rt_leak_setup
+
+	# Install the same ruleset used by bcast_{directed,limited}_forwarded.
+	# The received-on qualifier should restrict the block to forwarded
+	# packets, leaving router-originated broadcasts to pass normally.
+	rt_leak_install_rules \
+		"block out quick on ${epair_wan}a inet from any to (${epair_wan}a:broadcast) received-on any" \
+		"block out quick on ${epair_wan}a inet from any to 255.255.255.255 received-on any" \
+		"pass in on ${epair_lan}b route-to (${epair_wan}a 198.51.100.2) inet proto udp from any to any keep state"
+
+	# Router emits a limited broadcast on its own wan subnet.
+	rt_leak_send router 255.255.255.255
+
+	pkts=$(rt_leak_probe_pkts)
+	if [ "${pkts:-0}" -eq 0 ]; then
+		jexec router pfctl -vvsr
+		atf_fail "router-originated limited broadcast was incorrectly blocked by received-on-scoped rule"
+	fi
+}
+bcast_limited_local_cleanup()
+{
+	pft_cleanup
+}
+
+atf_test_case "mcast_v4_forwarded" "cleanup"
+mcast_v4_forwarded_head()
+{
+	atf_set descr 'Forwarded IPv4 multicast is blocked by a received-on-scoped block-out rule'
+	atf_set require.user root
+	atf_set require.progs python3
+}
+mcast_v4_forwarded_body()
+{
+	rt_leak_setup
+
+	# pf_route() does not guard against forwarding multicast traffic
+	# across broadcast domains. An IPv4 multicast block-out rule on
+	# the route-to target interface plugs the leak. Scope the rule
+	# to forwarded traffic with received-on so the router's own
+	# multicast is *not* affected.
+	rt_leak_install_rules \
+		"block out quick on ${epair_wan}a inet from any to 224.0.0.0/4 received-on any" \
+		"pass in on ${epair_lan}b route-to (${epair_wan}a 198.51.100.2) inet proto udp from any to any keep state"
+
+	rt_leak_send client 224.0.0.1
+
+	pkts=$(rt_leak_probe_pkts)
+	if [ "${pkts:-0}" -ne 0 ]; then
+		jexec wan pfctl -vvsr
+		atf_fail "IPv4 multicast leaked to wan despite block-out rule (${pkts} packet(s))"
+	fi
+}
+mcast_v4_forwarded_cleanup()
+{
+	pft_cleanup
+}
+
+atf_test_case "mcast_v6_forwarded" "cleanup"
+mcast_v6_forwarded_head()
+{
+	atf_set descr 'Forwarded IPv6 multicast is blocked by a received-on-scoped block-out rule'
+	atf_set require.user root
+	atf_set require.progs python3
+}
+mcast_v6_forwarded_body()
+{
+	rt_leak_setup
+
+	# pf_route6() does not guard against forwarding multicast traffic
+	# across broadcast domains. An IPv6 multicast block-out rule on
+	# the route-to target interface plugs the leak. Scope the rule
+	# to forwarded traffic with received-on so the router's own
+	# multicast is *not* affected.
+	rt_leak_install_rules \
+		"block out quick on ${epair_wan}a inet6 from any to ff00::/8 received-on any" \
+		"pass in on ${epair_lan}b route-to (${epair_wan}a 2001:db8:2::2) inet6 proto udp from any to any keep state"
+
+	rt_leak_send client ff0e::1
+
+	pkts=$(rt_leak_probe_pkts)
+	if [ "${pkts:-0}" -ne 0 ]; then
+		jexec wan pfctl -vvsr
+		atf_fail "IPv6 multicast leaked to wan despite block-out rule (${pkts} packet(s))"
+	fi
+}
+mcast_v6_forwarded_cleanup()
+{
+	pft_cleanup
+}
+
+atf_test_case "mcast_v4_local" "cleanup"
+mcast_v4_local_head()
+{
+	atf_set descr 'Router-originated IPv4 multicast is not blocked by a received-on-scoped rule'
+	atf_set require.user root
+	atf_set require.progs python3
+}
+mcast_v4_local_body()
+{
+	rt_leak_setup
+
+	# Install the same ruleset used by mcast_v4_forwarded. The received-on
+	# qualifier should restrict the block to forwarded packets, leaving
+	# router-originated broadcasts to pass normally.
+	rt_leak_install_rules \
+		"block out quick on ${epair_wan}a inet from any to 224.0.0.0/4 received-on any" \
+		"pass in on ${epair_lan}b route-to (${epair_wan}a 198.51.100.2) inet proto udp from any to any keep state"
+
+	# Router emits an IPv4 multicast datagram from its own stack.
+	rt_leak_send router 224.0.0.1
+
+	pkts=$(rt_leak_probe_pkts)
+	if [ "${pkts:-0}" -eq 0 ]; then
+		jexec router pfctl -vvsr
+		atf_fail "router-originated multicast was incorrectly blocked by received-on-scoped rule"
+	fi
+}
+mcast_v4_local_cleanup()
+{
+	pft_cleanup
+}
+
+atf_test_case "mcast_v6_local" "cleanup"
+mcast_v6_local_head()
+{
+	atf_set descr 'Router-originated IPv6 multicast is not blocked by a received-on-scoped rule'
+	atf_set require.user root
+	atf_set require.progs python3
+}
+mcast_v6_local_body()
+{
+	rt_leak_setup
+
+	# Install the same ruleset used by mcast_v6_forwarded. The received-on
+	# qualifier should restrict the block to forwarded packets, leaving
+	# router-originated broadcasts to pass normally.
+	rt_leak_install_rules \
+		"block out quick on ${epair_wan}a inet6 from any to ff00::/8 received-on any" \
+		"pass in on ${epair_lan}b route-to (${epair_wan}a 2001:db8:2::2) inet6 proto udp from any to any keep state"
+
+	# Router emits an IPv6 multicast datagram from its own stack.
+	rt_leak_send router ff0e::1
+
+	pkts=$(rt_leak_probe_pkts)
+	if [ "${pkts:-0}" -eq 0 ]; then
+		jexec router pfctl -vvsr
+		atf_fail "router-originated IPv6 multicast was incorrectly blocked by received-on-scoped rule"
+	fi
+}
+mcast_v6_local_cleanup()
+{
+	pft_cleanup
+}
+
+atf_test_case "divert_to" "cleanup"
+divert_to_head()
+{
+	atf_set descr 'Test that route-to is applied to divert-injected packets'
+	atf_set require.user root
+	atf_set require.kmods ipdivert
+}
+divert_to_body()
+{
+	pft_init
+
+	# Set up our topology:
+	#
+	# client <--> firewall <--> gateway <--> server
+	#
+	# The firewall has no default route.  route-to forces TCP port 8080
+	# traffic via epair_wan to the gateway; without it the firewall has no
+	# route to 10.4.4.2 and drops the packet.
+
+	epair_cl=$(vnet_mkepair)
+	epair_wan=$(vnet_mkepair)
+	epair_srv=$(vnet_mkepair)
+
+	vnet_mkjail client ${epair_cl}a
+	vnet_mkjail firewall ${epair_cl}b ${epair_wan}a
+	vnet_mkjail gateway ${epair_wan}b ${epair_srv}a
+	vnet_mkjail server ${epair_srv}b
+
+	# Client
+	atf_check jexec client ifconfig ${epair_cl}a 10.1.1.2/24 up
+	atf_check -o ignore jexec client route add default 10.1.1.1
+
+	# Firewall: no default route; route-to sends traffic out via epair_wan
+	atf_check jexec firewall ifconfig ${epair_cl}b 10.1.1.1/24 up
+	atf_check jexec firewall ifconfig ${epair_wan}a 10.3.3.1/30 up
+	atf_check -o ignore jexec firewall sysctl net.inet.ip.forwarding=1
+
+	# Gateway: routes between firewall and server
+	atf_check jexec gateway ifconfig ${epair_wan}b 10.3.3.2/30 up
+	atf_check jexec gateway ifconfig ${epair_srv}a 10.4.4.1/24 up
+	atf_check -o ignore jexec gateway sysctl net.inet.ip.forwarding=1
+	atf_check -o ignore jexec gateway route add -net 10.1.1.0/24 10.3.3.1
+
+	# Server
+	atf_check jexec server ifconfig ${epair_srv}b 10.4.4.2/24 up
+	atf_check -o ignore jexec server route add default 10.4.4.1
+
+	atf_check -o ignore jexec client ping -c 1 10.1.1.1
+
+	jexec server nc -l 8080 > $(pwd)/out &
+	server_pid=$!
+
+	# Firewall pf: divert the flow and route-to via wan
+	jexec firewall pfctl -e
+	pft_set_rules firewall \
+	    "pass in quick on ${epair_cl}b \
+	        route-to (${epair_wan}a 10.3.3.2) \
+	        inet proto tcp from 10.1.1.0/24 to 10.4.4.2 port 8080 \
+	        keep state divert-to 8000" \
+	    "pass in all" \
+	    "pass out all"
+
+	# Divert daemon: receives the SYN and re-injects it
+	jexec firewall ${common_dir}/divapp 8000 divert-back &
+	divapp_pid=$!
+	sleep 1
+
+	# The connection must succeed: route-to must be applied to the
+	# re-injected packet for it to reach the server.
+	echo "hello there" >$(pwd)/in
+	atf_check jexec client nc -N -w 3 10.4.4.2 8080 < $(pwd)/in
+
+	wait $divapp_pid
+	wait $server_pid
+	atf_check -o match:"hello there" cat $(pwd)/out
+}
+divert_to_cleanup()
+{
+	pft_cleanup
+}
+
 atf_init_test_cases()
 {
 	atf_add_test_case "v4"
@@ -995,5 +2081,34 @@ atf_init_test_cases()
 	atf_add_test_case "sticky"
 	atf_add_test_case "ttl"
 	atf_add_test_case "empty_pool"
+	atf_add_test_case "bcast_directed_forwarded"
+	atf_add_test_case "bcast_directed_local"
+	atf_add_test_case "bcast_limited_forwarded"
+	atf_add_test_case "bcast_limited_local"
+	atf_add_test_case "mcast_v4_forwarded"
+	atf_add_test_case "mcast_v4_local"
+	atf_add_test_case "mcast_v6_forwarded"
+	atf_add_test_case "mcast_v6_local"
+	atf_add_test_case "divert_to"
+	# Tests for pf_map_addr() without prefer-ipv6-nexthop
 	atf_add_test_case "table_loop"
+	atf_add_test_case "roundrobin"
+	atf_add_test_case "random_table"
+	atf_add_test_case "random_prefix"
+	# Tests for pf_map_addr() without prefer-ipv6-nexthop
+	# Next hop is a Single IP address
+	atf_add_test_case "prefer_ipv6_nexthop_single_ipv4"
+	atf_add_test_case "prefer_ipv6_nexthop_single_ipv6"
+	# Next hop is tables and prefixes, accessed by the round-robin algorithm
+	atf_add_test_case "prefer_ipv6_nexthop_mixed_af_roundrobin_ipv4"
+	atf_add_test_case "prefer_ipv6_nexthop_mixed_af_roundrobin_ipv6"
+	# Next hop is a table, accessed by the random algorithm
+	atf_add_test_case "prefer_ipv6_nexthop_mixed_af_random_table_ipv4"
+	atf_add_test_case "prefer_ipv6_nexthop_ipv4_random_table_ipv4"
+	atf_add_test_case "prefer_ipv6_nexthop_ipv4_random_table_ipv6"
+	# Next hop is a prefix, accessed by the random algorithm
+	atf_add_test_case "prefer_ipv6_nexthop_ipv6_random_prefix_ipv4"
+	atf_add_test_case "prefer_ipv6_nexthop_ipv6_random_prefix_ipv6"
+	atf_add_test_case "prefer_ipv6_nexthop_ipv4_random_prefix_ipv4"
+	atf_add_test_case "prefer_ipv6_nexthop_ipv4_random_prefix_ipv6"
 }

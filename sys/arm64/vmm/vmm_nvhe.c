@@ -36,6 +36,9 @@
 #define	EL1_REG(reg)		MRS_REG_ALT_NAME(reg ## _EL1)
 #define	EL0_REG(reg)		MRS_REG_ALT_NAME(reg ## _EL0)
 
+#define __hypctx_vncr_sysreg(hypctx, reg)       \
+	((uint64_t*)(hypctx->el2_vncr_addr + REG_VNCR_OFFSET(reg)))
+
 #include "vmm_hyp.c"
 
 uint64_t vmm_hyp_enter(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
@@ -52,7 +55,7 @@ vmm_dc_civac(uint64_t start, uint64_t len)
 	uint64_t ctr;
 
 	ctr = READ_SPECIALREG(ctr_el0);
-	line_size = sizeof(int) << CTR_DLINE_SIZE(ctr);
+	line_size = sizeof(int) << CTR_DminLine_SIZE(ctr);
 	end = start + len;
 	dsb(ishst);
 	/* Clean and Invalidate the D-cache */

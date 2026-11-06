@@ -121,6 +121,7 @@ kvm_proclist(kvm_t *kd, int what, int arg, struct proc *p,
 	struct thread mtd;
 	struct proc proc;
 	struct proc pproc;
+	struct proc rproc;
 	struct sysentvec sysent;
 	char svname[KI_EMULNAMELEN];
 	struct thread *td = NULL;
@@ -150,13 +151,14 @@ kvm_proclist(kvm_t *kd, int what, int arg, struct proc *p,
 			kp->ki_cr_flags = 0;
 			if (ucred.cr_flags & CRED_FLAG_CAPMODE)
 				kp->ki_cr_flags |= KI_CRF_CAPABILITY_MODE;
-			if (ucred.cr_ngroups > KI_NGROUPS) {
+			if (1 + ucred.cr_ngroups > KI_NGROUPS) {
 				kp->ki_ngroups = KI_NGROUPS;
 				kp->ki_cr_flags |= KI_CRF_GRP_OVERFLOW;
 			} else
-				kp->ki_ngroups = ucred.cr_ngroups;
-			kvm_read(kd, (u_long)ucred.cr_groups, kp->ki_groups,
-			    kp->ki_ngroups * sizeof(gid_t));
+				kp->ki_ngroups = 1 + ucred.cr_ngroups;
+			kp->ki_groups[0] = ucred.cr_gid;
+			kvm_read(kd, (u_long)ucred.cr_groups, kp->ki_groups + 1,
+			    (kp->ki_ngroups - 1) * sizeof(gid_t));
 			if (ucred.cr_prison != NULL) {
 				if (KREAD(kd, (u_long)ucred.cr_prison, &pr)) {
 					_kvm_err(kd, kd->program,
@@ -364,6 +366,13 @@ nopgrp:
 		kp->ki_xstat = KW_EXITCODE(proc.p_xexit, proc.p_xsig);
 		kp->ki_acflag = proc.p_acflag;
 		kp->ki_lock = proc.p_lock;
+		if (KREAD(kd, (u_long)proc.p_reaper, &rproc)) {
+			_kvm_err(kd, kd->program,
+			    "can't read reaper at %p", proc.p_reaper);
+			return (-1);
+		}
+		kp->ki_reaper = rproc.p_pid;
+		kp->ki_reapsubtree = proc.p_reapsubtree;
 		kp->ki_tdev_freebsd11 = kp->ki_tdev; /* truncate */
 
 		/* Per-thread items; iterate as appropriate. */
@@ -600,15 +609,15 @@ liveout:
 		struct nlist nl[6], *p;
 		struct nlist nlz[2];
 
-		nl[0].n_name = "_nprocs";
-		nl[1].n_name = "_allproc";
-		nl[2].n_name = "_ticks";
-		nl[3].n_name = "_hz";
-		nl[4].n_name = "_cpu_tick_frequency";
-		nl[5].n_name = 0;
+		nl[0].n_name = "nprocs";
+		nl[1].n_name = "allproc";
+		nl[2].n_name = "ticks";
+		nl[3].n_name = "hz";
+		nl[4].n_name = "cpu_tick_frequency";
+		nl[5].n_name = NULL;
 
-		nlz[0].n_name = "_zombproc";
-		nlz[1].n_name = 0;
+		nlz[0].n_name = "zombproc";
+		nlz[1].n_name = NULL;
 
 		if (!kd->arch->ka_native(kd)) {
 			_kvm_err(kd, kd->program,

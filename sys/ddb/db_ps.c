@@ -358,8 +358,7 @@ DB_SHOW_COMMAND(thread, db_show_thread)
 	if (td->td_name[0] != '\0')
 		db_printf(" name: %s\n", td->td_name);
 	db_printf(" pcb: %p\n", td->td_pcb);
-	db_printf(" stack: %p-%p\n", (void *)td->td_kstack,
-	    (void *)(td->td_kstack + td->td_kstack_pages * PAGE_SIZE - 1));
+	db_printf(" stack: %p-%p\n", td->td_kstack, td_kstack_top(td) - 1);
 	db_printf(" flags: %#x ", td->td_flags);
 	db_printf(" pflags: %#x\n", td->td_pflags);
 	db_printf(" state: ");
@@ -459,12 +458,11 @@ DB_SHOW_COMMAND(proc, db_show_proc)
 		db_printf("??? (%#x)\n", p->p_state);
 	}
 	if (p->p_ucred != NULL) {
-		db_printf(" uid: %d  gids: ", p->p_ucred->cr_uid);
-		for (i = 0; i < p->p_ucred->cr_ngroups; i++) {
-			db_printf("%d", p->p_ucred->cr_groups[i]);
-			if (i < (p->p_ucred->cr_ngroups - 1))
-				db_printf(", ");
-		}
+		db_printf(" uid: %d gid: %d supp gids: ",
+		    p->p_ucred->cr_uid, p->p_ucred->cr_gid);
+		for (i = 0; i < p->p_ucred->cr_ngroups; i++)
+			db_printf(i == 0 ? "%d" : ", %d",
+			    p->p_ucred->cr_groups[i]);
 		db_printf("\n");
 	}
 	if (p->p_pptr != NULL)

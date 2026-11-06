@@ -535,4 +535,13 @@
 #define	SYS_inotify_rm_watch	594
 #define	SYS_getgroups	595
 #define	SYS_setgroups	596
-#define	SYS_MAXSYSCALL	597
+#define	SYS_jail_attach_jd	597
+#define	SYS_jail_remove_jd	598
+#define	SYS_kexec_load	599
+#define	SYS_pdrfork	600
+#define	SYS_pdwait	601
+#define	SYS_renameat2	602
+#define	SYS_pdopenpid	603
+#define	SYS_pddupfd	604
+#define	SYS_pdptrace	605
+#define	SYS_MAXSYSCALL	606

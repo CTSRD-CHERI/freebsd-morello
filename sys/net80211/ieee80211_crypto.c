@@ -611,11 +611,15 @@ ieee80211_crypto_setkey(struct ieee80211vap *vap, struct ieee80211_key *key)
 	return dev_key_set(vap, key);
 }
 
-/*
- * Return index if the key is a WEP key (0..3); -1 otherwise.
+/**
+ * @brief Return index if the key is a WEP key (0..3); -1 otherwise.
  *
  * This is different to "get_keyid" which defaults to returning
  * 0 for unicast keys; it assumes that it won't be used for WEP.
+ *
+ * @param vap the current VAP
+ * @param k ieee80211_key to check
+ * @returns 0..3 if it's a global/WEP key, -1 otherwise.
  */
 int
 ieee80211_crypto_get_key_wepidx(const struct ieee80211vap *vap,
@@ -628,8 +632,18 @@ ieee80211_crypto_get_key_wepidx(const struct ieee80211vap *vap,
 	return (-1);
 }
 
-/*
- * Note: only supports a single unicast key (0).
+/**
+ * @brief Return the index of a unicast, global or IGTK key.
+ *
+ * Return the index of a key.  For unicast keys the index is 0..1.
+ * For global/WEP keys it's 0..3.  For IGTK keys its 4..5.
+ *
+ * TODO: support >1 unicast key
+ * TODO: support IGTK keys
+ *
+ * @param vap the current VAP
+ * @param k ieee80211_key to check
+ * @returns 0..3 for a WEP/global key, 0..1 for unicast key, 4..5 for IGTK key
  */
 uint8_t
 ieee80211_crypto_get_keyid(struct ieee80211vap *vap, struct ieee80211_key *k)
@@ -641,11 +655,42 @@ ieee80211_crypto_get_keyid(struct ieee80211vap *vap, struct ieee80211_key *k)
 	return (0);
 }
 
+/**
+ * @param Return the key to use for encrypting an mbuf frame to a node
+ *
+ * This routine chooses a suitable key used to encrypt the given frame with.
+ * It doesn't do the encryption; it only chooses the key.  If a key is not
+ * available then the routine will return NULL.
+ *
+ * It's up to the caller to enforce whether a key is absolutely required or not.
+ *
+ * @param ni The ieee80211_node to send the frame to
+ * @param m the mbuf to encrypt
+ * @returns the ieee80211_key to encrypt with, or NULL if there's no suitable key
+ */
 struct ieee80211_key *
 ieee80211_crypto_get_txkey(struct ieee80211_node *ni, struct mbuf *m)
 {
 	struct ieee80211vap *vap = ni->ni_vap;
 	struct ieee80211_frame *wh;
+
+	/*
+	 * Explicitly check whether we're doing WEP and allow
+	 * the use of the default TX key.
+	 */
+	if ((ni->ni_authmode == IEEE80211_AUTH_OPEN) &&
+	    ((vap->iv_flags & IEEE80211_F_PRIVACY) != 0) &&
+	    (vap->iv_def_txkey != IEEE80211_KEYIX_NONE)) {
+		struct ieee80211_key *k;
+		/*
+		 * Check to see if the TX key is a WEP cipher key.
+		 * Only allow transmit using it here if it's
+		 * a WEP key.
+		 */
+		k = &vap->iv_nw_keys[vap->iv_def_txkey];
+		if (k->wk_cipher->ic_cipher == IEEE80211_CIPHER_WEP)
+			return (k);
+	}
 
 	/*
 	 * Multicast traffic always uses the multicast key.
@@ -676,8 +721,28 @@ ieee80211_crypto_get_txkey(struct ieee80211_node *ni, struct mbuf *m)
 	return &ni->ni_ucastkey;
 }
 
-/*
- * Add privacy headers appropriate for the specified key.
+/**
+ * @brief Privacy encapsulate and encrypt the given mbuf.
+ *
+ * This routine handles the mechanics of encryption - expanding the
+ * mbuf to add privacy headers, IV, ICV, MIC, MMIC, and then encrypts
+ * the given mbuf if required.
+ *
+ * This should be called by the driver in its TX path as part of
+ * encapsulation before passing frames to the hardware/firmware
+ * queues.
+ *
+ * Drivers/hardware which does its own entirely offload path
+ * should still call this for completeness - it indicates to the
+ * driver that the frame itself should be encrypted.
+ *
+ * The driver should have set capability bits in the attach /
+ * key allocation path to disable various encapsulation/encryption
+ * features.
+ *
+ * @param ni ieee80211_node for this frame
+ * @param mbuf mbuf to modify
+ * @returns the key used if the frame is to be encrypted, NULL otherwise
  */
 struct ieee80211_key *
 ieee80211_crypto_encap(struct ieee80211_node *ni, struct mbuf *m)
@@ -693,9 +758,31 @@ ieee80211_crypto_encap(struct ieee80211_node *ni, struct mbuf *m)
 	return NULL;
 }
 
-/*
- * Validate and strip privacy headers (and trailer) for a
- * received frame that has the WEP/Privacy bit set.
+/**
+ * @brief Decapsulate and validate an encrypted frame.
+ *
+ * This handles an encrypted frame (one with the privacy bit set.)
+ * It also obeys the key / config / receive packet flags for how
+ * the driver says its already been processed.
+ *
+ * Unlike ieee80211_crypto_encap(), this isn't called in the driver.
+ * Instead, drivers passed the potentially decrypted frame - fully,
+ * partial, or not at all - and net80211 will call this as appropriate.
+ *
+ * This handles NICs (like ath(4)) which have a variable size between
+ * the 802.11 header and 802.11 payload due to DMA alignment / encryption
+ * engine concerns.
+ *
+ * If the frame was decrypted and validated successfully then 1 is returned
+ * and the mbuf can be treated as an 802.11 frame.  If it is not decrypted
+ * successfully or it was decrypted but failed validation/checks, then
+ * 0 is returned.
+ *
+ * @param ni ieee80211_node for received frame
+ * @param m mbuf frame to receive
+ * @param hdrlen length of the 802.11 header, including trailing null bytes
+ * @param key pointer to ieee80211_key that will be set if appropriate
+ * @returns 0 if the frame wasn't decrypted/validated, 1 if decrypted/validated.
  */
 int
 ieee80211_crypto_decap(struct ieee80211_node *ni, struct mbuf *m, int hdrlen,
@@ -956,7 +1043,8 @@ ieee80211_crypto_init_aad(const struct ieee80211_frame *wh, uint8_t *aad,
 	/*
 	 * AAD for PV0 MPDUs:
 	 *
-	 * FC with bits 4..6 and 11..13 masked to zero; 14 is always one
+	 * FC + data frame - mask bits 4..6
+	 * FC 11..13 masked to zero; 14 is always one
 	 * A1 | A2 | A3
 	 * SC with bits 4..15 (seq#) masked to zero
 	 * A4 (if present)
@@ -964,7 +1052,11 @@ ieee80211_crypto_init_aad(const struct ieee80211_frame *wh, uint8_t *aad,
 	 */
 	aad[0] = 0;	/* AAD length >> 8 */
 	/* NB: aad[1] set below */
-	aad[2] = wh->i_fc[0] & 0x8f;	/* see above for bitfields */
+	/* Only mask bits 4,5,6 if its a data frame */
+	aad[2] = wh->i_fc[0];
+	if (IEEE80211_IS_DATA(wh))
+		aad[2] &= 0x8f; /* see above for bitfields */
+
 	aad[3] = wh->i_fc[1] & 0xc7;	/* see above for bitfields */
 	/* mask aad[3] b7 if frame is data frame w/ QoS control field */
 	if (IEEE80211_IS_QOS_ANY(wh))

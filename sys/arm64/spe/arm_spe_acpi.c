@@ -29,8 +29,6 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/cdefs.h>
-
 #include <sys/param.h>
 #include <sys/bus.h>
 #include <sys/kernel.h>
@@ -48,8 +46,8 @@ static device_probe_t arm_spe_acpi_probe;
 
 static device_method_t arm_spe_acpi_methods[] = {
 	/* Device interface */
-	DEVMETHOD(device_identify,	arm_spe_acpi_identify),
-	DEVMETHOD(device_probe,		arm_spe_acpi_probe),
+	DEVMETHOD(device_identify,      arm_spe_acpi_identify),
+	DEVMETHOD(device_probe,         arm_spe_acpi_probe),
 
 	DEVMETHOD_END,
 };
@@ -58,8 +56,6 @@ DEFINE_CLASS_1(spe, arm_spe_acpi_driver, arm_spe_acpi_methods,
     sizeof(struct arm_spe_softc), arm_spe_driver);
 
 DRIVER_MODULE(spe, acpi, arm_spe_acpi_driver, 0, 0);
-MODULE_DEPEND(spe, hwt, 1, 1, 1);
-MODULE_VERSION(spe, 1);
 
 struct madt_data {
 	u_int irq;
@@ -132,10 +128,8 @@ arm_spe_acpi_identify(driver_t *driver, device_t parent)
 
 	dev = BUS_ADD_CHILD(parent, 0, "spe", -1);
 	if (dev == NULL) {
-		device_printf(parent, "add gic child failed\n");
+		device_printf(parent, "add spe child failed\n");
 		goto out;
-	} else {
-		device_printf(parent, "child added\n");
 	}
 
 	BUS_SET_RESOURCE(parent, dev, SYS_RES_IRQ, 0, madt_data.irq, 1);
@@ -150,4 +144,3 @@ arm_spe_acpi_probe(device_t dev)
 	device_set_desc(dev, "ARM Statistical Profiling Extension");
 	return (BUS_PROBE_NOWILDCARD);
 }
-

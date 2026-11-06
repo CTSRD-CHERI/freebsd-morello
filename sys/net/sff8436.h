@@ -151,7 +151,7 @@ enum {
 					* OM2 fiber, units of 1 m */
 	SFF_8436_LEN_OM1	= 145,	/* Link length supported for 1310 nm
 					 * 50um multi-mode fiber, units of 1m*/
-	SFF_8436_LEN_ASM	= 144, /* Link length of passive cable assembly
+	SFF_8436_LEN_ASM	= 146, /* Link length of passive cable assembly
 					* Length is specified as in the INF
 					* 8074, units of 1m. 0 means this is
 					* not value assembly. Value of 255
@@ -187,7 +187,7 @@ enum {
 	SFF_8436_OPTIONS_END	= 195,
 	SFF_8436_SN_START 	= 196,	/* Vendor SN, riwght padded with 0x20 */
 	SFF_8436_SN_END 	= 211,
-	SFF_8436_DATE_START	= 212,	/* Vendor’s manufacturing date code
+	SFF_8436_DATE_START	= 212,	/* Vendor's manufacturing date code
 					* (see Table 40) */
 	SFF_8436_DATE_END	= 219,
 	SFF_8436_DIAG_TYPE	= 220,	/* Diagnostic Monitoring Type

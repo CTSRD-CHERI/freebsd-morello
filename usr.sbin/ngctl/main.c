@@ -1,10 +1,9 @@
-
 /*
  * main.c
  *
  * Copyright (c) 1996-1999 Whistle Communications, Inc.
  * All rights reserved.
- * 
+ *
  * Subject to the following obligations and disclaimer of warranty, use and
  * redistribution of this software, in source or object code forms, with or
  * without modifications are expressly permitted by Whistle Communications;
@@ -15,7 +14,7 @@
  *    Communications, Inc. trademarks, including the mark "WHISTLE
  *    COMMUNICATIONS" on advertising, endorsements, or otherwise except as
  *    such appears in the above copyright notice or in the software.
- * 
+ *
  * THIS SOFTWARE IS BEING PROVIDED BY WHISTLE COMMUNICATIONS "AS IS", AND
  * TO THE MAXIMUM EXTENT PERMITTED BY LAW, WHISTLE COMMUNICATIONS MAKES NO
  * REPRESENTATIONS OR WARRANTIES, EXPRESS OR IMPLIED, REGARDING THIS SOFTWARE,
@@ -39,12 +38,12 @@
 
 #include <sys/param.h>
 #include <sys/socket.h>
-#include <sys/select.h>
 
 #include <ctype.h>
 #include <err.h>
 #include <errno.h>
 #include <limits.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -54,6 +53,10 @@
 #include <signal.h>
 #include <histedit.h>
 #include <pthread.h>
+#endif
+#ifdef JAIL
+#include <sys/jail.h>
+#include <jail.h>
 #endif
 
 #include <netgraph.h>
@@ -67,7 +70,8 @@
 
 /* Internal functions */
 static int	ReadFile(FILE *fp);
-static void	ReadSockets(fd_set *);
+static void	ReadCtrlSocket(void);
+static void	ReadDataSocket(void);
 static int	DoParseCommand(const char *line);
 static int	DoCommand(int ac, char **av);
 static int	DoInteractive(void);
@@ -137,16 +141,20 @@ int	csock, dsock;
 int
 main(int ac, char *av[])
 {
-	char	name[NG_NODESIZ];
-	int	interactive = isatty(0) && isatty(1);
-	FILE	*fp = NULL;
-	int	ch, rtn = 0;
+	char		name[NG_NODESIZ];
+	int		interactive = isatty(0) && isatty(1);
+	FILE		*fp = NULL;
+#ifdef JAIL
+	const char	*jail_name = NULL;
+	int		jid;
+#endif
+	int		ch, rtn = 0;
 
 	/* Set default node name */
 	snprintf(name, sizeof(name), "ngctl%d", getpid());
 
 	/* Parse command line */
-	while ((ch = getopt(ac, av, "df:n:")) != -1) {
+	while ((ch = getopt(ac, av, "df:j:n:")) != -1) {
 		switch (ch) {
 		case 'd':
 			NgSetDebug(NgSetDebug(-1) + 1);
@@ -157,10 +165,16 @@ main(int ac, char *av[])
 			else if ((fp = fopen(optarg, "r")) == NULL)
 				err(EX_NOINPUT, "%s", optarg);
 			break;
+		case 'j':
+#ifdef JAIL
+			jail_name = optarg;
+#else
+			errx(EX_UNAVAILABLE, "not built with jail support");
+#endif
+			break;
 		case 'n':
 			snprintf(name, sizeof(name), "%s", optarg);
 			break;
-		case '?':
 		default:
 			Usage((char *)NULL);
 			break;
@@ -168,6 +182,22 @@ main(int ac, char *av[])
 	}
 	ac -= optind;
 	av += optind;
+
+#ifdef JAIL
+	if (jail_name != NULL) {
+		if (jail_name[0] == '\0')
+			Usage("invalid jail name");
+
+		jid = jail_getid(jail_name);
+
+		if (jid == -1)
+			errx((errno == EPERM) ? EX_NOPERM : EX_NOHOST,
+			    "%s", jail_errmsg);
+		if (jail_attach(jid) != 0)
+			errx((errno == EPERM) ? EX_NOPERM : EX_OSERR,
+			    "cannot attach to jail");
+	}
+#endif
 
 	/* Create a new socket node */
 	if (NgMkSockNode(name, &csock, &dsock) < 0)
@@ -207,18 +237,25 @@ main(int ac, char *av[])
 static int
 ReadFile(FILE *fp)
 {
-	char line[LINE_MAX];
-	int num, rtn;
+	char *line = NULL;
+	ssize_t len;
+	size_t sz = 0;
+	unsigned int lineno = 0;
+	int rtn = CMDRTN_OK;
 
-	for (num = 1; fgets(line, sizeof(line), fp) != NULL; num++) {
+	while ((len = getline(&line, &sz, fp)) >= 0) {
+		lineno++;
 		if (*line == '#')
 			continue;
-		if ((rtn = DoParseCommand(line)) != 0) {
-			warnx("line %d: error in file", num);
-			return (rtn);
+		if ((rtn = DoParseCommand(line)) != CMDRTN_OK) {
+			warnx("line %d: error in file", lineno);
+			break;
 		}
 	}
-	return (CMDRTN_OK);
+	if (ferror(fp))
+		rtn = CMDRTN_ERROR;
+	free(line);
+	return (rtn);
 }
 
 #ifdef EDITLINE
@@ -226,7 +263,6 @@ ReadFile(FILE *fp)
 static void
 Unblock(int signal __unused)
 {
-
 	unblock = 1;
 }
 
@@ -237,8 +273,11 @@ Unblock(int signal __unused)
 static void *
 Monitor(void *v __unused)
 {
+	struct pollfd pfds[2] = {
+		{ .fd = csock, .events = POLLIN },
+		{ .fd = dsock, .events = POLLIN },
+	};
 	struct sigaction act;
-	const int maxfd = MAX(csock, dsock) + 1;
 
 	act.sa_handler = Unblock;
 	sigemptyset(&act.sa_mask);
@@ -247,22 +286,19 @@ Monitor(void *v __unused)
 
 	pthread_mutex_lock(&mutex);
 	for (;;) {
-		fd_set rfds;
-
-		/* See if any data or control messages are arriving. */
-		FD_ZERO(&rfds);
-		FD_SET(csock, &rfds);
-		FD_SET(dsock, &rfds);
 		unblock = 0;
-		if (select(maxfd, &rfds, NULL, NULL, NULL) <= 0) {
+		if (poll(pfds, 2, INFTIM) <= 0) {
 			if (errno == EINTR) {
 				if (unblock == 1)
 					pthread_cond_wait(&cond, &mutex);
 				continue;
 			}
-			err(EX_OSERR, "select");
+			err(EX_OSERR, "poll");
 		}
-		ReadSockets(&rfds);
+		if (pfds[0].revents != 0)
+			ReadCtrlSocket();
+		if (pfds[1].revents != 0)
+			ReadDataSocket();
 	}
 
 	return (NULL);
@@ -271,7 +307,6 @@ Monitor(void *v __unused)
 static char *
 Prompt(EditLine *el __unused)
 {
-
 	return (PROMPT);
 }
 
@@ -344,49 +379,48 @@ DoInteractive(void)
 static int
 DoInteractive(void)
 {
-	const int maxfd = MAX(csock, dsock) + 1;
+	struct pollfd pfds[3] = {
+		{ .fd = csock, .events = POLLIN },
+		{ .fd = dsock, .events = POLLIN },
+		{ .fd = STDIN_FILENO, .events = POLLIN },
+	};
+	char *line = NULL;
+	ssize_t len;
+	size_t sz = 0;
 
 	(*help_cmd.func)(0, NULL);
-	while (1) {
-		struct timeval tv;
-		fd_set rfds;
-
+	for (;;) {
 		/* See if any data or control messages are arriving */
-		FD_ZERO(&rfds);
-		FD_SET(csock, &rfds);
-		FD_SET(dsock, &rfds);
-		memset(&tv, 0, sizeof(tv));
-		if (select(maxfd, &rfds, NULL, NULL, &tv) <= 0) {
-
+		if (poll(pfds, 2, 0) <= 0) {
 			/* Issue prompt and wait for anything to happen */
 			printf("%s", PROMPT);
 			fflush(stdout);
-			FD_ZERO(&rfds);
-			FD_SET(0, &rfds);
-			FD_SET(csock, &rfds);
-			FD_SET(dsock, &rfds);
-			if (select(maxfd, &rfds, NULL, NULL, NULL) < 0)
-				err(EX_OSERR, "select");
-
-			/* If not user input, print a newline first */
-			if (!FD_ISSET(0, &rfds))
-				printf("\n");
+			if (poll(pfds, 3, INFTIM) < 0 && errno != EINTR)
+				err(EX_OSERR, "poll");
+		} else {
+			pfds[2].revents = 0;
 		}
 
-		ReadSockets(&rfds);
+		/* If not user input, print a newline first */
+		if (pfds[2].revents == 0)
+			printf("\n");
+
+		if (pfds[0].revents != 0)
+			ReadCtrlSocket();
+		if (pfds[1].revents != 0)
+			ReadDataSocket();
 
 		/* Get any user input */
-		if (FD_ISSET(0, &rfds)) {
-			char buf[LINE_MAX];
-
-			if (fgets(buf, sizeof(buf), stdin) == NULL) {
+		if (pfds[2].revents != 0) {
+			if ((len = getline(&line, &sz, stdin)) <= 0) {
 				printf("\n");
 				break;
 			}
-			if (DoParseCommand(buf) == CMDRTN_QUIT)
+			if (DoParseCommand(line) == CMDRTN_QUIT)
 				break;
 		}
 	}
+	free(line);
 	return (CMDRTN_QUIT);
 }
 #endif /* !EDITLINE */
@@ -395,29 +429,28 @@ DoInteractive(void)
  * Read and process data on netgraph control and data sockets.
  */
 static void
-ReadSockets(fd_set *rfds)
+ReadCtrlSocket(void)
 {
-	/* Display any incoming control message. */
-	if (FD_ISSET(csock, rfds))
-		MsgRead();
+	MsgRead();
+}
 
-	/* Display any incoming data packet. */
-	if (FD_ISSET(dsock, rfds)) {
-		char hook[NG_HOOKSIZ];
-		u_char *buf;
-		int rl;
+static void
+ReadDataSocket(void)
+{
+	char hook[NG_HOOKSIZ];
+	u_char *buf;
+	int rl;
 
-		/* Read packet from socket. */
-		if ((rl = NgAllocRecvData(dsock, &buf, hook)) < 0)
-			err(EX_OSERR, "reading hook \"%s\"", hook);
-		if (rl == 0)
-			errx(EX_OSERR, "EOF from hook \"%s\"?", hook);
+	/* Read packet from socket. */
+	if ((rl = NgAllocRecvData(dsock, &buf, hook)) < 0)
+		err(EX_OSERR, "reading hook \"%s\"", hook);
+	if (rl == 0)
+		errx(EX_OSERR, "EOF from hook \"%s\"?", hook);
 
-		/* Write packet to stdout. */
-		printf("Rec'd data packet on hook \"%s\":\n", hook);
-		DumpAscii(buf, rl);
-		free(buf);
-	}
+	/* Write packet to stdout. */
+	printf("Rec'd data packet on hook \"%s\":\n", hook);
+	DumpAscii(buf, rl);
+	free(buf);
 }
 
 /*
@@ -529,6 +562,8 @@ ReadCmd(int ac, char **av)
 
 	/* Process it */
 	rtn = ReadFile(fp);
+	if (ferror(fp))
+		warn("%s", av[1]);
 	fclose(fp);
 	return (rtn);
 }
@@ -540,7 +575,9 @@ static int
 HelpCmd(int ac, char **av)
 {
 	const struct ngcmd *cmd;
-	int k;
+	const char *s;
+	const int maxcol = 63;
+	int a, k, len;
 
 	switch (ac) {
 	case 0:
@@ -548,13 +585,11 @@ HelpCmd(int ac, char **av)
 		/* Show all commands */
 		printf("Available commands:\n");
 		for (k = 0; cmds[k] != NULL; k++) {
-			char *s, buf[100];
-
 			cmd = cmds[k];
-			snprintf(buf, sizeof(buf), "%s", cmd->cmd);
-			for (s = buf; *s != '\0' && !isspace(*s); s++);
-			*s = '\0';
-			printf("  %-10s %s\n", buf, cmd->desc);
+			for (s = cmd->cmd; *s != '\0' && !isspace(*s); s++)
+				/* nothing */;
+			printf("  %.*s%*s %s\n", (int)(s - cmd->cmd), cmd->cmd,
+			    (int)(10 - (s - cmd->cmd)), "", cmd->desc);
 		}
 		return (CMDRTN_OK);
 	default:
@@ -562,40 +597,29 @@ HelpCmd(int ac, char **av)
 		if ((cmd = FindCommand(av[1])) != NULL) {
 			printf("usage:    %s\n", cmd->cmd);
 			if (cmd->aliases[0] != NULL) {
-				int a = 0;
-
 				printf("Aliases:  ");
-				while (1) {
-					printf("%s", cmd->aliases[a++]);
-					if (a == MAX_CMD_ALIAS
-					    || cmd->aliases[a] == NULL) {
-						printf("\n");
-						break;
-					}
-					printf(", ");
+				for (a = 0; a < MAX_CMD_ALIAS &&
+				    cmd->aliases[a] != NULL; a++) {
+					if (a > 0)
+						printf(", ");
+					printf("%s", cmd->aliases[a]);
 				}
+				printf("\n");
 			}
 			printf("Summary:  %s\n", cmd->desc);
-			if (cmd->help != NULL) {
-				const char *s;
-				char buf[65];
-				int tot, len, done;
-
-				printf("Description:\n");
-				for (s = cmd->help; *s != '\0'; s += len) {
-					while (isspace(*s))
-						s++;
-					tot = snprintf(buf,
-					    sizeof(buf), "%s", s);
-					len = strlen(buf);
-					done = len == tot;
-					if (!done) {
-						while (len > 0
-						    && !isspace(buf[len-1]))
-							buf[--len] = '\0';
-					}
-					printf("  %s\n", buf);
-				}
+			if (cmd->help == NULL)
+				break;
+			printf("Description:\n");
+			for (s = cmd->help; *s != '\0'; s += len) {
+				while (isspace(*s))
+					s++;
+				/* advance to the column limit */
+				for (len = 0; s[len] && len < maxcol; len++)
+					/* nothing */;
+				/* back up to previous interword space */
+				while (len > 0 && s[len] && !isblank(s[len]))
+					len--;
+				printf("  %.*s\n", len, s);
 			}
 		}
 	}
@@ -617,34 +641,27 @@ QuitCmd(int ac __unused, char **av __unused)
 void
 DumpAscii(const u_char *buf, int len)
 {
-	char ch, sbuf[100];
 	int k, count;
 
 	for (count = 0; count < len; count += DUMP_BYTES_PER_LINE) {
-		snprintf(sbuf, sizeof(sbuf), "%04x:  ", count);
+		printf("%04x:  ", count);
 		for (k = 0; k < DUMP_BYTES_PER_LINE; k++) {
 			if (count + k < len) {
-				snprintf(sbuf + strlen(sbuf),
-				    sizeof(sbuf) - strlen(sbuf),
-				    "%02x ", buf[count + k]);
+				printf("%02x ", buf[count + k]);
 			} else {
-				snprintf(sbuf + strlen(sbuf),
-				    sizeof(sbuf) - strlen(sbuf), "   ");
+				printf("   ");
 			}
 		}
-		snprintf(sbuf + strlen(sbuf), sizeof(sbuf) - strlen(sbuf), " ");
+		printf(" ");
 		for (k = 0; k < DUMP_BYTES_PER_LINE; k++) {
 			if (count + k < len) {
-				ch = isprint(buf[count + k]) ?
-				    buf[count + k] : '.';
-				snprintf(sbuf + strlen(sbuf),
-				    sizeof(sbuf) - strlen(sbuf), "%c", ch);
+				printf("%c", isprint(buf[count + k]) ?
+				    buf[count + k] : '.');
 			} else {
-				snprintf(sbuf + strlen(sbuf),
-				    sizeof(sbuf) - strlen(sbuf), " ");
+				printf(" ");
 			}
 		}
-		printf("%s\n", sbuf);
+		printf("\n");
 	}
 }
 
@@ -657,6 +674,7 @@ Usage(const char *msg)
 	if (msg)
 		warnx("%s", msg);
 	fprintf(stderr,
-		"usage: ngctl [-d] [-f file] [-n name] [command ...]\n");
+		"usage: ngctl [-j jail] [-d] [-f filename] [-n nodename] "
+		"[command [argument ...]]\n");
 	exit(EX_USAGE);
 }

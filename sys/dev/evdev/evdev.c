@@ -37,6 +37,7 @@
 #include <sys/malloc.h>
 #include <sys/module.h>
 #include <sys/proc.h>
+#include <sys/stat.h>
 #include <sys/sx.h>
 #include <sys/sysctl.h>
 #include <sys/systm.h>
@@ -94,8 +95,14 @@ static int evdev_check_event(struct evdev_dev *, uint16_t, uint16_t, int32_t);
 struct evdev_dev *
 evdev_alloc(void)
 {
+	struct evdev_dev *evdev;
 
-	return malloc(sizeof(struct evdev_dev), M_EVDEV, M_WAITOK | M_ZERO);
+	evdev = malloc(sizeof(struct evdev_dev), M_EVDEV, M_WAITOK | M_ZERO);
+	evdev->ev_cdev_uid = UID_ROOT;
+	evdev->ev_cdev_gid = GID_WHEEL;
+	evdev->ev_cdev_mode = S_IRUSR | S_IWUSR;
+
+	return (evdev);
 }
 
 void
@@ -208,7 +215,7 @@ evdev_sysctl_create(struct evdev_dev *evdev)
 	ev_sysctl_tree = SYSCTL_ADD_NODE_WITH_LABEL(&evdev->ev_sysctl_ctx,
 	    SYSCTL_STATIC_CHILDREN(_kern_evdev_input), OID_AUTO,
 	    ev_unit_str, CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "",
-	    "device index");
+	    "device_index");
 
 	SYSCTL_ADD_STRING(&evdev->ev_sysctl_ctx,
 	    SYSCTL_CHILDREN(ev_sysctl_tree), OID_AUTO, "name", CTLFLAG_RD,
@@ -276,6 +283,11 @@ evdev_sysctl_create(struct evdev_dev *evdev)
 	    SYSCTL_CHILDREN(ev_sysctl_tree), OID_AUTO, "sw_bits", CTLFLAG_RD,
 	    evdev->ev_sw_flags, sizeof(evdev->ev_sw_flags), "",
 	    "Input device supported switch events");
+
+	SYSCTL_ADD_U64(&evdev->ev_sysctl_ctx,
+	    SYSCTL_CHILDREN(ev_sysctl_tree), OID_AUTO, "devnum", CTLFLAG_RD,
+	    &evdev->ev_devnum, 0,
+	    "Input device number");
 }
 
 static int
@@ -321,6 +333,7 @@ evdev_register_common(struct evdev_dev *evdev)
 	ret = evdev_cdev_create(evdev);
 	if (ret != 0)
 		goto bail_out;
+	evdev->ev_devnum = dev2udev(evdev->ev_cdev);
 
 	/* Create sysctls (for device enumeration without /dev/input access rights) */
 	evdev_sysctl_create(evdev);
@@ -582,6 +595,14 @@ evdev_set_flag(struct evdev_dev *evdev, uint16_t flag)
 
 	KASSERT(flag < EVDEV_FLAG_CNT, ("invalid evdev flag property"));
 	bit_set(evdev->ev_flags, flag);
+}
+
+void
+evdev_set_cdev_mode(struct evdev_dev *evdev, uid_t uid, gid_t gid, int mode)
+{
+	evdev->ev_cdev_uid = uid;
+	evdev->ev_cdev_gid = gid;
+	evdev->ev_cdev_mode = mode;
 }
 
 static int

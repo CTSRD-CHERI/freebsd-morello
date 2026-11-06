@@ -128,6 +128,10 @@ static int		no_daemon;
 static int		unknown_ok = 1;
 static int		routefd;
 
+#ifndef WITHOUT_NETLINK
+struct snl_state	nl_ss;
+#endif
+
 struct interface_info	*ifi;
 
 int		 findproto(char *, int);
@@ -135,12 +139,16 @@ struct sockaddr	*get_ifa(char *, int);
 void		 routehandler(struct protocol *);
 void		 usage(void);
 int		 check_option(struct client_lease *l, int option);
-int		 check_classless_option(unsigned char *data, int len);
+int		 check_classless_option(unsigned char *data, size_t len);
 int		 ipv4addrs(const char * buf);
 int		 res_hnok(const char *dn);
 int		 check_search(const char *srch);
 const char	*option_as_string(unsigned int code, unsigned char *data, int len);
 int		 fork_privchld(int, int);
+static bool	 ipv6_only_preferred(struct interface_info *, struct packet *);
+static void	 v6only_wait_expired(void *);
+static void	 make_release(struct interface_info *, struct client_lease *);
+static void	 send_release(struct interface_info *, struct client_lease *);
 
 #define	ROUNDUP(a) \
 	    ((a) > 0 ? (1 + (((a) - 1) | (sizeof(long) - 1))) : sizeof(long))
@@ -534,6 +542,14 @@ main(int argc, char *argv[])
 	if (caph_rights_limit(routefd, &rights) < 0)
 		error("can't limit route socket: %m");
 
+#ifndef WITHOUT_NETLINK
+	if (!snl_init(&nl_ss, NETLINK_ROUTE))
+		error("can't open netlink socket");
+	cap_rights_init(&rights, CAP_EVENT, CAP_READ, CAP_WRITE);
+	if (caph_rights_limit(nl_ss.fd, &rights) < 0)
+		error("can't limit netlink route socket: %m");
+#endif
+
 	endpwent();
 
 	setproctitle("%s", ifi->name);
@@ -619,6 +635,8 @@ state_reboot(void *ipp)
 {
 	struct interface_info *ip = ipp;
 
+	cancel_timeout(v6only_wait_expired, ip);
+
 	/* If we don't remember an active lease, go straight to INIT. */
 	if (!ip->client->active || ip->client->active->is_bootp) {
 		state_init(ip);
@@ -657,6 +675,8 @@ state_init(void *ipp)
 	struct interface_info *ip = ipp;
 
 	ASSERT_STATE(state, S_INIT);
+
+	cancel_timeout(v6only_wait_expired, ip);
 
 	/* Make a DHCPDISCOVER packet, and set appropriate per-interface
 	   flags. */
@@ -762,9 +782,76 @@ freeit:
 	send_request(ip);
 }
 
+/*
+ * RFC 8925, sec 3.2: if the packet carries a valid IPv6-Only Preferred
+ * option and we have IPv6 connectivity, stop DHCPv4 for V6ONLY_WAIT
+ * seconds or until a network attachment event, whichever comes first.
+ * Returns true if DHCPv4 was stopped.
+ */
+static bool
+ipv6_only_preferred(struct interface_info *ip, struct packet *packet)
+{
+	struct client_lease *lp, *next;
+	uint32_t v6wait;
+
+	if (packet->options[DHO_IPV6_ONLY].data == NULL)
+		return (false);
+
+	if (!check_ipv6_connectivity(ip->index)) {
+		note("IPv6-Only Preferred option received, "
+		     "but we can't verify IPv6 connectivity, ignore");
+		return (false);
+	}
+
+	v6wait = getULong(packet->options[DHO_IPV6_ONLY].data);
+	note("IPv6-Only Preferred option received (%u seconds), abort", v6wait);
+
+	cancel_timeout(send_discover, ip);
+	cancel_timeout(send_request, ip);
+	cancel_timeout(state_selecting, ip);
+	for (lp = ip->client->offered_leases; lp != NULL; lp = next) {
+		next = lp->next;
+		free_client_lease(lp);
+	}
+	ip->client->offered_leases = NULL;
+
+	/*
+	 * In INIT-REBOOT the DHCPACK just re-confirmed our old lease.
+	 * Release it so the server doesn't keep the address committed,
+	 * and forget it so the next attempt starts with a DHCPDISCOVER.
+	 */
+	if (ip->client->state == S_REBOOTING && ip->client->active != NULL) {
+		make_release(ip, ip->client->active);
+		send_release(ip, ip->client->active);
+		disassoc(ip);
+		free_client_lease(ip->client->active);
+		ip->client->active = NULL;
+		rewrite_client_leases();
+	}
+
+	ip->client->state = S_INIT;
+	if (v6wait < UINT32_MAX) {
+		struct timespec stop_time, v6wait_left = {
+			.tv_sec = (time_t)v6wait
+		};
+		timespecadd(&time_now, &v6wait_left, &stop_time);
+		add_timeout_timespec(stop_time, v6only_wait_expired, ip);
+	}
+	go_daemon();
+	return (true);
+}
+
+static void
+v6only_wait_expired(void *ipp)
+{
+	struct interface_info *ip = ipp;
+
+	note("V6ONLY_WAIT expired, restarting DHCPv4");
+	state_reboot(ip);
+}
+
 /* state_requesting is called when we receive a DHCPACK message after
    having sent out one or more DHCPREQUEST packets. */
-
 void
 dhcpack(struct packet *packet)
 {
@@ -786,6 +873,11 @@ dhcpack(struct packet *packet)
 		return;
 
 	note("DHCPACK from %s", piaddr(packet->client_addr));
+
+	/* RFC 8925, sec 3.2: only INIT-REBOOT stops, other states keep the lease. */
+	if (ip->client->state == S_REBOOTING &&
+	    ipv6_only_preferred(ip, packet))
+		return;
 
 	lease = packet_to_lease(packet);
 	if (!lease) {
@@ -1069,6 +1161,10 @@ dhcpoffer(struct packet *packet)
 		}
 	}
 
+	/* RFC 8925, sec 3.2: with v6only, don't request the offered address. */
+	if (ipv6_only_preferred(ip, packet))
+		return;
+
 	lease = packet_to_lease(packet);
 	if (!lease) {
 		note("packet_to_lease failed.");
@@ -1161,7 +1257,7 @@ packet_to_lease(struct packet *packet)
 	lease = malloc(sizeof(struct client_lease));
 
 	if (!lease) {
-		warning("dhcpoffer: no memory to record lease.");
+		warning("dhcpoffer: no memory to record lease");
 		return (NULL);
 	}
 
@@ -1211,7 +1307,7 @@ packet_to_lease(struct packet *packet)
 
 	/* If the server name was filled out, copy it.
 	   Do not attempt to validate the server name as a host name.
-	   RFC 2131 merely states that sname is NUL-terminated (which do
+	   RFC 2131 merely states that sname is NUL-terminated (which we
 	   do not assume) and that it is the server's host name.  Since
 	   the ISC client and server allow arbitrary characters, we do
 	   as well. */
@@ -1219,28 +1315,73 @@ packet_to_lease(struct packet *packet)
 	    !(packet->options[DHO_DHCP_OPTION_OVERLOAD].data[0] & 2)) &&
 	    packet->raw->sname[0]) {
 		lease->server_name = malloc(DHCP_SNAME_LEN + 1);
-		if (!lease->server_name) {
-			warning("dhcpoffer: no memory for server name.");
+		if (lease->server_name == NULL) {
+			warning("dhcpoffer: no memory for server name");
 			free_client_lease(lease);
 			return (NULL);
 		}
-		memcpy(lease->server_name, packet->raw->sname, DHCP_SNAME_LEN);
-		lease->server_name[DHCP_SNAME_LEN]='\0';
+		for (i = 0; i < DHCP_SNAME_LEN; i++) {
+			if (packet->raw->sname[i] == '\0') {
+				break;
+			}
+			if (packet->raw->sname[i] < ' ' ||
+			    packet->raw->sname[i] == '"' ||
+			    packet->raw->sname[i] == '\\') {
+				warning("dhcpoffer: server name contains "
+				    "unsafe characters");
+				free(lease->server_name);
+				lease->server_name = NULL;
+				break;
+			}
+			lease->server_name[i] = packet->raw->sname[i];
+		}
+		/* Terminate and zero-pad */
+		if (lease->server_name != NULL) {
+			while (i < DHCP_SNAME_LEN + 1) {
+				lease->server_name[i++] = '\0';
+			}
+		}
 	}
 
-	/* Ditto for the filename. */
+	/* Ditto for the file name. */
 	if ((!packet->options[DHO_DHCP_OPTION_OVERLOAD].len ||
 	    !(packet->options[DHO_DHCP_OPTION_OVERLOAD].data[0] & 1)) &&
 	    packet->raw->file[0]) {
 		/* Don't count on the NUL terminator. */
 		lease->filename = malloc(DHCP_FILE_LEN + 1);
-		if (!lease->filename) {
-			warning("dhcpoffer: no memory for filename.");
+		if (lease->filename == NULL) {
+			warning("dhcpoffer: no memory for file name");
 			free_client_lease(lease);
 			return (NULL);
 		}
-		memcpy(lease->filename, packet->raw->file, DHCP_FILE_LEN);
-		lease->filename[DHCP_FILE_LEN]='\0';
+		for (i = 0; i < DHCP_FILE_LEN; i++) {
+			if (packet->raw->file[i] == '\0') {
+				break;
+			}
+			if (packet->raw->file[i] < ' ' ||
+			    packet->raw->file[i] == '"') {
+				warning("dhcpoffer: file name contains "
+				    "unsafe characters");
+				free(lease->filename);
+				lease->filename = NULL;
+				break;
+			}
+			if (packet->raw->file[i] == '\\') {
+				/*
+				 * This is common in Windows-centric
+				 * environments.  Instead of rejecting,
+				 * silently convert to forward slash.
+				 */
+				packet->raw->file[i] = '/';
+			}
+			lease->filename[i] = packet->raw->file[i];
+		}
+		/* Terminate and zero-pad */
+		if (lease->filename != NULL) {
+			while (i < DHCP_FILE_LEN + 1) {
+				lease->filename[i++] = '\0';
+			}
+		}
 	}
 	return lease;
 }
@@ -1618,6 +1759,23 @@ send_decline(void *ipp)
 	    ip->client->packet_length, inaddr_any, inaddr_broadcast);
 }
 
+static void
+send_release(struct interface_info *ip, struct client_lease *lease)
+{
+	struct in_addr from, to;
+
+	/* RFC 2131, sec 4.4.4: DHCPRELEASE is unicast to the server. */
+	memcpy(&from, lease->address.iabuf, sizeof(from));
+	if (lease->options[DHO_DHCP_SERVER_IDENTIFIER].len == sizeof(to))
+		memcpy(&to, lease->options[DHO_DHCP_SERVER_IDENTIFIER].data, sizeof(to));
+	else
+		to = inaddr_broadcast;
+
+	note("DHCPRELEASE on %s to %s port %d", ip->name, inet_ntoa(to), REMOTE_PORT);
+	send_packet_unpriv(privfd, &ip->client->packet,
+	    ip->client->packet_length, from, to);
+}
+
 void
 make_discover(struct interface_info *ip, struct client_lease *lease)
 {
@@ -1864,24 +2022,26 @@ make_request(struct interface_info *ip, struct client_lease * lease)
 	    ip->hw_address.haddr, ip->hw_address.hlen);
 }
 
-void
-make_decline(struct interface_info *ip, struct client_lease *lease)
+/*
+ * Build the packet DHCPDECLINE and DHCPRELEASE share: message type,
+ * server and client identifiers, plus any options already in options[].
+ */
+static void
+make_decline_or_release(struct interface_info *ip,
+    struct client_lease *lease, unsigned char type,
+    struct tree_cache **options)
 {
-	struct tree_cache *options[256], message_type_tree;
-	struct tree_cache requested_address_tree;
-	struct tree_cache server_id_tree, client_id_tree;
-	unsigned char decline = DHCPDECLINE;
+	struct tree_cache message_type_tree, server_id_tree, client_id_tree;
 	int i;
 
-	memset(options, 0, sizeof(options));
 	memset(&ip->client->packet, 0, sizeof(ip->client->packet));
 
-	/* Set DHCP_MESSAGE_TYPE to DHCPDECLINE */
+	/* Set DHCP_MESSAGE_TYPE */
 	i = DHO_DHCP_MESSAGE_TYPE;
 	options[i] = &message_type_tree;
-	options[i]->value = &decline;
-	options[i]->len = sizeof(decline);
-	options[i]->buf_size = sizeof(decline);
+	options[i]->value = &type;
+	options[i]->len = sizeof(type);
+	options[i]->buf_size = sizeof(type);
 	options[i]->timeout = 0xFFFFFFFF;
 
 	/* Send back the server identifier... */
@@ -1890,14 +2050,6 @@ make_decline(struct interface_info *ip, struct client_lease *lease)
 	options[i]->value = lease->options[i].data;
 	options[i]->len = lease->options[i].len;
 	options[i]->buf_size = lease->options[i].len;
-	options[i]->timeout = 0xFFFFFFFF;
-
-	/* Send back the address we're declining. */
-	i = DHO_DHCP_REQUESTED_ADDRESS;
-	options[i] = &requested_address_tree;
-	options[i]->value = lease->address.iabuf;
-	options[i]->len = lease->address.len;
-	options[i]->buf_size = lease->address.len;
 	options[i]->timeout = 0xFFFFFFFF;
 
 	/* Send the uid if the user supplied one. */
@@ -1909,7 +2061,6 @@ make_decline(struct interface_info *ip, struct client_lease *lease)
 		options[i]->buf_size = ip->client->config->send_options[i].len;
 		options[i]->timeout = 0xFFFFFFFF;
 	}
-
 
 	/* Set up the option buffer... */
 	ip->client->packet_length = cons_options(NULL, &ip->client->packet, 0,
@@ -1936,6 +2087,38 @@ make_decline(struct interface_info *ip, struct client_lease *lease)
 	    sizeof(ip->client->packet.giaddr));
 	memcpy(ip->client->packet.chaddr,
 	    ip->hw_address.haddr, ip->hw_address.hlen);
+}
+
+void
+make_decline(struct interface_info *ip, struct client_lease *lease)
+{
+	struct tree_cache *options[256], requested_address_tree;
+	int i;
+
+	memset(options, 0, sizeof(options));
+
+	/* Send back the address we're declining. */
+	i = DHO_DHCP_REQUESTED_ADDRESS;
+	options[i] = &requested_address_tree;
+	options[i]->value = lease->address.iabuf;
+	options[i]->len = lease->address.len;
+	options[i]->buf_size = lease->address.len;
+	options[i]->timeout = 0xFFFFFFFF;
+
+	make_decline_or_release(ip, lease, DHCPDECLINE, options);
+}
+
+static void
+make_release(struct interface_info *ip, struct client_lease *lease)
+{
+	struct tree_cache *options[256];
+
+	memset(options, 0, sizeof(options));
+	make_decline_or_release(ip, lease, DHCPRELEASE, options);
+
+	/* RFC 2131, sec 4.4.4: ciaddr carries the address being released. */
+	memcpy(&ip->client->packet.ciaddr, lease->address.iabuf,
+	    sizeof(ip->client->packet.ciaddr));
 }
 
 void
@@ -2248,10 +2431,21 @@ supersede:
 		if (len) {
 			char name[256];
 
-			if (dhcp_option_ev_name(name, sizeof(name),
+			/*
+			 * The option is named "captive-portal", so the
+			 * generic name derived below would be
+			 * new_captive_portal / old_captive_portal.
+			 * Append "_url" suffix so that the variable name
+			 * says that the value is a URL.
+			 */
+			if (i == DHO_CAPTIVE_PORTAL)
+				strlcpy(name, "captive_portal_url",
+				    sizeof(name));
+			else if (!dhcp_option_ev_name(name, sizeof(name),
 			    &dhcp_options[i]))
-				script_set_env(ip->client, prefix, name,
-				    pretty_print_option(i, dp, len, 0, 0));
+				continue;
+			script_set_env(ip->client, prefix, name,
+			    pretty_print_option(i, dp, len, 0, 0));
 		}
 	}
 	snprintf(tbuf, sizeof(tbuf), "%d", (int)lease->expiry);
@@ -2426,8 +2620,8 @@ script_set_env(struct client_state *client, const char *prefix,
 			char **newscriptEnv;
 			int newscriptEnvsize = client->scriptEnvsize + 50;
 
-			newscriptEnv = realloc(client->scriptEnv,
-			    newscriptEnvsize);
+			newscriptEnv = reallocarray(client->scriptEnv,
+			    newscriptEnvsize, sizeof(char *));
 			if (newscriptEnv == NULL) {
 				free(client->scriptEnv);
 				client->scriptEnv = NULL;
@@ -2633,10 +2827,12 @@ check_option(struct client_lease *l, int option)
 	case DHO_DHCP_CLIENT_IDENTIFIER:
 	case DHO_BOOTFILE_NAME:
 	case DHO_DHCP_USER_CLASS_ID:
-	case DHO_URL:
+	case DHO_CAPTIVE_PORTAL:
+	case DHO_CAPTIVE_PORTAL_LEGACY:
 	case DHO_SIP_SERVERS:
 	case DHO_V_I_VENDOR_CLASS:
 	case DHO_V_I_VENDOR_OPTS:
+	case DHO_IPV6_ONLY:
 	case DHO_END:
 		return (1);
 	case DHO_CLASSLESS_ROUTES:
@@ -2650,43 +2846,56 @@ check_option(struct client_lease *l, int option)
 
 /* RFC 3442 The Classless Static Routes option checks */
 int
-check_classless_option(unsigned char *data, int len)
+check_classless_option(unsigned char *data, size_t len)
 {
-	int i = 0;
-	unsigned char width;
+	unsigned int i;
 	in_addr_t addr, mask;
+	unsigned char width;
 
 	if (len < 5) {
-		warning("Too small length: %d", len);
+		warning("Too small length: %zu", len);
 		return (0);
 	}
-	while(i < len) {
+	for (i = 0; i < len; i += 4) {
+		unsigned int octets;
+
 		width = data[i++];
-		if (width == 0) {
-			i += 4;
-			continue;
-		} else if (width < 9) {
-			addr =  (in_addr_t)(data[i]	<< 24);
-			i += 1;
-		} else if (width < 17) {
-			addr =  (in_addr_t)(data[i]	<< 24) +
-				(in_addr_t)(data[i + 1]	<< 16);
-			i += 2;
-		} else if (width < 25) {
-			addr =  (in_addr_t)(data[i]	<< 24) +
-				(in_addr_t)(data[i + 1]	<< 16) +
-				(in_addr_t)(data[i + 2]	<< 8);
-			i += 3;
-		} else if (width < 33) {
-			addr =  (in_addr_t)(data[i]	<< 24) +
-				(in_addr_t)(data[i + 1]	<< 16) +
-				(in_addr_t)(data[i + 2]	<< 8)  +
-				data[i + 3];
-			i += 4;
-		} else {
-			warning("Incorrect subnet width: %d", width);
+		octets = (width + 7) / 8;
+		if (len < i + octets) {
+			warning("Incorrect data length: %zu", len);
 			return (0);
 		}
+
+		switch (octets) {
+		case 0:
+			continue;
+		case 1:
+			addr = ((in_addr_t)data[i] << 24);
+			i += 1;
+			break;
+		case 2:
+			addr = ((in_addr_t)data[i] << 24) +
+			    ((in_addr_t)data[i + 1] << 16);
+			i += 2;
+			break;
+		case 3:
+			addr = ((in_addr_t)data[i] << 24) +
+			    ((in_addr_t)data[i + 1] << 16) +
+			    ((in_addr_t)data[i + 2] << 8);
+			i += 3;
+			break;
+		case 4:
+			addr = ((in_addr_t)data[i] << 24) +
+			    ((in_addr_t)data[i + 1] << 16) +
+			    ((in_addr_t)data[i + 2] << 8) +
+			    data[i + 3];
+			i += 4;
+			break;
+		default:
+			warning("Incorrect subnet width: %u", width);
+			return (0);
+		}
+
 		mask = (in_addr_t)(~0) << (32 - width);
 		addr = ntohl(addr);
 		mask = ntohl(mask);
@@ -2703,10 +2912,9 @@ check_classless_option(unsigned char *data, int len)
 			data[i - 1] = (unsigned char)(
 				(addr >> (((32 - width)/8)*8)) & 0xFF);
 		}
-		i += 4;
 	}
 	if (i > len) {
-		warning("Incorrect data length: %d (must be %d)", len, i);
+		warning("Incorrect data length: %zu (must be %u)", len, i);
 		return (0);
 	}
 	return (1);

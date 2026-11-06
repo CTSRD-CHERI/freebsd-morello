@@ -76,7 +76,7 @@ nat64stl_log(struct pfloghdr *plog, struct mbuf *m, sa_family_t family,
 	plog->subrulenr = htonl(pktid);
 	plog->ruleset[0] = '\0';
 	strlcpy(plog->ifname, "NAT64STL", sizeof(plog->ifname));
-	ipfw_bpf_mtap2(plog, PFLOG_HDRLEN, m);
+	ipfw_pflog_tap(plog, m);
 }
 
 static int
@@ -175,8 +175,7 @@ nat64stl_handle_icmp6(struct ip_fw_chain *chain, struct nat64stl_cfg *cfg,
 		NAT64STAT_INC(stats, dropped);
 		return (NAT64MFREE);
 	}
-	if (m->m_len < hlen + sizeof(struct ip6_hdr) + ICMP_MINLEN)
-		m = m_pullup(m, hlen + sizeof(struct ip6_hdr) + ICMP_MINLEN);
+	m = m_pullup(m, hlen + sizeof(struct ip6_hdr) + ICMP_MINLEN);
 	if (m == NULL) {
 		NAT64STAT_INC(stats, nomem);
 		return (NAT64RETURN);
@@ -217,7 +216,8 @@ ipfw_nat64stl(struct ip_fw_chain *chain, struct ip_fw_args *args,
 	if (cmd->opcode != O_EXTERNAL_ACTION ||
 	    insntod(cmd, kidx)->kidx != V_nat64stl_eid ||
 	    icmd->opcode != O_EXTERNAL_INSTANCE ||
-	    (cfg = NAT64_LOOKUP(chain, icmd)) == NULL)
+	    (cfg = NAT64_LOOKUP(chain, icmd)) == NULL ||
+	    cfg->no.etlv != IPFW_TLV_NAT64STL_NAME)
 		return (0);
 
 	switch (args->f_id.addr_type) {

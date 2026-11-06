@@ -39,6 +39,11 @@
 #include <linux/fs.h>
 #include <linux/slab.h>
 
+#include <linux/compiler.h>
+#include <linux/types.h>
+#include <linux/errno.h>
+#include <linux/cleanup.h>
+
 struct linux_file;
 
 #undef file
@@ -177,6 +182,16 @@ static inline struct fd fdget(unsigned int fd)
 {
 	struct linux_file *f = linux_fget(fd);
 	return (struct fd){f};
+}
+
+LINUXKPI_DEFINE_CLASS(fd, struct fd, fdput(_T), fdget(fd), int fd)
+
+#define	fd_file(fd)	((fd).linux_file)
+
+static inline bool
+fd_empty(struct fd fd)
+{
+	return (fd_file(fd) == NULL);
 }
 
 #define	file		linux_file

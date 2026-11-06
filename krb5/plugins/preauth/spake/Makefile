@@ -1,5 +1,5 @@
 #
-# SPDX-License-Idendifier: BSD-2-Clause
+# SPDX-License-Identifier: BSD-2-Clause
 #
 # Copyright (c) 2025 FreeBSD Foundation
 #
@@ -13,7 +13,7 @@
 
 LIB=		spake
 LIBDIR=		${PLUGINSDIR}/preauth
-LDFLAGS=-Wl,--no-undefined
+LDFLAGS+=-Wl,--no-undefined
 LIBADD=	krb5profile krb5 k5crypto com_err krb5support crypto sys
 VERSION_MAP=	${.CURDIR}/version.map
 
@@ -29,6 +29,7 @@ SRCS=	edwards25519.c \
 
 CFLAGS+=-I${KRB5_DIR}/plugins/preauth/spake \
 	-I${KRB5_DIR}/include \
-	-I${KRB5_SRCTOP}/include
+	-I${KRB5_SRCTOP}/include \
+	-I${KRB5_OBJTOP}/util/profile
 
 .include <bsd.lib.mk>

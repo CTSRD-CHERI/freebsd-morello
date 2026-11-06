@@ -1,6 +1,8 @@
-PACKAGE=	tests
+.include <src.opts.mk>
 
-_LIBARCHIVEDIR=	${SRCTOP}/contrib/libarchive
+.include "${SRCTOP}/lib/libarchive/Makefile.inc"
+
+PACKAGE=	tests
 
 ATF_TESTS_SH+=	functional_test
 
@@ -8,13 +10,10 @@ BINDIR=		${TESTSDIR}
 
 PROGS+=		bsdcpio_test
 
-CFLAGS+=	-DPLATFORM_CONFIG_H=\"${SRCTOP}/lib/libarchive/config_freebsd.h\"
-CFLAGS+=	-I${SRCTOP}/lib/libarchive -I${.OBJDIR}
-
 CFLAGS+=	-I${.OBJDIR}
-CFLAGS+=	-I${_LIBARCHIVEDIR}/cpio -I${_LIBARCHIVEDIR}/cpio/test
-CFLAGS+=	-I${_LIBARCHIVEDIR}/libarchive
-CFLAGS+=	-I${_LIBARCHIVEDIR}/libarchive_fe -I${_LIBARCHIVEDIR}/test_utils
+CFLAGS+=	-I${_LIBARCHIVEDIR}/cpio
+CFLAGS+=	-I${_LIBARCHIVEDIR}/cpio/test
+CFLAGS+=	-I${_LIBARCHIVEDIR}/test_utils
 
 # Uncomment to link against dmalloc
 #LDADD+= -L/usr/local/lib -ldmalloc
@@ -26,7 +25,7 @@ CFLAGS.test_utils.c+=	-Wno-cast-align
 CPIO_SRCS= cmdline.c
 
 .PATH:	${_LIBARCHIVEDIR}/libarchive_fe
-CPIO_SRCS+= err.c
+CPIO_SRCS+= lafe_err.c
 
 .PATH:	${_LIBARCHIVEDIR}/cpio/test
 TESTS_SRCS=	\
@@ -67,6 +66,7 @@ TESTS_SRCS=	\
 	test_option_lzma.c			\
 	test_option_lzop.c			\
 	test_option_m.c				\
+	test_option_o_rejected_entry.c		\
 	test_option_passphrase.c		\
 	test_option_t.c				\
 	test_option_u.c				\

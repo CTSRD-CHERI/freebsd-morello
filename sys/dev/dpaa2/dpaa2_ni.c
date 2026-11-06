@@ -1,8 +1,9 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * Copyright © 2021-2023 Dmitry Salychev
- * Copyright © 2022 Mathew McBride
+ * Copyright (c) 2021-2026 Dmitry Salychev
+ * Copyright (c) 2022 Mathew McBride
+ * Copyright (c) 2026 Bjoern A. Zeeb
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -56,6 +57,7 @@
 #include <sys/buf_ring.h>
 #include <sys/smp.h>
 #include <sys/proc.h>
+#include <sys/sbuf.h>
 
 #include <vm/vm.h>
 #include <vm/pmap.h>
@@ -96,6 +98,7 @@
 #include "dpaa2_ni.h"
 #include "dpaa2_channel.h"
 #include "dpaa2_buf.h"
+#include "dpaa2_frame.h"
 
 #define BIT(x)			(1ul << (x))
 #define WRIOP_VERSION(x, y, z)	((x) << 10 | (y) << 5 | (z) << 0)
@@ -126,13 +129,10 @@
 MALLOC_DEFINE(M_DPAA2_TXB, "dpaa2_txb", "DPAA2 DMA-mapped buffer (Tx)");
 
 /*
- * How many times channel cleanup routine will be repeated if the RX or TX
- * budget was depleted.
+ * Minimum and maximum valid values for the cleanup sysctls.
  */
-#define DPAA2_CLEAN_BUDGET	64 /* sysctl(9)? */
-/* TX/RX budget for the channel cleanup task */
-#define DPAA2_TX_BUDGET		128 /* sysctl(9)? */
-#define DPAA2_RX_BUDGET		256 /* sysctl(9)? */
+#define DPAA2_CLEAN_BUDGET_MIN 8
+#define DPAA2_CLEAN_BUDGET_MAX 2048
 
 #define DPNI_IRQ_INDEX		0 /* Index of the only DPNI IRQ. */
 #define DPNI_IRQ_LINK_CHANGED	1 /* Link state changed */
@@ -156,10 +156,6 @@ MALLOC_DEFINE(M_DPAA2_TXB, "dpaa2_txb", "DPAA2 DMA-mapped buffer (Tx)");
 #define DPAA2_RX_BUFRING_SZ	(4096u)
 #define DPAA2_RXE_BUFRING_SZ	(1024u)
 #define DPAA2_TXC_BUFRING_SZ	(4096u)
-#define DPAA2_TX_SEGLIMIT	(16u) /* arbitrary number */
-#define DPAA2_TX_SEG_SZ		(PAGE_SIZE)
-#define DPAA2_TX_SEGS_MAXSZ	(DPAA2_TX_SEGLIMIT * DPAA2_TX_SEG_SZ)
-#define DPAA2_TX_SGT_SZ		(PAGE_SIZE) /* bytes */
 
 /* Size of a buffer to keep a QoS table key configuration. */
 #define ETH_QOS_KCFG_BUF_SIZE	(PAGE_SIZE)
@@ -186,15 +182,6 @@ MALLOC_DEFINE(M_DPAA2_TXB, "dpaa2_txb", "DPAA2 DMA-mapped buffer (Tx)");
 #define DPAA2_NI_TXBUF_IDX_MASK	(0xFFu)
 #define DPAA2_NI_TXBUF_IDX_SHIFT (49)
 
-#define DPAA2_NI_FD_FMT_MASK	(0x3u)
-#define DPAA2_NI_FD_FMT_SHIFT	(12)
-#define DPAA2_NI_FD_ERR_MASK	(0xFFu)
-#define DPAA2_NI_FD_ERR_SHIFT	(0)
-#define DPAA2_NI_FD_SL_MASK	(0x1u)
-#define DPAA2_NI_FD_SL_SHIFT	(14)
-#define DPAA2_NI_FD_LEN_MASK	(0x3FFFFu)
-#define DPAA2_NI_FD_OFFSET_MASK (0x0FFFu)
-
 /* Enables TCAM for Flow Steering and QoS look-ups. */
 #define DPNI_OPT_HAS_KEY_MASKING 0x10
 
@@ -219,6 +206,9 @@ MALLOC_DEFINE(M_DPAA2_TXB, "dpaa2_txb", "DPAA2 DMA-mapped buffer (Tx)");
 #define	RXH_L4_B_0_1		(1 << 6) /* src port in case of TCP/UDP/SCTP */
 #define	RXH_L4_B_2_3		(1 << 7) /* dst port in case of TCP/UDP/SCTP */
 #define	RXH_DISCARD		(1 << 31)
+
+/* Transmit checksum offload */
+#define DPAA2_CSUM_TX_OFFLOAD	(CSUM_IP | CSUM_DELAY_DATA | CSUM_DELAY_DATA_IPV6)
 
 /* Default Rx hash options, set during attaching. */
 #define DPAA2_RXH_DEFAULT	(RXH_IP_SRC | RXH_IP_DST | RXH_L4_B_0_1 | RXH_L4_B_2_3)
@@ -369,19 +359,43 @@ static struct dpni_stat {
 	int	 cnt;
 	char	*name;
 	char	*desc;
-} dpni_stat_sysctls[DPAA2_NI_STAT_SYSCTLS] = {
+} dpni_stat_sysctls[] = {
 	/* PAGE, COUNTER, NAME, DESCRIPTION */
-	{  0, 0, "in_all_frames",	"All accepted ingress frames" },
-	{  0, 1, "in_all_bytes",	"Bytes in all accepted ingress frames" },
-	{  0, 2, "in_multi_frames",	"Multicast accepted ingress frames" },
-	{  1, 0, "eg_all_frames",	"All egress frames transmitted" },
-	{  1, 1, "eg_all_bytes",	"Bytes in all frames transmitted" },
-	{  1, 2, "eg_multi_frames",	"Multicast egress frames transmitted" },
-	{  2, 0, "in_filtered_frames",	"All ingress frames discarded due to "
-	   				"filtering" },
-	{  2, 1, "in_discarded_frames",	"All frames discarded due to errors" },
-	{  2, 2, "in_nobuf_discards",	"Discards on ingress side due to buffer "
-	   				"depletion in DPNI buffer pools" },
+	{ 0, 0, "in_all_frames",	"All accepted ingress frames" },
+	{ 0, 1, "in_all_bytes",		"Bytes in all accepted ingress frames" },
+	{ 0, 2, "in_mc_frames",		"Multicast accepted ingress frames" },
+	{ 0, 3, "in_mc_bytes",		"Bytes in received multicast frames" },
+	{ 0, 4, "in_bc_frames",		"Broadcast accepted ingress frames" },
+	{ 0, 5, "in_bc_bytes",		"Bytes in broadcast multicast frames" },
+
+	{ 1, 0, "eg_all_frames",	"All egress frames transmitted" },
+	{ 1, 1, "eg_all_bytes",		"Bytes in all frames transmitted" },
+	{ 1, 2, "eg_mc_frames",		"Multicast egress frames transmitted" },
+	{ 1, 3, "eg_mc_bytes",		"Bytes in transmitted multicast frame" },
+	{ 1, 4, "eg_bc_frames",		"Broadcast egress frames transmitted" },
+	{ 1, 5, "eg_bc_bytes",		"Bytes in broadcast multicast frames" },
+
+	{ 2, 0, "in_filtered_frames",	"All ingress frames discarded due to filtering" },
+	{ 2, 1, "in_discarded_frames",	"All frames discarded due to errors" },
+	{ 2, 2, "in_nobuf_discards",	"Discards on ingress side due to buffer depletion in DPNI buffer pools" },
+	{ 2, 3, "eg_frames_disc",	"Frames discarded on transmit due to DPNI configuration and/or frame state" },
+	{ 2, 4, "eg_frames_tx",		"Frames that have been confirmed after transmission" },
+
+	/* XXX FIXME Page 3/4 can take a param as well not encoded here. */
+	/* XXX 3/0 and 3/1 have the same description in the manual?  Where's the difference? */
+	{ 3, 0, "bytes_dequeued",	"Cumulative count of the number of bytes dequeued" },
+	{ 3, 1, "frames_dequeued",	"Cumulative count of the number of frames dequeued" },
+	{ 3, 2, "bytes_enqueued_rej",	"Cumulative count of the number of bytes in all frames whose enqueue was rejected." },
+	{ 3, 3, "frames_enqueued_rej",	"Cumulative count of all frame enqueues rejected." },
+
+	{ 4, 0, "fames_rej_tc",		"Rejected frames in associated congestion point (valid if this TC has an associated congestion point)" },
+	{ 4, 1, "bytes_rej_tc",		"Rejected bytes in associated congestion point (valid if this TC has an associated congestion point)" },
+
+	{ 5, 0, "pol_red",		"Policer RED packet counter. 32bit value valid only when policer is enabled." },
+	{ 5, 1, "pol_yel",		"Policer YELLOW packet counter. 32bit value valid only when policer is enabled." },
+	{ 5, 2, "pol_gre",		"Policer GREEN packet counter. 32bit value valid only when policer is enabled." },
+	{ 5, 3, "pol_re_red",		"Policer recolored RED packet counter. 32bit value valid only when policer is enabled." },
+	{ 5, 4, "pol_re_yel",		"Policer recolored YELLOW packet counter. 32bit value valid only when policer is enabled." },
 };
 
 struct dpaa2_ni_rx_ctx {
@@ -421,18 +435,10 @@ static int dpaa2_ni_set_mac_addr(device_t);
 static int dpaa2_ni_set_hash(device_t, uint64_t);
 static int dpaa2_ni_set_dist_key(device_t, enum dpaa2_ni_dist_mode, uint64_t);
 
-/* Frame descriptor routines */
-static int dpaa2_ni_build_fd(struct dpaa2_ni_softc *, struct dpaa2_ni_tx_ring *,
-    struct dpaa2_buf *, bus_dma_segment_t *, int, struct dpaa2_fd *);
-static int dpaa2_ni_fd_err(struct dpaa2_fd *);
-static uint32_t dpaa2_ni_fd_data_len(struct dpaa2_fd *);
-static int dpaa2_ni_fd_format(struct dpaa2_fd *);
-static bool dpaa2_ni_fd_short_len(struct dpaa2_fd *);
-static int dpaa2_ni_fd_offset(struct dpaa2_fd *);
-
 /* Various subroutines */
 static int dpaa2_ni_cmp_api_version(struct dpaa2_ni_softc *, uint16_t, uint16_t);
 static int dpaa2_ni_prepare_key_cfg(struct dpkg_profile_cfg *, uint8_t *);
+static int dpaa2_ni_update_csum_flags(struct dpaa2_fd *, struct mbuf *);
 
 /* Network interface routines */
 static void dpaa2_ni_init(void *);
@@ -452,8 +458,8 @@ static void dpaa2_ni_media_status(if_t , struct ifmediareq *);
 static void dpaa2_ni_media_tick(void *);
 
 /* Tx/Rx routines. */
-static int dpaa2_ni_rx_cleanup(struct dpaa2_channel *);
-static int dpaa2_ni_tx_cleanup(struct dpaa2_channel *);
+static int dpaa2_ni_rx_cleanup(struct dpaa2_channel *, const int budget);
+static int dpaa2_ni_tx_cleanup(struct dpaa2_channel *, const int budget);
 static void dpaa2_ni_tx(struct dpaa2_ni_softc *, struct dpaa2_channel *,
     struct dpaa2_ni_tx_ring *, struct mbuf *);
 static void dpaa2_ni_cleanup_task(void *, int);
@@ -472,6 +478,12 @@ static int dpaa2_ni_tx_conf(struct dpaa2_channel *, struct dpaa2_ni_fq *,
 static int dpaa2_ni_collect_stats(SYSCTL_HANDLER_ARGS);
 static int dpaa2_ni_collect_buf_num(SYSCTL_HANDLER_ARGS);
 static int dpaa2_ni_collect_buf_free(SYSCTL_HANDLER_ARGS);
+static int dpaa2_ni_sysctl_link_state(SYSCTL_HANDLER_ARGS);
+static int dpaa2_ni_sysctl_handle_int(struct sysctl_req *req,
+    struct dpaa2_atomic *value);
+static int dpaa2_ni_sysctl_handle_clean_budget(SYSCTL_HANDLER_ARGS);
+static int dpaa2_ni_sysctl_handle_tx_budget(SYSCTL_HANDLER_ARGS);
+static int dpaa2_ni_sysctl_handle_rx_budget(SYSCTL_HANDLER_ARGS);
 
 static int
 dpaa2_ni_probe(device_t dev)
@@ -512,11 +524,15 @@ dpaa2_ni_attach(device_t dev)
 	sc->rx_sg_buf_frames = 0;
 	sc->rx_enq_rej_frames = 0;
 	sc->rx_ieoi_err_frames = 0;
+	sc->rx_other_err_frames = 0;
 	sc->tx_single_buf_frames = 0;
 	sc->tx_sg_frames = 0;
 
 	DPAA2_ATOMIC_XCHG(&sc->buf_num, 0);
 	DPAA2_ATOMIC_XCHG(&sc->buf_free, 0);
+	DPAA2_ATOMIC_XCHG(&sc->clean_budget, 128);
+	DPAA2_ATOMIC_XCHG(&sc->tx_budget, 256);
+	DPAA2_ATOMIC_XCHG(&sc->rx_budget, 512);
 
 	sc->rxd_dmat = NULL;
 	sc->qos_dmat = NULL;
@@ -559,7 +575,9 @@ dpaa2_ni_attach(device_t dev)
 	if_settransmitfn(ifp, dpaa2_ni_transmit);
 	if_setqflushfn(ifp, dpaa2_ni_qflush);
 
-	if_setcapabilities(ifp, IFCAP_VLAN_MTU | IFCAP_HWCSUM | IFCAP_JUMBO_MTU);
+	if_sethwassist(sc->ifp, DPAA2_CSUM_TX_OFFLOAD);
+	if_setcapabilities(ifp, IFCAP_VLAN_MTU | IFCAP_HWCSUM |
+	    IFCAP_HWCSUM_IPV6 | IFCAP_JUMBO_MTU);
 	if_setcapenable(ifp, if_getcapabilities(ifp));
 
 	DPAA2_CMD_INIT(&cmd);
@@ -625,6 +643,12 @@ dpaa2_ni_attach(device_t dev)
 	if (error) {
 		device_printf(dev, "%s: failed to setup sysctls: error=%d\n",
 		    __func__, error);
+		goto close_ni;
+	}
+	error = dpaa2_ni_setup_if_caps(sc);
+	if (error) {
+		device_printf(dev, "%s: failed to setup interface capabilities: "
+		    "error=%d\n", __func__, error);
 		goto close_ni;
 	}
 
@@ -1569,8 +1593,7 @@ dpaa2_ni_setup_msi(struct dpaa2_ni_softc *sc)
 static int
 dpaa2_ni_setup_if_caps(struct dpaa2_ni_softc *sc)
 {
-	const bool en_rxcsum = if_getcapenable(sc->ifp) & IFCAP_RXCSUM;
-	const bool en_txcsum = if_getcapenable(sc->ifp) & IFCAP_TXCSUM;
+	bool en_rxcsum, en_txcsum;
 	device_t pdev = device_get_parent(sc->dev);
 	device_t dev = sc->dev;
 	device_t child = dev;
@@ -1581,6 +1604,17 @@ dpaa2_ni_setup_if_caps(struct dpaa2_ni_softc *sc)
 	int error;
 
 	DPAA2_CMD_INIT(&cmd);
+
+	/*
+	 * XXX-DSL: DPAA2 allows to validate L3/L4 checksums on reception and/or
+	 *          generate L3/L4 checksums on transmission without
+	 *          differentiating between IPv4/v6, i.e. enable for both
+	 *          protocols if requested.
+	 */
+	en_rxcsum = if_getcapenable(sc->ifp) &
+	    (IFCAP_RXCSUM | IFCAP_RXCSUM_IPV6);
+	en_txcsum = if_getcapenable(sc->ifp) &
+	    (IFCAP_TXCSUM | IFCAP_TXCSUM_IPV6);
 
 	error = DPAA2_CMD_RC_OPEN(dev, child, &cmd, rcinfo->id, &rc_token);
 	if (error) {
@@ -1625,6 +1659,13 @@ dpaa2_ni_setup_if_caps(struct dpaa2_ni_softc *sc)
 		device_printf(dev, "%s: failed to %s L4 checksum generation\n",
 		    __func__, en_txcsum ? "enable" : "disable");
 		goto close_ni;
+	}
+
+	if (bootverbose) {
+		device_printf(dev, "%s: L3/L4 checksum validation %s\n",
+		    __func__, en_rxcsum ? "enabled" : "disabled");
+		device_printf(dev, "%s: L3/L4 checksum generation %s\n",
+		    __func__, en_txcsum ? "enabled" : "disabled");
 	}
 
 	(void)DPAA2_CMD_NI_CLOSE(dev, child, &cmd);
@@ -1714,7 +1755,7 @@ dpaa2_ni_setup_sysctls(struct dpaa2_ni_softc *sc)
 	node = SYSCTL_ADD_NODE(ctx, parent, OID_AUTO, "stats",
 	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "DPNI Statistics");
 	parent = SYSCTL_CHILDREN(node);
-	for (i = 0; i < DPAA2_NI_STAT_SYSCTLS; ++i) {
+	for (i = 0; i < nitems(dpni_stat_sysctls); ++i) {
 		SYSCTL_ADD_PROC(ctx, parent, i, dpni_stat_sysctls[i].name,
 		    CTLTYPE_U64 | CTLFLAG_RD, sc, 0, dpaa2_ni_collect_stats,
 		    "IU", dpni_stat_sysctls[i].desc);
@@ -1734,6 +1775,9 @@ dpaa2_ni_setup_sysctls(struct dpaa2_ni_softc *sc)
 	SYSCTL_ADD_UQUAD(ctx, parent, OID_AUTO, "rx_ieoi_err_frames",
 	    CTLFLAG_RD, &sc->rx_ieoi_err_frames,
 	    "QMan IEOI error");
+	SYSCTL_ADD_UQUAD(ctx, parent, OID_AUTO, "rx_other_err_frames",
+	    CTLFLAG_RD, &sc->rx_other_err_frames,
+	    "Other Rx frames with errors");
 	SYSCTL_ADD_UQUAD(ctx, parent, OID_AUTO, "tx_single_buf_frames",
 	    CTLFLAG_RD, &sc->tx_single_buf_frames,
 	    "Tx single buffer frames");
@@ -1748,9 +1792,8 @@ dpaa2_ni_setup_sysctls(struct dpaa2_ni_softc *sc)
 	    CTLTYPE_U32 | CTLFLAG_RD, sc, 0, dpaa2_ni_collect_buf_free,
 	    "IU", "number of free Rx buffers in the buffer pool");
 
- 	parent = SYSCTL_CHILDREN(device_get_sysctl_tree(sc->dev));
-
 	/* Add channels statistics. */
+	parent = SYSCTL_CHILDREN(device_get_sysctl_tree(sc->dev));
 	node = SYSCTL_ADD_NODE(ctx, parent, OID_AUTO, "channels",
 	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "DPNI Channels");
 	parent = SYSCTL_CHILDREN(node);
@@ -1768,6 +1811,30 @@ dpaa2_ni_setup_sysctls(struct dpaa2_ni_softc *sc)
 		    CTLFLAG_RD, &sc->channels[i]->tx_dropped,
 		    "Tx dropped counter");
 	}
+
+	/* Add Link debugging options. */
+	parent = SYSCTL_CHILDREN(device_get_sysctl_tree(sc->dev));
+	node = SYSCTL_ADD_PROC(ctx, parent, OID_AUTO, "link",
+	    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_MPSAFE,
+	    sc, 0, dpaa2_ni_sysctl_link_state,
+	    "A", "DPNI link state information");
+
+	/* Add configuration tunables */
+	parent = SYSCTL_CHILDREN(device_get_sysctl_tree(sc->dev));
+	node = SYSCTL_ADD_NODE(ctx, parent, OID_AUTO, "config",
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "configuration tunables");
+	parent = SYSCTL_CHILDREN(node);
+
+	/* Add cleanup budget tunables. */
+	SYSCTL_ADD_PROC(ctx, parent, OID_AUTO, "clean_budget",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_MPSAFE, sc, 0,
+	    dpaa2_ni_sysctl_handle_clean_budget, "d", "clean budget");
+	SYSCTL_ADD_PROC(ctx, parent, OID_AUTO, "tx_budget",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_MPSAFE, sc, 0,
+	    dpaa2_ni_sysctl_handle_tx_budget, "d", "tx budget");
+	SYSCTL_ADD_PROC(ctx, parent, OID_AUTO, "rx_budget",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_MPSAFE, sc, 0,
+	    dpaa2_ni_sysctl_handle_rx_budget, "d", "rx budget");
 
 	return (0);
 }
@@ -2446,6 +2513,17 @@ dpaa2_ni_init(void *arg)
 		    __func__, error);
 	}
 
+	error = dpaa2_ni_setup_if_flags(sc);
+	if (error) {
+		device_printf(dev, "%s: failed to update interface flags: "
+		    "error=%d\n", __func__, error);
+	}
+	error = dpaa2_ni_update_mac_filters(ifp);
+	if (error) {
+		device_printf(dev, "%s: failed to update MAC filters: "
+		    "error=%d\n", __func__, error);
+	}
+
 	DPNI_LOCK(sc);
 	/* Announce we are up and running and can queue packets. */
 	if_setdrvflagbits(ifp, IFF_DRV_RUNNING, IFF_DRV_OACTIVE);
@@ -2504,6 +2582,7 @@ dpaa2_ni_transmit(if_t ifp, struct mbuf *m)
 	ch = sc->channels[chidx];
 	error = buf_ring_enqueue(ch->xmit_br, m);
 	if (__predict_false(error != 0)) {
+		if_inc_counter(ifp, IFCOUNTER_OQDROPS, 1);
 		m_freem(m);
 	} else {
 		taskqueue_enqueue(ch->cleanup_tq, &ch->cleanup_task);
@@ -2574,13 +2653,13 @@ dpaa2_ni_ioctl(if_t ifp, u_long c, caddr_t data)
 		break;
 	case SIOCSIFCAP:
 		changed = if_getcapenable(ifp) ^ ifr->ifr_reqcap;
-		if (changed & IFCAP_HWCSUM) {
-			if ((ifr->ifr_reqcap & changed) & IFCAP_HWCSUM) {
-				if_setcapenablebit(ifp, IFCAP_HWCSUM, 0);
-			} else {
-				if_setcapenablebit(ifp, 0, IFCAP_HWCSUM);
-			}
+		if ((changed & (IFCAP_RXCSUM | IFCAP_RXCSUM_IPV6)) != 0)
+			if_togglecapenable(ifp, IFCAP_RXCSUM | IFCAP_RXCSUM_IPV6);
+		if ((changed & (IFCAP_TXCSUM | IFCAP_TXCSUM_IPV6)) != 0) {
+			if_togglecapenable(ifp, IFCAP_TXCSUM | IFCAP_TXCSUM_IPV6);
+			if_togglehwassist(ifp, DPAA2_CSUM_TX_OFFLOAD);
 		}
+
 		rc = dpaa2_ni_setup_if_caps(sc);
 		if (rc) {
 			printf("%s: failed to update iface capabilities: "
@@ -2821,18 +2900,21 @@ dpaa2_ni_cleanup_task(void *arg, int count)
 {
 	struct dpaa2_channel *ch = (struct dpaa2_channel *)arg;
 	struct dpaa2_ni_softc *sc = device_get_softc(ch->ni_dev);
+	const int clean_budget = DPAA2_ATOMIC_READ(&sc->clean_budget);
+	const int tx_budget = DPAA2_ATOMIC_READ(&sc->tx_budget);
+	const int rx_budget = DPAA2_ATOMIC_READ(&sc->rx_budget);
 	int error, rxc, txc;
 
-	for (int i = 0; i < DPAA2_CLEAN_BUDGET; i++) {
-		rxc  = dpaa2_ni_rx_cleanup(ch);
-		txc  = dpaa2_ni_tx_cleanup(ch);
+	for (int i = 0; i < clean_budget; i++) {
+		rxc = dpaa2_ni_rx_cleanup(ch, rx_budget);
+		txc = dpaa2_ni_tx_cleanup(ch, tx_budget);
 
 		if (__predict_false((if_getdrvflags(sc->ifp) &
 		    IFF_DRV_RUNNING) == 0)) {
 			return;
 		}
 
-		if ((txc != DPAA2_TX_BUDGET) && (rxc != DPAA2_RX_BUDGET)) {
+		if ((txc != tx_budget) && (rxc != rx_budget)) {
 			break;
 		}
 	}
@@ -2849,13 +2931,13 @@ dpaa2_ni_cleanup_task(void *arg, int count)
  * @brief Poll frames from a specific channel when CDAN is received.
  */
 static int
-dpaa2_ni_rx_cleanup(struct dpaa2_channel *ch)
+dpaa2_ni_rx_cleanup(struct dpaa2_channel *ch, const int budget)
 {
 	struct dpaa2_io_softc *iosc = device_get_softc(ch->io_dev);
 	struct dpaa2_swp *swp = iosc->swp;
 	struct dpaa2_ni_fq *fq;
 	struct dpaa2_buf *buf = &ch->store;
-	int budget = DPAA2_RX_BUDGET;
+	int budget_remaining = budget;
 	int error, consumed = 0;
 
 	do {
@@ -2873,18 +2955,18 @@ dpaa2_ni_rx_cleanup(struct dpaa2_channel *ch)
 			device_printf(ch->ni_dev, "%s: timeout to consume "
 			    "frames: chan_id=%d\n", __func__, ch->id);
 		}
-	} while (--budget);
+	} while (--budget_remaining );
 
-	return (DPAA2_RX_BUDGET - budget);
+	return (budget - budget_remaining);
 }
 
 static int
-dpaa2_ni_tx_cleanup(struct dpaa2_channel *ch)
+dpaa2_ni_tx_cleanup(struct dpaa2_channel *ch, const int budget)
 {
 	struct dpaa2_ni_softc *sc = device_get_softc(ch->ni_dev);
 	struct dpaa2_ni_tx_ring *tx = &ch->txc_queue.tx_rings[0];
 	struct mbuf *m = NULL;
-	int budget = DPAA2_TX_BUDGET;
+	int budget_remaining = budget;
 
 	do {
 		mtx_assert(&ch->xmit_mtx, MA_NOTOWNED);
@@ -2898,9 +2980,9 @@ dpaa2_ni_tx_cleanup(struct dpaa2_channel *ch)
 		} else {
 			dpaa2_ni_tx(sc, ch, tx, m);
 		}
-	} while (--budget);
+	} while (--budget_remaining);
 
-	return (DPAA2_TX_BUDGET - budget);
+	return (budget - budget_remaining);
 }
 
 static void
@@ -2915,6 +2997,8 @@ dpaa2_ni_tx(struct dpaa2_ni_softc *sc, struct dpaa2_channel *ch,
 	bus_dma_segment_t segs[DPAA2_TX_SEGLIMIT];
 	int rc, nsegs;
 	int error;
+	int len;
+	bool mcast;
 
 	mtx_assert(&tx->lock, MA_NOTOWNED);
 	mtx_lock(&tx->lock);
@@ -2929,6 +3013,8 @@ dpaa2_ni_tx(struct dpaa2_ni_softc *sc, struct dpaa2_channel *ch,
 		buf->m = m;
 		sgt = buf->sgt;
 	}
+	len = m->m_pkthdr.len;
+	mcast = (m->m_flags & M_MCAST) != 0;
 
 #if defined(INVARIANTS)
 	struct dpaa2_ni_tx_ring *btx = (struct dpaa2_ni_tx_ring *)buf->opt;
@@ -2946,6 +3032,7 @@ dpaa2_ni_tx(struct dpaa2_ni_softc *sc, struct dpaa2_channel *ch,
 		if (md == NULL) {
 			device_printf(dev, "%s: m_collapse() failed\n", __func__);
 			fq->chan->tx_dropped++;
+			if_inc_counter(sc->ifp, IFCOUNTER_OERRORS, 1);
 			goto err;
 		}
 
@@ -2956,17 +3043,23 @@ dpaa2_ni_tx(struct dpaa2_ni_softc *sc, struct dpaa2_channel *ch,
 			device_printf(dev, "%s: bus_dmamap_load_mbuf_sg() "
 			    "failed: error=%d\n", __func__, error);
 			fq->chan->tx_dropped++;
+			if_inc_counter(sc->ifp, IFCOUNTER_OERRORS, 1);
 			goto err;
 		}
 	}
 
-	error = dpaa2_ni_build_fd(sc, tx, buf, segs, nsegs, &fd);
+	error = dpaa2_fd_build(dev, sc->tx_data_off, buf, segs, nsegs, &fd);
 	if (__predict_false(error != 0)) {
 		device_printf(dev, "%s: failed to build frame descriptor: "
 		    "error=%d\n", __func__, error);
 		fq->chan->tx_dropped++;
+		if_inc_counter(sc->ifp, IFCOUNTER_OERRORS, 1);
 		goto err_unload;
-	}
+	} else
+		sc->tx_sg_frames++; /* for sysctl(9) */
+
+	bus_dmamap_sync(buf->dmat, buf->dmap, BUS_DMASYNC_PREWRITE);
+	bus_dmamap_sync(sgt->dmat, sgt->dmap, BUS_DMASYNC_PREWRITE);
 
 	/* TODO: Enqueue several frames in a single command */
 	for (int i = 0; i < DPAA2_NI_ENQUEUE_RETRIES; i++) {
@@ -2977,13 +3070,15 @@ dpaa2_ni_tx(struct dpaa2_ni_softc *sc, struct dpaa2_channel *ch,
 		}
 	}
 
-	bus_dmamap_sync(buf->dmat, buf->dmap, BUS_DMASYNC_PREWRITE);
-	bus_dmamap_sync(sgt->dmat, sgt->dmap, BUS_DMASYNC_PREWRITE);
-
 	if (rc != 1) {
 		fq->chan->tx_dropped++;
+		if_inc_counter(sc->ifp, IFCOUNTER_OERRORS, 1);
 		goto err_unload;
 	} else {
+		if (mcast)
+			if_inc_counter(sc->ifp, IFCOUNTER_OMCASTS, 1);
+		if_inc_counter(sc->ifp, IFCOUNTER_OPACKETS, 1);
+		if_inc_counter(sc->ifp, IFCOUNTER_OBYTES, len);
 		fq->chan->tx_frames++;
 	}
 	return;
@@ -3089,22 +3184,36 @@ dpaa2_ni_consume_frames(struct dpaa2_channel *chan, struct dpaa2_ni_fq **src,
  * @brief Receive frames.
  */
 static int
-dpaa2_ni_rx(struct dpaa2_channel *ch, struct dpaa2_ni_fq *fq, struct dpaa2_fd *fd,
-    struct dpaa2_ni_rx_ctx *ctx)
+dpaa2_ni_rx(struct dpaa2_channel *ch, struct dpaa2_ni_fq *fq,
+    struct dpaa2_fd *fd, struct dpaa2_ni_rx_ctx *ctx)
 {
-	bus_addr_t paddr = (bus_addr_t)fd->addr;
-	struct dpaa2_fa *fa = (struct dpaa2_fa *)PHYS_TO_DMAP(paddr);
-	struct dpaa2_buf *buf = fa->buf;
-	struct dpaa2_channel *bch = (struct dpaa2_channel *)buf->opt;
-	struct dpaa2_ni_softc *sc = device_get_softc(bch->ni_dev);
+	bus_addr_t paddr;
+	struct dpaa2_swa *swa;
+	struct dpaa2_buf *buf;
+	struct dpaa2_bufext_rx *bext;
+	struct dpaa2_channel *bch;
+	struct dpaa2_ni_softc *sc;
 	struct dpaa2_bp_softc *bpsc;
 	struct mbuf *m;
 	device_t bpdev;
 	bus_addr_t released[DPAA2_SWP_BUFS_PER_CMD];
 	void *buf_data;
 	int buf_len, error, released_n = 0;
+	bool update_csum_flags;
 
-	KASSERT(fa->magic == DPAA2_MAGIC, ("%s: wrong magic", __func__));
+	error = dpaa2_fa_get_swa(fd, &swa);
+	if (__predict_false(error != 0))
+		panic("%s: frame has no software annotation: error=%d",
+		    __func__, error);
+
+	paddr = (bus_addr_t)fd->addr;
+	buf = swa->buf;
+	bext = (struct dpaa2_bufext_rx *)buf->opt;
+	bch =  bext->ch;
+	sc = device_get_softc(bch->ni_dev);
+	update_csum_flags = true;
+
+	KASSERT(swa->magic == DPAA2_MAGIC, ("%s: wrong magic", __func__));
 	/*
 	 * NOTE: Current channel might not be the same as the "buffer" channel
 	 * and it's fine. It must not be NULL though.
@@ -3116,7 +3225,15 @@ dpaa2_ni_rx(struct dpaa2_channel *ch, struct dpaa2_ni_fq *fq, struct dpaa2_fd *f
 		    __func__, paddr, buf->paddr);
 	}
 
-	switch (dpaa2_ni_fd_err(fd)) {
+	switch (dpaa2_fd_err(fd)) {
+	case 0:
+		/*
+		 * FD[ERR] = 0 value is reserved to indicate that there is no
+		 * error encoded in this field. See 3.4.5 Error handling,
+		 * LX2160A DPAA2 Low-Level Hardware Reference Manual, Rev. 0,
+		 * 06/2020.
+		 */
+		break;
 	case 1: /* Enqueue rejected by QMan */
 		sc->rx_enq_rej_frames++;
 		break;
@@ -3124,9 +3241,11 @@ dpaa2_ni_rx(struct dpaa2_channel *ch, struct dpaa2_ni_fq *fq, struct dpaa2_fd *f
 		sc->rx_ieoi_err_frames++;
 		break;
 	default:
+		sc->rx_other_err_frames++;
 		break;
 	}
-	switch (dpaa2_ni_fd_format(fd)) {
+
+	switch (dpaa2_fd_format(fd)) {
 	case DPAA2_FD_SINGLE:
 		sc->rx_single_buf_frames++;
 		break;
@@ -3134,17 +3253,20 @@ dpaa2_ni_rx(struct dpaa2_channel *ch, struct dpaa2_ni_fq *fq, struct dpaa2_fd *f
 		sc->rx_sg_buf_frames++;
 		break;
 	default:
+		update_csum_flags = false;
 		break;
 	}
 
-	mtx_assert(&bch->dma_mtx, MA_NOTOWNED);
-	mtx_lock(&bch->dma_mtx);
+	mtx_assert(&bext->dma_mtx, MA_NOTOWNED);
+	mtx_lock(&bext->dma_mtx);
 
 	bus_dmamap_sync(buf->dmat, buf->dmap, BUS_DMASYNC_POSTREAD);
 	bus_dmamap_unload(buf->dmat, buf->dmap);
+
 	m = buf->m;
-	buf_len = dpaa2_ni_fd_data_len(fd);
-	buf_data = (uint8_t *)buf->vaddr + dpaa2_ni_fd_offset(fd);
+	buf_len = dpaa2_fd_data_len(fd);
+	buf_data = (uint8_t *)buf->vaddr + dpaa2_fd_offset(fd);
+
 	/* Prepare buffer to be re-cycled */
 	buf->m = NULL;
 	buf->paddr = 0;
@@ -3153,7 +3275,7 @@ dpaa2_ni_rx(struct dpaa2_channel *ch, struct dpaa2_ni_fq *fq, struct dpaa2_fd *f
 	buf->seg.ds_len = 0;
 	buf->nseg = 0;
 
-	mtx_unlock(&bch->dma_mtx);
+	mtx_unlock(&bext->dma_mtx);
 
 	m->m_flags |= M_PKTHDR;
 	m->m_data = buf_data;
@@ -3162,6 +3284,15 @@ dpaa2_ni_rx(struct dpaa2_channel *ch, struct dpaa2_ni_fq *fq, struct dpaa2_fd *f
 	m->m_pkthdr.rcvif = sc->ifp;
 	m->m_pkthdr.flowid = fq->fqid;
 	M_HASHTYPE_SET(m, M_HASHTYPE_OPAQUE);
+	if_inc_counter(sc->ifp, IFCOUNTER_IPACKETS, 1);
+
+	if (update_csum_flags && ((if_getcapenable(sc->ifp) & (IFCAP_RXCSUM |
+	    IFCAP_RXCSUM_IPV6)) != 0)) {
+		error = dpaa2_ni_update_csum_flags(fd, m);
+		if (error != 0)
+			device_printf(sc->dev, "%s: failed to update checksum "
+			    "flags: error=%d\n", __func__, error);
+	}
 
 	if (ctx->head == NULL) {
 		KASSERT(ctx->tail == NULL, ("%s: tail already given?", __func__));
@@ -3189,13 +3320,14 @@ dpaa2_ni_rx(struct dpaa2_channel *ch, struct dpaa2_ni_fq *fq, struct dpaa2_fd *f
 
 		for (int i = 0; i < ch->recycled_n; i++) {
 			buf = ch->recycled[i];
-			bch = (struct dpaa2_channel *)buf->opt;
+			bext = (struct dpaa2_bufext_rx *)buf->opt;
+			bch = bext->ch;
 
-			mtx_assert(&bch->dma_mtx, MA_NOTOWNED);
-			mtx_lock(&bch->dma_mtx);
+			mtx_assert(&bext->dma_mtx, MA_NOTOWNED);
+			mtx_lock(&bext->dma_mtx);
 			error = dpaa2_buf_seed_rxb(sc->dev, buf,
-			    DPAA2_RX_BUF_SIZE, &bch->dma_mtx);
-			mtx_unlock(&bch->dma_mtx);
+			    DPAA2_RX_BUF_SIZE);
+			mtx_unlock(&bext->dma_mtx);
 
 			if (__predict_false(error != 0)) {
 				/* TODO: What else to do with the buffer? */
@@ -3231,16 +3363,28 @@ static int
 dpaa2_ni_rx_err(struct dpaa2_channel *ch, struct dpaa2_ni_fq *fq,
     struct dpaa2_fd *fd)
 {
-	bus_addr_t paddr = (bus_addr_t)fd->addr;
-	struct dpaa2_fa *fa = (struct dpaa2_fa *)PHYS_TO_DMAP(paddr);
-	struct dpaa2_buf *buf = fa->buf;
-	struct dpaa2_channel *bch = (struct dpaa2_channel *)buf->opt;
-	struct dpaa2_ni_softc *sc = device_get_softc(bch->ni_dev);
+	bus_addr_t paddr;
+	struct dpaa2_swa *swa;
+	struct dpaa2_buf *buf;
+	struct dpaa2_bufext_rx *bext;
+	struct dpaa2_channel *bch;
+	struct dpaa2_ni_softc *sc;
 	device_t bpdev;
 	struct dpaa2_bp_softc *bpsc;
 	int error;
 
-	KASSERT(fa->magic == DPAA2_MAGIC, ("%s: wrong magic", __func__));
+	error = dpaa2_fa_get_swa(fd, &swa);
+	if (__predict_false(error != 0))
+		panic("%s: frame has no software annotation: error=%d",
+		    __func__, error);
+
+	paddr = (bus_addr_t)fd->addr;
+	buf = swa->buf;
+	bext = (struct dpaa2_bufext_rx *)buf->opt;
+	bch = bext->ch;
+	sc = device_get_softc(bch->ni_dev);
+
+	KASSERT(swa->magic == DPAA2_MAGIC, ("%s: wrong magic", __func__));
 	/*
 	 * NOTE: Current channel might not be the same as the "buffer" channel
 	 * and it's fine. It must not be NULL though.
@@ -3274,14 +3418,26 @@ static int
 dpaa2_ni_tx_conf(struct dpaa2_channel *ch, struct dpaa2_ni_fq *fq,
     struct dpaa2_fd *fd)
 {
-	bus_addr_t paddr = (bus_addr_t)fd->addr;
-	struct dpaa2_fa *fa = (struct dpaa2_fa *)PHYS_TO_DMAP(paddr);
-	struct dpaa2_buf *buf = fa->buf;
-	struct dpaa2_buf *sgt = buf->sgt;
-	struct dpaa2_ni_tx_ring *tx = (struct dpaa2_ni_tx_ring *)buf->opt;
-	struct dpaa2_channel *bch = tx->fq->chan;
+	bus_addr_t paddr;
+	struct dpaa2_swa *swa;
+	struct dpaa2_buf *buf;
+	struct dpaa2_buf *sgt;
+	struct dpaa2_ni_tx_ring *tx;
+	struct dpaa2_channel *bch;
+	int error;
 
-	KASSERT(fa->magic == DPAA2_MAGIC, ("%s: wrong magic", __func__));
+	error = dpaa2_fa_get_swa(fd, &swa);
+	if (__predict_false(error != 0))
+		panic("%s: frame has no software annotation: error=%d",
+		    __func__, error);
+
+	paddr = (bus_addr_t)fd->addr;
+	buf = swa->buf;
+	sgt = buf->sgt;
+	tx = (struct dpaa2_ni_tx_ring *)buf->opt;
+	bch = tx->fq->chan;
+
+	KASSERT(swa->magic == DPAA2_MAGIC, ("%s: wrong magic", __func__));
 	KASSERT(tx != NULL, ("%s: Tx ring is NULL", __func__));
 	KASSERT(sgt != NULL, ("%s: S/G table is NULL", __func__));
 	/*
@@ -3330,102 +3486,6 @@ dpaa2_ni_cmp_api_version(struct dpaa2_ni_softc *sc, uint16_t major,
 }
 
 /**
- * @brief Build a DPAA2 frame descriptor.
- */
-static int
-dpaa2_ni_build_fd(struct dpaa2_ni_softc *sc, struct dpaa2_ni_tx_ring *tx,
-    struct dpaa2_buf *buf, bus_dma_segment_t *segs, int nsegs, struct dpaa2_fd *fd)
-{
-	struct dpaa2_buf *sgt = buf->sgt;
-	struct dpaa2_sg_entry *sge;
-	struct dpaa2_fa *fa;
-	int i, error;
-
-	KASSERT(nsegs <= DPAA2_TX_SEGLIMIT, ("%s: too many segments", __func__));
-	KASSERT(buf->opt != NULL, ("%s: no Tx ring?", __func__));
-	KASSERT(sgt != NULL, ("%s: no S/G table?", __func__));
-	KASSERT(sgt->vaddr != NULL, ("%s: no S/G vaddr?", __func__));
-
-	memset(fd, 0, sizeof(*fd));
-
-	/* Populate and map S/G table */
-	if (__predict_true(nsegs <= DPAA2_TX_SEGLIMIT)) {
-		sge = (struct dpaa2_sg_entry *)sgt->vaddr + sc->tx_data_off;
-		for (i = 0; i < nsegs; i++) {
-			sge[i].addr = (uint64_t)segs[i].ds_addr;
-			sge[i].len = (uint32_t)segs[i].ds_len;
-			sge[i].offset_fmt = 0u;
-		}
-		sge[i-1].offset_fmt |= 0x8000u; /* set final entry flag */
-
-		KASSERT(sgt->paddr == 0, ("%s: paddr(%#jx) != 0", __func__,
-		    sgt->paddr));
-
-		error = bus_dmamap_load(sgt->dmat, sgt->dmap, sgt->vaddr,
-		    DPAA2_TX_SGT_SZ, dpaa2_dmamap_oneseg_cb, &sgt->paddr,
-		    BUS_DMA_NOWAIT);
-		if (__predict_false(error != 0)) {
-			device_printf(sc->dev, "%s: bus_dmamap_load() failed: "
-			    "error=%d\n", __func__, error);
-			return (error);
-		}
-
-		buf->paddr = sgt->paddr;
-		buf->vaddr = sgt->vaddr;
-		sc->tx_sg_frames++; /* for sysctl(9) */
-	} else {
-		return (EINVAL);
-	}
-
-	fa = (struct dpaa2_fa *)sgt->vaddr;
-	fa->magic = DPAA2_MAGIC;
-	fa->buf = buf;
-
-	fd->addr = buf->paddr;
-	fd->data_length = (uint32_t)buf->m->m_pkthdr.len;
-	fd->bpid_ivp_bmt = 0;
-	fd->offset_fmt_sl = 0x2000u | sc->tx_data_off;
-	fd->ctrl = 0x00800000u;
-
-	return (0);
-}
-
-static int
-dpaa2_ni_fd_err(struct dpaa2_fd *fd)
-{
-	return ((fd->ctrl >> DPAA2_NI_FD_ERR_SHIFT) & DPAA2_NI_FD_ERR_MASK);
-}
-
-static uint32_t
-dpaa2_ni_fd_data_len(struct dpaa2_fd *fd)
-{
-	if (dpaa2_ni_fd_short_len(fd)) {
-		return (fd->data_length & DPAA2_NI_FD_LEN_MASK);
-	}
-	return (fd->data_length);
-}
-
-static int
-dpaa2_ni_fd_format(struct dpaa2_fd *fd)
-{
-	return ((enum dpaa2_fd_format)((fd->offset_fmt_sl >>
-	    DPAA2_NI_FD_FMT_SHIFT) & DPAA2_NI_FD_FMT_MASK));
-}
-
-static bool
-dpaa2_ni_fd_short_len(struct dpaa2_fd *fd)
-{
-	return (((fd->offset_fmt_sl >> DPAA2_NI_FD_SL_SHIFT)
-	    & DPAA2_NI_FD_SL_MASK) == 1);
-}
-
-static int
-dpaa2_ni_fd_offset(struct dpaa2_fd *fd)
-{
-	return (fd->offset_fmt_sl & DPAA2_NI_FD_OFFSET_MASK);
-}
-
-/**
  * @brief Collect statistics of the network interface.
  */
 static int
@@ -3439,7 +3499,7 @@ dpaa2_ni_collect_stats(SYSCTL_HANDLER_ARGS)
 	struct dpaa2_devinfo *rcinfo = device_get_ivars(pdev);
 	struct dpaa2_devinfo *dinfo = device_get_ivars(dev);
 	struct dpaa2_cmd cmd;
-	uint64_t cnt[DPAA2_NI_STAT_COUNTERS];
+	uint64_t cnt[DPAA2_NI_STAT_COUNTERS_PER_PAGE];
 	uint64_t result = 0;
 	uint16_t rc_token, ni_token;
 	int error;
@@ -3472,6 +3532,71 @@ exit:
 }
 
 static int
+dpaa2_ni_sysctl_link_state(SYSCTL_HANDLER_ARGS)
+{
+	struct dpaa2_ni_softc *sc;
+	struct dpaa2_devinfo *rcinfo;
+	struct dpaa2_devinfo *dinfo;
+	struct dpaa2_cmd cmd;
+	struct dpaa2_ni_link_state ls;
+	struct sbuf s;
+	int error;
+	uint16_t rc_token, ni_token;
+
+	if (req->newptr)
+		return (EPERM);
+
+	sc = (struct dpaa2_ni_softc *)arg1;
+
+	rcinfo = device_get_ivars(device_get_parent(sc->dev));
+	dinfo = device_get_ivars(sc->dev);
+
+	DPAA2_CMD_INIT(&cmd);
+
+	error = DPAA2_CMD_RC_OPEN(sc->dev, sc->dev, &cmd, rcinfo->id, &rc_token);
+	if (error != 0) {
+		device_printf(sc->dev, "%s: failed to open resource container: "
+		    "id=%d, error=%d\n", __func__, rcinfo->id, error);
+		goto exit;
+	}
+	error = DPAA2_CMD_NI_OPEN(sc->dev, sc->dev, &cmd, dinfo->id, &ni_token);
+	if (error != 0) {
+		device_printf(sc->dev, "%s: failed to open network interface: "
+		    "id=%d, error=%d\n", __func__, dinfo->id, error);
+		goto close_rc;
+	}
+
+	error = DPAA2_CMD_NI_GET_LINK_STATE(sc->dev, sc->dev, &cmd, &ls);
+
+	(void)DPAA2_CMD_NI_CLOSE(sc->dev, sc->dev, DPAA2_CMD_TK(&cmd, ni_token));
+close_rc:
+	(void)DPAA2_CMD_RC_CLOSE(sc->dev, sc->dev, DPAA2_CMD_TK(&cmd, rc_token));
+
+	if (error != 0)
+		goto exit;
+
+#define	NI_LINK_STATE_OPTIONS_BITS					\
+    "\20\1AUTONEG\2HDX\3PAUSE\4ASYM_PAUSE"
+
+	sbuf_new_for_sysctl(&s, NULL, 1024, req);
+	sbuf_putc(&s, '\n');
+	sbuf_printf(&s, "Link State: %s (%s)\n", ls.link_up ? "UP" : "DOWN",
+	    ls.state_valid ? "VALID" : "IGNORE");
+	sbuf_printf(&s, "Link Rate: %ju\n", (uintmax_t)ls.rate);
+	sbuf_printf(&s, "Link Options: %b\n",
+	    (int)ls.options, NI_LINK_STATE_OPTIONS_BITS);
+	sbuf_printf(&s, "Link Speed Capabilities: %#018jx\n",
+	    (uintmax_t)ls.sup_speeds);
+	sbuf_printf(&s, "Link Speed Advertised for autoneg: %#018jx\n",
+	    (uintmax_t)ls.adv_speeds);
+	sbuf_finish(&s);
+	sbuf_delete(&s);
+
+exit:
+	return (error);
+}
+
+static int
 dpaa2_ni_collect_buf_num(SYSCTL_HANDLER_ARGS)
 {
 	struct dpaa2_ni_softc *sc = (struct dpaa2_ni_softc *) arg1;
@@ -3487,6 +3612,53 @@ dpaa2_ni_collect_buf_free(SYSCTL_HANDLER_ARGS)
 	uint32_t buf_free = DPAA2_ATOMIC_READ(&sc->buf_free);
 
 	return (sysctl_handle_32(oidp, &buf_free, 0, req));
+}
+
+/*
+ * Common sysctl handler function for integer values stored as dpaa2_atomic.
+ * Reads the current value from the atomic object and writes the new one to it.
+ */
+static inline int
+dpaa2_ni_sysctl_handle_int(struct sysctl_req *req, struct dpaa2_atomic *value)
+{
+	int error, tmp;
+
+	tmp = DPAA2_ATOMIC_READ(value);
+	error = SYSCTL_OUT(req, &tmp, sizeof(tmp));
+	if (error || req->newptr == NULL)
+		return error;
+	error = SYSCTL_IN(req, &tmp, sizeof(tmp));
+	if (error)
+		return error;
+	if ((tmp < DPAA2_CLEAN_BUDGET_MIN) || (tmp > DPAA2_CLEAN_BUDGET_MAX))
+		return EINVAL;
+	DPAA2_ATOMIC_XCHG(value, tmp);
+
+	return 0;
+}
+
+static int
+dpaa2_ni_sysctl_handle_clean_budget(SYSCTL_HANDLER_ARGS)
+{
+	struct dpaa2_ni_softc *sc = (struct dpaa2_ni_softc *)arg1;
+
+	return dpaa2_ni_sysctl_handle_int(req, &sc->clean_budget);
+}
+
+static int
+dpaa2_ni_sysctl_handle_tx_budget(SYSCTL_HANDLER_ARGS)
+{
+	struct dpaa2_ni_softc *sc = (struct dpaa2_ni_softc *)arg1;
+
+	return dpaa2_ni_sysctl_handle_int(req, &sc->tx_budget);
+}
+
+static int
+dpaa2_ni_sysctl_handle_rx_budget(SYSCTL_HANDLER_ARGS)
+{
+	struct dpaa2_ni_softc *sc = (struct dpaa2_ni_softc *)arg1;
+
+	return dpaa2_ni_sysctl_handle_int(req, &sc->rx_budget);
 }
 
 static int
@@ -3676,6 +3848,51 @@ dpaa2_ni_prepare_key_cfg(struct dpkg_profile_cfg *cfg, uint8_t *key_cfg_buf)
 	}
 
 	return (0);
+}
+
+static int
+dpaa2_ni_update_csum_flags(struct dpaa2_fd *fd, struct mbuf *m)
+{
+	struct dpaa2_hwa_fas fas;
+	uint32_t status;
+	int rc;
+
+	if (__predict_false((dpaa2_fd_get_frc(fd) & DPAA2_FD_FRC_FASV)) == 0u)
+		return (EINVAL);
+
+	/*
+	 * XXX-DSL: Frame context of the frame descriptor (FD[FRC]) contains
+	 *          an Accelerator ID in the MSbits on some SoCs (e.g. LS1088A),
+	 *          but a frame ParseSummary on the others (e.g. LX2160A).
+	 *          However, frame annotation valid bits seem to be at the
+	 *          same offsets. This is the reason why different accelerators
+	 *          are treated the same here. It isn't clear whether this is
+	 *          a hardware limitation of the SoCs, version of the firmware
+	 *          or DPL configuration.
+	 */
+
+	rc = dpaa2_fa_get_fas(fd, &fas);
+	if (rc != 0)
+		return (rc);
+
+	status = le32toh(fas.status);
+	rc = 0;
+
+	/* L3 */
+	if ((status & DPAA2_FAS_L3CV) != 0) {
+		m->m_pkthdr.csum_flags |= CSUM_L3_CALC;
+		if ((status & DPAA2_FAS_L3CE) == 0)
+			m->m_pkthdr.csum_flags |= CSUM_L3_VALID;
+	}
+	/* L4 */
+	if ((status & DPAA2_FAS_L4CV) != 0) {
+		m->m_pkthdr.csum_flags |= CSUM_L4_CALC;
+		m->m_pkthdr.csum_data = 0xffff;
+		if ((status & DPAA2_FAS_L4CE) == 0)
+			m->m_pkthdr.csum_flags |= CSUM_L4_VALID;
+	}
+
+	return (rc);
 }
 
 static device_method_t dpaa2_ni_methods[] = {

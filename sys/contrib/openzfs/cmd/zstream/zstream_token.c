@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -31,26 +21,18 @@
  * Copyright (c) 2020 by Datto Inc. All rights reserved.
  */
 
-#include <ctype.h>
 #include <libnvpair.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <stddef.h>
-
 #include <libzfs.h>
-#include <libzfs_core.h>
+#include <stdio.h>
+#include <sys/nvpair.h>
 
-#include <sys/dmu.h>
-#include <sys/zfs_ioctl.h>
 #include "zstream.h"
+#include "zstream_util.h"
 
 int
 zstream_do_token(int argc, char *argv[])
 {
 	char *resume_token = NULL;
-	libzfs_handle_t *hdl;
 
 	if (argc < 2) {
 		(void) fprintf(stderr, "Need to pass the resume token\n");
@@ -58,26 +40,21 @@ zstream_do_token(int argc, char *argv[])
 	}
 
 	resume_token = argv[1];
-
-	if ((hdl = libzfs_init()) == NULL) {
-		(void) fprintf(stderr, "%s\n", libzfs_error_init(errno));
-		return (1);
-	}
+	require_libzfs();
 
 	nvlist_t *resume_nvl =
-	    zfs_send_resume_token_to_nvlist(hdl, resume_token);
+	    zfs_send_resume_token_to_nvlist(libzfs_handle, resume_token);
 
 	if (resume_nvl == NULL) {
 		(void) fprintf(stderr,
 		    "Unable to parse resume token: %s\n",
-		    libzfs_error_description(hdl));
-		libzfs_fini(hdl);
+		    libzfs_error_description(libzfs_handle));
+		release_libzfs();
 		return (1);
 	}
 
 	dump_nvlist(resume_nvl, 5);
 	nvlist_free(resume_nvl);
-
-	libzfs_fini(hdl);
+	release_libzfs();
 	return (0);
 }

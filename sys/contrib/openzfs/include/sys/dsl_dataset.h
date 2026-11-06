@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -40,6 +30,7 @@
 #include <sys/zfs_refcount.h>
 #include <sys/rrwlock.h>
 #include <sys/dsl_crypt.h>
+#include <sys/wmsum.h>
 #include <zfeature_common.h>
 
 #ifdef	__cplusplus
@@ -130,6 +121,15 @@ struct zfs_bookmark_phys;
 #define	DS_FIELD_IVSET_GUID	"com.datto:ivset_guid"
 
 /*
+ * This field, when present, marks a snapshot that was received raw. A later
+ * non-raw incremental receive onto such a snapshot re-stamps its ivset guid
+ * and so diverges it from the sending lineage, which makes any subsequent raw
+ * incremental fail with an IV set guid mismatch; the field lets the receive
+ * warn about that as it happens instead of only failing later (see #8758).
+ */
+#define	DS_FIELD_RAW_RECEIVED	"org.openzfs:raw_received"
+
+/*
  * DS_FLAG_CI_DATASET is set if the dataset contains a file system whose
  * name lookups should be performed case-insensitively.
  */
@@ -213,6 +213,21 @@ typedef struct dsl_dataset {
 	/* protected by lock on pool's dp_dirty_datasets list */
 	txg_node_t ds_dirty_link;
 	list_node_t ds_synced_link;
+
+	/*
+	 * Space accounting deltas of this txg, applied by
+	 * dsl_dataset_apply_deltas().  The first group counts blocks
+	 * referenced only by this dataset, the second blocks moved to the
+	 * deadlist, i.e. now owned by ds_prev.  Non-snapshots only.
+	 */
+	wmsum_t ds_unique_delta;
+	wmsum_t ds_unique_comp_delta;
+	wmsum_t ds_unique_uncomp_delta;
+	wmsum_t ds_dead_delta;
+	wmsum_t ds_dead_comp_delta;
+	wmsum_t ds_dead_uncomp_delta;
+	wmsum_t ds_snap_xfer_delta;
+	wmsum_t ds_prev_unique_delta;
 
 	/*
 	 * ds_phys->ds_<accounting> is also protected by ds_lock.
@@ -395,6 +410,7 @@ void dsl_dataset_block_born(dsl_dataset_t *ds, const blkptr_t *bp,
     dmu_tx_t *tx);
 int dsl_dataset_block_kill(dsl_dataset_t *ds, const blkptr_t *bp,
     dmu_tx_t *tx, boolean_t async);
+void dsl_dataset_apply_deltas(dsl_dataset_t *ds, dmu_tx_t *tx);
 void dsl_dataset_block_remapped(dsl_dataset_t *ds, uint64_t vdev,
     uint64_t offset, uint64_t size, uint64_t birth, dmu_tx_t *tx);
 int dsl_dataset_snap_lookup(dsl_dataset_t *ds, const char *name,
@@ -468,7 +484,7 @@ void dsl_dataset_clone_swap_sync_impl(dsl_dataset_t *clone,
 int dsl_dataset_snapshot_check_impl(dsl_dataset_t *ds, const char *snapname,
     dmu_tx_t *tx, boolean_t recv, uint64_t cnt, cred_t *cr);
 void dsl_dataset_snapshot_sync_impl(dsl_dataset_t *ds, const char *snapname,
-    dmu_tx_t *tx);
+    uint64_t crtime, dmu_tx_t *tx);
 
 void dsl_dataset_remove_from_next_clones(dsl_dataset_t *ds, uint64_t obj,
     dmu_tx_t *tx);

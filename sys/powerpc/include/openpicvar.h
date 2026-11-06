@@ -28,12 +28,15 @@
 #ifndef	_POWERPC_OPENPICVAR_H_
 #define	_POWERPC_OPENPICVAR_H_
 
+#include <sys/kobj.h>
+
 #define OPENPIC_DEVSTR	"OpenPIC Interrupt Controller"
 
-#define OPENPIC_IRQMAX	256	/* h/w allows more */
+#define OPENPIC_IRQMAX	512	/* h/w allows more */
 
 #define	OPENPIC_QUIRK_SINGLE_BIND	1	/* Bind interrupts to only 1 CPU */
 #define	OPENPIC_QUIRK_HIDDEN_IRQS	2	/* May have IRQs beyond FRR[NIRQ] */
+#define	OPENPIC_QUIRK_WHOAMI_WORKS	4	/* WHOAMI register is present */
 
 /* Names match the macros in openpicreg.h. */
 struct openpic_timer {
@@ -57,6 +60,7 @@ struct openpic_softc {
 	u_int		sc_nirq;
 	int		sc_psim;
 	u_int		sc_quirks;
+	uint32_t	sc_vec_mask;
 
 	/* Saved states. */
 	uint32_t		sc_saved_config;
@@ -75,16 +79,11 @@ int	openpic_common_attach(device_t, uint32_t);
 /*
  * PIC interface.
  */
-void	openpic_bind(device_t dev, u_int irq, cpuset_t cpumask, void **);
 void	openpic_config(device_t, u_int, enum intr_trigger, enum intr_polarity);
-void	openpic_dispatch(device_t, struct trapframe *);
 void	openpic_enable(device_t, u_int, u_int, void **);
 void	openpic_eoi(device_t, u_int, void *);
-void	openpic_ipi(device_t, u_int);
-void	openpic_mask(device_t, u_int, void *);
 void	openpic_unmask(device_t, u_int, void *);
 
-int	openpic_suspend(device_t dev);
-int	openpic_resume(device_t dev);
+DECLARE_CLASS(openpic_class);
 
 #endif /* _POWERPC_OPENPICVAR_H_ */

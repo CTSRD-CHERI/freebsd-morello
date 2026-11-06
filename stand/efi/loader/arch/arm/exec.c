@@ -69,9 +69,6 @@ __elfN(arm_exec)(struct preloaded_file *fp)
 
 	efi_time_fini();
 
-	entry = efi_translate(e->e_entry);
-
-	printf("Kernel entry at %p...\n", entry);
 	printf("Kernel args: %s\n", fp->f_args);
 
 	/*
@@ -85,13 +82,15 @@ __elfN(arm_exec)(struct preloaded_file *fp)
 		return (error);
 	}
 
+	entry = efi_translate(e->e_entry);
+
 	(*entry)((void *)modulep);
 	panic("exec returned");
 }
 
 static struct file_format arm_elf = {
-	__elfN(arm_load),
-	__elfN(arm_exec)
+	.l_load = __elfN(arm_load),
+	.l_exec = __elfN(arm_exec)
 };
 
 struct file_format *file_formats[] = {

@@ -29,12 +29,16 @@ basic_head()
 {
 	atf_set descr 'Basic jail test'
 	atf_set require.user root
+	atf_set require.progs jail
 }
 
 basic_body()
 {
 	# Create the jail
 	atf_check -s exit:0 -o ignore jail -c name=basejail persist ip4.addr=192.0.1.1
+	# Create a second jail to test `jls -n` in the process for breakage when
+	# handling some of the non-trivial parameter types.
+	atf_check -s exit:0 -o ignore jail -c name=basejail2 persist ip4.addr=192.0.1.2
 	# Check output of jls
 	atf_check -s exit:0 -o ignore jls
 	atf_check -s exit:0 -o ignore jls -v
@@ -52,7 +56,7 @@ basic_body()
 
 basic_cleanup()
 {
-	jail -r basejail
+	jail -r basejail basejail2
 }
 
 atf_test_case "list" "cleanup"
@@ -60,6 +64,7 @@ list_head()
 {
 	atf_set descr 'Specify some jail parameters as lists'
 	atf_set require.user root
+	atf_set require.progs jail
 }
 
 list_body()
@@ -89,6 +94,7 @@ nested_head()
 {
 	atf_set descr 'Hierarchical jails test'
 	atf_set require.user root
+	atf_set require.progs jail
 }
 
 nested_body()
@@ -129,6 +135,7 @@ commands_head()
 {
 	atf_set descr 'Commands jail test'
 	atf_set require.user root
+	atf_set require.progs jail
 }
 
 commands_body()
@@ -170,6 +177,7 @@ jid_name_set_head()
 {
 	atf_set descr 'Test that one can set both the jid and name in a config file'
 	atf_set require.user root
+	atf_set require.progs jail
 }
 
 find_unused_jid()
@@ -186,11 +194,12 @@ find_unused_jid()
 			atf_skip "System has too many jail, cannot find free slot"
 		fi
 
-		jid=$((jid + 1))
+		: $(( jid += 1 ))
 	done
 
 	echo "$jid" | tee -a jails.lst
 }
+
 clean_jails()
 {
 	if [ ! -s jails.lst ]; then
@@ -198,7 +207,7 @@ clean_jails()
 	fi
 
 	while read jail; do
-		if jls -e -j "$jail"; then
+		if jls -c -j "$jail"; then
 			jail -r "$jail"
 		fi
 	done < jails.lst
@@ -211,10 +220,23 @@ jid_name_set_body()
 	echo "basejail" >> jails.lst
 	echo "$jid { name = basejail; persist; }" > jail.conf
 	atf_check -o match:"$jid: created" jail -f jail.conf -c "$jid"
+	# Confirm that we didn't override the explicitly-set name with the jid
+	# as the name.
+	atf_check -o match:"basejail" jls -j "$jid" name
+	atf_check -o match:"$jid: removed" jail -f jail.conf -r "$jid"
+
+	echo "$jid { host.hostname = \"\${name}\"; persist; }" > jail.conf
+	atf_check -o match:"$jid: created" jail -f jail.conf -c "$jid"
+	# Confirm that ${name} expanded and expanded correctly to the
+	# jid-implied name.
+	atf_check -o match:"$jid" jls -j "$jid" host.hostname
 	atf_check -o match:"$jid: removed" jail -f jail.conf -r "$jid"
 
 	echo "basejail { jid = $jid; persist; }" > jail.conf
 	atf_check -o match:"basejail: created" jail -f jail.conf -c basejail
+	# Confirm that our jid assigment in the definition worked out and we
+	# did in-fact create the jail there.
+	atf_check -o match:"$jid" jls -j "basejail" jid
 	atf_check -o match:"basejail: removed" jail -f jail.conf -r basejail
 }
 
@@ -228,6 +250,7 @@ param_consistency_head()
 {
 	atf_set descr 'Test for consistency in jid/name params being set implicitly'
 	atf_set require.user root
+	atf_set require.progs jail
 }
 
 param_consistency_body()
@@ -293,6 +316,25 @@ param_consistency_cleanup()
 	fi
 }
 
+atf_test_case "setaudit"
+setaudit_head()
+{
+	atf_set descr 'Test that setaudit works in a jail when configured with allow.setaudit'
+	atf_set require.user root
+	atf_set require.progs setaudit jail
+}
+
+setaudit_body()
+{
+	# Try to modify the audit mask within a jail without
+	# allow.setaudit configured.
+	atf_check -s not-exit:0 -o empty -e not-empty jail -c name=setaudit_jail \
+	    command=setaudit -m fr ls /
+	# The command should succeed if allow.setaudit is configured.
+	atf_check -s exit:0 -o ignore -e empty jail -c name=setaudit_jail \
+	    allow.setaudit command=setaudit -m fr ls /
+}
+
 atf_init_test_cases()
 {
 	atf_add_test_case "basic"
@@ -301,4 +343,5 @@ atf_init_test_cases()
 	atf_add_test_case "commands"
 	atf_add_test_case "jid_name_set"
 	atf_add_test_case "param_consistency"
+	atf_add_test_case "setaudit"
 }

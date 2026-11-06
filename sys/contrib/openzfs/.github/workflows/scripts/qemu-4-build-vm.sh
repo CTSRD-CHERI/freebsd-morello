@@ -5,12 +5,15 @@
 #
 # Usage:
 #
-#       qemu-4-build-vm.sh OS [--enable-debug][--dkms][--poweroff]
-#           [--release][--repo][--tarball]
+#       qemu-4-build-vm.sh OS [--custom-branch BRANCH][--enable-debug][--dkms]
+#               [--patch-level NUM][--poweroff][--release][--repo][--tarball]
 #
 # OS:           OS name like 'fedora41'
+# --custom-branch: When building packages, checkout this version of ZFS to
+#                  build, but use the current CI scripts to do it.
 # --enable-debug:  Build RPMs with '--enable-debug' (for testing)
 # --dkms:       Build DKMS RPMs as well
+# --patch-level NUM:    Use a custom patch level number for packages.
 # --poweroff:   Power-off the VM after building
 # --release     Build zfs-release*.rpm as well
 # --repo        After building everything, copy RPMs into /tmp/repo
@@ -21,18 +24,43 @@
 
 ENABLE_DEBUG=""
 DKMS=""
+PATCH_LEVEL=""
 POWEROFF=""
 RELEASE=""
 REPO=""
 TARBALL=""
+CUSTOM_BRANCH=""
+PREV_BRANCH=""
+
+cleanup() {
+  if [ -n "$PREV_BRANCH" ] ; then
+    git checkout $PREV_BRANCH
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case $1 in
+    --custom-branch)
+      CUSTOM_BRANCH="$2"
+      # If the user specifies a custom tag/branch to build, and the build
+      # fails, we want to make sure our workflow scripts are restored to the
+      # current (more modern) versions so the subsequent CI steps use those.
+      shift
+      shift
+      PREV_BRANCH=$(git branch --show-current)
+      trap 'cleanup' ERR
+      ;;
     --enable-debug)
       ENABLE_DEBUG=1
       shift
       ;;
     --dkms)
       DKMS=1
+      shift
+      ;;
+    --patch-level)
+      PATCH_LEVEL=$2
+      shift
       shift
       ;;
     --poweroff)
@@ -174,7 +202,7 @@ function freebsd() {
   echo "##[endgroup]"
 
   echo "##[group]Build"
-  run gmake -j$(sysctl -n hw.ncpu)
+  run gmake -j$(nproc)
   echo "##[endgroup]"
 
   echo "##[group]Install"
@@ -214,6 +242,10 @@ function rpm_build_and_install() {
   echo "##[group]Autogen.sh"
   run ./autogen.sh
   echo "##[endgroup]"
+
+  if [ -n "$PATCH_LEVEL" ] ; then
+    sed -i -E 's/(Release:\s+)1/\1'$PATCH_LEVEL'/g' META
+  fi
 
   echo "##[group]Configure"
   run ./configure --enable-debuginfo $extra
@@ -326,19 +358,39 @@ fi
 #
 # rhel8.10
 # almalinux9.5
-# fedora42
+# fedora44
 source /etc/os-release
-sudo hostname "$ID$VERSION_ID"
+ if which hostnamectl &> /dev/null ; then
+  # Fedora 42+ use hostnamectl
+  sudo hostnamectl set-hostname "$ID$VERSION_ID"
+  sudo hostnamectl set-hostname --pretty "$ID$VERSION_ID"
+else
+  sudo hostname "$ID$VERSION_ID"
+fi
 
 # save some sysinfo
 uname -a > /var/tmp/uname.txt
 
-cd $HOME/zfs
+# Check if we're running this script from within a VM or on the runner itself.
+# Most of the time we will be running in a VM, but the ARM builder actually
+# runs this script on the runner.  If we happen to be running on the ARM
+# runner, we will start in the ZFS source directory.  If we're running on a VM
+# then we'll just start in our home directory, and will need to 'cd' into our
+# source directory.
+if [ ! -e META ] ; then
+  cd $HOME/zfs
+fi
+
 export PATH="$PATH:/sbin:/usr/sbin:/usr/local/sbin"
 
 extra=""
 if [ -n "$ENABLE_DEBUG" ] ; then
   extra="--enable-debug"
+fi
+
+if [ -n "$CUSTOM_BRANCH" ] ; then
+  git fetch --unshallow
+  git checkout $CUSTOM_BRANCH
 fi
 
 # build
@@ -348,13 +400,12 @@ case "$OS" in
     ;;
   alma*|centos*)
     rpm_build_and_install "--with-spec=redhat $extra"
+    if [ -n "$TARBALL" ] ; then
+        build_tarball
+    fi
     ;;
   fedora*)
     rpm_build_and_install "$extra"
-
-    # Historically, we've always built the release tarballs on Fedora, since
-    # there was one instance long ago where we built them on CentOS 7, and they
-    # didn't work correctly for everyone.
     if [ -n "$TARBALL" ] ; then
         build_tarball
     fi
@@ -367,6 +418,8 @@ case "$OS" in
     ;;
 esac
 
+git checkout $PREV_BRANCH
+PREV_BRANCH=""
 
 # building the zfs module was ok
 echo 0 > /var/tmp/build-exitcode.txt

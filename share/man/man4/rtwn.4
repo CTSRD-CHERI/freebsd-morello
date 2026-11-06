@@ -19,7 +19,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd November 10, 2024
+.Dd October 22, 2026
 .Dt RTWN 4
 .Os
 .Sh NAME
@@ -89,9 +89,13 @@ driver supports USB and PCI devices with the following chipsets:
 .It
 Realtek 802.11n wireless 8188e (RTL8188E)
 .It
+Realtek 802.11n wireless 8188f (RTL8188F)
+.It
 Realtek 802.11n wireless 8192c (RTL8192C)
 .It
 Realtek 802.11n wireless 8192e (RTL8192E)
+.It
+Realtek 802.11n wireless 8723b (RTL8723B)
 .It
 Realtek 802.11ac wireless 8812a (RTL8812A)
 .It
@@ -117,11 +121,13 @@ which are loaded when an interface is brought up:
 .Bl -tag -width Ds -offset indent -compact
 .It Pa /boot/kernel/rtwn-rtl8188eefw.ko
 .It Pa /boot/kernel/rtwn-rtl8188eufw.ko
+.It Pa /boot/kernel/rtwn-rtl8188fufw.ko
 .It Pa /boot/kernel/rtwn-rtl8192cfwE_B.ko
 .It Pa /boot/kernel/rtwn-rtl8192cfwE.ko
 .It Pa /boot/kernel/rtwn-rtl8192cfwT.ko
 .It Pa /boot/kernel/rtwn-rtl8192cfwU.ko
 .It Pa /boot/kernel/rtwn-rtl8192eufw.ko
+.It Pa /boot/kernel/rtwn-rtl8723bufw.ko
 .It Pa /boot/kernel/rtwn-rtl8812aufw.ko
 .It Pa /boot/kernel/rtwn-rtl8821aufw.ko
 .El
@@ -257,7 +263,7 @@ driver was initially written by
 .An -nosplit
 .An Stefan Sperling Aq Mt stsp@openbsd.org
 and ported by
-.An Kevin Lo Aq Mt kevlo@freebsd.org .
+.An Kevin Lo Aq Mt kevlo@FreeBSD.org .
 It was based on the
 .Cm urtwn
 driver written by
@@ -266,3 +272,6 @@ driver written by
 The
 .Nm
 driver currently does not implement firmware-based rate control.
+The RTL8723BU seems to depend on some firmware commands for antenna
+setup.
+Hence, it does not work without firmware.

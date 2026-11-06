@@ -33,7 +33,9 @@
 #include <sys/param.h>
 #include <sys/socket.h>
 #include <sys/sysctl.h>
+#include <sys/systm.h>
 #include <sys/taskqueue.h>
+#include <sys/callout.h>
 #include <sys/bitstring.h>
 
 #include <machine/bus.h>
@@ -44,9 +46,12 @@
 #include <net/iflib.h>
 #include <linux/types.h>
 
+#include "bnxt_compat.h"
 #include "hsi_struct_def.h"
 #include "bnxt_dcb.h"
 #include "bnxt_auxbus_compat.h"
+#include "bnxt_sriov.h"
+#include "bnxt_log.h"
 
 #define DFLT_HWRM_CMD_TIMEOUT		500
 
@@ -95,9 +100,18 @@
 #define NETXTREME_C_VF1	0x16cb
 #define NETXTREME_C_VF2	0x16e1
 #define NETXTREME_C_VF3	0x16e5
-#define NETXTREME_E_VF1	0x16c1
-#define NETXTREME_E_VF2	0x16d3
-#define NETXTREME_E_VF3	0x16dc
+
+#define NETXTREME_E_VF1	0x1606
+#define NETXTREME_E_VF2	0x1609
+#define NETXTREME_E_VF3	0x16c1
+#define NETXTREME_E_VF4	0x16d3
+#define NETXTREME_E_VF5	0x16dc
+
+#define NETXTREME_E_P5_VF1	0x1806
+#define NETXTREME_E_P5_VF2	0x1807
+#define NETXTREME_E_P5_VF_HV1	0x1808
+#define NETXTREME_E_P5_VF_HV2	0x1809
+#define E_P7_VF	0x1819
 
 #define EVENT_DATA1_RESET_NOTIFY_FATAL(data1)				\
 	(((data1) &							\
@@ -226,6 +240,11 @@
 
 #define BNXT_MAX_NUM_QUEUES (BNXT_MAX_L2_QUEUES + BNXT_ROCE_IRQ_COUNT)
 
+#define BNXT_DEBUG(dev, fmt, ...) do { \
+	if (bootverbose) \
+		device_printf(dev, "" fmt, ##__VA_ARGS__); \
+} while (0)
+
 /* Completion related defines */
 #define CMP_VALID(cmp, v_bit) \
 	((!!(((struct cmpl_base *)(cmp))->info3_v & htole32(CMPL_BASE_V))) == !!(v_bit) )
@@ -310,6 +329,7 @@
 	(offsetof(struct tx_port_stats_ext, counter) / 8)
 
 extern const char bnxt_driver_version[];
+extern const uint16_t bnxt_tx_lhint[];
 typedef void (*bnxt_doorbell_tx)(void *, uint16_t idx);
 typedef void (*bnxt_doorbell_rx)(void *, uint16_t idx);
 typedef void (*bnxt_doorbell_rx_cq)(void *, bool);
@@ -384,6 +404,9 @@ struct bnxt_bar_info {
 	int			rid;
 };
 
+#define BNXT_HWRM_BAR_IDX	0
+#define BNXT_DOORBELL_BAR_IDX	2
+
 struct bnxt_flow_ctrl {
 	bool rx;
 	bool tx;
@@ -455,6 +478,19 @@ struct bnxt_link_info {
 	uint16_t	req_link_speed;
 	uint8_t		module_status;
 	struct hwrm_port_phy_qcfg_output    phy_qcfg_resp;
+	uint8_t		active_lanes;
+};
+
+#define BNXT_MAX_LED	4
+
+/* Layout of one LED capability record returned by HWRM_PORT_LED_QCAPS. */
+struct bnxt_led_info {
+	uint8_t		led_id;
+	uint8_t		led_type;
+	uint8_t		led_group_id;
+	uint8_t		unused;
+	uint16_t	led_state_caps;
+	uint16_t	led_color_caps;
 };
 
 enum bnxt_phy_type {
@@ -462,12 +498,14 @@ enum bnxt_phy_type {
 	BNXT_MEDIA_LR,
 	BNXT_MEDIA_SR,
 	BNXT_MEDIA_ER,
+	BNXT_MEDIA_FR,
 	BNXT_MEDIA_KR,
 	BNXT_MEDIA_AC,
 	BNXT_MEDIA_BASECX,
 	BNXT_MEDIA_BASET,
 	BNXT_MEDIA_BASEKX,
 	BNXT_MEDIA_BASESGMII,
+	BNXT_MEDIA_DR,
 	BNXT_MEDIA_END
 };
 
@@ -503,42 +541,29 @@ struct bnxt_pf_info {
 	uint8_t		port_id;
 	uint32_t	first_vf_id;
 	uint16_t	active_vfs;
+	uint16_t	registered_vfs;
 	uint16_t	max_vfs;
+	bool		iov_attached;
+	uint16_t	max_msix_vfs;
 	uint32_t	max_encap_records;
 	uint32_t	max_decap_records;
 	uint32_t	max_tx_em_flows;
 	uint32_t	max_tx_wm_flows;
 	uint32_t	max_rx_em_flows;
 	uint32_t	max_rx_wm_flows;
-	unsigned long	*vf_event_bmap;
+	bitstr_t	*vf_event_bmap;
 	uint16_t	hwrm_cmd_req_pages;
+	struct iflib_dma_info	hwrm_cmd_req_mem[4];
 	void		*hwrm_cmd_req_addr[4];
 	bus_addr_t	hwrm_cmd_req_dma_addr[4];
-};
-
-struct bnxt_vf_info {
 	uint16_t	fw_fid;
 	uint8_t		mac_addr[ETHER_ADDR_LEN];
-	uint16_t	max_rsscos_ctxs;
-	uint16_t	max_cp_rings;
-	uint16_t	max_tx_rings;
-	uint16_t	max_rx_rings;
-	uint16_t	max_hw_ring_grps;
-	uint16_t	max_l2_ctxs;
-	uint16_t	max_irqs;
-	uint16_t	max_vnics;
-	uint16_t	max_stat_ctxs;
-	uint32_t	vlan;
-#define BNXT_VF_QOS		0x1
-#define BNXT_VF_SPOOFCHK	0x2
-#define BNXT_VF_LINK_FORCED	0x4
-#define BNXT_VF_LINK_UP		0x8
-	uint32_t	flags;
-	uint32_t	func_flags; /* func cfg flags */
-	uint32_t	min_tx_rate;
-	uint32_t	max_tx_rate;
-	void		*hwrm_cmd_req_addr;
-	bus_addr_t	hwrm_cmd_req_dma_addr;
+	uint8_t		vf_resv_strategy;
+	uint8_t		num_vfs;
+	struct		bnxt_vf_info *vf;
+	uint16_t	vf_hwrm_cmd_req_page_shift;
+	struct sysctl_ctx_list	sysctl_ctx;
+	struct sysctl_oid	*sysctl_node;
 };
 
 #define BNXT_PF(softc)		(!((softc)->flags & BNXT_FLAG_VF))
@@ -586,7 +611,54 @@ struct bnxt_grp_info {
 	uint16_t	ag_ring_id;
 };
 
-#define	EPOCH_ARR_SZ	4096
+struct tx_bd_opaque {
+	uint16_t idx;
+	uint16_t bds:15,
+		 ktls_replay:1;
+} __packed;
+
+#define TX_RING_MASK(txr) ((txr)->ring_size - 1)
+
+#define SET_TX_OPAQUE_KTLS(opq, txr, replay, prod, segs)			\
+	do {								\
+		opq->ktls_replay = (replay);		\
+		opq->idx = (prod) & TX_RING_MASK(txr);	\
+		opq->bds = (segs);				\
+	} while(0)
+
+#define KID_HIGH(kid)	((kid & 0x000fff80) >> 7)   /*Upper 13 bits of KID*/
+#define KID_LOW(kid)	(kid & 0x0000007f)           /*Lower 7 bits of KID*/
+#define TX_BD_FLAGS_CRYPTO_EN	(1 << 15)
+
+/* Hand-rolled generic BD views used only for byte-addressable copies of
+ * the kTLS presync command (see bnxt_ktls_pre_xmit()); distinct from the
+ * full HSI tx_bd_short/tx_bd_long types used for normal TX BDs. */
+struct tx_bd {
+	uint32_t tx_bd_len_flags_type;
+#define TX_BD_TYPE					(0x3f << 0)
+#define TX_BD_FLAGS_BD_CNT_SHIFT			8
+#define TX_BD_LEN_SHIFT					16
+	uint32_t tx_bd_opaque;
+	uint64_t tx_bd_haddr;
+} __packed;
+
+struct tx_bd_presync {
+	uint32_t tx_bd_len_flags_type;
+#define TX_BD_TYPE_PRESYNC_TX_BD			(0x09 << 0)
+	uint32_t tx_bd_opaque;
+	uint32_t tx_bd_kid;
+	uint32_t tx_bd_unused;
+} __packed;
+
+struct bnxt_sw_mpc_tx_bd {
+	uint8_t inline_bds;
+	unsigned long handle;
+};
+
+struct bnxt_sw_tx_bd {
+	uint8_t is_replay;
+	uint8_t inline_bds;
+};
 
 struct bnxt_ring {
 	uint64_t		paddr;
@@ -597,16 +669,30 @@ struct bnxt_ring {
 	uint16_t		id;		/* Logical ID */
 	uint16_t		phys_id;
 	uint16_t		idx;
+	uint16_t		running_bds;	/* host TX-completion-coalescing accumulator */
+	uint8_t			queue_id;	/* CoS queue, or BNXT_MPC_QUEUE_ID below */
+#define BNXT_MPC_QUEUE_ID	0xff
+	uint8_t			mpc_chnl_type;	/* valid when queue_id == BNXT_MPC_QUEUE_ID */
+	struct iflib_dma_info	ring_mem;	/* manual DMA alloc for driver-private rings (MPC) */
+	struct bnxt_cp_ring	*cp_ring;	/* completion ring this TX ring reports to (MPC) */
+	uint32_t		prod;		/* MPC TX ring producer index */
+	uint32_t		cons;		/* MPC TX ring consumer index */
+	struct mtx		tx_lock;	/* MPC TX ring lock */
+	union {
+		struct bnxt_sw_tx_bd		*tx_buf_ring;
+		struct bnxt_sw_mpc_tx_bd	*tx_mpc_buf_ring;
+	};
+	struct bnxt_replay_pkt	*replay_pkt;
 	struct bnxt_full_tpa_start *tpa_start;
 	union {
 		u64             db_key64;
 		u32             db_key32;
 	};
 	uint32_t                db_ring_mask;
+	uint32_t		free_flow_cons;	/* HW TX-completion-coalescing SQ consumer */
 	uint32_t                db_epoch_mask;
 	uint8_t                 db_epoch_shift;
 
-	uint64_t		epoch_arr[EPOCH_ARR_SZ];
 	bool                    epoch_bit;
 
 };
@@ -627,7 +713,22 @@ struct bnxt_cp_ring {
 	uint8_t			type;
 #define Q_TYPE_TX		1
 #define Q_TYPE_RX		2
+#define TX_CP_NQ		3	/* MPC-private NQ ring (bnxt_mpc.c) */
+/* BNXT_TX_ONLY_NQ is kept distinct from the MPC-private TX_CP_NQ above -
+ * same field, unrelated arrays. */
+#define SHARED_NQ		4
+#define BNXT_TX_ONLY_NQ		5
+#define RX_CP_NQ		6
+	int			msix_vec;	/* MPC-private ring: bus_setup_intr vector */
+	struct resource		*irq_res;	/* MPC-private ring: bus_setup_intr resource */
+	void			*irq_cookie;	/* MPC-private ring: bus_setup_intr cookie */
 };
+
+#define MAX_RXQ_INDEX(softc) ((softc)->nrxqsets - 1)
+#define IS_SHARED_NQ(softc, i) \
+	(BNXT_CHIP_P5_PLUS(softc) && (softc)->nq_rings[i].type == SHARED_NQ)
+#define IS_TX_NQ(softc, i) ((softc)->nq_rings[i].type == BNXT_TX_ONLY_NQ)
+#define IS_RX_NQ(softc, i) ((softc)->nq_rings[i].type == RX_CP_NQ)
 
 struct bnxt_full_tpa_start {
 	struct rx_tpa_start_cmpl low;
@@ -696,7 +797,17 @@ struct bnxt_func_qcfg {
 	uint16_t alloc_completion_rings;
 	uint16_t alloc_tx_rings;
 	uint16_t alloc_rx_rings;
+	/* Firmware-granted counts before the MPC reservation is subtracted;
+	 * bnxt_set_dflt_mpc_rings() needs these unreduced values. */
+	uint16_t orig_alloc_completion_rings;
+	uint16_t orig_alloc_tx_rings;
 	uint16_t alloc_vnics;
+	uint16_t alloc_rss_ctx;
+	uint16_t alloc_l2_ctx;
+	uint16_t alloc_vfs;
+	uint16_t alloc_hw_ring_grps;
+	uint16_t alloc_stat_ctx;
+	uint16_t alloc_msix;
 };
 
 struct bnxt_hw_lro {
@@ -705,6 +816,56 @@ struct bnxt_hw_lro {
 	uint16_t max_agg_segs;
 	uint16_t max_aggs;
 	uint32_t min_agg_len;
+};
+
+#define BNXT_LEGACY_COAL_CMPL_PARAMS					\
+	(HWRM_RING_AGGINT_QCAPS_OUTPUT_CMPL_PARAMS_INT_LAT_TMR_MIN |		\
+	 HWRM_RING_AGGINT_QCAPS_OUTPUT_CMPL_PARAMS_INT_LAT_TMR_MAX |		\
+	 HWRM_RING_AGGINT_QCAPS_OUTPUT_CMPL_PARAMS_TIMER_RESET |		\
+	 HWRM_RING_AGGINT_QCAPS_OUTPUT_CMPL_PARAMS_RING_IDLE |			\
+	 HWRM_RING_AGGINT_QCAPS_OUTPUT_CMPL_PARAMS_NUM_CMPL_DMA_AGGR |		\
+	 HWRM_RING_AGGINT_QCAPS_OUTPUT_CMPL_PARAMS_NUM_CMPL_DMA_AGGR_DURING_INT | \
+	 HWRM_RING_AGGINT_QCAPS_OUTPUT_CMPL_PARAMS_CMPL_AGGR_DMA_TMR |		\
+	 HWRM_RING_AGGINT_QCAPS_OUTPUT_CMPL_PARAMS_CMPL_AGGR_DMA_TMR_DURING_INT | \
+	 HWRM_RING_AGGINT_QCAPS_OUTPUT_CMPL_PARAMS_NUM_CMPL_AGGR_INT)
+
+#define BNXT_COAL_CMPL_ENABLES						\
+	(HWRM_RING_CMPL_RING_CFG_AGGINT_PARAMS_INPUT_ENABLES_NUM_CMPL_DMA_AGGR | \
+	 HWRM_RING_CMPL_RING_CFG_AGGINT_PARAMS_INPUT_ENABLES_CMPL_AGGR_DMA_TMR | \
+	 HWRM_RING_CMPL_RING_CFG_AGGINT_PARAMS_INPUT_ENABLES_INT_LAT_TMR_MAX | \
+	 HWRM_RING_CMPL_RING_CFG_AGGINT_PARAMS_INPUT_ENABLES_NUM_CMPL_AGGR_INT)
+
+#define BNXT_COAL_CMPL_MIN_TMR_ENABLE					\
+	HWRM_RING_CMPL_RING_CFG_AGGINT_PARAMS_INPUT_ENABLES_INT_LAT_TMR_MIN
+
+/* Gates cmpl_aggr_dma_tmr_during_int, but reuses num_cmpl_dma_aggr_during_int's
+ * enable bit - there's no separate bit for the timer field. */
+#define BNXT_COAL_CMPL_AGGR_TMR_DURING_INT_ENABLE			\
+	HWRM_RING_CMPL_RING_CFG_AGGINT_PARAMS_INPUT_ENABLES_NUM_CMPL_DMA_AGGR_DURING_INT
+
+struct bnxt_coal_cap {
+	uint32_t			cmpl_params;
+	uint32_t			nq_params;
+	uint16_t			num_cmpl_dma_aggr_max;
+	uint16_t			num_cmpl_dma_aggr_during_int_max;
+	uint16_t			cmpl_aggr_dma_tmr_max;
+	uint16_t			cmpl_aggr_dma_tmr_during_int_max;
+	uint16_t			int_lat_tmr_min_max;
+	uint16_t			int_lat_tmr_max_max;
+	uint16_t			num_cmpl_aggr_int_max;
+	uint16_t			timer_units;
+};
+
+struct bnxt_coal {
+	uint16_t			coal_ticks;
+	uint16_t			coal_ticks_irq;
+	uint16_t			coal_bufs;
+	uint16_t			coal_bufs_irq;
+	uint16_t			idle_thresh; /* RING_IDLE enabled when coal ticks < idle_thresh  */
+	uint8_t				bufs_per_record;
+	uint16_t			budget;
+	uint16_t			flags;
+	uint8_t				timer_reset_during_ring_alloc;
 };
 
 /* The hardware supports certain page sizes.  Use the supported page sizes
@@ -805,6 +966,8 @@ struct bnxt_ctx_mem_type {
 	struct bnxt_ctx_pg_info	*pg_info;
 };
 
+#define BNXT_CTX_MRAV_AV_SPLIT_ENTRY	0
+
 #define BNXT_CTX_QP	HWRM_FUNC_BACKING_STORE_CFG_V2_INPUT_TYPE_QP
 #define BNXT_CTX_SRQ	HWRM_FUNC_BACKING_STORE_CFG_V2_INPUT_TYPE_SRQ
 #define BNXT_CTX_CQ	HWRM_FUNC_BACKING_STORE_CFG_V2_INPUT_TYPE_CQ
@@ -814,6 +977,7 @@ struct bnxt_ctx_mem_type {
 #define BNXT_CTX_FTQM	HWRM_FUNC_BACKING_STORE_CFG_V2_INPUT_TYPE_FP_TQM_RING
 #define BNXT_CTX_MRAV	HWRM_FUNC_BACKING_STORE_CFG_V2_INPUT_TYPE_MRAV
 #define BNXT_CTX_TIM	HWRM_FUNC_BACKING_STORE_CFG_V2_INPUT_TYPE_TIM
+#define BNXT_CTX_TCK	HWRM_FUNC_BACKING_STORE_CFG_V2_INPUT_TYPE_TX_CK
 #define BNXT_CTX_TKC	HWRM_FUNC_BACKING_STORE_CFG_V2_INPUT_TYPE_TKC
 #define BNXT_CTX_RKC	HWRM_FUNC_BACKING_STORE_CFG_V2_INPUT_TYPE_RKC
 #define BNXT_CTX_MTQM	HWRM_FUNC_BACKING_STORE_CFG_V2_INPUT_TYPE_MP_TQM_RING
@@ -827,9 +991,33 @@ struct bnxt_ctx_mem_type {
 #define BNXT_CTX_L2_MAX (BNXT_CTX_FTQM + 1)
 
 #define BNXT_CTX_V2_MAX (HWRM_FUNC_BACKING_STORE_CFG_V2_INPUT_TYPE_ROCE_HWRM_TRACE + 1)
-#define BNXT_CTX_SRT_TRACE		HWRM_FUNC_BACKING_STORE_QCFG_V2_OUTPUT_TYPE_SRT_TRACE
-#define BNXT_CTX_ROCE_HWRM_TRACE	HWRM_FUNC_BACKING_STORE_CFG_V2_INPUT_TYPE_ROCE_HWRM_TRACE
+
+#define BNXT_CTX_SRT_TRACE	\
+	HWRM_FUNC_BACKING_STORE_QCFG_V2_OUTPUT_TYPE_SRT_TRACE
+
+#define BNXT_CTX_SRT2_TRACE	\
+	HWRM_FUNC_BACKING_STORE_QCFG_V2_OUTPUT_TYPE_SRT2_TRACE
+
+#define BNXT_CTX_CRT_TRACE	\
+	HWRM_FUNC_BACKING_STORE_QCFG_V2_OUTPUT_TYPE_CRT_TRACE
+
+#define BNXT_CTX_CRT2_TRACE	\
+	HWRM_FUNC_BACKING_STORE_QCFG_V2_OUTPUT_TYPE_CRT2_TRACE
+
+#define BNXT_CTX_RIGP0_TRACE	\
+	HWRM_FUNC_BACKING_STORE_QCFG_V2_OUTPUT_TYPE_RIGP0_TRACE
+
+#define BNXT_CTX_L2_HWRM_TRACE	\
+	HWRM_FUNC_BACKING_STORE_QCFG_V2_OUTPUT_TYPE_L2_HWRM_TRACE
+
+#define BNXT_CTX_ROCE_HWRM_TRACE \
+	HWRM_FUNC_BACKING_STORE_CFG_V2_INPUT_TYPE_ROCE_HWRM_TRACE
+
 #define BNXT_CTX_INV	((u16)-1)
+
+#define BNXT_CTX_TRACE_BUF_COUNT	\
+	(BNXT_CTX_ROCE_HWRM_TRACE - BNXT_CTX_SRT_TRACE + 1)
+
 
 struct bnxt_ctx_mem_info {
 	u8	tqm_fp_rings_count;
@@ -837,6 +1025,20 @@ struct bnxt_ctx_mem_info {
 	u32	flags;
 	#define BNXT_CTX_FLAG_INITED	0x01
 	struct bnxt_ctx_mem_type	ctx_arr[BNXT_CTX_V2_MAX];
+};
+
+enum bnxt_tls_rtpe {
+	BNXT_CRYPTO_TYPE_KTLS = 0,
+	BNXT_CRYPTO_TYPE_QUIC,
+};
+
+struct bnxt_hw_tls_resc {
+	uint32_t	min_tx_key_ctxs;
+	uint32_t	max_tx_key_ctxs;
+	uint32_t	resv_tx_key_ctxs;
+	uint32_t	min_rx_key_ctxs;
+	uint32_t	max_rx_key_ctxs;
+	uint32_t	resv_rx_key_ctxs;
 };
 
 struct bnxt_hw_resc {
@@ -866,6 +1068,7 @@ struct bnxt_hw_resc {
 	uint16_t	max_nqs;
 	uint16_t	max_irqs;
 	uint16_t	resv_irqs;
+	struct bnxt_hw_tls_resc tls_resc[2];
 };
 
 enum bnxt_type_ets {
@@ -953,7 +1156,7 @@ struct bnxt_fw_health {
 	u32 echo_req_data1;
 	u32 echo_req_data2;
 	struct devlink_health_reporter	*fw_reporter;
-	struct mutex lock;
+	struct mtx lock;
 	enum bnxt_health_severity severity;
 	enum bnxt_health_remedy remedy;
 	u32 arrests;
@@ -1043,6 +1246,21 @@ struct bnxt_fw_health {
 #define DB_RING_IDX(ring, idx, bit)    (((idx) & (ring)->db_ring_mask) | \
                                        ((bit) << (24)))
 
+struct bnxt_bs_trace_info {
+        u8 *magic_byte;
+#define BNXT_TRACE_BUF_MAGIC_BYTE ((uint8_t)0xBC)
+        u32 last_offset;
+        u8 wrapped:1;
+        u16 ctx_type;
+        u16 trace_type;
+};
+
+struct bnxt_logger;
+
+#define BNXT_HWRM_VER_CODE_EXT(maj, mnr, upd, rsv)			\
+	(((uint32_t)(maj) << 24) | ((uint32_t)(mnr) << 16) |		\
+	((uint32_t)(upd) << 8) | (uint32_t)(rsv))
+
 struct bnxt_softc {
 	device_t	dev;
 	if_ctx_t	ctx;
@@ -1062,6 +1280,9 @@ struct bnxt_softc {
 	struct bnxt_bar_info	hwrm_bar;
 	struct bnxt_bar_info	doorbell_bar;
 	struct bnxt_link_info	link_info;
+	struct bnxt_led_info	leds[BNXT_MAX_LED];
+	uint8_t			num_leds;
+	bool			led_active;
 #define BNXT_FLAG_VF				0x0001
 #define BNXT_FLAG_NPAR				0x0002
 #define BNXT_FLAG_WOL_CAP			0x0004
@@ -1088,17 +1309,32 @@ struct bnxt_softc {
 	struct bnxt_func_qcfg	fn_qcfg;
 	struct bnxt_pf_info	pf;
 	struct bnxt_vf_info	vf;
+	struct hwrm_func_vf_resource_cfg_input vf_resc_cfg_input;
 
 	uint16_t		hwrm_cmd_seq;
 	uint32_t		hwrm_cmd_timeo;	/* milliseconds */
+
+	/* DDR Crash Dump Support */
+	struct bnxt_ctx_pg_info *fw_crash_mem;
+	uint32_t fw_crash_len;
+	uint32_t fw_dbg_cap;
+	#define BNXT_FW_DBG_CAP_CRASHDUMP_SOC		0x00000001
+	#define BNXT_FW_DBG_CAP_CRASHDUMP_HOST		0x00000002
+	uint16_t dump_flag;
+	#define BNXT_DUMP_LIVE                    0
+	#define BNXT_DUMP_CRASH                   1
+	#define BNXT_DUMP_DRIVER                  2
+	#define BNXT_DUMP_LIVE_WITH_CTX_L1_CACHE  3
 	struct iflib_dma_info	hwrm_cmd_resp;
 	struct iflib_dma_info	hwrm_short_cmd_req_addr;
 	/* Interrupt info for HWRM */
 	struct if_irq		irq;
 	struct mtx		hwrm_lock;
+	struct mtx		sriov_lock;
 	uint16_t		hwrm_max_req_len;
 	uint16_t		hwrm_max_ext_req_len;
 	uint32_t		hwrm_spec_code;
+	uint32_t		hwrm_spec_code_ext;
 
 #define BNXT_MAX_QUEUE	8
 	uint8_t			max_tc;
@@ -1128,6 +1364,9 @@ struct bnxt_softc {
 	struct iflib_dma_info	hw_rx_port_stats_ext;
 	struct tx_port_stats_ext *tx_port_stats_ext;
 	struct rx_port_stats_ext *rx_port_stats_ext;
+
+	struct iflib_dma_info	hw_generic_stats;
+	struct generic_sw_hw_stats	*generic_stats;
 
 	uint16_t		fw_rx_stats_ext_size;
 	uint16_t		fw_tx_stats_ext_size;
@@ -1167,6 +1406,7 @@ struct bnxt_softc {
 	struct iflib_dma_info	def_nq_ring_mem;
 	struct task		def_cp_task;
 	int			db_size;
+	int			db_offset;
 	int			legacy_db_size;
 	struct bnxt_doorbell_ops db_ops;
 
@@ -1180,20 +1420,21 @@ struct bnxt_softc {
 	struct sysctl_oid	*dcb_oid;
 
 	struct bnxt_ver_info	*ver_info;
+	struct hwrm_ver_get_output      ver_resp;
 	struct bnxt_nvram_info	*nvm_info;
 	bool wol;
 	bool is_dev_init;
+	/* Cross-thread flag; access only via atomic_load_acq_int()/
+	 * atomic_store_rel_int(), never as a plain bool. */
+	volatile int detached;
 	struct bnxt_hw_lro	hw_lro;
 	uint8_t wol_filter_id;
-	uint16_t		rx_coal_usecs;
-	uint16_t		rx_coal_usecs_irq;
-	uint16_t               	rx_coal_frames;
-	uint16_t               	rx_coal_frames_irq;
-	uint16_t               	tx_coal_usecs;
-	uint16_t               	tx_coal_usecs_irq;
-	uint16_t               	tx_coal_frames;
-	uint16_t		tx_coal_frames_irq;
 
+	struct bnxt_coal_cap	coal_cap;
+	struct bnxt_coal	rx_coal;
+	struct bnxt_coal	tx_coal;
+
+	uint32_t		stats_coal_ticks;
 #define BNXT_USEC_TO_COAL_TIMER(x)      ((x) * 25 / 2)
 #define BNXT_DEF_STATS_COAL_TICKS        1000000
 #define BNXT_MIN_STATS_COAL_TICKS         250000
@@ -1249,6 +1490,13 @@ struct bnxt_softc {
 	#define BNXT_FW_CAP_CFA_NTUPLE_RX_EXT_IP_PROTO	BIT_ULL(47)
 	#define BNXT_FW_CAP_ENABLE_RDMA_SRIOV		BIT_ULL(48)
 	#define BNXT_FW_CAP_RSS_TCAM			BIT_ULL(49)
+	#define BNXT_FW_CAP_KTLS_SUPPORTED		BIT_ULL(50)
+	#define BNXT_FLAG_TX_COAL_CMPL			BIT_ULL(51)
+
+	#define BNXT_FW_CAP_SW_MAX_RESOURCE_LIMITS      BIT_ULL(61)
+	#define BNXT_SW_RES_LMT(bp) ((bp)->fw_cap & BNXT_FW_CAP_SW_MAX_RESOURCE_LIMITS)
+	#define BNXT_FW_CAP_PTP				BIT_ULL(62)
+
 	uint32_t		lpi_tmr_lo;
 	uint32_t		lpi_tmr_hi;
 	/* copied from flags and flags2 in hwrm_port_phy_qcaps_output */
@@ -1264,6 +1512,7 @@ struct bnxt_softc {
 #define BNXT_PHY_FL_NO_PAUSE            (HWRM_PORT_PHY_QCAPS_OUTPUT_FLAGS2_PAUSE_UNSUPPORTED << 8)
 #define BNXT_PHY_FL_NO_PFC              (HWRM_PORT_PHY_QCAPS_OUTPUT_FLAGS2_PFC_UNSUPPORTED << 8)
 #define BNXT_PHY_FL_BANK_SEL            (HWRM_PORT_PHY_QCAPS_OUTPUT_FLAGS2_BANK_ADDR_SUPPORTED << 8)
+#define BNXT_PHY_FL_SPEEDS2		(HWRM_PORT_PHY_QCAPS_OUTPUT_FLAGS2_SPEEDS2_SUPPORTED << 8)
 	struct bnxt_aux_dev     *aux_dev;
 	struct net_device	*net_dev;
 	struct mtx		en_ops_lock;
@@ -1286,11 +1535,12 @@ struct bnxt_softc {
 #define BNXT_STATE_FW_NON_FATAL_COND	13
 #define BNXT_STATE_FW_ACTIVATE_RESET	14
 #define BNXT_STATE_HALF_OPEN		15
+#define BNXT_STATE_UP			16
 #define BNXT_NO_FW_ACCESS(bp)		\
-	test_bit(BNXT_STATE_FW_FATAL_COND, &(bp)->state)
+	bnxt_drv_state_test((bp), BNXT_STATE_FW_FATAL_COND)
 	struct pci_dev			*pdev;
 
-	struct work_struct	sp_task;
+	struct task		sp_task;
 	unsigned long		sp_event;
 #define BNXT_RX_MASK_SP_EVENT		0
 #define BNXT_RX_NTP_FLTR_SP_EVENT	1
@@ -1318,7 +1568,7 @@ struct bnxt_softc {
 #define BNXT_FW_ECHO_REQUEST_SP_EVENT	23
 #define BNXT_VF_CFG_CHNG_SP_EVENT	24
 
-	struct delayed_work	fw_reset_task;
+	struct timeout_task	fw_reset_tmo;
 	int			fw_reset_state;
 #define BNXT_FW_RESET_STATE_POLL_VF	1
 #define BNXT_FW_RESET_STATE_RESET_FW	2
@@ -1331,9 +1581,98 @@ struct bnxt_softc {
 	u16			fw_reset_max_dsecs;
 #define BNXT_DFLT_FW_RST_MAX_DSECS	60
 	unsigned long		fw_reset_timestamp;
+	unsigned long		fw_reset_notify_timestamp;
+	u16			fw_reset_req_min_dsecs;
 
 	struct bnxt_fw_health	*fw_health;
+	char			board_partno[64];
+	TAILQ_HEAD(, bnxt_logger) loggers_list;
+	void                    *debug_buf;
+	struct mtx              log_lock; /* logging ops lock */
+	struct callout		time_sync_callout;
+	struct bnxt_bs_trace_info bs_trace[BNXT_CTX_TRACE_BUF_COUNT];
+
+#define MAX_NUM_DMA_INDICATIONS 10
+	struct iflib_dma_info	mgmt_dma_data[MAX_NUM_DMA_INDICATIONS];
+
+	struct bnxt_ptp_cfg	*ptp_cfg;
+	bool			rx_ts_enabled;
+
+	struct bnxt_mpc_info	*mpc_info;
+	struct bnxt_tls_info	*ktls_info;
+	struct sysctl_ctx_list	ktls_stats;
+	struct sysctl_oid	*ktls_stats_oid;
+	struct sysctl_ctx_list	mpc_cmp_time_stats;
+	struct sysctl_oid	*mpc_cmp_time_stats_oid;
+	uint32_t		max_ktls_entries;
+	bool			disable_hw_ktls;
+
+#define BNXT_CAGR_CQCOAL_OFFSET			0xc00
+#define BNXT_CAGR_NQAGG_MAXTIMER		0x5930000
+#define BNXT_CAGR_TICK_RES_DEFAULT		0x2
+#define BNXT_CAGR_TICK_RES_MIN			0x0
+#define BNXT_CAGR_TICK_RES_MAX			0x4
+#define BNXT_CAGR_TICK_RES_OFFSET		16
+	uint32_t		cagr_tick_res;
+
+	/* Matches this branch's scctx->isc_tx_nsegments; cached for the
+	 * tx_host_coal_bds underflow guard below. */
+#define BNXT_MAX_NUM_SEGS	31
+	uint32_t		tx_ring_size;	/* cached scctx->isc_ntxd[1] */
+	/*
+	 * Host-based TX coalescing: driver suppresses per-BD completions by
+	 * setting TX_BD_LONG_FLAGS_NO_CMPL / TX_BD_LONG_FLAGS_COAL_NOW on BDs.
+	 */
+#define BNXT_TX_HOST_COAL_BDS_MIN	33	/* must be > BNXT_MAX_NUM_SEGS+1 to avoid uint underflow */
+#define BNXT_TX_HOST_COAL_BDS_DEFAULT	256	/* cap for large rings; halved for small rings */
+	uint32_t		tx_host_coal_bds;    /* max BDs before forcing completion */
+	bool			tx_host_coal_enable; /* enable host-driven TX coalescing */
+	/* Firmware coalesces completions autonomously based on cmpl_coal_cnt
+	 * (only valid when BNXT_FLAG_TX_COAL_CMPL is set); raw codes map to
+	 * counts 4,8,12,16,24,32,48,64,96,128,192,256,320,384,MAX. */
+#define BNXT_TX_HW_COAL_CNT_DEFAULT	\
+	HWRM_RING_ALLOC_INPUT_CMPL_COAL_CNT_COAL_64	/* code 8 = up to 64 pkts */
+	uint8_t			tx_hw_coal_cnt;
 };
+
+/* softc->state helpers */
+static __inline bool
+bnxt_drv_state_test(const struct bnxt_softc *sc, unsigned int bit)
+{
+	/* Paired with the atomic RMWs the write-side helpers below use. */
+	return (atomic_load_acq_long(&sc->state) & (1UL << bit)) != 0;
+}
+
+static __inline void
+bnxt_drv_state_set(struct bnxt_softc *sc, unsigned int bit)
+{
+	atomic_testandset_long(&sc->state, bit);
+}
+
+static __inline void
+bnxt_drv_state_clear(struct bnxt_softc *sc, unsigned int bit)
+{
+	atomic_testandclear_long(&sc->state, bit);
+}
+
+static __inline bool
+bnxt_drv_state_test_and_clear(struct bnxt_softc *sc, unsigned int bit)
+{
+	return atomic_testandclear_long(&sc->state, bit);
+}
+
+/* softc->sp_event helpers */
+static __inline void
+bnxt_sp_event_set(struct bnxt_softc *sc, unsigned int bit)
+{
+	atomic_testandset_long(&sc->sp_event, bit);
+}
+
+static __inline bool
+bnxt_sp_event_test_and_clear(struct bnxt_softc *sc, unsigned int bit)
+{
+	return atomic_testandclear_long(&sc->sp_event, bit);
+}
 
 struct bnxt_filter_info {
 	STAILQ_ENTRY(bnxt_filter_info) next;
@@ -1386,5 +1725,75 @@ int bnxt_dcb_ieee_setapp(struct bnxt_softc *softc, struct bnxt_dcb_app *app);
 int bnxt_dcb_ieee_delapp(struct bnxt_softc *softc, struct bnxt_dcb_app *app);
 int bnxt_dcb_ieee_listapp(struct bnxt_softc *softc, struct bnxt_dcb_app *app,
     size_t nitems, int *num_inputs);
+void bnxt_set_flags_by_devid(struct bnxt_softc *softc);
+int bnxt_hwrm_reserve_rings(struct bnxt_softc *softc);
+void bnxt_free_ctx_pg_tbls(struct bnxt_softc *softc,
+				struct bnxt_ctx_pg_info *ctx_pg);
+int bnxt_alloc_ctx_pg_tbls(struct bnxt_softc *softc,
+			    struct bnxt_ctx_pg_info *ctx_pg,
+			    uint32_t mem_size, uint8_t depth,
+			    struct bnxt_ctx_mem_type *ctxm);
+int bnxt_hwrm_ptp_qcfg(struct bnxt_softc *bp);
+int bnxt_populate_irq(struct bnxt_softc *softc, int irq_count);
+void bnxt_mark_cpr_invalid(struct bnxt_cp_ring *cpr);
+void bnxt_set_db_mask(struct bnxt_softc *bp, struct bnxt_ring *db,
+    uint32_t ring_type);
 
+static inline u32
+readl_fbsd(struct bnxt_softc *bp, u32 reg_off, u8 bar_idx)
+{
+	switch (bar_idx) {
+	case BNXT_HWRM_BAR_IDX:
+		return (bus_space_read_4(bp->hwrm_bar.tag,
+		    bp->hwrm_bar.handle, reg_off));
+	case BNXT_DOORBELL_BAR_IDX:
+		return (bus_space_read_4(bp->doorbell_bar.tag,
+		    bp->doorbell_bar.handle, reg_off));
+	default:
+		panic("%s: invalid bar_idx %u", __func__, bar_idx);
+	}
+}
+
+static inline void
+writel_fbsd(struct bnxt_softc *bp, u32 reg_off, u8 bar_idx, u32 val)
+{
+	switch (bar_idx) {
+	case BNXT_HWRM_BAR_IDX:
+		bus_space_write_4(bp->hwrm_bar.tag, bp->hwrm_bar.handle,
+		    reg_off, htole32(val));
+		break;
+	case BNXT_DOORBELL_BAR_IDX:
+		bus_space_write_4(bp->doorbell_bar.tag, bp->doorbell_bar.handle,
+		    reg_off, htole32(val));
+		break;
+	default:
+		panic("%s: invalid bar_idx %u", __func__, bar_idx);
+	}
+}
+
+/* Non-atomic test-and-set; caller must hold the lock serializing bmap.
+ * bitstring.h has no equivalent primitive. */
+static inline int
+bnxt_test_and_set_bit_nonatomic(int nr, bitstr_t *bmap)
+{
+	if (bit_test(bmap, nr))
+		return (1);
+	bit_set(bmap, nr);
+	return (0);
+}
+
+static inline int
+bnxt_test_and_clear_bit_nonatomic(int nr, bitstr_t *bmap)
+{
+	if (!bit_test(bmap, nr))
+		return (0);
+	bit_clear(bmap, nr);
+	return (1);
+}
+
+int bnxt_tls_snd_tag_alloc(if_t ifp,
+    union if_snd_tag_alloc_params *params,
+    struct m_snd_tag **ppmt);
+int bnxt_ktls_xmit(struct bnxt_softc* softc, struct bnxt_ring* txr,
+    struct mbuf** ppmb, uint16_t* lflags, uint32_t* kid, if_pkt_info_t pi);
 #endif /* _BNXT_H */

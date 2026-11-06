@@ -6,6 +6,7 @@ SRCS=	linux_compat.c \
 	linux_devres.c \
 	linux_dmi.c \
 	linux_domain.c \
+	linux_eventfd.c \
 	linux_firmware.c \
 	linux_folio.c \
 	linux_fpu.c \
@@ -18,19 +19,24 @@ SRCS=	linux_compat.c \
 	linux_kobject.c \
 	linux_kthread.c \
 	linux_lock.c \
+	linux_math.c \
 	linux_netdev.c \
 	linux_page.c \
+	linuxkpi_page_pool.c \
 	linux_pci.c \
 	linux_radix.c \
 	linux_rcu.c \
 	linux_schedule.c \
+	linux_seq_buf.c \
 	linux_seq_file.c \
 	linux_shmemfs.c \
 	linux_shrinker.c \
 	linux_simple_attr.c \
+	linux_siphash.c \
 	linux_skbuff.c \
 	linux_slab.c \
 	linux_tasklet.c \
+	linux_timesub.c \
 	linux_usb.c \
 	linux_work.c \
 	linux_xarray.c

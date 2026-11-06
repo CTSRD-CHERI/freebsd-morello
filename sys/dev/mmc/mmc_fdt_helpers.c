@@ -160,6 +160,17 @@ cd_setup(struct mmc_helper *helper, phandle_t node)
 	}
 
 	/*
+	 * If the device has no card-detection, treat it as non-removable.
+	 * This could be improved by polling for detection.
+	 */
+	if (helper->props & MMC_PROP_BROKEN_CD) {
+		helper->cd_disabled = true;
+		if (bootverbose)
+			device_printf(dev, "Broken card-detect\n");
+		return;
+	}
+
+	/*
 	 * If there is no cd-gpios property, then presumably the hardware
 	 * PRESENT_STATE register and interrupts will reflect card state
 	 * properly, and there's nothing more for us to do.  Our get_present()
@@ -201,7 +212,7 @@ cd_setup(struct mmc_helper *helper, phandle_t node)
 	/*
 	 * Create an interrupt resource from the pin and set up the interrupt.
 	 */
-	if ((helper->cd_ires = gpio_alloc_intr_resource(dev, &helper->cd_irid,
+	if ((helper->cd_ires = gpio_alloc_intr_resource(dev, helper->cd_irid,
 	    RF_ACTIVE, helper->cd_pin, GPIO_INTR_EDGE_BOTH)) == NULL) {
 		if (bootverbose)
 			device_printf(dev, "Cannot allocate an IRQ for card "

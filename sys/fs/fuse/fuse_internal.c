@@ -262,7 +262,7 @@ fuse_internal_cache_attrs(struct vnode *vp, struct fuse_attr *attr,
 	fvdat = VTOFUD(vp);
 	data = fuse_get_mpdata(mp);
 
-	ASSERT_VOP_ELOCKED(vp, "fuse_internal_cache_attrs");
+	ASSERT_CACHED_ATTRS_LOCKED(vp);
 
 	fuse_validity_2_bintime(attr_valid, attr_valid_nsec,
 		&fvdat->attr_cache_timeout);
@@ -478,7 +478,9 @@ fuse_internal_invalidate_entry(struct mount *mp, struct uio *uio)
 	cn.cn_namelen = fnieo.namelen;
 	err = cache_lookup(dvp, &vp, &cn, NULL, NULL);
 	MPASS(err == 0);
+	CACHED_ATTR_LOCK(dvp);
 	fuse_vnode_clear_attr_cache(dvp);
+	CACHED_ATTR_UNLOCK(dvp);
 	vput(dvp);
 	return (0);
 }
@@ -498,8 +500,8 @@ fuse_internal_invalidate_inode(struct mount *mp, struct uio *uio)
 	if (fniio.ino == FUSE_ROOT_ID)
 		err = VFS_ROOT(mp, LK_EXCLUSIVE, &vp);
 	else
-		err = fuse_internal_get_cached_vnode(mp, fniio.ino, LK_SHARED,
-			&vp);
+		err = fuse_internal_get_cached_vnode(mp, fniio.ino,
+		    LK_EXCLUSIVE, &vp);
 	SDT_PROBE2(fusefs, , internal, invalidate_inode, vp, &fniio);
 	if (err != 0 || vp == NULL)
 		return (err);
@@ -693,6 +695,8 @@ fuse_internal_remove(struct vnode *dvp,
 	struct fuse_dispatcher fdi;
 	nlink_t nlink;
 	int err = 0;
+
+	ASSERT_CACHED_ATTRS_LOCKED(vp);
 
 	fdisp_init(&fdi, cnp->cn_namelen + 1);
 	fdisp_make_vp(&fdi, op, dvp, curthread, cnp->cn_cred);
@@ -891,14 +895,8 @@ fuse_internal_do_getattr(struct vnode *vp, struct vattr *vap,
 	struct fuse_vnode_data *fvdat = VTOFUD(vp);
 	struct fuse_getattr_in *fgai;
 	struct fuse_attr_out *fao;
-	off_t old_filesize = fvdat->cached_attrs.va_size;
-	struct timespec old_atime = fvdat->cached_attrs.va_atime;
-	struct timespec old_ctime = fvdat->cached_attrs.va_ctime;
-	struct timespec old_mtime = fvdat->cached_attrs.va_mtime;
 	__enum_uint8(vtype) vtyp;
 	int err;
-
-	ASSERT_VOP_LOCKED(vp, __func__);
 
 	fdisp_init(&fdi, sizeof(*fgai));
 	fdisp_make_vp(&fdi, FUSE_GETATTR, vp, td, cred);
@@ -917,22 +915,27 @@ fuse_internal_do_getattr(struct vnode *vp, struct vattr *vap,
 
 	fao = (struct fuse_attr_out *)fdi.answ;
 	vtyp = IFTOVT(fao->attr.mode);
+
+	CACHED_ATTR_LOCK(vp);
 	if (fvdat->flag & FN_SIZECHANGE)
-		fao->attr.size = old_filesize;
+		fao->attr.size = fvdat->cached_attrs.va_size;
 	if (fvdat->flag & FN_ATIMECHANGE) {
-		fao->attr.atime = old_atime.tv_sec;
-		fao->attr.atimensec = old_atime.tv_nsec;
+		fao->attr.atime = fvdat->cached_attrs.va_atime.tv_sec;
+		fao->attr.atimensec = fvdat->cached_attrs.va_atime.tv_nsec;
 	}
 	if (fvdat->flag & FN_CTIMECHANGE) {
-		fao->attr.ctime = old_ctime.tv_sec;
-		fao->attr.ctimensec = old_ctime.tv_nsec;
+		fao->attr.ctime = fvdat->cached_attrs.va_ctime.tv_sec;
+		fao->attr.ctimensec = fvdat->cached_attrs.va_ctime.tv_nsec;
 	}
 	if (fvdat->flag & FN_MTIMECHANGE) {
-		fao->attr.mtime = old_mtime.tv_sec;
-		fao->attr.mtimensec = old_mtime.tv_nsec;
+		fao->attr.mtime = fvdat->cached_attrs.va_mtime.tv_sec;
+		fao->attr.mtimensec = fvdat->cached_attrs.va_mtime.tv_nsec;
 	}
+
 	fuse_internal_cache_attrs(vp, &fao->attr, fao->attr_valid,
 		fao->attr_valid_nsec, vap, true);
+
+	CACHED_ATTR_UNLOCK(vp);
 	if (vtyp != vnode_vtype(vp)) {
 		fuse_internal_vnode_disappear(vp);
 		err = ENOENT;
@@ -950,10 +953,13 @@ fuse_internal_getattr(struct vnode *vp, struct vattr *vap, struct ucred *cred,
 {
 	struct vattr *attrs;
 
+	CACHED_ATTR_LOCK(vp);
 	if ((attrs = VTOVA(vp)) != NULL) {
 		*vap = *attrs;	/* struct copy */
+		CACHED_ATTR_UNLOCK(vp);
 		return 0;
-	}
+	} else
+		CACHED_ATTR_UNLOCK(vp);
 
 	return fuse_internal_do_getattr(vp, vap, cred, td);
 }
@@ -1063,6 +1069,8 @@ fuse_internal_init_callback(struct fuse_ticket *tick, struct uio *uio)
 	if (!fuse_libabi_geq(data, 7, 28))
 		fsess_set_notimpl(data->mp, FUSE_COPY_FILE_RANGE);
 
+	if (fuse_libabi_geq(data, 7, 33) && (fiio->flags & FUSE_SETXATTR_EXT))
+		data->dataflags |= FSESS_SETXATTR_EXT;
 out:
 	if (err) {
 		fdata_set_dead(data);
@@ -1101,7 +1109,6 @@ fuse_internal_send_init(struct fuse_data *data, struct thread *td)
 	 * FUSE_SPLICE_WRITE, FUSE_SPLICE_MOVE, FUSE_SPLICE_READ: FreeBSD
 	 *	doesn't have splice(2).
 	 * FUSE_FLOCK_LOCKS: not yet implemented
-	 * FUSE_HAS_IOCTL_DIR: not yet implemented
 	 * FUSE_AUTO_INVAL_DATA: not yet implemented
 	 * FUSE_DO_READDIRPLUS: not yet implemented
 	 * FUSE_READDIRPLUS_AUTO: not yet implemented
@@ -1114,8 +1121,9 @@ fuse_internal_send_init(struct fuse_data *data, struct thread *td)
 	 * FUSE_MAX_PAGES: not yet implemented
 	 */
 	fiii->flags = FUSE_ASYNC_READ | FUSE_POSIX_LOCKS | FUSE_EXPORT_SUPPORT
-		| FUSE_BIG_WRITES | FUSE_WRITEBACK_CACHE
-		| FUSE_NO_OPEN_SUPPORT | FUSE_NO_OPENDIR_SUPPORT;
+		| FUSE_BIG_WRITES | FUSE_HAS_IOCTL_DIR | FUSE_WRITEBACK_CACHE
+		| FUSE_NO_OPEN_SUPPORT | FUSE_NO_OPENDIR_SUPPORT
+		| FUSE_SETXATTR_EXT;
 
 	fuse_insert_callback(fdi.tick, fuse_internal_init_callback);
 	fuse_insert_message(fdi.tick, false);
@@ -1138,7 +1146,7 @@ int fuse_internal_setattr(struct vnode *vp, struct vattr *vap,
 	int err = 0;
 	__enum_uint8(vtype) vtyp;
 
-	ASSERT_VOP_ELOCKED(vp, __func__);
+	ASSERT_CACHED_ATTRS_LOCKED(vp);
 
 	mp = vnode_mount(vp);
 	fvdat = VTOFUD(vp);

@@ -283,7 +283,7 @@ ieee80211_sysctl_vattach(struct ieee80211vap *vap)
 	}
 	sysctl_ctx_init(ctx);
 	snprintf(num, sizeof(num), "%u", ifp->if_dunit);
-	oid = SYSCTL_ADD_NODE(ctx, &SYSCTL_NODE_CHILDREN(_net, wlan),
+	oid = SYSCTL_ADD_NODE(ctx, SYSCTL_STATIC_CHILDREN(_net_wlan),
 	    OID_AUTO, num, CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "");
 	SYSCTL_ADD_PROC(ctx, SYSCTL_CHILDREN(oid), OID_AUTO,
 	    "%parent", CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_NEEDGIANT,
@@ -1088,35 +1088,7 @@ ieee80211_load_module(const char *modname)
 #endif
 }
 
-static eventhandler_tag wlan_bpfevent;
 static eventhandler_tag wlan_ifllevent;
-
-static void
-bpf_track(void *arg, struct ifnet *ifp, int dlt, int attach)
-{
-	/* NB: identify vap's by if_init */
-	if (dlt == DLT_IEEE802_11_RADIO &&
-	    ifp->if_init == ieee80211_init) {
-		struct ieee80211vap *vap = ifp->if_softc;
-		/*
-		 * Track bpf radiotap listener state.  We mark the vap
-		 * to indicate if any listener is present and the com
-		 * to indicate if any listener exists on any associated
-		 * vap.  This flag is used by drivers to prepare radiotap
-		 * state only when needed.
-		 */
-		if (attach) {
-			ieee80211_syncflag_ext(vap, IEEE80211_FEXT_BPF);
-			if (vap->iv_opmode == IEEE80211_M_MONITOR)
-				atomic_add_int(&vap->iv_ic->ic_montaps, 1);
-		} else if (!bpf_peers_present(vap->iv_rawbpf)) {
-			ieee80211_syncflag_ext(vap, -IEEE80211_FEXT_BPF);
-			if (vap->iv_opmode == IEEE80211_M_MONITOR)
-				atomic_subtract_int(&vap->iv_ic->ic_montaps, 1);
-		}
-	}
-}
-
 /*
  * Change MAC address on the vap (if was not started).
  */
@@ -1352,7 +1324,7 @@ net80211_vap_printf(const struct ieee80211vap *vap, const char *fmt, ...)
 
 	va_start(ap, fmt);
 	snprintf(if_fmt, sizeof(if_fmt), "%s: %s", if_name(vap->iv_ifp), fmt);
-	vlog(LOG_INFO, if_fmt, ap);
+	vprintf(if_fmt, ap);
 	va_end(ap);
 }
 
@@ -1362,14 +1334,12 @@ net80211_vap_printf(const struct ieee80211vap *vap, const char *fmt, ...)
 void
 net80211_ic_printf(const struct ieee80211com *ic, const char *fmt, ...)
 {
+	char if_fmt[256];
 	va_list ap;
 
-	/*
-	 * TODO: do the vap_printf stuff above, use vlog(LOG_INFO, ...)
-	 */
-	printf("%s: ", ic->ic_name);
+	snprintf(if_fmt, sizeof(if_fmt), "%s: %s", ic->ic_name, fmt);
 	va_start(ap, fmt);
-	vprintf(fmt, ap);
+	vprintf(if_fmt, ap);
 	va_end(ap);
 }
 
@@ -1385,8 +1355,6 @@ wlan_modevent(module_t mod, int type, void *unused)
 	case MOD_LOAD:
 		if (bootverbose)
 			printf("wlan: <802.11 Link Layer>\n");
-		wlan_bpfevent = EVENTHANDLER_REGISTER(bpf_track,
-		    bpf_track, 0, EVENTHANDLER_PRI_ANY);
 		wlan_ifllevent = EVENTHANDLER_REGISTER(iflladdr_event,
 		    wlan_iflladdr, NULL, EVENTHANDLER_PRI_ANY);
 		struct if_clone_addreq req = {
@@ -1398,7 +1366,6 @@ wlan_modevent(module_t mod, int type, void *unused)
 		return 0;
 	case MOD_UNLOAD:
 		ifc_detach_cloner(wlan_cloner);
-		EVENTHANDLER_DEREGISTER(bpf_track, wlan_bpfevent);
 		EVENTHANDLER_DEREGISTER(iflladdr_event, wlan_ifllevent);
 		return 0;
 	}

@@ -126,6 +126,7 @@ enum {
 #define UNREFERENCED_2PARAMETER(_p, _q)
 #define UNREFERENCED_3PARAMETER(_p, _q, _r)
 #define UNREFERENCED_4PARAMETER(_p, _q, _r, _s)
+#define UNREFERENCED_5PARAMETER(_p, _q, _r, _s, _t)
 
 #define IXGBE_NTOHL(_i)	ntohl(_i)
 #define IXGBE_NTOHS(_i)	ntohs(_i)
@@ -133,7 +134,9 @@ enum {
 /* XXX these need to be revisited */
 #define IXGBE_CPU_TO_LE16 htole16
 #define IXGBE_CPU_TO_LE32 htole32
+#define IXGBE_LE16_TO_CPU le16toh
 #define IXGBE_LE32_TO_CPU le32toh
+#define IXGBE_LE64_TO_CPU le64toh
 #define IXGBE_LE32_TO_CPUS(x) *(x) = le32dec(x)
 #define IXGBE_CPU_TO_BE16 htobe16
 #define IXGBE_CPU_TO_BE32 htobe32
@@ -146,6 +149,7 @@ typedef int16_t		s16;
 typedef uint32_t	u32;
 typedef int32_t		s32;
 typedef uint64_t	u64;
+typedef int64_t		s64;
 #ifndef __bool_true_false_are_defined
 typedef boolean_t	bool;
 #endif
@@ -195,11 +199,19 @@ struct ixgbe_osdep
 	bus_space_handle_t mem_bus_space_handle;
 };
 
+struct ixgbe_lock
+{
+	struct mtx mutex;
+};
+
 /* These routines need struct ixgbe_hw declared */
 struct ixgbe_hw;
 device_t ixgbe_dev_from_hw(struct ixgbe_hw *hw);
 
 /* These routines are needed by the shared code */
+extern u8 ixgbe_read_pci_cfg_byte(struct ixgbe_hw *, u32);
+#define IXGBE_READ_PCIE_BYTE ixgbe_read_pci_cfg_byte
+
 extern u16 ixgbe_read_pci_cfg(struct ixgbe_hw *, u32);
 #define IXGBE_READ_PCIE_WORD ixgbe_read_pci_cfg
 
@@ -221,5 +233,31 @@ extern u32 ixgbe_read_reg_array(struct ixgbe_hw *, u32, u32);
 extern void ixgbe_write_reg_array(struct ixgbe_hw *, u32, u32, u32);
 #define IXGBE_WRITE_REG_ARRAY(a, reg, offset, val) \
     ixgbe_write_reg_array(a, reg, offset, val)
+
+void ixgbe_init_lock(struct ixgbe_lock *);
+void ixgbe_destroy_lock(struct ixgbe_lock *);
+void ixgbe_acquire_lock(struct ixgbe_lock *);
+void ixgbe_release_lock(struct ixgbe_lock *);
+
+static inline void *
+ixgbe_calloc(struct ixgbe_hw __unused *hw, size_t count, size_t size)
+{
+	return (malloc(count * size, M_DEVBUF, M_ZERO | M_NOWAIT));
+}
+
+static inline void *
+ixgbe_malloc(struct ixgbe_hw __unused *hw, size_t size)
+{
+	return (malloc(size, M_DEVBUF, M_ZERO | M_NOWAIT));
+}
+
+static inline void
+ixgbe_free(struct ixgbe_hw __unused *hw, void *addr)
+{
+	free(addr, M_DEVBUF);
+}
+
+void ixgbe_info_fwlog(struct ixgbe_hw *hw, uint32_t rowsize,
+	uint32_t groupsize, uint8_t *buf, size_t len);
 
 #endif /* _IXGBE_OSDEP_H_ */

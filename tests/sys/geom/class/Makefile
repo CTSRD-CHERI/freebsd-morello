@@ -9,6 +9,7 @@ TESTS_SUBDIRS+=	concat
 TESTS_SUBDIRS+=	eli
 .endif
 TESTS_SUBDIRS+=	gate
+TESTS_SUBDIRS+=	label
 TESTS_SUBDIRS+=	mirror
 TESTS_SUBDIRS+=	multipath
 TESTS_SUBDIRS+=	nop
@@ -19,7 +20,9 @@ TESTS_SUBDIRS+=	stripe
 TESTS_SUBDIRS+=	union
 TESTS_SUBDIRS+=	uzip
 TESTS_SUBDIRS+=	virstor
+TESTS_SUBDIRS+=	zoned
 
 ${PACKAGE}FILES+=	geom_subr.sh
+${PACKAGE}FILES+=	zoned_subr.sh
 
 .include <bsd.test.mk>

@@ -168,15 +168,21 @@ usage(void)
 		strlcat(options, " ", sizeof(options));
 	}
 
+#ifdef	JAIL
+#define	JFLAG " [-j jail] "
+#else
+#define	JFLAG " "
+#endif
 	fprintf(stderr,
-	"usage: ifconfig [-j jail] [-f type:format] %sinterface address_family\n"
+	"usage: ifconfig" JFLAG "[-f type:format] %sinterface address_family\n"
 	"                [address [dest_address]] [parameters]\n"
-	"       ifconfig [-j jail] interface create\n"
-	"       ifconfig [-j jail] -a %s[-d] [-m] [-u] [-v] [address_family]\n"
-	"       ifconfig [-j jail] -l [-d] [-u] [address_family]\n"
-	"       ifconfig [-j jail] %s[-d] [-m] [-u] [-v]\n",
+	"       ifconfig" JFLAG "interface create\n"
+	"       ifconfig" JFLAG "-a %s[-d] [-m] [-u] [-v] [address_family]\n"
+	"       ifconfig" JFLAG "-l [-d] [-u] [address_family]\n"
+	"       ifconfig" JFLAG "%s[-d] [-m] [-u] [-v]\n",
 		options, options, options);
 	exit(1);
+#undef	JFLAG
 }
 
 static void
@@ -463,6 +469,9 @@ args_parse(struct ifconfig_args *args, int argc, char *argv[])
 {
 	char options[1024];
 	struct option *p;
+#ifdef JAIL
+	int jid;
+#endif
 	int c;
 
 	/* Parse leading line options */
@@ -494,9 +503,13 @@ args_parse(struct ifconfig_args *args, int argc, char *argv[])
 #ifdef JAIL
 			if (optarg == NULL)
 				usage();
-			args->jail_name = optarg;
+			jid = jail_getid(optarg);
+			if (jid == -1)
+				Perror("jail not found");
+			if (jail_attach(jid) != 0)
+				Perror("cannot attach to jail");
 #else
-			Perror("not built with jail support");
+			Perrorc("not built with jail support", EINVAL);
 #endif
 			break;
 		case 'k':
@@ -611,9 +624,6 @@ main(int ac, char *av[])
 {
 	char *envformat;
 	int flags;
-#ifdef JAIL
-	int jid;
-#endif
 	struct ifconfig_args _args = {};
 	struct ifconfig_args *args = &_args;
 
@@ -637,16 +647,6 @@ main(int ac, char *av[])
 	atexit(printifnamemaybe);
 
 	args_parse(args, ac, av);
-
-#ifdef JAIL
-	if (args->jail_name) {
-		jid = jail_getid(args->jail_name);
-		if (jid == -1)
-			Perror("jail not found");
-		if (jail_attach(jid) != 0)
-			Perror("cannot attach to jail");
-	}
-#endif
 
 	if (!args->all && !args->namesonly) {
 		/* not listing, need an argument */
@@ -1669,9 +1669,10 @@ static const char *IFCAPBITS[] = {
 	[20] = "NETMAP",
 	[21] = "RXCSUM_IPV6",
 	[22] = "TXCSUM_IPV6",
+	[23] = "HWSTATS",
 	[24] = "TXRTLMT",
 	[25] = "HWRXTSTMP",
-	[26] = "NOMAP",
+	[26] = "MEXTPG",
 	[27] = "TXTLS4",
 	[28] = "TXTLS6",
 	[29] = "VXLAN_HWCSUM",

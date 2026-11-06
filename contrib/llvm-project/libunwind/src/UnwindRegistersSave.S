@@ -65,6 +65,49 @@ DEFINE_LIBUNWIND_FUNCTION(__unw_getcontext)
   xorl  %eax, %eax    # return UNW_ESUCCESS
   ret
 
+#elif defined(__arm64ec__)
+
+//
+// extern int __unw_getcontext(unw_context_t* thread_state)
+//
+// On entry:
+//  thread_state pointer is in x0
+//
+  .section .text,"xr",discard,"#__unw_getcontext"
+  .p2align 2
+DEFINE_LIBUNWIND_FUNCTION("#__unw_getcontext")
+  stp    x8, x27, [x0, #0x000]  // rax, rbx
+  stp    x0, x1,  [x0, #0x010]  // rcx, rdx
+  stp    x26,x25, [x0, #0x020]  // rdi, rsi
+  mov    x1, sp
+  stp    fp, x1,  [x0, #0x030]  // rbp, rsp
+  stp    x2, x3,  [x0, #0x040]  // r8,  r9
+  stp    x4, x5,  [x0, #0x050]  // r10, r11
+  stp    x19,x20, [x0, #0x060]  // r12, r13
+  stp    x21,x22, [x0, #0x070]  // r14, r15
+  str    x30,     [x0, #0x080]  // store return address as pc
+  stp    xzr,xzr, [x0, #0x088]  // flags and segment selectors
+  stp    xzr,xzr, [x0, #0x098]  // fs.base, gs.base
+  stp    q0, q1,  [x0, #0x0b0]  // xmm0, xmm1
+  stp    q2, q3,  [x0, #0x0d0]  // xmm2, xmm3
+  stp    q4, q5,  [x0, #0x0f0]  // xmm4, xmm5
+  stp    q6, q7,  [x0, #0x110]  // xmm6, xmm7
+  stp    q8, q9,  [x0, #0x130]  // xmm8, xmm9
+  stp    q10,q11, [x0, #0x150]  // xmm10,xmm11
+  stp    q12,q13, [x0, #0x170]  // xmm12,xmm13
+  stp    q14,q15, [x0, #0x190]  // xmm14,xmm15
+  mov    x0, #0                 // return UNW_ESUCCESS
+  ret
+
+  .weak_anti_dep __unw_getcontext
+  .set __unw_getcontext, "#__unw_getcontext"
+
+  .section .hybmp$x,"yi"
+  .symidx "#__unw_getcontext"
+  .symidx $ientry_thunk$cdecl$i8$i8
+  .word 1
+  .text
+
 #elif defined(__x86_64__)
 
 #
@@ -77,9 +120,11 @@ DEFINE_LIBUNWIND_FUNCTION(__unw_getcontext)
 #if defined(_WIN64)
 #define PTR %rcx
 #define TMP %rdx
+#define TMP32 %edx
 #else
 #define PTR %rdi
 #define TMP %rsi
+#define TMP32 %esi
 #endif
 
   _LIBUNWIND_CET_ENDBR
@@ -91,7 +136,6 @@ DEFINE_LIBUNWIND_FUNCTION(__unw_getcontext)
   movq  %rsi, 40(PTR)
   movq  %rbp, 48(PTR)
   movq  %rsp, 56(PTR)
-  addq  $8,   56(PTR)
   movq  %r8,  64(PTR)
   movq  %r9,  72(PTR)
   movq  %r10, 80(PTR)
@@ -102,10 +146,53 @@ DEFINE_LIBUNWIND_FUNCTION(__unw_getcontext)
   movq  %r15,120(PTR)
   movq  (%rsp),TMP
   movq  TMP,128(PTR) # store return address as rip
-  # skip rflags
-  # skip cs
-  # skip fs
-  # skip gs
+  # Capture flags before any instruction that changes them.
+  pushfq
+  popq  TMP
+  movl  TMP32,136(PTR)
+  leaq  8(%rsp),TMP
+  movq  TMP,56(PTR) # store what sp was at call site as rsp
+  movw  %cs,140(PTR)
+  movw  %fs,148(PTR)
+  movw  %gs,150(PTR)
+  movw  %es,146(PTR)
+  movw  %ss,142(PTR)
+  movw  %ds,144(PTR)
+  movq  $0,152(PTR)
+  movq  $0,160(PTR)
+
+#if defined(X86_64_BASE_SYSCALL)
+  # Use syscalls rather than FSGSBASE instructions, which require both CPU
+  # support and OS enablement. All syscall-clobbered registers are saved above.
+  # FreeBSD may clear r8-r10 on syscall return. Keep the context pointer in
+  # the callee-saved rbx, preserving its value for our caller as well.
+  pushq %rbx
+  movq  PTR,%rbx
+  movq  $X86_64_BASE_SYSCALL,%rax
+  movq  $X86_64_GET_FSBASE,%rdi
+  leaq  152(%rbx),%rsi
+  syscall
+  # FreeBSD reports errors in CF with a positive errno in rax; Linux returns
+  # a negative errno in rax. Check the appropriate convention after each call.
+#if defined(__FreeBSD__)
+  jc    9f
+#else
+  testq %rax,%rax
+  js    9f
+#endif
+  movq  $X86_64_BASE_SYSCALL,%rax
+  movq  $X86_64_GET_GSBASE,%rdi
+  leaq  160(%rbx),%rsi
+  syscall
+#if defined(__FreeBSD__)
+  jc    9f
+#else
+  testq %rax,%rax
+  js    9f
+#endif
+  movq  %rbx,PTR
+  popq  %rbx
+#endif
 
 #if defined(_WIN64)
   movdqu %xmm0,176(PTR)
@@ -127,6 +214,12 @@ DEFINE_LIBUNWIND_FUNCTION(__unw_getcontext)
 #endif
   xorl  %eax, %eax    # return UNW_ESUCCESS
   ret
+#if defined(X86_64_BASE_SYSCALL)
+9:
+  popq %rbx
+  movl $-6540,%eax # UNW_EUNSPEC: segment base capture failed
+  ret
+#endif
 
 #elif defined(__mips__) && defined(_ABIO32) && _MIPS_SIM == _ABIO32
 
@@ -377,9 +470,13 @@ LnoR2Fix:
 // register in the incorrect doubleword order.
 // FIXME: when supporting targets older than Power9 on LE is no longer required
 //        this can be changed to simply `stxv n, 16 * n(4)`.
+// Restore the register after storing: xxswapd is its own inverse, so a second
+// xxswapd undoes the in-place corruption of callee-saved VSRs (f14-f31,
+// VR20-VR31) that would otherwise persist after unw_getcontext returns.
 #define PPC64_STVS(n)      \
   xxswapd n, n            ;\
   stxvd2x n, 0, 4         ;\
+  xxswapd n, n            ;\
   addi    4, 4, 16
 #else
 #define PPC64_STVS(n)      \
@@ -746,6 +843,7 @@ DEFINE_LIBUNWIND_FUNCTION(__unw_getcontext)
   str    x1,      [x0, #0x0F8]
   str    x30,     [x0, #0x100]    // store return address as pc
   // skip cpsr
+#if defined(__ARM_FP) && __ARM_FP != 0
   stp    d0, d1,  [x0, #0x110]
   stp    d2, d3,  [x0, #0x120]
   stp    d4, d5,  [x0, #0x130]
@@ -763,6 +861,7 @@ DEFINE_LIBUNWIND_FUNCTION(__unw_getcontext)
   stp    d28,d29, [x0, #0x1F0]
   str    d30,     [x0, #0x200]
   str    d31,     [x0, #0x208]
+#endif
   mov    x0, #0                   // return UNW_ESUCCESS
   ret
 
@@ -1108,7 +1207,11 @@ DEFINE_LIBUNWIND_FUNCTION(__unw_getcontext)
 #
 DEFINE_LIBUNWIND_FUNCTION(__unw_getcontext)
   ISTORE    x1, (RISCV_ISIZE * 0)(a0) // store ra as pc
+#if defined(__riscv_32e)
+  .irp i,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+#else
   .irp i,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
+#endif
     ISTORE x\i, (RISCV_ISIZE * \i)(a0)
   .endr
 
@@ -1175,7 +1278,15 @@ DEFINE_LIBUNWIND_FUNCTION(__unw_getcontext)
 
 #endif
 
+#ifdef __arm64ec__
+  .globl "#unw_getcontext"
+  .set "#unw_getcontext", "#__unw_getcontext"
+  .weak_anti_dep unw_getcontext
+  .set unw_getcontext, "#unw_getcontext"
+  EXPORT_SYMBOL(unw_getcontext)
+#else
   WEAK_ALIAS(__unw_getcontext, unw_getcontext)
+#endif
 
 #endif /* !defined(__USING_SJLJ_EXCEPTIONS__) && !defined(__wasm__) */
 

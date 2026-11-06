@@ -1,5 +1,5 @@
 #! /usr/bin/env perl
-# Copyright 2023-2025 The OpenSSL Project Authors. All Rights Reserved.
+# Copyright 2023-2026 The OpenSSL Project Authors. All Rights Reserved.
 #
 # Licensed under the Apache License 2.0 (the "License").  You may not use
 # this file except in compliance with the License.  You can obtain a copy
@@ -169,6 +169,7 @@ my %params = (
     'DIGEST_PARAM_SIZE' =>         "size",         # size_t
     'DIGEST_PARAM_XOF' =>          "xof",          # int, 0 or 1
     'DIGEST_PARAM_ALGID_ABSENT' => "algid-absent", # int, 0 or 1
+    'DIGEST_PARAM_FIPS_APPROVED_INDICATOR' => '*ALG_PARAM_FIPS_APPROVED_INDICATOR',
 
 # MAC parameters
     'MAC_PARAM_KEY' =>            "key",           # octet string
@@ -618,7 +619,7 @@ my %params = (
     'LIBSSL_RECORD_LAYER_PARAM_BLOCK_PADDING' =>  "block_padding",
     'LIBSSL_RECORD_LAYER_PARAM_HS_PADDING' =>     "hs_padding",
 
-# Symmetric Key parametes
+# Symmetric Key parameters
     'SKEY_PARAM_RAW_BYTES' => "raw-bytes",
     'SKEY_PARAM_KEY_LENGTH' => "key-length",
 );

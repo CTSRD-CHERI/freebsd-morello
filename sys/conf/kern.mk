@@ -37,6 +37,9 @@ NO_WBITWISE_INSTEAD_OF_LOGICAL=	-Wno-bitwise-instead-of-logical
 NO_WSTRICT_PROTOTYPES=		-Wno-strict-prototypes
 NO_WDEPRECATED_NON_PROTOTYPE=	-Wno-deprecated-non-prototype
 .endif
+.if ${COMPILER_VERSION} >= 210000
+NO_WDEFAULT_CONST_INIT_FIELD_UNSAFE= -Wno-default-const-init-field-unsafe
+.endif
 # Several other warnings which might be useful in some cases, but not severe
 # enough to error out the whole kernel build.  Display them anyway, so there is
 # some incentive to fix them eventually.
@@ -45,6 +48,9 @@ CWARNEXTRA?=	-Wno-error=tautological-compare -Wno-error=empty-body \
 		-Wno-error=pointer-sign
 CWARNEXTRA+=	-Wno-error=shift-negative-value
 CWARNEXTRA+=	-Wno-address-of-packed-member
+.if ${COMPILER_VERSION} >= 230000
+CWARNEXTRA+=	-Wno-error=unused-but-set-global
+.endif
 .endif	# clang
 
 .if ${COMPILER_TYPE} == "gcc"
@@ -163,7 +169,7 @@ INLINE_LIMIT?=	8000
 # code model as "medium" and "medany" respectively.
 #
 .if ${MACHINE_CPUARCH} == "riscv"
-CFLAGS+=	-march=rv64imafdch
+CFLAGS+=	-march=rv64imafdch_zifencei_svinval
 CFLAGS+=	-mabi=lp64
 CFLAGS.clang+=	-mcmodel=medium
 CFLAGS.gcc+=	-mcmodel=medany
@@ -205,10 +211,6 @@ CFLAGS+=	-mno-altivec -msoft-float
 INLINE_LIMIT?=	15000
 .endif
 
-.if ${MACHINE_ARCH} == "powerpcspe"
-CFLAGS.gcc+=	-mno-spe
-.endif
-
 #
 # Use dot symbols (or, better, the V2 ELF ABI) on powerpc64 to make
 # DDB happy. ELFv2, if available, has some other efficiency benefits.
@@ -236,7 +238,7 @@ CFLAGS+=	-fwrapv
 # Stack Smashing Protection (SSP) support
 #
 .if ${MK_SSP} != "no"
-CFLAGS+=	-fstack-protector
+CFLAGS+=	-fstack-protector-strong
 .endif
 
 #
@@ -244,7 +246,7 @@ CFLAGS+=	-fstack-protector
 #
 .if defined(COMPILER_FEATURES) && ${COMPILER_FEATURES:Mretpoline} != "" && \
     ${MK_KERNEL_RETPOLINE} != "no"
-CFLAGS+=	-mretpoline
+CFLAGS+=	-mretpoline-external-thunk
 .endif
 
 #
@@ -407,7 +409,6 @@ LD_EMULATION_arm=armelf_fbsd
 LD_EMULATION_armv7=armelf_fbsd
 LD_EMULATION_i386=elf_i386_fbsd
 LD_EMULATION_powerpc= elf32ppc_fbsd
-LD_EMULATION_powerpcspe= elf32ppc_fbsd
 LD_EMULATION_powerpc64= elf64ppc_fbsd
 LD_EMULATION_powerpc64le= elf64lppc_fbsd
 LD_EMULATION_riscv64= elf64lriscv

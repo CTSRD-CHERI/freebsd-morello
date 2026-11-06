@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -995,6 +985,7 @@ vdev_trim_thread(void *arg)
 
 	vd->vdev_trim_thread = NULL;
 	cv_broadcast(&vd->vdev_trim_cv);
+	spa_notify_waiters(spa);
 	mutex_exit(&vd->vdev_trim_lock);
 
 	thread_exit();
@@ -1045,7 +1036,7 @@ vdev_trim_stop_wait(spa_t *spa, list_t *vd_list)
 	(void) spa;
 	vdev_t *vd;
 
-	ASSERT(MUTEX_HELD(&spa_namespace_lock) ||
+	ASSERT(spa_namespace_held() ||
 	    spa->spa_export_thread == curthread);
 
 	while ((vd = list_remove_head(vd_list)) != NULL) {
@@ -1085,7 +1076,7 @@ vdev_trim_stop(vdev_t *vd, vdev_trim_state_t tgt_state, list_t *vd_list)
 	if (vd_list == NULL) {
 		vdev_trim_stop_wait_impl(vd);
 	} else {
-		ASSERT(MUTEX_HELD(&spa_namespace_lock) ||
+		ASSERT(spa_namespace_held() ||
 		    vd->vdev_spa->spa_export_thread == curthread);
 		list_insert_tail(vd_list, vd);
 	}
@@ -1122,7 +1113,7 @@ vdev_trim_stop_all(vdev_t *vd, vdev_trim_state_t tgt_state)
 	list_t vd_list;
 	vdev_t *vd_l2cache;
 
-	ASSERT(MUTEX_HELD(&spa_namespace_lock) ||
+	ASSERT(spa_namespace_held() ||
 	    spa->spa_export_thread == curthread);
 
 	list_create(&vd_list, sizeof (vdev_t),
@@ -1156,7 +1147,7 @@ vdev_trim_stop_all(vdev_t *vd, vdev_trim_state_t tgt_state)
 void
 vdev_trim_restart(vdev_t *vd)
 {
-	ASSERT(MUTEX_HELD(&spa_namespace_lock) ||
+	ASSERT(spa_namespace_held() ||
 	    vd->vdev_spa->spa_load_thread == curthread);
 	ASSERT(!spa_config_held(vd->vdev_spa, SCL_ALL, RW_WRITER));
 
@@ -1582,7 +1573,7 @@ vdev_autotrim_stop_all(spa_t *spa)
 void
 vdev_autotrim_restart(spa_t *spa)
 {
-	ASSERT(MUTEX_HELD(&spa_namespace_lock) ||
+	ASSERT(spa_namespace_held() ||
 	    spa->spa_load_thread == curthread);
 	if (spa->spa_autotrim)
 		vdev_autotrim(spa);
@@ -1689,7 +1680,7 @@ vdev_trim_l2arc_thread(void *arg)
 void
 vdev_trim_l2arc(spa_t *spa)
 {
-	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+	ASSERT(spa_namespace_held());
 
 	/*
 	 * Locate the spa's l2arc devices and kick off TRIM threads.

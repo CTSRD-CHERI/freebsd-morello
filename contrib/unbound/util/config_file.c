@@ -46,6 +46,7 @@
 #ifdef HAVE_TIME_H
 #include <time.h>
 #endif
+#include <limits.h>
 #include "util/log.h"
 #include "util/configyyrename.h"
 #include "util/config_file.h"
@@ -62,6 +63,9 @@
 #include "sldns/wire2str.h"
 #include "sldns/parseutil.h"
 #include "iterator/iterator.h"
+#ifdef HAVE_SYS_STAT_H
+#include <sys/stat.h>
+#endif
 #ifdef HAVE_GLOB_H
 # include <glob.h>
 #endif
@@ -90,7 +94,7 @@ struct config_parser_state* cfg_parser = 0;
 static void init_outgoing_availports(int* array, int num);
 
 /** init cookie with random data */
-static void init_cookie_secret(uint8_t* cookie_secret, size_t cookie_secret_len);
+static int init_cookie_secret(struct config_file* cfg);
 
 struct config_file*
 config_create(void)
@@ -129,6 +133,7 @@ config_create(void)
 	cfg->tls_cert_bundle = NULL;
 	cfg->tls_win_cert = 0;
 	cfg->tls_use_sni = 1;
+	if(!(cfg->tls_protocols = strdup("TLSv1.2 TLSv1.3"))) goto error_exit;
 	cfg->https_port = UNBOUND_DNS_OVER_HTTPS_PORT;
 	if(!(cfg->http_endpoint = strdup("/dns-query"))) goto error_exit;
 	cfg->http_max_streams = 100;
@@ -147,6 +152,7 @@ config_create(void)
 	cfg->log_local_actions = 0;
 	cfg->log_servfail = 0;
 	cfg->log_destaddr = 0;
+	cfg->log_thread_id = 0;
 #ifndef USE_WINSOCK
 #  ifdef USE_MINI_EVENT
 	/* select max 1024 sockets */
@@ -155,7 +161,7 @@ config_create(void)
 #  else
 	/* libevent can use many sockets */
 	cfg->outgoing_num_ports = 4096;
-	cfg->num_queries_per_thread = 1024;
+	cfg->num_queries_per_thread = 2048;
 #  endif
 	cfg->outgoing_num_tcp = 10;
 	cfg->incoming_num_tcp = 10;
@@ -169,10 +175,10 @@ config_create(void)
 	cfg->edns_buffer_size = 1232; /* from DNS flagday recommendation */
 	cfg->msg_buffer_size = 65552; /* 64 k + a small margin */
 	cfg->msg_cache_size = 4 * 1024 * 1024;
-	cfg->msg_cache_slabs = 4;
+	cfg->msg_cache_slabs = 0;
 	cfg->jostle_time = 200;
 	cfg->rrset_cache_size = 4 * 1024 * 1024;
-	cfg->rrset_cache_slabs = 4;
+	cfg->rrset_cache_slabs = 0;
 	cfg->host_ttl = 900;
 	cfg->bogus_ttl = 60;
 	cfg->min_ttl = 0;
@@ -182,7 +188,7 @@ config_create(void)
 	cfg->prefetch = 0;
 	cfg->prefetch_key = 0;
 	cfg->deny_any = 0;
-	cfg->infra_cache_slabs = 4;
+	cfg->infra_cache_slabs = 0;
 	cfg->infra_cache_numhosts = 10000;
 	cfg->infra_cache_min_rtt = 50;
 	cfg->infra_cache_max_rtt = 120000;
@@ -210,7 +216,7 @@ config_create(void)
 	cfg->if_automatic = 0;
 	cfg->if_automatic_ports = NULL;
 	cfg->so_rcvbuf = 0;
-	cfg->so_sndbuf = 0;
+	cfg->so_sndbuf = 4*1024*1024;
 	cfg->so_reuseport = REUSEPORT_DEFAULT;
 	cfg->ip_transparent = 0;
 	cfg->ip_freebind = 0;
@@ -272,7 +278,7 @@ config_create(void)
 	cfg->val_sig_skew_min = 3600; /* at least daylight savings trouble */
 	cfg->val_sig_skew_max = 86400; /* at most timezone settings trouble */
 	cfg->val_max_restart = 5;
-	cfg->val_clean_additional = 1;
+	cfg->val_clean_additional = 0; /* off to protect against much data. */
 	cfg->val_log_level = 0;
 	cfg->val_log_squelch = 0;
 	cfg->val_permissive_mode = 0;
@@ -291,7 +297,7 @@ config_create(void)
 	cfg->keep_missing = 366*24*3600; /* one year plus a little leeway */
 	cfg->permit_small_holddown = 0;
 	cfg->key_cache_size = 4 * 1024 * 1024;
-	cfg->key_cache_slabs = 4;
+	cfg->key_cache_slabs = 0;
 	cfg->neg_cache_size = 1 * 1024 * 1024;
 	cfg->local_zones = NULL;
 	cfg->local_zones_nodefault = NULL;
@@ -341,8 +347,8 @@ config_create(void)
 	cfg->ip_ratelimit_cookie = 0;
 	cfg->ip_ratelimit = 0;
 	cfg->ratelimit = 0;
-	cfg->ip_ratelimit_slabs = 4;
-	cfg->ratelimit_slabs = 4;
+	cfg->ip_ratelimit_slabs = 0;
+	cfg->ratelimit_slabs = 0;
 	cfg->ip_ratelimit_size = 4*1024*1024;
 	cfg->ratelimit_size = 4*1024*1024;
 	cfg->ratelimit_for_domain = NULL;
@@ -367,9 +373,9 @@ config_create(void)
 	cfg->dnscrypt_provider_cert_rotated = NULL;
 	cfg->dnscrypt_secret_key = NULL;
 	cfg->dnscrypt_shared_secret_cache_size = 4*1024*1024;
-	cfg->dnscrypt_shared_secret_cache_slabs = 4;
+	cfg->dnscrypt_shared_secret_cache_slabs = 0;
 	cfg->dnscrypt_nonce_cache_size = 4*1024*1024;
-	cfg->dnscrypt_nonce_cache_slabs = 4;
+	cfg->dnscrypt_nonce_cache_slabs = 0;
 	cfg->pad_responses = 1;
 	cfg->pad_responses_block_size = 468; /* from RFC8467 */
 	cfg->pad_queries = 1;
@@ -384,8 +390,7 @@ config_create(void)
 #endif
 	cfg->do_answer_cookie = 0;
 	memset(cfg->cookie_secret, 0, sizeof(cfg->cookie_secret));
-	cfg->cookie_secret_len = 16;
-	init_cookie_secret(cfg->cookie_secret, cfg->cookie_secret_len);
+	cfg->cookie_secret_len = 0; /* not set yet */
 	cfg->cookie_secret_file = NULL;
 #ifdef USE_CACHEDB
 	if(!(cfg->cachedb_backend = strdup("testframe"))) goto error_exit;
@@ -421,7 +426,11 @@ config_create(void)
 	cfg->dns_error_reporting = 0;
 	cfg->iter_scrub_ns = 20;
 	cfg->iter_scrub_cname = 11;
+	cfg->iter_scrub_rrsig = 8;
+	cfg->iter_scrub_promiscuous = 1;
 	cfg->max_global_quota = 200;
+	cfg->val_validation_attempts = 32;
+	cfg->val_hash_attempts = 32;
 	return cfg;
 error_exit:
 	config_delete(cfg);
@@ -454,6 +463,11 @@ struct config_file* config_create_forlib(void)
 	cfg->val_log_squelch = 1;
 	cfg->minimal_responses = 0;
 	cfg->harden_short_bufsize = 1;
+	/* Need to explicitly define the slabs from their 0 default value */
+	cfg->ip_ratelimit_slabs = 1;
+	cfg->ratelimit_slabs = 1;
+	cfg->dnscrypt_shared_secret_cache_slabs = 1;
+	cfg->dnscrypt_nonce_cache_slabs = 1;
 	return cfg;
 }
 
@@ -521,7 +535,11 @@ probe_maxrto(int useful_server_top_timeout) {
 int config_apply_max_rtt(int max_rtt)
 {
 	USEFUL_SERVER_TOP_TIMEOUT = max_rtt;
-	BLACKLIST_PENALTY = max_rtt*4;
+	BLACKLIST_PENALTY =
+#ifdef INT_MAX
+		(max_rtt > INT_MAX/4) ? INT_MAX :
+#endif
+		max_rtt*4;
 	PROBE_MAXRTO = probe_maxrto(max_rtt);
 	return max_rtt;
 }
@@ -623,6 +641,11 @@ int config_set_option(struct config_file* cfg, const char* opt,
 	else S_STR("tls-ciphers:", tls_ciphers)
 	else S_STR("tls-ciphersuites:", tls_ciphersuites)
 	else S_YNO("tls-use-sni:", tls_use_sni)
+	else if(strcmp(opt, "tls-protocols:") == 0) {
+		if(!cfg_tls_protocols_is_valid(val)) return 0;
+		free(cfg->tls_protocols);
+		return (cfg->tls_protocols = strdup(val)) != NULL;
+	}
 	else S_NUMBER_NONZERO("https-port:", https_port)
 	else S_STR("http-endpoint:", http_endpoint)
 	else S_NUMBER_NONZERO("http-max-streams:", http_max_streams)
@@ -740,6 +763,7 @@ int config_set_option(struct config_file* cfg, const char* opt,
 	else S_YNO("log-local-actions:", log_local_actions)
 	else S_YNO("log-servfail:", log_servfail)
 	else S_YNO("log-destaddr:", log_destaddr)
+	else S_YNO("log-thread-id:", log_thread_id)
 	else S_YNO("val-permissive-mode:", val_permissive_mode)
 	else S_YNO("aggressive-nsec:", aggressive_nsec)
 	else S_YNO("ignore-cd-flag:", ignore_cd)
@@ -758,9 +782,13 @@ int config_set_option(struct config_file* cfg, const char* opt,
 	else S_YNO("ede:", ede)
 	else S_YNO("ede-serve-expired:", ede_serve_expired)
 	else S_YNO("dns-error-reporting:", dns_error_reporting)
-	else S_NUMBER_OR_ZERO("iter-scrub-ns:", iter_scrub_ns)
+	else S_NUMBER_NONZERO("iter-scrub-ns:", iter_scrub_ns)
 	else S_NUMBER_OR_ZERO("iter-scrub-cname:", iter_scrub_cname)
+	else S_NUMBER_OR_ZERO("iter-scrub-rrsig:", iter_scrub_rrsig)
+	else S_YNO("iter-scrub-promiscuous:", iter_scrub_promiscuous)
 	else S_NUMBER_OR_ZERO("max-global-quota:", max_global_quota)
+	else S_NUMBER_OR_ZERO("val-validation-attempts:", val_validation_attempts)
+	else S_NUMBER_OR_ZERO("val-hash-attempts:", val_hash_attempts)
 	else S_YNO("serve-original-ttl:", serve_original_ttl)
 	else S_STR("val-nsec3-keysize-iterations:", val_nsec3_key_iterations)
 	else S_YNO("zonemd-permissive-mode:", zonemd_permissive_mode)
@@ -1174,6 +1202,7 @@ config_get_option(struct config_file* cfg, const char* opt,
 	else O_STR(opt, "tls-ciphers", tls_ciphers)
 	else O_STR(opt, "tls-ciphersuites", tls_ciphersuites)
 	else O_YNO(opt, "tls-use-sni", tls_use_sni)
+	else O_STR(opt, "tls-protocols", tls_protocols)
 	else O_DEC(opt, "https-port", https_port)
 	else O_STR(opt, "http-endpoint", http_endpoint)
 	else O_UNS(opt, "http-max-streams", http_max_streams)
@@ -1195,6 +1224,7 @@ config_get_option(struct config_file* cfg, const char* opt,
 	else O_YNO(opt, "log-local-actions", log_local_actions)
 	else O_YNO(opt, "log-servfail", log_servfail)
 	else O_YNO(opt, "log-destaddr", log_destaddr)
+	else O_YNO(opt, "log-thread-id", log_thread_id)
 	else O_STR(opt, "pidfile", pidfile)
 	else O_YNO(opt, "hide-identity", hide_identity)
 	else O_YNO(opt, "hide-version", hide_version)
@@ -1236,7 +1266,11 @@ config_get_option(struct config_file* cfg, const char* opt,
 	else O_YNO(opt, "dns-error-reporting", dns_error_reporting)
 	else O_DEC(opt, "iter-scrub-ns", iter_scrub_ns)
 	else O_DEC(opt, "iter-scrub-cname", iter_scrub_cname)
+	else O_DEC(opt, "iter-scrub-rrsig", iter_scrub_rrsig)
+	else O_YNO(opt, "iter-scrub-promiscuous", iter_scrub_promiscuous)
 	else O_DEC(opt, "max-global-quota", max_global_quota)
+	else O_DEC(opt, "val-validation-attempts", val_validation_attempts)
+	else O_DEC(opt, "val-hash-attempts", val_hash_attempts)
 	else O_YNO(opt, "serve-original-ttl", serve_original_ttl)
 	else O_STR(opt, "val-nsec3-keysize-iterations",val_nsec3_key_iterations)
 	else O_YNO(opt, "zonemd-permissive-mode", zonemd_permissive_mode)
@@ -1448,6 +1482,41 @@ create_cfg_parser(struct config_file* cfg, char* filename, const char* chroot)
 	init_cfg_parse();
 }
 
+void
+config_auto_slab_values(struct config_file* cfg)
+{
+#define SET_AUTO_SLAB(var, name, val)						\
+do {										\
+	if(cfg->var == 0) {							\
+		cfg->var = val;							\
+		verbose(VERB_QUERY, "setting "name": %lu", (unsigned long)val);	\
+	}									\
+} while(0);
+#ifdef THREADS_DISABLED
+	size_t pow_2_threads = 1;
+#else
+	size_t pow_2_threads = 4;  /* pow2 start */
+	while (pow_2_threads < (size_t)(cfg->num_threads?cfg->num_threads:1) &&
+		/* 1/3 of the distance to the next pow2 value stays with the
+		 * lower value */
+		(size_t)cfg->num_threads > pow_2_threads + (pow_2_threads - 1)/3) {
+		pow_2_threads <<= 1;
+	}
+	log_assert((pow_2_threads & (pow_2_threads - 1)) == 0); /* powerof2? */
+#endif /* THREADS_DISABLED */
+
+	SET_AUTO_SLAB(msg_cache_slabs, "msg-cache-slabs", pow_2_threads);
+	SET_AUTO_SLAB(rrset_cache_slabs, "rrset-cache-slabs", pow_2_threads);
+	SET_AUTO_SLAB(infra_cache_slabs, "infra-cache-slabs", pow_2_threads);
+	SET_AUTO_SLAB(key_cache_slabs, "key-cache-slabs", pow_2_threads);
+	SET_AUTO_SLAB(ip_ratelimit_slabs, "ip-ratelimit-slabs", pow_2_threads);
+	SET_AUTO_SLAB(ratelimit_slabs, "ratelimit-slabs", pow_2_threads);
+	SET_AUTO_SLAB(dnscrypt_shared_secret_cache_slabs,
+		"dnscrypt-shared-secret-cache-slabs", pow_2_threads);
+	SET_AUTO_SLAB(dnscrypt_nonce_cache_slabs,
+		"dnscrypt-nonce-cache-slabs", pow_2_threads);
+}
+
 int
 config_read(struct config_file* cfg, const char* filename, const char* chroot)
 {
@@ -1512,6 +1581,9 @@ config_read(struct config_file* cfg, const char* filename, const char* chroot)
 			}
 		}
 		globfree(&g);
+		config_auto_slab_values(cfg);
+		if(!init_cookie_secret(cfg))
+			return 0;
 		return 1;
 	}
 #endif /* HAVE_GLOB */
@@ -1535,6 +1607,9 @@ config_read(struct config_file* cfg, const char* filename, const char* chroot)
 		return 0;
 	}
 
+	config_auto_slab_values(cfg);
+	if(!init_cookie_secret(cfg))
+		return 0;
 	return 1;
 }
 
@@ -1705,6 +1780,7 @@ config_delete(struct config_file* cfg)
 	config_delstrlist(cfg->tls_session_ticket_keys.first);
 	free(cfg->tls_ciphers);
 	free(cfg->tls_ciphersuites);
+	free(cfg->tls_protocols);
 	free(cfg->http_endpoint);
 	if(cfg->log_identity) {
 		log_ident_revert_to_default();
@@ -1808,18 +1884,33 @@ config_delete(struct config_file* cfg)
 	free(cfg);
 }
 
-static void
-init_cookie_secret(uint8_t* cookie_secret, size_t cookie_secret_len)
+static int
+init_cookie_secret(struct config_file* cfg)
 {
-	struct ub_randstate *rand = ub_initstate(NULL);
+	struct ub_randstate* rand;
+	size_t cookie_secret_len;
+	uint8_t* cookie_secret;
+	if(!cfg->do_answer_cookie)
+		return 1;
+	if(cfg->cookie_secret_file && cfg->cookie_secret_file[0])
+		return 1;
+	if(cfg->cookie_secret_len != 0)
+		return 1;
 
-	if (!rand)
-		fatal_exit("could not init random generator");
+	rand = ub_initstate(NULL);
+	if(!rand) {
+		log_err("init_cookie_secret: could not init random generator");
+		return 0;
+	}
+	cfg->cookie_secret_len = 16;
+	cookie_secret_len = cfg->cookie_secret_len;
+	cookie_secret = cfg->cookie_secret;
 	while (cookie_secret_len) {
 		*cookie_secret++ = (uint8_t)ub_random(rand);
 		cookie_secret_len--;
 	}
 	ub_randfree(rand);
+	return 1;
 }
 
 static void
@@ -1882,7 +1973,7 @@ extract_port_from_str(const char* str, int max_port) {
 int
 cfg_mark_ports(const char* str, int allow, int* avail, int num)
 {
-	char* mid = strchr(str, '-');
+	const char* mid = strchr(str, '-');
 #ifdef DISABLE_EXPLICIT_PORT_RANDOMISATION
 	log_warn("Explicit port randomisation disabled, ignoring "
 		"outgoing-port-permit and outgoing-port-avoid configuration "
@@ -2585,10 +2676,10 @@ fname_after_chroot(const char* fname, struct config_file* cfg, int use_chdir)
 }
 
 /** return next space character in string */
-static char* next_space_pos(const char* str)
+static const char* next_space_pos(const char* str)
 {
-	char* sp = strchr(str, ' ');
-	char* tab = strchr(str, '\t');
+	const char* sp = strchr(str, ' ');
+	const char* tab = strchr(str, '\t');
 	if(!tab && !sp)
 		return NULL;
 	if(!sp) return tab;
@@ -2597,10 +2688,10 @@ static char* next_space_pos(const char* str)
 }
 
 /** return last space character in string */
-static char* last_space_pos(const char* str)
+static const char* last_space_pos(const char* str)
 {
-	char* sp = strrchr(str, ' ');
-	char* tab = strrchr(str, '\t');
+	const char* sp = strrchr(str, ' ');
+	const char* tab = strrchr(str, '\t');
 	if(!tab && !sp)
 		return NULL;
 	if(!sp) return tab;
@@ -2658,8 +2749,8 @@ cfg_parse_local_zone(struct config_file* cfg, const char* val)
 
 char* cfg_ptr_reverse(char* str)
 {
-	char* ip, *ip_end;
-	char* name;
+	const char* ip, *ip_end;
+	const char* name;
 	char* result;
 	char buf[1024];
 	struct sockaddr_storage addr;
@@ -2810,7 +2901,7 @@ if_listens_on(const char* ifname, int default_port, int port,
 	struct config_strlist* additional_ports)
 {
 	struct config_strlist* s;
-	char* p = strchr(ifname, '@');
+	const char* p = strchr(ifname, '@');
 	int if_port;
 	if(p) if_port = atoi(p+1);
 	else  if_port = default_port;
@@ -2878,6 +2969,29 @@ if_is_quic(const char* ifname, int default_port, int quic_port)
 }
 
 int
+cfg_ports_list_contains(char* ports, int p)
+{
+	char* now = ports, *after;
+	int extraport;
+	while(now && *now) {
+		while(isspace((unsigned char)*now))
+			now++;
+		if(!now)
+			break;
+		after = now;
+		extraport = (int)strtol(now, &after, 10);
+		if(extraport < 0 || extraport > 65535)
+			continue; /* Out of range. */
+		if(extraport == 0 && now == after)
+			return 0; /* Number could not be parsed. */
+		now = after;
+		if(extraport == p)
+			return 1;
+	}
+	return 0;
+}
+
+int
 cfg_has_https(struct config_file* cfg)
 {
 	int i;
@@ -2885,6 +2999,8 @@ cfg_has_https(struct config_file* cfg)
 		if(if_is_https(cfg->ifs[i], cfg->port, cfg->https_port))
 			return 1;
 	}
+	if(cfg_ports_list_contains(cfg->if_automatic_ports, cfg->https_port))
+		return 1;
 	return 0;
 }
 
@@ -2897,9 +3013,83 @@ cfg_has_quic(struct config_file* cfg)
 		if(if_is_quic(cfg->ifs[i], cfg->port, cfg->quic_port))
 			return 1;
 	}
+	if(cfg_ports_list_contains(cfg->if_automatic_ports, cfg->quic_port))
+		return 1;
 	return 0;
 #else
 	(void)cfg;
 	return 0;
 #endif
+}
+
+int
+cfg_tls_protocols_is_valid(const char* tls_protocols)
+{
+	const char* s = tls_protocols;
+	while(*s && isspace((unsigned char)*s)) s++;
+	while(*s && !isspace((unsigned char)*s)) {
+		if(strncmp(s, "TLSv1.2", 7) == 0 ||
+			strncmp(s, "TLSv1.3", 7) == 0) {
+			s += 7;
+			if(*s && !isspace((unsigned char)*s)) {
+				/* something is attached; fail */
+				return 0;
+			}
+			while(*s && isspace((unsigned char)*s))
+				s++;
+			continue;
+		}
+		return 0;
+	}
+	return 1;
+}
+
+void
+cfg_tls_protocols_allowed(const char* tls_protocols, int* allow12, int* allow13)
+{
+	const char* s = tls_protocols;
+	*allow12 = 0;
+	*allow13 = 0;
+	if(tls_protocols == NULL) return;
+	while(*s && isspace((unsigned char)*s)) s++;
+	while(*s && !isspace((unsigned char)*s)) {
+		if(strncmp(s, "TLSv1.2", 7) == 0) {
+			*allow12 = 1;
+			s += 7;
+		} else if(strncmp(s, "TLSv1.3", 7) == 0) {
+			*allow13 = 1;
+			s += 7;
+		} else {
+			/* Unknown word, this should never happen but skip to
+			 * be safe */
+			while(*s && !isspace((unsigned char)*s))
+				s++;
+		}
+		while(*s && isspace((unsigned char)*s))
+			s++;
+	}
+}
+
+int
+file_get_mtime(const char* file, time_t* mtime, long* ns, int* nonexist)
+{
+	struct stat s;
+	if(stat(file, &s) != 0) {
+		*mtime = 0;
+		*ns = 0;
+		if(nonexist)
+			*nonexist = (errno == ENOENT);
+		return 0;
+	}
+	if(nonexist)
+		*nonexist = 0;
+	*mtime = s.st_mtime;
+#ifdef HAVE_STRUCT_STAT_ST_MTIMENSEC
+	*ns = s.st_mtimensec;
+#elif defined(HAVE_STRUCT_STAT_ST_MTIM_TV_NSEC)
+	*ns = s.st_mtim.tv_nsec;
+#else
+	*ns = 0;
+#endif
+	return 1;
 }

@@ -70,6 +70,7 @@
 
 typedef struct {
 	void		*addr;
+	void		*origaddr; /* Used by debuggers. */
 	Elf_Off		size;
 	int		flags;	/* Section flags. */
 	int		sec;	/* Original section number. */
@@ -231,7 +232,7 @@ link_elf_protect_range(elf_file_t ef, vm_offset_t start, vm_offset_t end,
 		return;
 	if (ef->preloaded) {
 #ifdef __amd64__
-		error = pmap_change_prot(start, end - start, prot);
+		error = pmap_change_prot((void *)start, end - start, prot);
 		KASSERT(error == 0,
 		    ("link_elf_protect_range: pmap_change_prot() returned %d",
 		    error));
@@ -492,7 +493,8 @@ link_elf_link_preload(linker_class_t cls, const char *filename,
 		case SHT_FINI_ARRAY:
 			if (shdr[i].sh_addr == 0)
 				break;
-			ef->progtab[pb].addr = (void *)shdr[i].sh_addr;
+			ef->progtab[pb].addr = ef->progtab[pb].origaddr =
+			    (void *)shdr[i].sh_addr;
 			if (shdr[i].sh_type == SHT_PROGBITS)
 				ef->progtab[pb].name = "<<PROGBITS>>";
 #ifdef __amd64__
@@ -1088,6 +1090,8 @@ link_elf_load_file(linker_class_t cls, const char *filename,
 				ef->progtab[pb].name = "<<NOBITS>>";
 			if (ef->progtab[pb].name != NULL && 
 			    !strcmp(ef->progtab[pb].name, DPCPU_SETNAME)) {
+				ef->progtab[pb].origaddr =
+				    (void *)(uintptr_t)mapbase;
 				ef->progtab[pb].addr =
 				    dpcpu_alloc(shdr[i].sh_size);
 				if (ef->progtab[pb].addr == NULL) {
@@ -1101,6 +1105,8 @@ link_elf_load_file(linker_class_t cls, const char *filename,
 #ifdef VIMAGE
 			else if (ef->progtab[pb].name != NULL &&
 			    !strcmp(ef->progtab[pb].name, VNET_SETNAME)) {
+				ef->progtab[pb].origaddr =
+				    (void *)(uintptr_t)mapbase;
 				ef->progtab[pb].addr =
 				    vnet_data_alloc(shdr[i].sh_size);
 				if (ef->progtab[pb].addr == NULL) {
@@ -1299,6 +1305,20 @@ link_elf_unload_file(linker_file_t file)
 				vnet_data_free(ef->progtab[i].addr,
 				    ef->progtab[i].size);
 #endif
+			else if (ef->preloaded) {
+				vm_offset_t start, end;
+
+				start = (vm_offset_t)ef->progtab[i].addr;
+				end = start + ef->progtab[i].size;
+
+				/*
+				 * Reset mapping protections to their original
+				 * state.  This affects the direct map alias of
+				 * the module mapping as well.
+				 */
+				link_elf_protect_range(ef, trunc_page(start),
+				    round_page(end), VM_PROT_RW);
+			}
 		}
 	}
 	if (ef->preloaded) {
@@ -1696,7 +1716,7 @@ elf_obj_cleanup_globals_cache(elf_file_t ef)
 
 	for (i = 0; i < ef->ddbsymcnt; i++) {
 		sym = ef->ddbsymtab + i;
-		if (sym->st_shndx == SHN_FBSD_CACHED) {
+		if (sym->st_shndx == SHN_FREEBSD_CACHED) {
 			sym->st_shndx = SHN_UNDEF;
 			sym->st_value = 0;
 		}
@@ -1765,7 +1785,7 @@ elf_obj_lookup(linker_file_t lf, Elf_Size symidx, int deps, Elf_Addr *res)
 		 * above.
 		 */
 		if (res1 != 0) {
-			sym->st_shndx = SHN_FBSD_CACHED;
+			sym->st_shndx = SHN_FREEBSD_CACHED;
 			sym->st_value = res1;
 			*res = res1;
 			return (0);

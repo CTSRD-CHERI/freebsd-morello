@@ -73,8 +73,7 @@ static device_method_t ofwbus_methods[] = {
 	DEVMETHOD_END
 };
 
-DEFINE_CLASS_1(ofwbus, ofwbus_driver, ofwbus_methods,
-    sizeof(struct simplebus_softc), simplebus_driver);
+DEFINE_CLASS_1(ofwbus, ofwbus_driver, ofwbus_methods, 0, simplebus_driver);
 EARLY_DRIVER_MODULE(ofwbus, nexus, ofwbus_driver, 0, 0,
     BUS_PASS_BUS + BUS_PASS_ORDER_MIDDLE);
 MODULE_VERSION(ofwbus, 1);
@@ -130,7 +129,7 @@ ofwbus_attach(device_t dev)
 }
 
 static struct resource *
-ofwbus_alloc_resource(device_t bus, device_t child, int type, int *rid,
+ofwbus_alloc_resource(device_t bus, device_t child, int type, int rid,
     rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
 {
 	struct resource *rv;
@@ -142,11 +141,11 @@ ofwbus_alloc_resource(device_t bus, device_t child, int type, int *rid,
 	rle = NULL;
 	if (!passthrough && isdefault) {
 		rle = resource_list_find(BUS_GET_RESOURCE_LIST(bus, child),
-		    type, *rid);
+		    type, rid);
 		if (rle == NULL) {
 			if (bootverbose)
 				device_printf(bus, "no default resources for "
-				    "rid = %d, type = %d\n", *rid, type);
+				    "rid = %d, type = %d\n", rid, type);
 			return (NULL);
 		}
 		start = rle->start;

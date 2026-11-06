@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2006, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -25,6 +15,7 @@
  */
 
 #include <libzfs.h>
+#include <libzutil.h>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -43,6 +34,7 @@
 #include <sys/dmu_objset.h>
 #include <sys/dnode.h>
 #include <sys/vdev_impl.h>
+#include <sys/zvol.h>
 
 #include <sys/mkdev.h>
 
@@ -76,16 +68,52 @@ compress_slashes(const char *src, char *dest)
 }
 
 /*
- * Given a full path to a file, translate into a dataset name and a relative
- * path within the dataset.  'dataset' must be at least MAXNAMELEN characters,
- * and 'relpath' must be at least MAXPATHLEN characters.  We also pass a stat64
- * buffer, which we need later to get the object ID.
+ * If 'inpath' points to a zvol block device, copy the zvol dataset path to 'ds'
+ * (like "tank/vol"), and return true.  If 'inpath' does not point to a zvol
+ * block device, then return false.
+ */
+static boolean_t
+get_zvol_dataset(const char *inpath, char *ds)
+{
+	boolean_t rc = B_FALSE;
+
+	char *buf = realpath(inpath, NULL);
+	if (buf == NULL)
+		return (B_FALSE);
+
+	int fd = open(buf, O_RDONLY | O_CLOEXEC);
+	free(buf);
+
+	if (fd == -1)
+		return (B_FALSE);
+
+	/*
+	 * We want to determine if 'inpath' is a zvol device.  There's no
+	 * universal way to do that, so we use OS-specific zvol ioctls.
+	 */
+#if defined(__FreeBSD__)
+	if (ioctl(fd, DIOCGPHYSPATH, ds) == 0)
+		rc = B_TRUE;
+#else
+	if (ioctl(fd, BLKZNAME, ds) == 0)
+		rc = B_TRUE;
+#endif
+	close(fd);
+
+	return (rc);
+}
+
+/*
+ * Given a full path to a file or zvol device, translate into a dataset name and
+ * a relative path within the dataset.  'dataset' must be at least MAXNAMELEN
+ * characters, and 'relpath' must be at least MAXPATHLEN characters.  We also
+ * pass a stat64 buffer, which we need later to get the object ID.
  */
 static int
 parse_pathname(const char *inpath, char *dataset, char *relpath,
     struct stat64 *statbuf)
 {
-	struct extmnttab mp;
+	struct mnttab mp;
 	const char *rel;
 	char fullpath[MAXPATHLEN];
 
@@ -96,6 +124,39 @@ parse_pathname(const char *inpath, char *dataset, char *relpath,
 		    "path\n", fullpath);
 		usage();
 		return (-1);
+	}
+
+	/* special case: inject errors into zvol */
+	if (get_zvol_dataset(inpath, fullpath)) {
+		char *slash;
+		/*
+		 * The zvol's inode does not contain its object number.
+		 * However, it has long been the case that the zvol data is
+		 * object number 1 (ZVOL_OBJ):
+		 *
+		 * Object  lvl   iblk   dblk  dsize  lsize   %full  type
+		 *      0    6   128K    16K    11K    16K    6.25  DMU dnode
+		 *      1    2   128K    16K  20.1M    20M  100.00  zvol object
+		 *      2    1   128K    512      0    512  100.00  zvol prop
+		 *
+		 * So we hardcode that in the statbuf inode field as workaround.
+		 */
+		statbuf->st_ino = ZVOL_OBJ;
+
+		(void) strlcpy(dataset, fullpath, MAXNAMELEN);
+
+		/*
+		 * fullpath contains string like 'tank/zvol'.  Strip off the
+		 * 'tank' and 'zvol' parts.
+		 */
+		slash = strchr(fullpath, '/');
+		if (slash == NULL) {
+			(void) fprintf(stderr, "invalid volume name: '%s'\n",
+			    fullpath);
+			return (-1);
+		}
+		(void) strlcpy(relpath, slash + 1, MAXPATHLEN);
+		return (0);
 	}
 
 	if (getextmntent(fullpath, &mp, statbuf) != 0) {
@@ -165,22 +226,28 @@ initialize_range(err_type_t type, int level, char *range,
 		record->zi_start = 0;
 		record->zi_end = -1ULL;
 	} else {
-		char *end;
+		char *comma;
+		int error;
 
-		/* XXX add support for suffixes */
-		record->zi_start = strtoull(range, &end, 10);
+		comma = strchr(range, ',');
+		if (comma != NULL)
+			*comma = '\0';
 
+		error = zfs_nicestrtonum(g_zfs, range,
+		    &record->zi_start);
 
-		if (*end == '\0')
+		if (comma != NULL)
+			*comma = ',';
+
+		if (error != 0)
+			goto bad_range;
+
+		if (comma != NULL) {
+			if (zfs_nicestrtonum(g_zfs, comma + 1,
+			    &record->zi_end) != 0)
+				goto bad_range;
+		} else {
 			record->zi_end = record->zi_start + 1;
-		else if (*end == ',')
-			record->zi_end = strtoull(end + 1, &end, 10);
-
-		if (*end != '\0') {
-			(void) fprintf(stderr, "invalid range '%s': must be "
-			    "a numeric range of the form 'start[,end]'\n",
-			    range);
-			return (-1);
 		}
 	}
 
@@ -213,6 +280,11 @@ initialize_range(err_type_t type, int level, char *range,
 	record->zi_level = level;
 
 	return (0);
+
+bad_range:
+	(void) fprintf(stderr, "invalid range '%s': must be of the form "
+	    "'start[,end]'\n", range);
+	return (-1);
 }
 
 int

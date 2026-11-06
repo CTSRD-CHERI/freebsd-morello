@@ -1,27 +1,34 @@
-name: Upstream self-hosted
+name: OpenBSD
 
 on:
   push:
     branches: [ master ]
-    paths: [ '**.c', '**.h', '**.sh', '.github/configs', '.github/workflows/upstream.yml' ]
+    paths: [ '**.c', '**.h', '**.sh', '.github/workflows/upstream.yml' ]
 
 jobs:
   selfhosted:
     name: "upstream ${{ matrix.target }} ${{ matrix.config }}"
     if: github.repository == 'openssh/openssh-portable-selfhosted'
-    runs-on: 'libvirt'
+    runs-on: ${{ matrix.host }}
     env:
-      DEBUG_ACTIONS: true
       EPHEMERAL: true
-      HOST: 'libvirt'
+      HOST:  ${{ matrix.host }}
       TARGET_HOST: ${{ matrix.target }}
       TARGET_CONFIG: ${{ matrix.config }}
       TARGET_DOMAIN: ${{ format('{0}-{1}-{2}', matrix.target, matrix.config, github.run_id) || matrix.target }}
     strategy:
       fail-fast: false
       matrix:
+        host:
+          - libvirt
         target: [ obsdsnap, obsdsnap-i386 ]
-        config: [ default, without-openssl, ubsan ]
+        # TODO: restore 'ubsan' once fixed
+        config: [ default, kerberos5, without-openssl ]
+        include:
+          - { host: libvirt-arm64, target: obsdsnap-arm64, config: default }
+          - { host: libvirt-arm64, target: obsdsnap-arm64, config: kerberos5 }
+          - { host: libvirt-arm64, target: obsdsnap-arm64, config: without-openssl }
+          # - { host: libvirt-arm64, target: obsdsnap-arm64, config: ubsan }
     steps:
     - name: unmount stale workspace
       run: fusermount -u ${GITHUB_WORKSPACE} || true
@@ -29,7 +36,7 @@ jobs:
     - name: shutdown VM if running
       run: vmshutdown
       working-directory: ${{ runner.temp }}
-    - uses: actions/checkout@main
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # main
     - name: startup VM
       run: vmstartup
       working-directory: ${{ runner.temp }}
@@ -37,29 +44,44 @@ jobs:
       run: sshfs_mount
       working-directory: ${{ runner.temp }}
     - name: update source
-      run: vmrun "cd /usr/src && cvs up -dPA usr.bin/ssh regress/usr.bin/ssh"
+      run: vmrun "cd /usr/src && if [ -d .git ]; then git pull && git log -n1; else cvs -q up -dPA usr.bin/ssh regress/usr.bin/ssh usr.bin/nc; fi"
+    - name: set build options in /etc/mk.conf
+      run: |
+        case ${{ matrix.config }} in \
+          without-openssl) o='OPENSSL=no' ;; \
+          kerberos5) o='KERBEROS5=yes' ;; \
+          ubsan) o='DEBUG=-fsanitize-minimal-runtime -fsanitize=undefined';; \
+        esac
+        vmrun "echo $o | sudo tee -a /etc/mk.conf"
+    - name: update netcat
+      run: vmrun "cd /usr/src/usr.bin/nc && make clean all && sudo make install"
     - name: make clean
-      run: vmrun "cd /usr/src/usr.bin/ssh && make obj && make clean && cd /usr/src/regress/usr.bin/ssh && make obj && make clean && sudo chmod -R g-w /usr/src /usr/obj"
+      run: vmrun "make -C /usr/src/usr.bin/ssh obj clean && make -C /usr/src/regress/usr.bin/ssh obj clean && sudo chmod -R g-w /usr/src /usr/obj"
     - name: make
-      run: vmrun "cd /usr/src/usr.bin/ssh && case ${{ matrix.config }} in without-openssl) make OPENSSL=no;; ubsan) make DEBUG='-fsanitize-minimal-runtime -fsanitize=undefined';; *) make; esac"
+      run: vmrun " make -C /usr/src/usr.bin/ssh"
     - name: make install
-      run: vmrun "cd /usr/src/usr.bin/ssh && sudo make install && sudo /etc/rc.d/sshd -f restart"
+      run: vmrun "sudo make -C /usr/src/usr.bin/ssh install && sudo /etc/rc.d/sshd -f restart"
     - name: make tests`
-      run: vmrun "cd /usr/src/regress/usr.bin/ssh && case ${{ matrix.config }} in without-openssl) make OPENSSL=no;; ubsan) make DEBUG='-fsanitize-minimal-runtime -fsanitize=undefined';; *) make; esac"
+      run: vmrun "cd /usr/src/regress/usr.bin/ssh && case ${{ matrix.config }} in without-openssl) make OPENSSL=no;; *) make;; esac"
       env:
         SUDO: sudo
       timeout-minutes: 300
+    - name: show logs
+      if: failure()
+      run: vmrun 'for i in /usr/src/regress/usr.bin/ssh/obj/*.log; do echo ====; echo logfile $i; echo =====; cat $i; done'
     - name: save logs
       if: failure()
-      uses: actions/upload-artifact@main
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # main
       with:
         name: ${{ matrix.target }}-${{ matrix.config }}-logs
         path: |
-          /usr/obj/regress/usr.bin/ssh/obj/*.log
-          /usr/obj/regress/usr.bin/ssh/obj/log/*
+          /usr/src/regress/usr.bin/ssh/obj/*.log
+          /usr/src/regress/usr.bin/ssh/obj/log/*
     - name: unmount workspace
       if: always()
-      run: fusermount -u ${GITHUB_WORKSPACE} || true
+      run: |
+        fusermount -u ${GITHUB_WORKSPACE} || true
+        fusermount -z -u ${GITHUB_WORKSPACE} || true
       working-directory: ${{ runner.temp }}
     - name: shutdown VM
       if: always()

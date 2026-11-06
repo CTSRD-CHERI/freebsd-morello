@@ -85,6 +85,10 @@ int posix_spawn_file_actions_addopen(posix_spawn_file_actions_t * __restrict,
     int, const char * __restrict, int, mode_t);
 int posix_spawn_file_actions_adddup2(posix_spawn_file_actions_t *, int, int);
 int posix_spawn_file_actions_addclose(posix_spawn_file_actions_t *, int);
+int posix_spawn_file_actions_addchdir(posix_spawn_file_actions_t *
+    __restrict, const char * __restrict);
+int posix_spawn_file_actions_addfchdir(posix_spawn_file_actions_t *,
+    int);
 
 #if __BSD_VISIBLE
 int posix_spawn_file_actions_addchdir_np(posix_spawn_file_actions_t *
@@ -123,6 +127,17 @@ int posix_spawnattr_setsigdefault(posix_spawnattr_t * __restrict,
     const sigset_t * __restrict);
 int posix_spawnattr_setsigmask(posix_spawnattr_t * __restrict,
     const sigset_t * __restrict);
+
+#if __BSD_VISIBLE
+int posix_spawnattr_setexecfd_np(posix_spawnattr_t * __restrict, int);
+int posix_spawnattr_setprocdescp_np(const posix_spawnattr_t * __restrict,
+    int * __restrict, int);
+int posix_spawnattr_getexecfd_np(const posix_spawnattr_t * __restrict,
+    int * __restrict);
+int posix_spawnattr_getprocdescp_np(const posix_spawnattr_t * __restrict,
+    int ** __restrict, int * __restrict);
+#endif
+
 __END_DECLS
 
 #endif /* !_SPAWN_H_ */

@@ -422,13 +422,21 @@ grab_mcontext(struct thread *td, mcontext_t *mcp, int flags)
 		for (i = 0; i < 32; i++)
 			memcpy(&mcp->mc_fpreg[i], &pcb->pcb_fpu.fpr[i].fpr,
 			    sizeof(double));
-	}
 
-	if (pcb->pcb_flags & PCB_VSX) {
-		mcp->mc_flags |= _MC_VS_VALID;
-		for (i = 0; i < 32; i++)
-			memcpy(&mcp->mc_vsxfpreg[i],
-			    &pcb->pcb_fpu.fpr[i].vsr[2], sizeof(double));
+		/*
+		 * The second halves of VSR0-31 in the PCB are current
+		 * whenever the FP state is: VSX instructions cannot run
+		 * without PCB_VSX, and save_fpu() stores them when it is
+		 * set.  Export them regardless of whether the thread owns
+		 * VSX at this moment, or a signal delivered right after a
+		 * sigreturn loses them.
+		 */
+		if (cpu_features & PPC_FEATURE_HAS_VSX) {
+			mcp->mc_flags |= _MC_VS_VALID;
+			for (i = 0; i < 32; i++)
+				memcpy(&mcp->mc_vsxfpreg[i],
+				    &pcb->pcb_fpu.fpr[i].vsr[2], sizeof(double));
+		}
 	}
 
 	/*
@@ -522,7 +530,14 @@ set_mcontext(struct thread *td, mcontext_t *mcp)
 	 *
 	 * Additionally, ensure VSX is disabled as well, as it is illegal
 	 * to leave it turned on when FP or VEC are off.
+	 *
+	 * The MSR bits in the frame and the PCB flags must change together:
+	 * if the thread is switched out in between, cpu_switchin() still
+	 * sees the flags, reloads the registers and puts the MSR bits back
+	 * into the frame, and the thread then runs with the units enabled
+	 * but without owning them.
 	 */
+	critical_enter();
 	tf->srr1 &= ~(PSL_FP | PSL_VSX | PSL_VEC);
 	pcb->pcb_flags &= ~(PCB_FPU | PCB_VSX | PCB_VEC);
 
@@ -536,7 +551,6 @@ set_mcontext(struct thread *td, mcontext_t *mcp)
 	 * sigresume is callled will used by the resumed thread, instead of the
 	 * previously saved data from the mcontext.
 	 */
-	critical_enter();
 	msr = mfmsr() & ~(PSL_FP | PSL_VSX | PSL_VEC);
 	isync();
 	mtmsr(msr);
@@ -644,18 +658,6 @@ cpu_update_pcb(struct thread *td)
 	 */
 	if (pcb_flags & PCB_CDSCR)
 		pcb->pcb_dscr = mfspr(SPR_DSCRP);
-#endif
-
-#if defined(__SPE__)
-	/*
-	 * On E500v2, single-precision scalar instructions and access to
-	 * SPEFSCR may be used without PSL_VEC turned on, as long as they
-	 * limit themselves to the low word of the registers.
-	 *
-	 * As such, we need to unconditionally save SPEFSCR, even though
-	 * it is also updated in save_vec_nodrop().
-	 */
-	pcb->pcb_vec.vscr = mfspr(SPR_SPEFSCR);
 #endif
 
 	if (pcb_flags & PCB_FPU)
@@ -1092,10 +1094,15 @@ cpu_thread_clean(struct thread *td)
 void
 cpu_thread_alloc(struct thread *td)
 {
+}
+
+void
+cpu_thread_new_kstack(struct thread *td)
+{
 	struct pcb *pcb;
 
-	pcb = (struct pcb *)((td->td_kstack + td->td_kstack_pages * PAGE_SIZE -
-	    sizeof(struct pcb)) & ~0x2fUL);
+	pcb = (struct pcb *)__align_down(td_kstack_top(td) - sizeof(struct pcb),
+	    0x40);
 	td->td_pcb = pcb;
 	td->td_frame = (struct trapframe *)pcb - 1;
 }
@@ -1155,9 +1162,6 @@ cpu_copy_thread(struct thread *td, struct thread *td0)
 	pcb2->pcb_context[0] = pcb2->pcb_lr;
 	#endif
 	pcb2->pcb_cpu.aim.usr_vsid = 0;
-#ifdef __SPE__
-	pcb2->pcb_vec.vscr = SPEFSCR_DFLT;
-#endif
 
 	/* Setup to release spin count in fork_exit(). */
 	td->td_md.md_spinlock_count = 1;
@@ -1215,9 +1219,6 @@ cpu_set_upcall(struct thread *td, void (*entry)(void *), void *arg,
 	}
 
 	td->td_pcb->pcb_flags = 0;
-#ifdef __SPE__
-	td->td_pcb->pcb_vec.vscr = SPEFSCR_DFLT;
-#endif
 
 	td->td_retval[0] = (register_t)entry;
 	td->td_retval[1] = 0;

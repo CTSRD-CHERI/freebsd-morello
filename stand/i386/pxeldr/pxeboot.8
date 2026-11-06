@@ -1,3 +1,6 @@
+.\"
+.\" SPDX-License-Identifier: BSD-2-Clause
+.\"
 .\" Copyright (c) 1999 Doug White
 .\" All rights reserved.
 .\"
@@ -127,6 +130,14 @@ In all other respects,
 acts just like
 .Xr loader 8 .
 .Pp
+.Nm
+requires NFS over UDP.
+Many recent distributions of Linux only serve NFS over TCP.
+Enable UDP in some distributions by uncommenting
+.Ql udp=y
+in
+.Pa /etc/nfs.conf .
+.Pp
 For further information on Intel's PXE specifications and Wired for
 Management (WfM) systems, see
 .Li http://www.pix.net/software/pxeboot/archive/pxespec.pdf .
@@ -142,8 +153,8 @@ bootloader first appeared in
 The
 .Nm
 bootloader was written by
-.An John Baldwin Aq jhb@FreeBSD.org
+.An John Baldwin Aq Mt jhb@FreeBSD.org
 and
-.An Paul Saab Aq ps@FreeBSD.org .
+.An Paul Saab Aq Mt ps@FreeBSD.org .
 This manual page was written by
-.An Doug White Aq dwhite@FreeBSD.org .
+.An Doug White Aq Mt dwhite@FreeBSD.org .

@@ -774,6 +774,7 @@ bwn_attach_post(struct bwn_softc *sc)
 		;
 
 	ic->ic_flags_ext |= IEEE80211_FEXT_SWBMISS;	/* s/w bmiss */
+	ic->ic_flags_ext |= IEEE80211_FEXT_SEQNO_OFFLOAD;
 
 	/* Determine the NVRAM variable containing our MAC address */
 	core_unit = bhnd_get_core_unit(sc->sc_dev);
@@ -1051,6 +1052,12 @@ full:
 	return (1);
 }
 
+/*
+ * @brief Queue the give frame for transmit.
+ *
+ * This must be called in the same lock/path as the crypto encap call
+ * to avoid reordering issues.
+ */
 static int
 bwn_tx_start(struct bwn_softc *sc, struct ieee80211_node *ni, struct mbuf *m)
 {
@@ -1063,6 +1070,8 @@ bwn_tx_start(struct bwn_softc *sc, struct ieee80211_node *ni, struct mbuf *m)
 		m_freem(m);
 		return (ENXIO);
 	}
+
+	ieee80211_output_seqno_assign(ni, -1, m);
 
 	error = (mac->mac_flags & BWN_MAC_FLAG_DMA) ?
 	    bwn_dma_tx_start(mac, ni, &m) : bwn_pio_tx_start(mac, ni, &m);

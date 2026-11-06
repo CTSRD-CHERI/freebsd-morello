@@ -61,6 +61,14 @@
 #include <cam/scsi/scsi_message.h>
 #include <cam/scsi/scsi_pass.h>
 
+/* SDT Probes */
+SDT_PROBE_DEFINE3(cam, , periph, error, "union ccb *", "cam_flags",
+    "uint32_t");
+SDT_PROBE_DEFINE2(cam, , periph, recovery, "union ccb *", "int");
+SDT_PROBE_DEFINE1(cam, , periph, invalidate, "struct cam_periph *");
+SDT_PROBE_DEFINE1(cam, , periph, hold__boot, "struct cam_periph *");
+SDT_PROBE_DEFINE1(cam, , periph, release__boot, "struct cam_periph *");
+
 static	u_int		camperiphnextunit(struct periph_driver *p_drv,
 					  u_int newunit, bool wired,
 					  path_id_t pathid, target_id_t target,
@@ -91,6 +99,10 @@ static	int		camperiphscsisenseerror(union ccb *ccb,
 					        uint32_t *action,
 					        const char **action_string);
 static void		cam_periph_devctl_notify(union ccb *ccb);
+static char		*cam_periph_devctl_sb_init(struct sbuf *sb,
+			    struct cam_periph *periph);
+static void		cam_periph_devctl_sb_fini(struct sbuf *sb, char *sbmsg,
+			    const char *type);
 
 static int nperiph_drivers;
 static int initialized = 0;
@@ -532,6 +544,7 @@ void
 cam_periph_hold_boot(struct cam_periph *periph)
 {
 
+	CAM_PROBE1(periph, hold__boot, periph);
 	root_mount_hold_token(periph->periph_name, &periph->periph_rootmount);
 }
 
@@ -539,6 +552,7 @@ void
 cam_periph_release_boot(struct cam_periph *periph)
 {
 
+	CAM_PROBE1(periph, release__boot, periph);
 	root_mount_rel(&periph->periph_rootmount);
 }
 
@@ -663,6 +677,17 @@ camperiphunit(struct periph_driver *p_drv, path_id_t pathid,
 	return (unit);
 }
 
+static void
+cam_periph_invalidate_devctl(struct cam_periph *periph)
+{
+	struct sbuf sb;
+	char *sbmsg;
+
+	sbmsg = cam_periph_devctl_sb_init(&sb, periph);
+	if (sbmsg != NULL)
+		cam_periph_devctl_sb_fini(&sb, sbmsg, "invalidate");
+}
+
 void
 cam_periph_invalidate(struct cam_periph *periph)
 {
@@ -675,7 +700,10 @@ cam_periph_invalidate(struct cam_periph *periph)
 	if ((periph->flags & CAM_PERIPH_INVALID) != 0)
 		return;
 
+	CAM_PROBE1(periph, invalidate, periph);
 	CAM_DEBUG(periph->path, CAM_DEBUG_INFO, ("Periph invalidated\n"));
+	if (!rebooting)
+		cam_periph_invalidate_devctl(periph);
 	if ((periph->flags & CAM_PERIPH_ANNOUNCED) && !rebooting) {
 		struct sbuf sb;
 		char buffer[160];
@@ -869,7 +897,7 @@ cam_periph_mapmem(union ccb *ccb, struct cam_periph_map_info *mapinfo,
 			return(0);
 		/* Two mappings: one for cmd->data and one for cmd->data->data */
 		data_ptrs[0] = (unsigned char **)&ccb->mmcio.cmd.data;
-		lengths[0] = sizeof(struct mmc_data *);
+		lengths[0] = sizeof(struct mmc_data);
 		dirs[0] = ccb->ccb_h.flags & CAM_DIR_MASK;
 		data_ptrs[1] = (unsigned char **)&ccb->mmcio.cmd.data->data;
 		lengths[1] = ccb->mmcio.cmd.data->len;
@@ -1048,7 +1076,7 @@ cam_periph_unmapmem(union ccb *ccb, struct cam_periph_map_info *mapinfo)
 		break;
 	case XPT_MMC_IO:
 		data_ptrs[0] = (uint8_t **)&ccb->mmcio.cmd.data;
-		lengths[0] = sizeof(struct mmc_data *);
+		lengths[0] = sizeof(struct mmc_data);
 		dirs[0] = ccb->ccb_h.flags & CAM_DIR_MASK;
 		data_ptrs[1] = (uint8_t **)&ccb->mmcio.cmd.data->data;
 		lengths[1] = ccb->mmcio.cmd.data->len;
@@ -1083,7 +1111,13 @@ cam_periph_unmapmem(union ccb *ccb, struct cam_periph_map_info *mapinfo)
 	}
 
 	error = 0;
-	for (i = 0; i < numbufs; i++) {
+	/*
+	 * Unmap in reverse order.  XPT_MMC_IO maps cmd.data and then
+	 * cmd.data->data; the second pointer lives inside the first
+	 * mapping, so it must be processed before the first mapping is
+	 * removed.
+	 */
+	for (i = numbufs - 1; i >= 0; i--) {
 		if (mapinfo->bp[i]) {
 			/* unmap the buffer */
 			vunmapbuf(mapinfo->bp[i]);
@@ -1876,6 +1910,8 @@ cam_periph_error(union ccb *ccb, cam_flags camflags,
 	int	    error, openings, devctl_err;
 	uint32_t   action, relsim_flags, timeout;
 
+	CAM_PROBE3(periph, error, ccb, camflags, sense_flags);
+
 	action = SSQ_PRINT_SENSE;
 	periph = xpt_path_periph(ccb->ccb_h.path);
 	action_string = NULL;
@@ -2105,38 +2141,77 @@ cam_periph_error(union ccb *ccb, cam_flags camflags,
 					 /*getcount_only*/0);
 	}
 
+	CAM_PROBE2(periph, recovery, ccb, error);
 	return (error);
 }
 
-#define CAM_PERIPH_DEVD_MSG_SIZE	256
+#define CAM_PERIPH_DEVD_MSG_SIZE	1024
+
+/*
+ * Allocate and initialize an sbuf for a devctl notification, populating it
+ * with the device name and serial number.  Returns the malloc'd backing
+ * buffer, or NULL on allocation failure.  On success, the caller can append
+ * additional fields to sb before calling cam_periph_devctl_sb_fini().
+ */
+static char *
+cam_periph_devctl_sb_init(struct sbuf *sb, struct cam_periph *periph)
+{
+	struct ccb_getdev *cgd;
+	char *sbmsg;
+
+	sbmsg = malloc(CAM_PERIPH_DEVD_MSG_SIZE, M_CAMPERIPH, M_NOWAIT);
+	if (sbmsg == NULL)
+		return (NULL);
+
+	sbuf_new(sb, sbmsg, CAM_PERIPH_DEVD_MSG_SIZE, SBUF_FIXEDLEN);
+
+	sbuf_printf(sb, "device=%s%d ", periph->periph_name,
+	    periph->unit_number);
+
+	if ((cgd = (struct ccb_getdev *)xpt_alloc_ccb_nowait()) != NULL) {
+		xpt_gdev_type(cgd, periph->path);
+		if (cgd->ccb_h.status == CAM_REQ_CMP &&
+		    cgd->serial_num_len > 0) {
+			sbuf_cat(sb, "serial=\"");
+			sbuf_bcat(sb, cgd->serial_num, cgd->serial_num_len);
+			sbuf_cat(sb, "\" ");
+		} else {
+			sbuf_cat(sb, "path=\"");
+			xpt_path_sbuf(periph->path, sb);
+			sbuf_cat(sb, "\" ");
+		}
+		xpt_free_ccb((union ccb *)cgd);
+	}
+
+	return (sbmsg);
+}
+
+/*
+ * Finish and send a devctl notification, then clean up the sbuf and its
+ * backing buffer.
+ */
+static void
+cam_periph_devctl_sb_fini(struct sbuf *sb, char *sbmsg, const char *type)
+{
+
+	if (sbuf_finish(sb) == 0)
+		devctl_notify("CAM", "periph", type, sbuf_data(sb));
+	sbuf_delete(sb);
+	free(sbmsg, M_CAMPERIPH);
+}
 
 static void
 cam_periph_devctl_notify(union ccb *ccb)
 {
 	struct cam_periph *periph;
-	struct ccb_getdev *cgd;
 	struct sbuf sb;
-	int serr, sk, asc, ascq;
 	char *sbmsg, *type;
 
-	sbmsg = malloc(CAM_PERIPH_DEVD_MSG_SIZE, M_CAMPERIPH, M_NOWAIT);
+	periph = xpt_path_periph(ccb->ccb_h.path);
+	sbmsg = cam_periph_devctl_sb_init(&sb, periph);
 	if (sbmsg == NULL)
 		return;
 
-	sbuf_new(&sb, sbmsg, CAM_PERIPH_DEVD_MSG_SIZE, SBUF_FIXEDLEN);
-
-	periph = xpt_path_periph(ccb->ccb_h.path);
-	sbuf_printf(&sb, "device=%s%d ", periph->periph_name,
-	    periph->unit_number);
-
-	sbuf_cat(&sb, "serial=\"");
-	if ((cgd = (struct ccb_getdev *)xpt_alloc_ccb_nowait()) != NULL) {
-		xpt_gdev_type(cgd, ccb->ccb_h.path);
-		if (cgd->ccb_h.status == CAM_REQ_CMP)
-			sbuf_bcat(&sb, cgd->serial_num, cgd->serial_num_len);
-		xpt_free_ccb((union ccb *)cgd);
-	}
-	sbuf_cat(&sb, "\" ");
 	sbuf_printf(&sb, "cam_status=\"0x%x\" ", ccb->ccb_h.status);
 
 	switch (ccb->ccb_h.status & CAM_STATUS_MASK) {
@@ -2145,10 +2220,7 @@ cam_periph_devctl_notify(union ccb *ccb)
 		type = "timeout";
 		break;
 	case CAM_SCSI_STATUS_ERROR:
-		sbuf_printf(&sb, "scsi_status=%d ", ccb->csio.scsi_status);
-		if (scsi_extract_sense_ccb(ccb, &serr, &sk, &asc, &ascq))
-			sbuf_printf(&sb, "scsi_sense=\"%02x %02x %02x %02x\" ",
-			    serr, sk, asc, ascq);
+		scsi_format_sense_devd(&ccb->csio, &sb);
 		type = "error";
 		break;
 	case CAM_ATA_STATUS_ERROR:
@@ -2191,9 +2263,10 @@ cam_periph_devctl_notify(union ccb *ccb)
 		struct nvme_command *cmd = &n->cmd;
 
 		// XXX Likely should be nvme_cmd_sbuf
-		sbuf_printf(&sb, "opc=\"%02x\" fuse=\"%02x\" cid=\"%04x\" "
+		sbuf_printf(&sb, "cmdset=\"%s\" opc=\"%02x\" fuse=\"%02x\" cid=\"%04x\" "
 		    "nsid=\"%08x\" cdw10=\"%08x\" cdw11=\"%08x\" cdw12=\"%08x\" "
 		    "cdw13=\"%08x\" cdw14=\"%08x\" cdw15=\"%08x\" ",
+		    ccb->ccb_h.func_code == XPT_NVME_ADMIN ? "admin" : "io",
 		    cmd->opc, cmd->fuse, cmd->cid, cmd->nsid, cmd->cdw10,
 		    cmd->cdw11, cmd->cdw12, cmd->cdw13, cmd->cdw14, cmd->cdw15);
 		break;
@@ -2202,10 +2275,7 @@ cam_periph_devctl_notify(union ccb *ccb)
 		break;
 	}
 
-	if (sbuf_finish(&sb) == 0)
-		devctl_notify("CAM", "periph", type, sbuf_data(&sb));
-	sbuf_delete(&sb);
-	free(sbmsg, M_CAMPERIPH);
+	cam_periph_devctl_sb_fini(&sb, sbmsg, type);
 }
 
 /*

@@ -55,7 +55,7 @@ struct csa_chinfo {
 	struct pcm_channel *channel;
 	struct snd_dbuf *buffer;
 	int dir;
-	u_int32_t fmt, spd;
+	uint32_t fmt, spd;
 	int dma;
 };
 
@@ -68,13 +68,13 @@ struct csa_info {
 
 	int active;
 	/* Contents of board's registers */
-	u_long		pfie;
-	u_long		pctl;
-	u_long		cctl;
+	unsigned long	pfie;
+	unsigned long	pctl;
+	unsigned long	cctl;
 	struct csa_chinfo pch, rch;
-	u_int32_t	ac97[CS461x_AC97_NUMBER_RESTORE_REGS];
-	u_int32_t	ac97_powerdown;
-	u_int32_t	ac97_general_purpose;
+	uint32_t	ac97[CS461x_AC97_NUMBER_RESTORE_REGS];
+	uint32_t	ac97_powerdown;
+	uint32_t	ac97_general_purpose;
 };
 
 /* -------------------------------------------------------------------- */
@@ -82,8 +82,9 @@ struct csa_info {
 /* prototypes */
 static int      csa_init(struct csa_info *);
 static void     csa_intr(void *);
-static void	csa_setplaysamplerate(csa_res *resp, u_long ulInRate);
-static void	csa_setcapturesamplerate(csa_res *resp, u_long ulOutRate);
+static void	csa_setplaysamplerate(csa_res *resp, unsigned long ulInRate);
+static void	csa_setcapturesamplerate(csa_res *resp,
+		    unsigned long ulOutRate);
 static void	csa_startplaydma(struct csa_info *csa);
 static void	csa_startcapturedma(struct csa_info *csa);
 static void	csa_stopplaydma(struct csa_info *csa);
@@ -95,7 +96,7 @@ static void	csa_releaseres(struct csa_info *scp, device_t dev);
 static void	csa_ac97_suspend(struct csa_info *csa);
 static void	csa_ac97_resume(struct csa_info *csa);
 
-static u_int32_t csa_playfmt[] = {
+static uint32_t csa_playfmt[] = {
 	SND_FORMAT(AFMT_U8, 1, 0),
 	SND_FORMAT(AFMT_U8, 2, 0),
 	SND_FORMAT(AFMT_S8, 1, 0),
@@ -108,7 +109,7 @@ static u_int32_t csa_playfmt[] = {
 };
 static struct pcmchan_caps csa_playcaps = {8000, 48000, csa_playfmt, 0};
 
-static u_int32_t csa_recfmt[] = {
+static uint32_t csa_recfmt[] = {
 	SND_FORMAT(AFMT_S16_LE, 1, 0),
 	SND_FORMAT(AFMT_S16_LE, 2, 0),
 	0
@@ -139,7 +140,7 @@ csa_active(struct csa_info *csa, int run)
 static int
 csa_rdcd(kobj_t obj, void *devinfo, int regno)
 {
-	u_int32_t data;
+	uint32_t data;
 	struct csa_info *csa = (struct csa_info *)devinfo;
 
 	csa_active(csa, 1);
@@ -151,7 +152,7 @@ csa_rdcd(kobj_t obj, void *devinfo, int regno)
 }
 
 static int
-csa_wrcd(kobj_t obj, void *devinfo, int regno, u_int32_t data)
+csa_wrcd(kobj_t obj, void *devinfo, int regno, uint32_t data)
 {
 	struct csa_info *csa = (struct csa_info *)devinfo;
 
@@ -163,19 +164,19 @@ csa_wrcd(kobj_t obj, void *devinfo, int regno, u_int32_t data)
 }
 
 static kobj_method_t csa_ac97_methods[] = {
-    	KOBJMETHOD(ac97_read,		csa_rdcd),
-    	KOBJMETHOD(ac97_write,		csa_wrcd),
+	KOBJMETHOD(ac97_read,		csa_rdcd),
+	KOBJMETHOD(ac97_write,		csa_wrcd),
 	KOBJMETHOD_END
 };
 AC97_DECLARE(csa_ac97);
 
 static void
-csa_setplaysamplerate(csa_res *resp, u_long ulInRate)
+csa_setplaysamplerate(csa_res *resp, unsigned long ulInRate)
 {
-	u_long ulTemp1, ulTemp2;
-	u_long ulPhiIncr;
-	u_long ulCorrectionPerGOF, ulCorrectionPerSec;
-	u_long ulOutRate;
+	unsigned long ulTemp1, ulTemp2;
+	unsigned long ulPhiIncr;
+	unsigned long ulCorrectionPerGOF, ulCorrectionPerSec;
+	unsigned long ulOutRate;
 
 	ulOutRate = 48000;
 
@@ -216,12 +217,12 @@ csa_setplaysamplerate(csa_res *resp, u_long ulInRate)
 }
 
 static void
-csa_setcapturesamplerate(csa_res *resp, u_long ulOutRate)
+csa_setcapturesamplerate(csa_res *resp, unsigned long ulOutRate)
 {
-	u_long ulPhiIncr, ulCoeffIncr, ulTemp1, ulTemp2;
-	u_long ulCorrectionPerGOF, ulCorrectionPerSec, ulInitialDelay;
-	u_long dwFrameGroupLength, dwCnt;
-	u_long ulInRate;
+	unsigned long ulPhiIncr, ulCoeffIncr, ulTemp1, ulTemp2;
+	unsigned long ulCorrectionPerGOF, ulCorrectionPerSec, ulInitialDelay;
+	unsigned long dwFrameGroupLength, dwCnt;
+	unsigned long ulInRate;
 
 	ulInRate = 48000;
 
@@ -333,7 +334,7 @@ static void
 csa_startplaydma(struct csa_info *csa)
 {
 	csa_res *resp;
-	u_long ul;
+	unsigned long ul;
 
 	if (!csa->pch.dma) {
 		resp = &csa->res;
@@ -349,7 +350,7 @@ static void
 csa_startcapturedma(struct csa_info *csa)
 {
 	csa_res *resp;
-	u_long ul;
+	unsigned long ul;
 
 	if (!csa->rch.dma) {
 		resp = &csa->res;
@@ -365,7 +366,7 @@ static void
 csa_stopplaydma(struct csa_info *csa)
 {
 	csa_res *resp;
-	u_long ul;
+	unsigned long ul;
 
 	if (csa->pch.dma) {
 		resp = &csa->res;
@@ -392,7 +393,7 @@ static void
 csa_stopcapturedma(struct csa_info *csa)
 {
 	csa_res *resp;
-	u_long ul;
+	unsigned long ul;
 
 	if (csa->rch.dma) {
 		resp = &csa->res;
@@ -419,7 +420,7 @@ static int
 csa_startdsp(csa_res *resp)
 {
 	int i;
-	u_long ul;
+	unsigned long ul;
 
 	/*
 	 * Set the frame timer to reflect the number of cycles per frame.
@@ -479,11 +480,11 @@ csa_setupchan(struct csa_chinfo *ch)
 {
 	struct csa_info *csa = ch->parent;
 	csa_res *resp = &csa->res;
-	u_long pdtc, tmp;
+	unsigned long pdtc, tmp;
 
 	if (ch->dir == PCMDIR_PLAY) {
 		/* direction */
-		csa_writemem(resp, BA1_PBA, sndbuf_getbufaddr(ch->buffer));
+		csa_writemem(resp, BA1_PBA, ch->buffer->buf_addr);
 
 		/* format */
 		csa->pfie = csa_readmem(resp, BA1_PFIE) & ~0x0000f03f;
@@ -512,7 +513,7 @@ csa_setupchan(struct csa_chinfo *ch)
 		csa_setplaysamplerate(resp, ch->spd);
 	} else if (ch->dir == PCMDIR_REC) {
 		/* direction */
-		csa_writemem(resp, BA1_CBA, sndbuf_getbufaddr(ch->buffer));
+		csa_writemem(resp, BA1_CBA, ch->buffer->buf_addr);
 
 		/* format */
 		csa_writemem(resp, BA1_CIE, (csa_readmem(resp, BA1_CIE) & ~0x0000003f) | 0x00000001);
@@ -542,7 +543,7 @@ csachan_init(kobj_t obj, void *devinfo, struct snd_dbuf *b, struct pcm_channel *
 }
 
 static int
-csachan_setformat(kobj_t obj, void *data, u_int32_t format)
+csachan_setformat(kobj_t obj, void *data, uint32_t format)
 {
 	struct csa_chinfo *ch = data;
 
@@ -550,8 +551,8 @@ csachan_setformat(kobj_t obj, void *data, u_int32_t format)
 	return 0;
 }
 
-static u_int32_t
-csachan_setspeed(kobj_t obj, void *data, u_int32_t speed)
+static uint32_t
+csachan_setspeed(kobj_t obj, void *data, uint32_t speed)
 {
 	struct csa_chinfo *ch = data;
 
@@ -559,8 +560,8 @@ csachan_setspeed(kobj_t obj, void *data, u_int32_t speed)
 	return ch->spd; /* XXX calc real speed */
 }
 
-static u_int32_t
-csachan_setblocksize(kobj_t obj, void *data, u_int32_t blocksize)
+static uint32_t
+csachan_setblocksize(kobj_t obj, void *data, uint32_t blocksize)
 {
 	return CS461x_BUFFSIZE / 2;
 }
@@ -591,22 +592,22 @@ csachan_trigger(kobj_t obj, void *data, int go)
 	return 0;
 }
 
-static u_int32_t
+static uint32_t
 csachan_getptr(kobj_t obj, void *data)
 {
 	struct csa_chinfo *ch = data;
 	struct csa_info *csa = ch->parent;
 	csa_res *resp;
-	u_int32_t ptr;
+	uint32_t ptr;
 
 	resp = &csa->res;
 
 	if (ch->dir == PCMDIR_PLAY) {
-		ptr = csa_readmem(resp, BA1_PBA) - sndbuf_getbufaddr(ch->buffer);
+		ptr = csa_readmem(resp, BA1_PBA) - ch->buffer->buf_addr;
 		if ((ch->fmt & AFMT_U8) != 0 || (ch->fmt & AFMT_S8) != 0)
 			ptr >>= 1;
 	} else {
-		ptr = csa_readmem(resp, BA1_CBA) - sndbuf_getbufaddr(ch->buffer);
+		ptr = csa_readmem(resp, BA1_CBA) - ch->buffer->buf_addr;
 		if ((ch->fmt & AFMT_U8) != 0 || (ch->fmt & AFMT_S8) != 0)
 			ptr >>= 1;
 	}
@@ -622,13 +623,13 @@ csachan_getcaps(kobj_t obj, void *data)
 }
 
 static kobj_method_t csachan_methods[] = {
-    	KOBJMETHOD(channel_init,		csachan_init),
-    	KOBJMETHOD(channel_setformat,		csachan_setformat),
-    	KOBJMETHOD(channel_setspeed,		csachan_setspeed),
-    	KOBJMETHOD(channel_setblocksize,	csachan_setblocksize),
-    	KOBJMETHOD(channel_trigger,		csachan_trigger),
-    	KOBJMETHOD(channel_getptr,		csachan_getptr),
-    	KOBJMETHOD(channel_getcaps,		csachan_getcaps),
+	KOBJMETHOD(channel_init,		csachan_init),
+	KOBJMETHOD(channel_setformat,		csachan_setformat),
+	KOBJMETHOD(channel_setspeed,		csachan_setspeed),
+	KOBJMETHOD(channel_setblocksize,	csachan_setblocksize),
+	KOBJMETHOD(channel_trigger,		csachan_trigger),
+	KOBJMETHOD(channel_getptr,		csachan_getptr),
+	KOBJMETHOD(channel_getcaps,		csachan_getcaps),
 	KOBJMETHOD_END
 };
 CHANNEL_DECLARE(csachan);
@@ -675,7 +676,7 @@ csa_init(struct csa_info *csa)
 	/* Power up amplifier */
 	csa_writeio(resp, BA0_EGPIODR, csa_readio(resp, BA0_EGPIODR) |
 		EGPIODR_GPOE2);
-	csa_writeio(resp, BA0_EGPIOPTR, csa_readio(resp, BA0_EGPIOPTR) | 
+	csa_writeio(resp, BA0_EGPIOPTR, csa_readio(resp, BA0_EGPIOPTR) |
 		EGPIOPTR_GPPT2);
 
 	return 0;
@@ -755,12 +756,10 @@ static int
 pcmcsa_probe(device_t dev)
 {
 	char *s;
-	struct sndcard_func *func;
 
 	/* The parent device has already been probed. */
 
-	func = device_get_ivars(dev);
-	if (func == NULL || func->func != SCF_PCM)
+	if (device_get_ivars(dev) == NULL)
 		return (ENXIO);
 
 	s = "CS461x PCM Audio";
@@ -776,11 +775,9 @@ pcmcsa_attach(device_t dev)
 	csa_res *resp;
 	char status[SND_STATUSLEN];
 	struct ac97_info *codec;
-	struct sndcard_func *func;
 
 	csa = malloc(sizeof(*csa), M_DEVBUF, M_WAITOK | M_ZERO);
-	func = device_get_ivars(dev);
-	csa->binfo = func->varinfo;
+	csa->binfo = device_get_ivars(dev);
 	/*
 	 * Fake the status of DMA so that the initial value of
 	 * PCTL and CCTL can be stored into csa->pctl and csa->cctl,
@@ -812,6 +809,7 @@ pcmcsa_attach(device_t dev)
 	}
 	if (csa->card->inv_eapd)
 		ac97_setflags(codec, AC97_F_EAPD_INV);
+	pcm_init(dev, csa);
 	if (mixer_init(dev, ac97_getmixerclass(), codec) == -1) {
 		ac97_destroy(codec);
 		csa_releaseres(csa, dev);
@@ -832,7 +830,6 @@ pcmcsa_attach(device_t dev)
 	csa_writemem(resp, BA1_CIE, (csa_readmem(resp, BA1_CIE) & ~0x0000003f) | 0x00000001);
 	csa_active(csa, -1);
 
-	pcm_init(dev, csa);
 	pcm_addchan(dev, PCMDIR_REC, &csachan_class, csa);
 	pcm_addchan(dev, PCMDIR_PLAY, &csachan_class, csa);
 	if (pcm_register(dev, status)) {
@@ -1024,7 +1021,7 @@ static device_method_t pcmcsa_methods[] = {
 	DEVMETHOD(device_suspend, pcmcsa_suspend),
 	DEVMETHOD(device_resume, pcmcsa_resume),
 
-	{ 0, 0 },
+	DEVMETHOD_END
 };
 
 static driver_t pcmcsa_driver = {
@@ -1034,6 +1031,6 @@ static driver_t pcmcsa_driver = {
 };
 
 DRIVER_MODULE(snd_csapcm, csa, pcmcsa_driver, 0, 0);
-MODULE_DEPEND(snd_csapcm, sound, SOUND_MINVER, SOUND_PREFVER, SOUND_MAXVER);
+MODULE_DEPEND(snd_csapcm, sound, 1, 1, 1);
 MODULE_DEPEND(snd_csapcm, snd_csa, 1, 1, 1);
 MODULE_VERSION(snd_csapcm, 1);

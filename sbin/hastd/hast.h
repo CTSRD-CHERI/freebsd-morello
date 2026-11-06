@@ -66,6 +66,7 @@
 #define	HASTCTL_CMD_UNKNOWN	0
 #define	HASTCTL_CMD_SETROLE	1
 #define	HASTCTL_CMD_STATUS	2
+#define	HASTCTL_CMD_STOP	3
 
 #define	HAST_ROLE_UNDEF		0
 #define	HAST_ROLE_INIT		1
@@ -265,5 +266,7 @@ struct hast_resource {
 
 struct hastd_config *yy_config_parse(const char *config, bool exitonerror);
 void yy_config_free(struct hastd_config *config);
+
+extern const char *nodename;
 
 #endif	/* !_HAST_H_ */

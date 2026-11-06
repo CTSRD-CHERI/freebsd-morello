@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 1984-2025  Mark Nudelman
+ * Copyright (C) 1984-2026  Mark Nudelman
  *
  * You may distribute under the terms of either the GNU General Public
  * License or the Less License, as specified in the README file.
@@ -133,7 +133,7 @@ static struct tag * maketagent(constant char *file, LINENUM linenum, constant ch
 /*
  * Get tag mode.
  */
-public int gettagtype(void)
+static int gettagtype(void)
 {
 	int f;
 
@@ -178,13 +178,13 @@ public void findtag(constant char *tag)
 	case TAG_INTR:
 		break;
 	case TAG_NOFILE:
-		error("No tags file", NULL_PARG);
+		error(LM(No_tags_file), NULL_PARG);
 		break;
 	case TAG_NOTAG:
-		error("No such tag in tags file", NULL_PARG);
+		error(LM(No_such_tag_in_tags_file), NULL_PARG);
 		break;
 	case TAG_NOTYPE:
-		error("unknown tag type", NULL_PARG);
+		error(LM(unknown_tag_type), NULL_PARG);
 		break;
 	}
 }
@@ -256,12 +256,12 @@ static enum tag_result findctag(constant char *tag)
 	char *q;
 	FILE *f;
 	size_t taglen;
+	int n;
 	LINENUM taglinenum;
 	char *tagfile;
 	char *tagpattern;
 	lbool tagendline;
 	int search_char;
-	lbool err;
 	char tline[TAGLINE_SIZE];
 	struct tag *tp;
 
@@ -321,8 +321,15 @@ static enum tag_result findctag(constant char *tag)
 		 * First see if it is a line number. 
 		 */
 		tagendline = FALSE;
-		taglinenum = getnum(&p, 0, &err);
-		if (err)
+		if (getnum(&p, NULL, FALSE, &n)) {
+			/*
+			 * Line numbers start from 1.
+			 */
+			if (n == 0)
+				continue;
+			taglinenum = n;
+		}
+		else
 		{
 			/*
 			 * No, it must be a pattern.
@@ -409,12 +416,12 @@ static POSITION ctagsearch(void)
 	LINENUM linenum;
 	size_t line_len;
 	constant char *line;
-	int found;
+	lbool found;
 
 	pos = ch_zero();
 	linenum = find_linenum(pos);
 
-	for (found = 0; !found;)
+	for (found = FALSE; !found;)
 	{
 		/*
 		 * Get lines until we find a matching one or 
@@ -437,7 +444,7 @@ static POSITION ctagsearch(void)
 			/*
 			 * We hit EOF without a match.
 			 */
-			error("Tag not found", NULL_PARG);
+			error(LM(Tag_not_found), NULL_PARG);
 			return (NULL_POSITION);
 		}
 
@@ -452,7 +459,7 @@ static POSITION ctagsearch(void)
 		if (ctldisp != OPT_ONPLUS)
 		{
 			if (curtag_match(line, linepos))
-				found = 1;
+				found = TRUE;
 		} else
 		{
 			int cvt_ops = CVT_ANSI;
@@ -461,7 +468,7 @@ static POSITION ctagsearch(void)
 			char *cline = (char *) ecalloc(1, cvt_len);
 			cvt_text(cline, line, chpos, &line_len, cvt_ops);
 			if (curtag_match(cline, linepos))
-				found = 1;
+				found = TRUE;
 			free(chpos);
 			free(cline);
 		}
@@ -536,7 +543,7 @@ static enum tag_result findgtag(constant char *tag, int type)
 		/* Get our data from global(1). */
 		qtag = shell_quote(tag);
 		if (qtag == NULL)
-			qtag = save(tag);
+			return TAG_NOTAG;
 		command = (char *) ecalloc(strlen(cmd) + strlen(flag) +
 				strlen(qtag) + 5, sizeof(char));
 		sprintf(command, "%s -x%s %s", cmd, flag, qtag);

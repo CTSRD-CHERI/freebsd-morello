@@ -91,6 +91,7 @@ s32 ixgbe_init_ops_generic(struct ixgbe_hw *hw)
 				      ixgbe_validate_eeprom_checksum_generic;
 	eeprom->ops.update_checksum = ixgbe_update_eeprom_checksum_generic;
 	eeprom->ops.calc_checksum = ixgbe_calc_eeprom_checksum_generic;
+	eeprom->ops.read_pba_string = ixgbe_read_pba_string_generic;
 
 	/* MAC */
 	mac->ops.init_hw = ixgbe_init_hw_generic;
@@ -178,6 +179,7 @@ bool ixgbe_device_supports_autoneg_fc(struct ixgbe_hw *hw)
 		case IXGBE_DEV_ID_X550EM_A_SFP_N:
 		case IXGBE_DEV_ID_X550EM_A_QSFP:
 		case IXGBE_DEV_ID_X550EM_A_QSFP_N:
+		case IXGBE_DEV_ID_E610_SFP:
 			supported = false;
 			break;
 		default:
@@ -210,6 +212,8 @@ bool ixgbe_device_supports_autoneg_fc(struct ixgbe_hw *hw)
 		case IXGBE_DEV_ID_X550EM_A_10G_T:
 		case IXGBE_DEV_ID_X550EM_A_1G_T:
 		case IXGBE_DEV_ID_X550EM_A_1G_T_L:
+		case IXGBE_DEV_ID_E610_10G_T:
+		case IXGBE_DEV_ID_E610_2_5G_T:
 			supported = true;
 			break;
 		default:
@@ -616,7 +620,8 @@ s32 ixgbe_clear_hw_cntrs_generic(struct ixgbe_hw *hw)
 		}
 	}
 
-	if (hw->mac.type == ixgbe_mac_X550 || hw->mac.type == ixgbe_mac_X540) {
+	if (hw->mac.type == ixgbe_mac_X540 ||
+	    hw->mac.type == ixgbe_mac_X550) {
 		if (hw->phy.id == 0)
 			ixgbe_identify_phy(hw);
 		hw->phy.ops.read_reg(hw, IXGBE_PCRC8ECL,
@@ -765,7 +770,7 @@ s32 ixgbe_read_pba_num_generic(struct ixgbe_hw *hw, u32 *pba_num)
 		DEBUGOUT("NVM Not supported\n");
 		return IXGBE_NOT_IMPLEMENTED;
 	}
-	*pba_num = (u32)(data << 16);
+	*pba_num = (u32)data << 16;
 
 	ret_val = hw->eeprom.ops.read(hw, IXGBE_PBANUM1_PTR, &data);
 	if (ret_val) {
@@ -1037,6 +1042,9 @@ void ixgbe_set_pci_config_data_generic(struct ixgbe_hw *hw, u16 link_status)
 	case IXGBE_PCI_LINK_SPEED_8000:
 		hw->bus.speed = ixgbe_bus_speed_8000;
 		break;
+	case IXGBE_PCI_LINK_SPEED_16000:
+		hw->bus.speed = ixgbe_bus_speed_16000;
+		break;
 	default:
 		hw->bus.speed = ixgbe_bus_speed_unknown;
 		break;
@@ -1059,7 +1067,9 @@ s32 ixgbe_get_bus_info_generic(struct ixgbe_hw *hw)
 	DEBUGFUNC("ixgbe_get_bus_info_generic");
 
 	/* Get the negotiated link width and speed from PCI config space */
-	link_status = IXGBE_READ_PCIE_WORD(hw, IXGBE_PCI_LINK_STATUS);
+	link_status = IXGBE_READ_PCIE_WORD(hw, hw->mac.type == ixgbe_mac_E610 ?
+					   IXGBE_PCI_LINK_STATUS_E610 :
+					   IXGBE_PCI_LINK_STATUS);
 
 	ixgbe_set_pci_config_data_generic(hw, link_status);
 
@@ -1878,7 +1888,6 @@ static s32 ixgbe_get_eeprom_semaphore(struct ixgbe_hw *hw)
 
 	DEBUGFUNC("ixgbe_get_eeprom_semaphore");
 
-
 	/* Get SMBI software semaphore between device drivers first */
 	for (i = 0; i < timeout; i++) {
 		/*
@@ -2212,7 +2221,8 @@ static void ixgbe_release_eeprom(struct ixgbe_hw *hw)
 s32 ixgbe_calc_eeprom_checksum_generic(struct ixgbe_hw *hw)
 {
 	u16 i;
-	u16 j;
+	u32 j;
+	u32 word_end;
 	u16 checksum = 0;
 	u16 length = 0;
 	u16 pointer = 0;
@@ -2239,6 +2249,10 @@ s32 ixgbe_calc_eeprom_checksum_generic(struct ixgbe_hw *hw)
 		/* If the pointer seems invalid */
 		if (pointer == 0xFFFF || pointer == 0)
 			continue;
+		if (pointer >= hw->eeprom.word_size) {
+			DEBUGOUT("EEPROM pointer outside word range\n");
+			return IXGBE_ERR_EEPROM;
+		}
 
 		if (hw->eeprom.ops.read(hw, pointer, &length)) {
 			DEBUGOUT("EEPROM read failed\n");
@@ -2247,9 +2261,14 @@ s32 ixgbe_calc_eeprom_checksum_generic(struct ixgbe_hw *hw)
 
 		if (length == 0xFFFF || length == 0)
 			continue;
+		if (length >= hw->eeprom.word_size - pointer) {
+			DEBUGOUT("EEPROM section outside word range\n");
+			return IXGBE_ERR_EEPROM;
+		}
 
-		for (j = pointer + 1; j <= pointer + length; j++) {
-			if (hw->eeprom.ops.read(hw, j, &word)) {
+		word_end = (u32)pointer + length;
+		for (j = (u32)pointer + 1; j <= word_end; j++) {
+			if (hw->eeprom.ops.read(hw, (u16)j, &word)) {
 				DEBUGOUT("EEPROM read failed\n");
 				return IXGBE_ERR_EEPROM;
 			}
@@ -2710,7 +2729,7 @@ void ixgbe_set_mta(struct ixgbe_hw *hw, u8 *mc_addr)
 	 */
 	vector_reg = (vector >> 5) & 0x7F;
 	vector_bit = vector & 0x1F;
-	hw->mac.mta_shadow[vector_reg] |= (1 << vector_bit);
+	hw->mac.mta_shadow[vector_reg] |= 1U << vector_bit;
 }
 
 /**
@@ -2924,7 +2943,7 @@ s32 ixgbe_fc_enable_generic(struct ixgbe_hw *hw)
 	}
 
 	/* Configure pause time (2 TCs per register) */
-	reg = hw->fc.pause_time * 0x00010001;
+	reg = hw->fc.pause_time * 0x00010001U;
 	for (i = 0; i < (IXGBE_DCB_MAX_TRAFFIC_CLASS / 2); i++)
 		IXGBE_WRITE_REG(hw, IXGBE_FCTTV(i), reg);
 
@@ -3363,7 +3382,6 @@ s32 ixgbe_disable_sec_rx_path_generic(struct ixgbe_hw *hw)
 
 	DEBUGFUNC("ixgbe_disable_sec_rx_path_generic");
 
-
 	secrxreg = IXGBE_READ_REG(hw, IXGBE_SECRXCTRL);
 	secrxreg |= IXGBE_SECRXCTRL_RX_DIS;
 	IXGBE_WRITE_REG(hw, IXGBE_SECRXCTRL, secrxreg);
@@ -3692,6 +3710,10 @@ u16 ixgbe_get_pcie_msix_count_generic(struct ixgbe_hw *hw)
 		pcie_offset = IXGBE_PCIE_MSIX_82599_CAPS;
 		max_msix_count = IXGBE_MAX_MSIX_VECTORS_82599;
 		break;
+	case ixgbe_mac_E610:
+		pcie_offset = IXGBE_PCIE_MSIX_E610_CAPS;
+		max_msix_count = IXGBE_MAX_MSIX_VECTORS_82599;
+		break;
 	default:
 		return msix_count;
 	}
@@ -3819,10 +3841,10 @@ s32 ixgbe_clear_vmdq_generic(struct ixgbe_hw *hw, u32 rar, u32 vmdq)
 			mpsar_hi = IXGBE_READ_REG(hw, IXGBE_MPSAR_HI(rar));
 		}
 	} else if (vmdq < 32) {
-		mpsar_lo &= ~(1 << vmdq);
+		mpsar_lo &= ~(1U << vmdq);
 		IXGBE_WRITE_REG(hw, IXGBE_MPSAR_LO(rar), mpsar_lo);
 	} else {
-		mpsar_hi &= ~(1 << (vmdq - 32));
+		mpsar_hi &= ~(1U << (vmdq - 32));
 		IXGBE_WRITE_REG(hw, IXGBE_MPSAR_HI(rar), mpsar_hi);
 	}
 
@@ -3856,11 +3878,11 @@ s32 ixgbe_set_vmdq_generic(struct ixgbe_hw *hw, u32 rar, u32 vmdq)
 
 	if (vmdq < 32) {
 		mpsar = IXGBE_READ_REG(hw, IXGBE_MPSAR_LO(rar));
-		mpsar |= 1 << vmdq;
+		mpsar |= 1U << vmdq;
 		IXGBE_WRITE_REG(hw, IXGBE_MPSAR_LO(rar), mpsar);
 	} else {
 		mpsar = IXGBE_READ_REG(hw, IXGBE_MPSAR_HI(rar));
-		mpsar |= 1 << (vmdq - 32);
+		mpsar |= 1U << (vmdq - 32);
 		IXGBE_WRITE_REG(hw, IXGBE_MPSAR_HI(rar), mpsar);
 	}
 	return IXGBE_SUCCESS;
@@ -3884,11 +3906,11 @@ s32 ixgbe_set_vmdq_san_mac_generic(struct ixgbe_hw *hw, u32 vmdq)
 	DEBUGFUNC("ixgbe_set_vmdq_san_mac");
 
 	if (vmdq < 32) {
-		IXGBE_WRITE_REG(hw, IXGBE_MPSAR_LO(rar), 1 << vmdq);
+		IXGBE_WRITE_REG(hw, IXGBE_MPSAR_LO(rar), 1U << vmdq);
 		IXGBE_WRITE_REG(hw, IXGBE_MPSAR_HI(rar), 0);
 	} else {
 		IXGBE_WRITE_REG(hw, IXGBE_MPSAR_LO(rar), 0);
-		IXGBE_WRITE_REG(hw, IXGBE_MPSAR_HI(rar), 1 << (vmdq - 32));
+		IXGBE_WRITE_REG(hw, IXGBE_MPSAR_HI(rar), 1U << (vmdq - 32));
 	}
 
 	return IXGBE_SUCCESS;
@@ -3996,7 +4018,7 @@ s32 ixgbe_set_vfta_generic(struct ixgbe_hw *hw, u32 vlan, u32 vind,
 	 *    bits[4-0]:  which bit in the register
 	 */
 	regidx = vlan / 32;
-	vfta_delta = 1 << (vlan % 32);
+	vfta_delta = 1U << (vlan % 32);
 	vfta = IXGBE_READ_REG(hw, IXGBE_VFTA(regidx));
 
 	/*
@@ -4068,12 +4090,12 @@ s32 ixgbe_set_vlvf_generic(struct ixgbe_hw *hw, u32 vlan, u32 vind,
 	bits = IXGBE_READ_REG(hw, IXGBE_VLVFB(vlvf_index * 2 + vind / 32));
 
 	/* set the pool bit */
-	bits |= 1 << (vind % 32);
+	bits |= 1U << (vind % 32);
 	if (vlan_on)
 		goto vlvf_update;
 
 	/* clear the pool bit */
-	bits ^= 1 << (vind % 32);
+	bits ^= 1U << (vind % 32);
 
 	if (!bits &&
 	    !IXGBE_READ_REG(hw, IXGBE_VLVFB(vlvf_index * 2 + 1 - vind / 32))) {
@@ -4139,11 +4161,10 @@ s32 ixgbe_clear_vfta_generic(struct ixgbe_hw *hw)
 	return IXGBE_SUCCESS;
 }
 
-
 /**
  * ixgbe_toggle_txdctl_generic - Toggle VF's queues
  * @hw: pointer to hardware structure
- * @vf_number: VF index
+ * @vf_number: VF number
  *
  * Enable and disable each queue in VF.
  */
@@ -4323,7 +4344,8 @@ s32 ixgbe_check_mac_link_generic(struct ixgbe_hw *hw, ixgbe_link_speed *speed,
 		break;
 	case IXGBE_LINKS_SPEED_100_82599:
 		*speed = IXGBE_LINK_SPEED_100_FULL;
-		if (hw->mac.type == ixgbe_mac_X550) {
+		if (hw->mac.type == ixgbe_mac_X550 ||
+		    hw->mac.type == ixgbe_mac_E610) {
 			if (links_reg & IXGBE_LINKS_SPEED_NON_STD)
 				*speed = IXGBE_LINK_SPEED_5GB_FULL;
 		}
@@ -4620,11 +4642,11 @@ s32 ixgbe_hic_unlocked(struct ixgbe_hw *hw, u32 *buffer, u32 length,
 	/* Setting this bit tells the ARC that a new command is pending. */
 	IXGBE_WRITE_REG(hw, IXGBE_HICR, hicr | IXGBE_HICR_C);
 
-	for (i = 0; i < timeout; i++) {
+	for (i = 0; i < timeout * 1000; i++) {
 		hicr = IXGBE_READ_REG(hw, IXGBE_HICR);
 		if (!(hicr & IXGBE_HICR_C))
 			break;
-		msec_delay(1);
+		usec_delay(1);
 	}
 
 	/* For each command except "Apply Update" perform
@@ -4635,7 +4657,7 @@ s32 ixgbe_hic_unlocked(struct ixgbe_hw *hw, u32 *buffer, u32 length,
 		return IXGBE_SUCCESS;
 
 	/* Check command completion */
-	if ((timeout && i == timeout) ||
+	if ((timeout && i == timeout * 1000) ||
 	    !(IXGBE_READ_REG(hw, IXGBE_HICR) & IXGBE_HICR_SV)) {
 		ERROR_REPORT1(IXGBE_ERROR_CAUTION,
 			      "Command has failed with no status valid.\n");
@@ -5443,11 +5465,11 @@ void ixgbe_get_etk_id(struct ixgbe_hw *hw, struct ixgbe_nvm_version *nvm_ver)
 	 * word bit 15.
 	 */
 	if ((etk_id_h & NVM_ETK_VALID) == 0) {
-		nvm_ver->etk_id = etk_id_h;
-		nvm_ver->etk_id |= (etk_id_l << NVM_ETK_SHIFT);
+		nvm_ver->etk_id = (u32)etk_id_h;
+		nvm_ver->etk_id |= (u32)etk_id_l << NVM_ETK_SHIFT;
 	} else {
-		nvm_ver->etk_id = etk_id_l;
-		nvm_ver->etk_id |= (etk_id_h << NVM_ETK_SHIFT);
+		nvm_ver->etk_id = (u32)etk_id_l;
+		nvm_ver->etk_id |= (u32)etk_id_h << NVM_ETK_SHIFT;
 	}
 }
 
@@ -5494,6 +5516,7 @@ void ixgbe_get_nvm_version(struct ixgbe_hw *hw,
 	case ixgbe_mac_X550:
 	case ixgbe_mac_X550EM_x:
 	case ixgbe_mac_X550EM_a:
+	case ixgbe_mac_E610:
 		/* version of eeprom section */
 		if (ixgbe_read_eeprom(hw, NVM_EEP_OFFSET_X540, &word))
 			word = NVM_VER_INVALID;
@@ -5512,6 +5535,7 @@ void ixgbe_get_nvm_version(struct ixgbe_hw *hw,
 	case ixgbe_mac_X550:
 	case ixgbe_mac_X550EM_x:
 	case ixgbe_mac_X550EM_a:
+	case ixgbe_mac_E610:
 		/* intel phy firmware version */
 		if (ixgbe_read_eeprom(hw, NVM_EEP_PHY_OFF_X540, &word))
 			word = NVM_VER_INVALID;

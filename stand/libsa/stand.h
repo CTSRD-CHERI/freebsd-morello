@@ -94,6 +94,8 @@ __BEGIN_DECLS
 
 struct open_file;
 
+#define FS_OPS_NO_DEVOPEN 1
+
 /*
  * This structure is used to define file system operations in a file system
  * independent way.
@@ -104,6 +106,7 @@ struct open_file;
  */
 struct fs_ops {
     const char	*fs_name;
+    int		fs_flags;
     int		(*fo_open)(const char *path, struct open_file *f);
     int		(*fo_close)(struct open_file *f);
     int		(*fo_read)(struct open_file *f, void *buf,
@@ -127,6 +130,8 @@ extern struct fs_ops nfs_fsops;
 extern struct fs_ops cd9660_fsops;
 extern struct fs_ops gzipfs_fsops;
 extern struct fs_ops bzipfs_fsops;
+extern struct fs_ops xzfs_fsops;
+extern struct fs_ops zstdfs_fsops;
 extern struct fs_ops dosfs_fsops;
 extern struct fs_ops ext2fs_fsops;
 extern struct fs_ops splitfs_fsops;
@@ -191,6 +196,8 @@ struct devdesc {
 
 char *devformat(struct devdesc *d);
 int devparse(struct devdesc **, const char *, const char **);
+int default_parsedev(struct devdesc **, const char *, const char **);
+int parse_uri(const char *, int *, char **, int *, const char **);
 int devinit(void);
 void	dev_cleanup(void);
 
@@ -349,6 +356,7 @@ extern int	pager_file(const char *fname);
 #define EV_DYNAMIC	(1<<0)		/* value was dynamically allocated, free if changed/unset */
 #define EV_VOLATILE	(1<<1)		/* value is volatile, make a copy of it */
 #define EV_NOHOOK	(1<<2)		/* don't call hook when setting */
+#define EV_NOKENV	(1<<3)		/* don't add to kenv (loader-only) */
 
 struct env_var;
 typedef char	*(ev_format_t)(struct env_var *ev);
@@ -377,6 +385,9 @@ extern int		setenv(const char *name, const char *value,
 			       int overwrite);
 extern int		putenv(char *string);
 extern int		unsetenv(const char *name);
+extern bool		is_restricted_var(const char *name);
+extern void		set_check_restricted(bool);
+extern int		boot_setenv(const char *name, const char *value);
 
 extern ev_sethook_t	env_noset;		/* refuse set operation */
 extern ev_unsethook_t	env_nounset;		/* refuse unset operation */
@@ -503,6 +514,9 @@ extern void *reallocf(void *, size_t);
  * va <-> pa routines. MD code must supply.
  */
 caddr_t ptov(uintptr_t);
+
+/* dev_net.c */
+bool is_tftp(void);
 
 /* features.c */
 typedef void (feature_iter_fn)(void *, const char *, const char *, bool);

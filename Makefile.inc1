@@ -2,7 +2,7 @@
 #
 # Make command line options:
 #	-DNO_CLEANDIR run ${MAKE} clean, instead of ${MAKE} cleandir
-#	-DNO_CLEAN do not clean at all
+#	-DNO_CLEAN do not clean at all (enabled by default)
 #	-DDB_FROM_SRC use the user/group databases in src/etc instead of
 #	    the system database when installing.
 #	-DNO_SHARE do not go into share subdir
@@ -151,7 +151,6 @@ KNOWN_ARCHES?=	aarch64/arm64 \
 		powerpc \
 		powerpc64/powerpc \
 		powerpc64le/powerpc \
-		powerpcspe/powerpc \
 		riscv64/riscv
 
 .if ${TARGET} == ${TARGET_ARCH}
@@ -183,9 +182,6 @@ _GCC_BROKEN=Missing atomic builtins in libc++.
 .if ${TARGET_ARCH:Mpowerpc64*}
 _GCC_BROKEN=libsys.so.7.full has a LOAD segment with RWX permissions.
 .endif
-.if ${TARGET} == "riscv"
-_GCC_BROKEN=boot code linker script issues.
-.endif
 .if defined(_GCC_BROKEN)
 .warning Target ${TARGET} is broken with GCC: ${_GCC_BROKEN}
 .if defined(TRY_GCC_BROKEN)
@@ -198,13 +194,18 @@ _GCC_BROKEN=boot code linker script issues.
 .endif
 
 .if ${.MAKE.OS} != "FreeBSD"
-CROSSBUILD_HOST=${.MAKE.OS}
+CROSSBUILD_HOST=${.MAKE.OS} # Unset for native FreeBSD builds
 .if ${.MAKE.OS} != "Linux" && ${.MAKE.OS} != "Darwin"
 .warning Unsupported crossbuild system: ${.MAKE.OS}. Build will probably fail!
 .endif
+.endif
 # We need to force NO_ROOT/DB_FROM_SRC builds when building on other operating
 # systems since the BSD.foo.dist specs contain users and groups that do not
-# exist by default on a Linux/MacOS system.
+# exist by default on a Linux/MacOS system.  The distribute* and package*
+# targets used for install media legacy distribution sets also always use and
+# require NO_ROOT mode.
+.if defined(CROSSBUILD_HOST) || make(distributeworld) || make(packageworld) || \
+    make(distributekernel) || make(packagekernel)
 NO_ROOT:=	1
 DB_FROM_SRC:=	1
 .export NO_ROOT
@@ -223,7 +224,7 @@ MK_SYSTEM_LINKER=	no
 .if defined(CROSS_TOOLCHAIN_PREFIX)
 CROSS_BINUTILS_PREFIX?=${CROSS_TOOLCHAIN_PREFIX}
 .endif
-XBINUTILS=	AS AR ELFCTL LD NM OBJCOPY RANLIB SIZE STRINGS STRIPBIN
+XBINUTILS=	AR ELFCTL LD NM OBJCOPY SIZE STRINGS STRIPBIN
 .for BINUTIL in ${XBINUTILS}
 .if defined(CROSS_BINUTILS_PREFIX) && \
     exists(${CROSS_BINUTILS_PREFIX}/${${BINUTIL}})
@@ -236,6 +237,12 @@ X${BINUTIL}?=	${${BINUTIL}}
 # If a full path to an external linker is given, don't build lld.
 .if ${XLD:M/*}
 MK_LLD_BOOTSTRAP=	no
+.endif
+
+# If full paths to all standard bintuils are given, don't build LLVM binutils.
+.if ${XAR:M/*} && ${XNM:M/*} && ${XOBJCOPY:M/*} && ${XSIZE:M/*} && \
+    ${XSTRINGS:M/*} && ${XSTRIPBIN:M/*}
+MK_LLVM_BINUTILS_BOOTSTRAP=	no
 .endif
 
 # We also want the X_LINKER* variables if we are using an external toolchain.
@@ -368,6 +375,10 @@ test-system-${_t}: .PHONY
 .elif ${MK_LLD_BOOTSTRAP} == "yes"
 .info SYSTEM_LINKER: libclang will be built for bootstrapping a cross-linker.
 .endif
+BUILD_USER!=	id -u
+.if ${BUILD_USER} == 0
+.warning Warning: ${.TARGETS} should not be run as root
+.endif
 .endif
 
 # End WITH_SYSTEM_COMPILER / WITH_SYSTEM_LD
@@ -427,7 +438,7 @@ SUBDIR+=bin
 .if ${MK_CDDL} != "no"
 SUBDIR+=cddl
 .endif
-SUBDIR+=gnu include
+SUBDIR+=include
 .if ${MK_KERBEROS} != "no"
 .if ${MK_MITKRB5} != "no"
 SUBDIR+=krb5
@@ -466,7 +477,7 @@ SUBDIR+=	${_DIR}
 # by calling 'makedb' in share/man.  This is only relevant for
 # install/distribute so they build the whatis file after every manpage is
 # installed.
-.if make(installworld) || make(install)
+.if make(installworld) || make(install) || make(distributeworld) || make(distribute)
 SUBDIR+=.WAIT
 .endif
 SUBDIR+=etc
@@ -518,25 +529,6 @@ BUILDENV_SHELL?=/bin/sh
 .endif
 
 .if !defined(_MKSHOWCONFIG)
-.if !defined(VCS_REVISION) || empty(VCS_REVISION)
-.if !defined(SVNVERSION_CMD) || empty(SVNVERSION_CMD)
-. for _D in ${PATH:S,:, ,g}
-.  if exists(${_D}/svnversion)
-SVNVERSION_CMD?=${_D}/svnversion
-.  endif
-.  if exists(${_D}/svnliteversion)
-SVNVERSION_CMD?=${_D}/svnliteversion
-.  endif
-. endfor
-.endif
-.if defined(SVNVERSION_CMD) && !empty(SVNVERSION_CMD)
-_VCS_REVISION?=	$$(eval ${SVNVERSION_CMD} ${SRCDIR})
-. if !empty(_VCS_REVISION)
-VCS_REVISION=	$$(echo r${_VCS_REVISION})
-.export VCS_REVISION
-. endif
-.endif
-.endif
 
 .if !defined(GIT_CMD) || empty(GIT_CMD)
 . for _P in /usr/bin /usr/local/bin
@@ -545,6 +537,15 @@ GIT_CMD=   ${_P}/git
 .  endif
 . endfor
 .export GIT_CMD
+.endif
+
+.if !defined(GOT_CMD) || empty(GOT_CMD)
+. for _P in /usr/bin /usr/local/bin
+.  if exists(${_P}/got)
+GOT_CMD=   ${_P}/got
+.  endif
+. endfor
+.export GOT_CMD
 .endif
 
 .if !defined(OSRELDATE)
@@ -585,10 +586,10 @@ BRANCH_EXT=	${MAJOR_REVISION}.snap
 EXTRA_REVISION=	.snap${_TIMENOW}
 .elif ${_BRANCH:MALPHA*}
 BRANCH_EXT=	alpha
-EXTRA_REVISION=	.${_BRANCH:C/ALPHA([0-9]+).*/\1/}.${_TIMENOW}
+EXTRA_REVISION=	.a${_BRANCH:C/ALPHA([0-9]+).*/\1/}.${_TIMENOW}
 .elif ${_BRANCH:MBETA*}
 BRANCH_EXT=	beta
-EXTRA_REVISION=	.${_BRANCH:C/BETA([0-9]+).*/\1/}.${_TIMENOW}
+EXTRA_REVISION=	.b${_BRANCH:C/BETA([0-9]+).*/\1/}.${_TIMENOW}
 .elif ${_BRANCH:MRC*}
 BRANCH_EXT=	rc
 EXTRA_REVISION=	.rc${_BRANCH:C/RC([0-9]+).*/\1/}.${_TIMENOW}
@@ -598,12 +599,24 @@ EXTRA_REVISION=	p${_BRANCH:C/.*-p([0-9]+$)/\1/}
 .if !defined(PKG_VERSION)
 PKG_VERSION:=	${_PKG_REVISION}${EXTRA_REVISION:C/[[:space:]]//g}
 .endif
+
 .endif	# !defined(_MKSHOWCONFIG)
 
+PKG_NAME_PREFIX?=	FreeBSD
+PKG_MAINTAINER?=	re@FreeBSD.org
+PKG_WWW?=		https://www.FreeBSD.org
+PKG_WORKERS_COUNT?=	1
+
 .if make(*package*)
+.export PKG_NAME_PREFIX
+.export PKG_MAINTAINER
+.export PKG_WWW
+
 .if !defined(PKG_TIMESTAMP)
 .if !empty(GIT_CMD) && exists(${GIT_CMD}) && exists(${SRCDIR}/.git)
 SOURCE_DATE_EPOCH!=	${GIT_CMD} -C ${SRCDIR} show -s --format=%ct HEAD
+.elif !empty(GOT_CMD) && exists(${GOT_CMD}) && exists(${SRCDIR}/.got)
+SOURCE_DATE_EPOCH!=	( cd ${SRCDIR} && ${GOT_CMD} cat HEAD | awk '$$1 == "committer" { print $$(NF-1); exit }' )
 .else
 TIMEEPOCHNOW=		%s
 SOURCE_DATE_EPOCH=	${TIMEEPOCHNOW:gmtime}
@@ -611,14 +624,6 @@ SOURCE_DATE_EPOCH=	${TIMEEPOCHNOW:gmtime}
 .else
 SOURCE_DATE_EPOCH=	${PKG_TIMESTAMP}
 .endif
-PKG_WORKERS_COUNT?=	1
-
-PKG_NAME_PREFIX?=	FreeBSD
-PKG_MAINTAINER?=	re@FreeBSD.org
-PKG_WWW?=		https://www.FreeBSD.org
-.export PKG_NAME_PREFIX
-.export PKG_MAINTAINER
-.export PKG_WWW
 .endif
 
 .if !defined(_MKSHOWCONFIG)
@@ -644,7 +649,10 @@ XPATH=		${WORLDTMP}/bin:${WORLDTMP}/usr/sbin:${WORLDTMP}/usr/bin
 # When building we want to find the cross tools before the host tools in ${BPATH}.
 # We also need to add UNIVERSE_TOOLCHAIN_PATH so that we can find the shared
 # toolchain files (clang, lld, etc.) during make universe/tinderbox
-STRICTTMPPATH=	${XPATH}:${BPATH}:${UNIVERSE_TOOLCHAIN_PATH}
+STRICTTMPPATH=	${XPATH}:${BPATH}
+.if defined(UNIVERSE_TOOLCHAIN_PATH)
+STRICTTMPPATH:=${STRICTTMPPATH}:${UNIVERSE_TOOLCHAIN_PATH}
+.endif
 # We should not be using tools from /usr/bin accidentally since this could cause
 # the build to break on other systems that don't have that tool. For now we
 # still allow using the old behaviour (inheriting $PATH) if
@@ -821,7 +829,6 @@ XMAKE=		${BMAKE} \
 		TARGET=${TARGET} TARGET_ARCH=${TARGET_ARCH} \
 		MK_CLANG=${MK_CLANG_BOOTSTRAP} \
 		MK_LLDB=no \
-		MK_LLVM_BINUTILS=no \
 		MK_TESTS=no
 
 # kernel-tools stage
@@ -863,9 +870,9 @@ HMAKE+=		PATH=${TMPPATH:Q} METALOG=${METALOG} -DNO_ROOT
 
 CROSSENV+=	CC="${XCC} ${XCFLAGS}" CXX="${XCXX} ${XCXXFLAGS} ${XCFLAGS}" \
 		CPP="${XCPP} ${XCFLAGS}" \
-		AS="${XAS}" AR="${XAR}" ELFCTL="${XELFCTL}" LD="${XLD}" \
+		AR="${XAR}" ELFCTL="${XELFCTL}" LD="${XLD}" \
 		LLVM_LINK="${XLLVM_LINK}" NM=${XNM} OBJCOPY="${XOBJCOPY}" \
-		RANLIB=${XRANLIB} STRINGS=${XSTRINGS} \
+		STRINGS=${XSTRINGS} \
 		SIZE="${XSIZE}" STRIPBIN="${XSTRIPBIN}"
 
 .if defined(CROSS_BINUTILS_PREFIX) && exists(${CROSS_BINUTILS_PREFIX})
@@ -973,8 +980,10 @@ IMAKE=		${TIME_ENV} ${IMAKEENV} ${MAKE} -f Makefile.inc1 \
 		${IMAKE_INSTALL} ${IMAKE_MTREE}
 .if empty(.MAKEFLAGS:M-n)
 IMAKEENV+=	PATH=${STRICTTMPPATH:Q}:${INSTALLTMP:Q} \
-		LD_LIBRARY_PATH=${INSTALLTMP:Q} \
-		PATH_LOCALE=${INSTALLTMP}/locale
+		LD_LIBRARY_PATH=${INSTALLTMP:Q}
+.if ${.MAKE.OS} == "FreeBSD"
+IMAKEENV+=	PATH_LOCALE=${INSTALLTMP}/locale
+.endif
 IMAKE+=		__MAKE_SHELL=${INSTALLTMP}/sh
 .else
 IMAKEENV+=	PATH=${TMPPATH:Q}:${INSTALLTMP:Q}
@@ -1021,7 +1030,8 @@ IMAKE_MTREE=	MTREE_CMD="${MTREE_CMD} ${MTREEFLAGS}"
 .endif
 
 .if make(distributeworld)
-CERTCTLDESTDIR=	${DESTDIR}/${DISTDIR}/base
+CERTCTLDESTDIR=	${DESTDIR}/${DISTDIR}
+CERTCTLFLAGS+=	-d /base
 .else
 CERTCTLDESTDIR=	${DESTDIR}
 .endif
@@ -1050,7 +1060,7 @@ DESTDIR_MTREE=	${DISTR_MTREECMD} ${DESTDIR_MTREEFLAGS}
 METALOG_SORT_CMD=	env -i LC_COLLATE=C sort
 
 # kernel stage
-KMAKEENV=	${WMAKEENV:NSYSROOT=*}
+KMAKEENV=	${WMAKEENV}
 KMAKE=		${TIME_ENV} ${KMAKEENV} ${MAKE} ${.MAKEFLAGS} ${KERNEL_FLAGS} KERNEL=${INSTKERNNAME}
 
 #
@@ -1079,10 +1089,12 @@ _sanity_check: .PHONY .MAKE
 # tree changes, particularly with respect to removing source files and
 # replacing generated files.  Handle these cases here in an ad-hoc fashion.
 _cleanobj_fast_depend_hack: .PHONY
+.if ${MK_DEPEND_CLEANUP} != "no"
 	@echo ">>> Deleting stale dependencies...";
 	MACHINE=${MACHINE} MACHINE_ARCH=${MACHINE_ARCH} \
-	    ALL_libcompats=${_ALL_libcompats:Q} \
+	    ALL_libcompats=${_ALL_libcompats:Q} MAKE=${MAKE} \
 	    sh ${.CURDIR}/tools/build/depend-cleanup.sh ${OBJTOP} ${SRCTOP}
+.endif
 
 _cleanworldtmp: .PHONY
 .if ${MK_CLEAN} == "yes"
@@ -1176,7 +1188,7 @@ _cleanobj:
 .endfor
 .else
 	${_+_}cd ${.CURDIR}; env CLEANMK="_NO_INCLUDE_COMPILERMK=t ${CLEANDIR}" \
-	    MAKE=${MAKE} ${WMAKE} _cleanobj_fast_depend_hack
+	    ${WMAKE} _cleanobj_fast_depend_hack
 .endif	# ${MK_CLEAN} == "yes"
 _obj:
 	@echo
@@ -1217,7 +1229,7 @@ _includes:
 .if !empty(SUBDIR_OVERRIDE) && make(buildworld)
 	${_+_}cd ${.CURDIR}; ${WMAKE} MK_INCLUDES=yes SHARED=symlinks includes
 .endif
-	${_+_}cd ${.CURDIR};  ${WMAKE} test-includes
+	${_+_}cd ${.CURDIR}; ${WMAKE} test-includes
 _libraries:
 	@echo
 	@echo "--------------------------------------------------------------"
@@ -1416,7 +1428,7 @@ _sysctl=sysctl
 .endif
 
 ITOOLS=	[ awk cap_mkdb cat chflags chmod chown cmp cp \
-	date echo egrep find grep id install ${_install-info} \
+	date echo egrep find grep id install \
 	ln make mkdir mtree mv pwd_mkdb \
 	rm sed services_mkdb sh sort strip ${_sysctl} test time true uname wc
 
@@ -1480,7 +1492,12 @@ distributeworld installworld stageworld: _installcheck_world .PHONY
 		    done); \
 	fi; \
 	${INSTALLTMP_COPY_HOST_TOOL} $$libs $$progs ${INSTALLTMP}
+	# On non-FreeBSD systems, there's no point copying locales here
+	# since we aren't going to overwrite them anyway.  This avoids
+	# failing if /usr/share/locale has odd modes (e.g., openSUSE).
+.if ${.MAKE.OS} == "FreeBSD"
 	cp -R $${PATH_LOCALE:-"/usr/share/locale"} ${INSTALLTMP}/locale
+.endif
 .if defined(NO_ROOT)
 	-mkdir -p ${METALOG:H}
 	echo "#${MTREE_MAGIC}" > ${METALOG}
@@ -1578,20 +1595,23 @@ packageworld: .PHONY
 	    ${XZ_CMD} > ${PACKAGEDIR}/${dist}-dbg.txz
 .endfor
 
+# We can't assume here that ${TMPPATH} will include ${PATH} or /usr/libexec
+# because we may be building with a STRICTTMPPATH, so we explicitly include
+# /usr/libexec here for flua.  ${TMPPATH} still usefully includes anything else
+# we may need to function.
+_flua_PATH=	${TMPPATH}:/usr/libexec
+
 makeman: .PHONY
-	${_+_}cd ${.CURDIR}/tools/build/options; sh makeman > \
+	${_+_}@cd ${.CURDIR}/tools/build/options; \
+	    PATH=${_flua_PATH:Q} flua makeman.lua > \
 	    ${.CURDIR}/share/man/man5/src.conf.5
 
 # Ensure no regressions in self-includeability of sys/*.h and net*/*.h
 test-includes: .PHONY
 	${_+_}cd ${.CURDIR}/tools/build/test-includes; \
+	    ${WMAKEENV} ${MAKE} ${WORLD_FLAGS} obj; \
 	    ${WMAKEENV} ${MAKE} ${WORLD_FLAGS} DESTDIR=${WORLDTMP} test-includes
 
-# We can't assume here that ${TMPPATH} will include ${PATH} or /usr/libexec
-# because we may be building with a STRICTTMPPATH, so we explicitly include
-# /usr/libexec here for flua.  ${TMPPATH} still usefully includes anything else
-# we may need to function.
-_sysent_PATH=	${TMPPATH}:/usr/libexec
 _sysent_dirs=	sys/kern
 _sysent_dirs+=	sys/compat/freebsd32
 _sysent_dirs+=	sys/amd64/linux		\
@@ -1604,7 +1624,7 @@ sysent: .PHONY
 .for _dir in ${_sysent_dirs}
 sysent-${_dir}: .PHONY
 	@echo "${MAKE} -C ${.CURDIR}/${_dir} sysent"
-	${_+_}@env PATH=${_sysent_PATH:Q} ${MAKE} -C ${.CURDIR}/${_dir} sysent
+	${_+_}@env PATH=${_flua_PATH:Q} ${MAKE} -C ${.CURDIR}/${_dir} sysent
 
 sysent: sysent-${_dir}
 .endfor
@@ -1711,7 +1731,6 @@ KERNCONF=${KERNFAST}
 .endif
 GENERIC_KERNCONF_SUFX_powerpc64=	64
 GENERIC_KERNCONF_SUFX_powerpc64le=	64LE
-GENERIC_KERNCONF_powerpcspe=	MPC85XXSPE
 GENERIC_KERNCONF?=	${GENERIC_KERNCONF_${TARGET_ARCH}:UGENERIC${GENERIC_KERNCONF_SUFX_${TARGET_ARCH}}}
 INSTKERNNAME?=	kernel
 
@@ -1739,10 +1758,6 @@ KERNCONF?=	${GENERIC_KERNCONF}
 
 BUILDKERNELS=
 INSTALLKERNEL=
-.if defined(NO_INSTALLKERNEL)
-# All of the BUILDKERNELS loops start at index 1.
-BUILDKERNELS+= dummy
-.endif
 .for _kernel in ${KERNCONF}
 .if !defined(_MKSHOWCONFIG) && exists(${KERNCONFDIR}/${_kernel})
 BUILDKERNELS+=	${_kernel}
@@ -1784,12 +1799,12 @@ _BUILDKERNEL_START!= date '+%s'
 # Builds all kernels defined by BUILDKERNELS.
 #
 buildkernel: .MAKE .PHONY
-.if empty(BUILDKERNELS:Ndummy)
+.if empty(BUILDKERNELS)
 	@echo "ERROR: Missing kernel configuration file(s) (${KERNCONF})."; \
 	false
 .endif
 	@echo
-.for _kernel in ${BUILDKERNELS:Ndummy}
+.for _kernel in ${BUILDKERNELS}
 	@echo "--------------------------------------------------------------"
 	@echo ">>> Kernel build for ${_kernel} started on `LC_ALL=C date`"
 	@echo "--------------------------------------------------------------"
@@ -1851,6 +1866,79 @@ NO_INSTALLEXTRAKERNELS?=	yes
 NO_INSTALLEXTRAKERNELS?=	no
 .endif
 
+.if ${NO_INSTALLEXTRAKERNELS} != "yes"
+.if defined(NO_INSTALLKERNEL)
+INSTALLEXTRAKERNELS=	${BUILDKERNELS}
+.elif ${BUILDKERNELS:[#]} > 1
+# First kernel is installed separately by INSTALLKERNEL, typically to
+# /boot/kernel, rather than to a config-suffixed directory.
+INSTALLEXTRAKERNELS=	${BUILDKERNELS:[2..-1]}
+.else
+INSTALLEXTRAKERNELS=
+.endif
+.endif
+
+#
+# Don't allow installworld or installkernel on a pkgbase system.  This avoids
+# accidentally updating a pkgbase system with install{world,kernel}, causing
+# the installed system to become out of date with the package database.
+#
+# Skip the check if DESTDIR is defined on the assumption the user knows what
+# they're doing.  This means the check can be disabled for the running system
+# using DESTDIR=/.
+#
+# People who want to disable this check permanently may set two variables in
+# /etc/make.conf, ALLOW_PKGBASE_INSTALLKERNEL and ALLOW_PKGBASE_INSTALLWORLD,
+# to disable these checks.  That doesn't stop this from breaking your system,
+# it just stops make from warning about it.
+#
+.if !make(distributeworld) && !defined(DESTDIR)
+
+. if !defined(ALLOW_PKGBASE_INSTALLKERNEL) && exists(${LOCALBASE}/sbin/pkg-static)
+# For installkernel, we check if this specific kernel was installed by pkg.
+# This means people can continue to use installkernel for non-packaged
+# kernels, which is useful for development.
+
+_installcheck_kernel: __installcheck_kernel_pkgbase
+__installcheck_kernel_pkgbase: .PHONY
+.  for _kernel in ${NO_INSTALLKERNEL:D:U${INSTKERNNAME}} \
+		${INSTALLEXTRAKERNELS:S/^/${INSTKERNNAME}./}
+	@if ${LOCALBASE}/sbin/pkg-static which /boot/${_kernel}/kernel \
+	    >/dev/null 2>&1; then \
+		echo >&2 "ERROR: The kernel at /boot/${_kernel} was installed from packages." ; \
+		echo >&2 "       A packaged kernel should never be updated using installkernel;" ; \
+		echo >&2 "       this will cause the package database to become out of sync with" ; \
+		echo >&2 "       the live system state.  Either uninstall the packaged kernel," ; \
+		echo >&2 "       or install this kernel to a different path using INSTKERNNAME." ; \
+		echo >&2 "" ; \
+		echo >&2 "       If you understand the risks and wish to proceed anyway, you may" ; \
+		echo >&2 "       set ALLOW_PKGBASE_INSTALLKERNEL=yes to override this safety check." ; \
+		echo >&2 "       After doing so, you should not use the pkg(8) utility until you" ; \
+		echo >&2 "       have resolved the inconsistency between the installed system and" ; \
+		echo >&2 "       the package database." ; \
+		false; \
+	fi
+.  endfor
+. endif	# !defined(ALLOW_PKGBASE_INSTALLKERNEL) && exists(pkg-static)
+
+. if !defined(ALLOW_PKGBASE_INSTALLWORLD) && exists(${LOCALBASE}/sbin/pkg-static)
+_installcheck_world: __installcheck_world_pkgbase
+__installcheck_world_pkgbase: .PHONY
+	@if ${LOCALBASE}/sbin/pkg-static info -e ${PKG_NAME_PREFIX}-runtime; then \
+		echo >&2 "ERROR: This target should never be used on a system installed from packages;" ; \
+		echo >&2 "       doing so will cause the package database to become out of sync with" ; \
+		echo >&2 "       the live system state." ; \
+		echo >&2 "" ; \
+		echo >&2 "       If you understand the risks and wish to proceed anyway, you may" ; \
+		echo >&2 "       set ALLOW_PKGBASE_INSTALLWORLD=yes to override this safety check." ; \
+		echo >&2 "       After doing so, you should not use the pkg(8) utility until you" ; \
+		echo >&2 "       have resolved the inconsistency between the installed system and" ; \
+		echo >&2 "       the package database." ; \
+		false; \
+	fi
+. endif	# !defined(ALLOW_PKGBASE_INSTALLWORLD) && exists(pkg-static)
+.endif	# !make(distributeworld) && !defined(DESTDIR)
+
 #
 # installkernel, etc.
 #
@@ -1877,8 +1965,8 @@ reinstallkernel reinstallkernel.debug: _installcheck_kernel .PHONY
 	  echo ">>> Install kernel(s) ${INSTALLKERNEL} completed in $$seconds seconds, ncpu: $$(${_ncpu_cmd})${.MAKE.JOBS:S/^/, make -j/}"
 	@echo "--------------------------------------------------------------"
 .endif
-.if ${BUILDKERNELS:[#]} > 1 && ${NO_INSTALLEXTRAKERNELS} != "yes"
-.for _kernel in ${BUILDKERNELS:[2..-1]}
+.if !empty(INSTALLEXTRAKERNELS)
+.for _kernel in ${INSTALLEXTRAKERNELS}
 	@echo "--------------------------------------------------------------"
 	@echo ">>> Installing kernel ${_kernel} $$(LC_ALL=C date)"
 	@echo "--------------------------------------------------------------"
@@ -1915,8 +2003,8 @@ distributekernel distributekernel.debug: .PHONY
 	    ${METALOG_SORT_CMD} >> ${DESTDIR}/${DISTDIR}/kernel.meta
 .endif
 .endif
-.if ${BUILDKERNELS:[#]} > 1 && ${NO_INSTALLEXTRAKERNELS} != "yes"
-.for _kernel in ${BUILDKERNELS:[2..-1]}
+.if !empty(INSTALLEXTRAKERNELS)
+.for _kernel in ${INSTALLEXTRAKERNELS}
 	rm -f ${DESTDIR}/${DISTDIR}/kernel.${_kernel}.premeta
 	${_+_}cd ${KRNLOBJDIR}/${_kernel}; \
 	    ${IMAKEENV} ${IMAKE_INSTALL:S/METALOG/kernel.${_kernel}.premeta/} \
@@ -1947,8 +2035,8 @@ packagekernel: .PHONY
 	    @${DESTDIR}/${DISTDIR}/kernel.meta | \
 	    ${XZ_CMD} > ${DESTDIR}/${DISTDIR}/kernel-dbg.txz
 .endif
-.if ${BUILDKERNELS:[#]} > 1 && ${NO_INSTALLEXTRAKERNELS} != "yes"
-.for _kernel in ${BUILDKERNELS:[2..-1]}
+.if !empty(INSTALLEXTRAKERNELS)
+.for _kernel in ${INSTALLEXTRAKERNELS}
 	cd ${DESTDIR}/${DISTDIR}/kernel.${_kernel}; \
 	    ${TAR_CMD} cvf - --exclude '*.debug' \
 	    @${DESTDIR}/${DISTDIR}/kernel.${_kernel}.meta | \
@@ -1973,6 +2061,7 @@ REPODIR?=	${OBJROOT}repo
 PKG_FORMAT?=	tzst
 PKG_LEVEL?=	-1
 PKG_CLEVEL?=	${"${PKG_FORMAT:Mtar}" != "":?:-l ${PKG_LEVEL}}
+PKG_CTHREADS?=	0
 PKG_REPO_SIGNING_KEY?=	# empty
 PKG_OUTPUT_DIR?=	${PKG_VERSION}
 PKG_ABI_FILE?=	${WSTAGEDIR}/usr/bin/uname
@@ -1988,16 +2077,20 @@ PKG_ABI!=	${PKG_CMD} -o ABI_FILE=${PKG_ABI_FILE} config ABI
 
 _pkgbootstrap: .PHONY
 .if make(*package*) && !exists(${LOCALBASE}/sbin/pkg)
-	@env ASSUME_ALWAYS_YES=YES pkg bootstrap
+.if defined(BOOTSTRAP_PKG_FROM_PORTS)
+	env - UNAME_r=${UNAME_r} PATH=$$PATH \
+	    make -C ${PORTSDIR}/ports-mgmt/pkg \
+	    I_DONT_CARE_IF_MY_BUILDS_TARGET_THE_WRONG_RELEASE=1 \
+	    BATCH=1 WRKDIRPREFIX=/tmp/ports DISTDIR=/tmp/distfiles \
+	    all install clean
+.else
+	@env ASSUME_ALWAYS_YES=YES ${PKG_CMD} bootstrap
+.endif
 .endif
 
 PKG_BIN_VERSION!=${PKG_CMD} --version </dev/null 2>/dev/null |\
-    awk -F. '/^[0-9.]+$$/ {print $$1 * 10000 + $$2 * 100 + $$3}'
-.if ${PKG_BIN_VERSION} < 11700
-PKG_EXT=	${PKG_FORMAT}
-.else
+    awk -F. '/^[0-9.]+(-.*)?$$/ {print $$1 * 10000 + $$2 * 100 + $$3}'
 PKG_EXT=	pkg
-.endif
 
 .if !defined(PKG_VERSION_FROM) && make(real-update-packages) && \
     exists(${PKG_ABI_FILE}) && exists(${REPODIR}/${PKG_ABI}/latest)
@@ -2034,28 +2127,32 @@ packages: .PHONY
 update-packages: .PHONY
 	${_+_}${MAKE} -C ${.CURDIR} ${PKGMAKEARGS} real-update-packages
 
-package-pkg: .PHONY
-	rm -rf /tmp/ports.${TARGET} || :
-	env ${WMAKEENV:Q} SRCDIR=${.CURDIR} PORTSDIR=${PORTSDIR} REVISION=${_REVISION} \
+package-pkg: _pkgbootstrap _repodir .PHONY
+.if defined(INCLUDE_PKG_IN_PKGBASE_REPO)
+.if exists(${PORTSDIR})
+	rm -rf /tmp/ports.${TARGET}
+	env ${WMAKEENV} SRCDIR=${.CURDIR} PORTSDIR=${PORTSDIR} REVISION=${_REVISION} \
 		PKG_CMD=${PKG_CMD} PKG_VERSION=${PKG_VERSION} REPODIR=${REPODIR} \
 		WSTAGEDIR=${WSTAGEDIR} \
-		OSVERSION="${SRCRELDATE}" \
+		OSVERSION="${SRCRELDATE}" LOCALBASE=${LOCALBASE} \
 		sh ${.CURDIR}/release/scripts/make-pkg-package.sh
+.endif
+.endif
 
 real-packages:	stage-packages create-packages sign-packages .PHONY
 
 real-update-packages: stage-packages .PHONY
 	${_+_}${MAKE} -C ${.CURDIR} PKG_VERSION=${PKG_VERSION} create-packages
-.if defined(PKG_VERSION_FROM_DIR)
+.if defined(PKG_VERSION_FROM_DIR) && ${PKG_VERSION} != ${PKG_VERSION_FROM}
 	@echo "==> Checking for new packages (comparing ${PKG_VERSION} to ${PKG_VERSION_FROM})"
 	@for pkg in ${PKG_VERSION_FROM_DIR}/${PKG_NAME_PREFIX}-*; do \
-	  pkgname=$$(pkg query -F $${pkg} '%n' | sed 's/${PKG_NAME_PREFIX}-\(.*\)/\1/') ; \
+	  pkgname=$$(${PKG_CMD} query -F $${pkg} '%n' | sed 's/${PKG_NAME_PREFIX}-\(.*\)/\1/') ; \
 	  newpkgname=${PKG_NAME_PREFIX}-$${pkgname}-${PKG_VERSION}.${PKG_EXT} ; \
-	  oldsum=$$(pkg query -F $${pkg} '%X') ; \
+	  oldsum=$$(${PKG_CMD} query -F $${pkg} '%X') ; \
 	  if [ ! -f ${REPODIR}/${PKG_ABI}/${PKG_VERSION}/$${newpkgname} ]; then \
 	    continue; \
 	  fi ; \
-	  newsum=$$(pkg query -F ${REPODIR}/${PKG_ABI}/${PKG_VERSION}/$${newpkgname} '%X') ; \
+	  newsum=$$(${PKG_CMD} query -F ${REPODIR}/${PKG_ABI}/${PKG_VERSION}/$${newpkgname} '%X') ; \
 	  if [ "${BRANCH_EXT_FROM}" = "${BRANCH_EXT}" -a "$${oldsum}" = "$${newsum}" ]; then \
 	   echo "==> Keeping old ${PKG_NAME_PREFIX}-$${pkgname}-${PKG_VERSION_FROM}.${PKG_EXT}" ; \
 	   rm ${REPODIR}/${PKG_ABI}/${PKG_VERSION}/$${newpkgname} ; \
@@ -2064,6 +2161,8 @@ real-update-packages: stage-packages .PHONY
 	    echo "==> New package $${newpkgname}" ; \
 	  fi ; \
 	done
+.elif defined(PKG_VERSION_FROM_DIR)
+	@echo "==> Package version ${PKG_VERSION} unchanged, keeping old package set"
 .else
 	@echo "==> Bootstrapping repository, not checking for new packages"
 .endif
@@ -2089,13 +2188,22 @@ _repodir: .PHONY
 
 create-packages-world:	_pkgbootstrap _repodir .PHONY
 	${_+_}@cd ${.CURDIR}; \
-		${MAKE} -f Makefile.inc1 \
+		PATH="${TMPPATH}" ${MAKE} -f Makefile.inc1 \
 			DESTDIR=${WSTAGEDIR} \
 			PKG_VERSION=${PKG_VERSION} create-world-packages
 
+.ORDER: create-packages-world create-packages-sets
+.ORDER: create-packages-kernel create-packages-sets
+.ORDER: create-packages-source create-packages-sets
+create-packages-sets:	_pkgbootstrap _repodir .PHONY
+	${_+_}@cd ${.CURDIR}; \
+		PATH="${TMPPATH}" ${MAKE} -f Makefile.inc1 \
+			DESTDIR=${WSTAGEDIR} \
+			PKG_VERSION=${PKG_VERSION} create-sets-packages
+
 create-packages-kernel:	_pkgbootstrap _repodir .PHONY
 	${_+_}@cd ${.CURDIR}; \
-		${MAKE} -f Makefile.inc1 \
+		PATH="${TMPPATH}" ${MAKE} -f Makefile.inc1 \
 			DESTDIR=${KSTAGEDIR} \
 			PKG_VERSION=${PKG_VERSION} DISTDIR=kernel \
 			SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} \
@@ -2105,24 +2213,36 @@ create-packages-kernel-repo: .PHONY create-packages-kernel sign-packages
 
 create-packages-world-repo: .PHONY create-packages-world sign-packages
 
+create-packages-sets-repo: .PHONY create-packages-sets sign-packages
+
 create-packages-source:	_pkgbootstrap _repodir .PHONY
 	${_+_}@cd ${.CURDIR}; \
-		${MAKE} -f Makefile.inc1 \
+		PATH="${TMPPATH}" ${MAKE} -f Makefile.inc1 \
 			DESTDIR=${SSTAGEDIR} \
 			PKG_VERSION=${PKG_VERSION} \
 			SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} \
 			create-source-packages
 
-create-packages: .PHONY create-packages-world create-packages-kernel create-packages-source
+create-packages: .PHONY create-packages-world create-packages-kernel create-packages-source package-pkg create-packages-sets
 
 create-source-src-package: _pkgbootstrap .PHONY
-	rm -f ${SSTAGEDIR}/src.plist 2>/dev/null || :
+	rm -f ${SSTAGEDIR}/src.plist
+.if ( !empty(GIT_CMD) && exists(${GIT_CMD}) && exists(${SRCDIR}/.git) ) || \
+    ( !empty(GOT_CMD) && exists(${GOT_CMD}) && exists(${SRCDIR}/.got) )
 .if !empty(GIT_CMD) && exists(${GIT_CMD}) && exists(${SRCDIR}/.git)
 	@cd ${SRCDIR}; \
 		( echo "@override_prefix /usr/src" ;  \
 		${GIT_CMD} ls-files --recurse-submodules ":!:sys/" ) \
 		> ${SSTAGEDIR}/src.plist
-	${SRCDIR}/release/packages/generate-ucl.lua \
+.else
+	@cd ${SRCDIR}; \
+		( echo "@override_prefix /usr/src" ;  \
+		${GOT_CMD} tree -R | \
+		    awk '/^sys\// { next } { sub(/ -> .*/, "") } /\/$$/ { next } { sub(/[*@$$]$$/, "") } { print }' | \
+		    sort ) \
+		> ${SSTAGEDIR}/src.plist
+.endif
+	flua ${SRCDIR}/release/packages/generate-ucl.lua \
 		PKGNAME "src" \
 		PKGGENNAME "src" \
 		VERSION "${PKG_VERSION}" \
@@ -2134,7 +2254,7 @@ create-source-src-package: _pkgbootstrap .PHONY
 		${SSTAGEDIR}/src.ucl
 	${PKG_CMD} -o ABI=${PKG_ABI} \
 		-o OSVERSION="${SRCRELDATE}" \
-		create -f ${PKG_FORMAT} ${PKG_CLEVEL} \
+		create -f ${PKG_FORMAT} ${PKG_CLEVEL} -T${PKG_CTHREADS} \
 		-M ${SSTAGEDIR}/src.ucl \
 		-p ${SSTAGEDIR}/src.plist \
 		-r ${SRCDIR} \
@@ -2142,13 +2262,23 @@ create-source-src-package: _pkgbootstrap .PHONY
 .endif
 
 create-source-src-sys-package: _pkgbootstrap .PHONY
-	rm -f ${SSTAGEDIR}/src-sys.plist 2>/dev/null || :
+	rm -f ${SSTAGEDIR}/src-sys.plist
+.if ( !empty(GIT_CMD) && exists(${GIT_CMD}) && exists(${SRCDIR}/.git) ) || \
+    ( !empty(GOT_CMD) && exists(${GOT_CMD}) && exists(${SRCDIR}/.got) )
 .if !empty(GIT_CMD) && exists(${GIT_CMD}) && exists(${SRCDIR}/.git)
 	@cd ${SRCDIR}; \
 		( echo "@override_prefix /usr/src" ; \
 		${GIT_CMD} ls-files --recurse-submodules "sys/" ) \
 		> ${SSTAGEDIR}/src-sys.plist
-	${SRCDIR}/release/packages/generate-ucl.lua \
+.else
+	@cd ${SRCDIR}; \
+		( echo "@override_prefix /usr/src" ;  \
+		${GOT_CMD} tree -R | \
+		    awk '!/^sys\// { next } { sub(/ -> .*/, "") } /\/$$/ { next } { sub(/[*@$$]$$/, "") } { print }' | \
+		    sort ) \
+		> ${SSTAGEDIR}/src-sys.plist
+.endif
+	flua ${SRCDIR}/release/packages/generate-ucl.lua \
 		PKGNAME "src-sys" \
 		PKGGENNAME "src-sys" \
 		VERSION "${PKG_VERSION}" \
@@ -2160,7 +2290,7 @@ create-source-src-sys-package: _pkgbootstrap .PHONY
 		${SSTAGEDIR}/src-sys.ucl
 	${PKG_CMD} -o ABI=${PKG_ABI} \
 		-o OSVERSION="${SRCRELDATE}" \
-		create -f ${PKG_FORMAT} ${PKG_CLEVEL} \
+		create -f ${PKG_FORMAT} ${PKG_CLEVEL} -T${PKG_CTHREADS} \
 		-M ${SSTAGEDIR}/src-sys.ucl \
 		-p ${SSTAGEDIR}/src-sys.plist \
 		-r ${SRCDIR} \
@@ -2170,45 +2300,37 @@ create-source-src-sys-package: _pkgbootstrap .PHONY
 create-source-packages: .PHONY _pkgbootstrap create-source-src-package create-source-src-sys-package
 
 create-world-packages:	_pkgbootstrap .PHONY
-	@rm -f ${WSTAGEDIR}/*.plist 2>/dev/null || :
+	@rm -f ${WSTAGEDIR}/*.plist
 	@cd ${WSTAGEDIR} ; \
 		${METALOG_SORT_CMD} ${WSTAGEDIR}/${DISTDIR}/METALOG | \
 		awk -f ${SRCDIR}/release/scripts/mtree-to-plist.awk
-	@for plist in ${WSTAGEDIR}/*.plist; do \
-	  plist=$${plist##*/} ; \
-	  pkgname=$${plist%.plist} ; \
-	  echo "_PKGS+= $${pkgname}" ; \
-	done > ${WSTAGEDIR}/packages.mk
-	${_+_}@cd ${.CURDIR}; \
-		${MAKE} -f Makefile.inc1 create-world-packages-jobs \
-		SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} \
-		.MAKE.JOB.PREFIX=
+	# bsd.pkg.mk doesn't always know about the dependencies of things
+	# it builds, so for now, always run clean here.
+	${CROSSENV} ${MAKE} -C ${.CURDIR}/packages \
+	    FLUA=${WORLDTMP}/legacy/usr/libexec/flua \
+	    REPODIR=${REPODIR} \
+	    WSTAGEDIR=${WSTAGEDIR} \
+	    PKG_VERSION=${PKG_VERSION} \
+	    MK_AUTO_OBJ=yes \
+	    clean all stagepackages
 
-.if make(create-world-packages-jobs)
-.include "${WSTAGEDIR}/packages.mk"
-.endif
-
-create-world-packages-jobs: .PHONY
-.for pkgname in ${_PKGS}
-create-world-packages-jobs: create-world-package-${pkgname}
-create-world-package-${pkgname}: .PHONY
-	@sh ${SRCDIR}/release/packages/generate-ucl.sh -o ${pkgname} \
-		-s ${SRCDIR} -u ${WSTAGEDIR}/${pkgname}.ucl
-	@awk -F\" ' \
-		/^name/ { printf("===> Creating %s-", $$2); next } \
-		/^version/ { print $$2; next } \
-		' ${WSTAGEDIR}/${pkgname}.ucl
-	@if [ "${pkgname}" == "runtime" ]; then \
-		sed -i '' -e "s/%VCS_REVISION%/${VCS_REVISION}/" ${WSTAGEDIR}/${pkgname}.ucl ; \
-	fi
-	${PKG_CMD} -o ABI=${PKG_ABI} -o ALLOW_BASE_SHLIBS=yes \
-		-o OSVERSION="${SRCRELDATE}" \
-		create -f ${PKG_FORMAT} ${PKG_CLEVEL} \
-		-M ${WSTAGEDIR}/${pkgname}.ucl \
-		-p ${WSTAGEDIR}/${pkgname}.plist \
-		-r ${WSTAGEDIR} \
-		-o ${REPODIR}/${PKG_ABI}/${PKG_OUTPUT_DIR}
-.endfor
+create-sets-packages-jobs: .PHONY create-sets-packages
+create-sets-packages: .PHONY
+	@echo "==> Creating set metapackages."
+	sh "${SRCDIR}/release/packages/create-sets.sh" "${SRCDIR}" \
+		"${WSTAGEDIR}" "${REPODIR}/${PKG_ABI}/${PKG_OUTPUT_DIR}" \
+		VERSION "${PKG_VERSION}" \
+		PKG_NAME_PREFIX "${PKG_NAME_PREFIX}" \
+		PKG_MAINTAINER "${PKG_MAINTAINER}" \
+		PKG_WWW "${PKG_WWW}"
+	@for manifest in ${WSTAGEDIR}/set-*.ucl; do \
+		echo "--> Processing manifest: $$manifest"; \
+		${PKG_CMD} -o ABI=${PKG_ABI} -o OSVERSION="${SRCRELDATE}" \
+			create -f ${PKG_FORMAT} ${PKG_CLEVEL} -T${PKG_CTHREADS} \
+			-M $$manifest \
+			-o "${REPODIR}/${PKG_ABI}/${PKG_OUTPUT_DIR}" \
+			|| exit 1; \
+	done
 
 _default_flavor=	-default
 .if make(*package*) && exists(${KSTAGEDIR}/kernel.meta)
@@ -2216,9 +2338,9 @@ _default_flavor=	-default
 _debug=-dbg
 . endif
 
-create-dtb-package:
+create-dtb-package:	.PHONY
 	@if [ -f ${KSTAGEDIR}/${DISTDIR}/dtb.plist ]; then \
-	${SRCDIR}/release/packages/generate-ucl.lua \
+		flua ${SRCDIR}/release/packages/generate-ucl.lua \
 		PKGNAME "dtb" \
 		PKGGENNAME "dtb" \
 		VERSION "${PKG_VERSION}" \
@@ -2234,22 +2356,25 @@ create-dtb-package:
 		${KSTAGEDIR}/${DISTDIR}/dtb.ucl ; \
 	${PKG_CMD} -o ABI=${PKG_ABI} -o ALLOW_BASE_SHLIBS=yes \
 		-o OSVERSION="${SRCRELDATE}" \
-		create -f ${PKG_FORMAT} ${PKG_CLEVEL} \
+		create -f ${PKG_FORMAT} ${PKG_CLEVEL} -T${PKG_CTHREADS} \
 		-M ${KSTAGEDIR}/${DISTDIR}/dtb.ucl \
 		-p ${KSTAGEDIR}/${DISTDIR}/dtb.plist \
 		-r ${KSTAGEDIR}/${DISTDIR} \
 		-o ${REPODIR}/${PKG_ABI}/${PKG_OUTPUT_DIR} ; \
 	fi
 
-create-kernel-packages:	.PHONY
+create-kernel-packages:	.PHONY create-kernel-flavored-packages create-dtb-package
+create-kernel-flavored-packages:	.PHONY
+.ORDER: create-kernel-flavored-packages create-dtb-package
+
 . for flavor in "" ${_debug}
-create-kernel-packages: create-kernel-packages-flavor${flavor:C,^""$,${_default_flavor},} create-dtb-package
+create-kernel-flavored-packages: create-kernel-packages-flavor${flavor:C,^""$,${_default_flavor},}
 create-kernel-packages-flavor${flavor:C,^""$,${_default_flavor},}: _pkgbootstrap .PHONY
 	@cd ${KSTAGEDIR}/${DISTDIR} ; \
 	${METALOG_SORT_CMD} ${KSTAGEDIR}/kernel.meta | \
 	awk -f ${SRCDIR}/release/scripts/mtree-to-plist.awk \
 		-v kernel=yes -v _kernconf=${INSTALLKERNEL} ; \
-	${SRCDIR}/release/packages/generate-ucl.lua \
+	flua ${SRCDIR}/release/packages/generate-ucl.lua \
 		PKGNAME "kernel-${INSTALLKERNEL:tl}${flavor}" \
 		PKGGENNAME "kernel" \
 		VERSION "${PKG_VERSION}" \
@@ -2268,15 +2393,18 @@ create-kernel-packages-flavor${flavor:C,^""$,${_default_flavor},}: _pkgbootstrap
 		${KSTAGEDIR}/${DISTDIR}/kernel.${INSTALLKERNEL}${flavor}.ucl ; \
 	${PKG_CMD} -o ABI=${PKG_ABI} -o ALLOW_BASE_SHLIBS=yes \
 		-o OSVERSION="${SRCRELDATE}" \
-		create -f ${PKG_FORMAT} ${PKG_CLEVEL} \
+		create -f ${PKG_FORMAT} ${PKG_CLEVEL} -T${PKG_CTHREADS} \
 		-M ${KSTAGEDIR}/${DISTDIR}/kernel.${INSTALLKERNEL}${flavor}.ucl \
 		-p ${KSTAGEDIR}/${DISTDIR}/kernel.${INSTALLKERNEL}${flavor}.plist \
 		-r ${KSTAGEDIR}/${DISTDIR} \
 		-o ${REPODIR}/${PKG_ABI}/${PKG_OUTPUT_DIR}
 . endfor
+.else
+create-kernel-packages: .PHONY
+
 .endif
-.if ${BUILDKERNELS:[#]} > 1 && ${NO_INSTALLEXTRAKERNELS} != "yes"
-. for _kernel in ${BUILDKERNELS:[2..-1]}
+.if !empty(INSTALLEXTRAKERNELS)
+.for _kernel in ${INSTALLEXTRAKERNELS}
 .  if exists(${KSTAGEDIR}/kernel.${_kernel}.meta)
 .   if ${MK_DEBUG_FILES} != "no"
 _debug=-dbg
@@ -2288,7 +2416,7 @@ create-kernel-packages-extra-flavor${flavor:C,^""$,${_default_flavor},}-${_kerne
 	${METALOG_SORT_CMD} ${KSTAGEDIR}/kernel.${_kernel}.meta | \
 	awk -f ${SRCDIR}/release/scripts/mtree-to-plist.awk \
 		-v kernel=yes -v _kernconf=${_kernel} ; \
-	${SRCDIR}/release/packages/generate-ucl.lua \
+	flua ${SRCDIR}/release/packages/generate-ucl.lua \
 		PKGNAME "kernel-${_kernel:tl}${flavor}" \
 		PKGGENNAME "kernel" \
 		FORCEINCLUDE "kernel${flavor}" \
@@ -2308,7 +2436,7 @@ create-kernel-packages-extra-flavor${flavor:C,^""$,${_default_flavor},}-${_kerne
 		${KSTAGEDIR}/kernel.${_kernel}/kernel.${_kernel}${flavor}.ucl ; \
 	${PKG_CMD} -o ABI=${PKG_ABI} -o ALLOW_BASE_SHLIBS=yes \
 		-o OSVERSION="${SRCRELDATE}" \
-		create -f ${PKG_FORMAT} ${PKG_CLEVEL} \
+		create -f ${PKG_FORMAT} ${PKG_CLEVEL} -T${PKG_CTHREADS} \
 		-M ${KSTAGEDIR}/kernel.${_kernel}/kernel.${_kernel}${flavor}.ucl \
 		-p ${KSTAGEDIR}/kernel.${_kernel}/kernel.${_kernel}${flavor}.plist \
 		-r ${KSTAGEDIR}/kernel.${_kernel} \
@@ -2327,9 +2455,6 @@ sign-packages:	.PHONY
 
 real-sign-packages:	_pkgbootstrap .PHONY
 	printf "version = 2;\n" > ${WSTAGEDIR}/meta
-.if ${PKG_BIN_VERSION} < 11700
-	printf "packing_format = \"${PKG_FORMAT}\";\n" >> ${WSTAGEDIR}/meta
-.endif
 	@${PKG_CMD} -o ABI=${PKG_ABI} -o OSVERSION="${SRCRELDATE}" \
 		-o WORKERS_COUNT=${PKG_WORKERS_COUNT} repo \
 		-m ${WSTAGEDIR}/meta \
@@ -2337,7 +2462,7 @@ real-sign-packages:	_pkgbootstrap .PHONY
 		${REPODIR}/${PKG_ABI}/${PKG_VERSION} \
 		${PKG_REPO_SIGNING_KEY} ; \
 	cd ${REPODIR}/${PKG_ABI}; \
-	ln -hfs ${PKG_OUTPUT_DIR} latest
+	ln -nfs ${PKG_OUTPUT_DIR} latest
 
 #
 #
@@ -2363,17 +2488,25 @@ doxygen: .PHONY
 		echo "You need doxygen (devel/doxygen) to generate the API documentation of the kernel." | /usr/bin/fmt; \
 		exit 1; \
 	fi
+	@if [ ! -x "${LOCALBASE}/bin/tex" ]; then \
+		echo "You need TeX (print/texlive-full) to generate the API documentation of the kernel." | /usr/bin/fmt; \
+		exit 1; \
+	fi
+	@if [ ! -x "${LOCALBASE}/bin/dot" ]; then \
+		echo "You need graphviz (graphics/graphviz) to generate the API documentation of the kernel." | /usr/bin/fmt; \
+		exit 1; \
+	fi
 	${_+_}cd ${.CURDIR}/tools/kerneldoc/subsys; ${MAKE} obj all
 
 #
 # ------------------------------------------------------------------------
 #
-# From here onwards are utility targets used by the 'make world' and
+# From here onwards are utility targets used by the 'make buildworld' and
 # related targets.  If your 'world' breaks, you may like to try to fix
 # the problem and manually run the following targets to attempt to
 # complete the build.  Beware, this is *not* guaranteed to work, you
 # need to have a pretty good grip on the current state of the system
-# to attempt to manually finish it.  If in doubt, 'make world' again.
+# to attempt to manually finish it.  If in doubt, 'make buildworld' again.
 #
 
 #
@@ -2497,13 +2630,11 @@ _bt_libkldelf_depend=${_bt}-lib/libkldelf
 _kldxref=	usr.sbin/kldxref
 ${_bt}-usr.sbin/kldxref: ${_bt_libelf_depend} ${_bt_libkldelf_depend}
 
-# flua is required to regenerate syscall files.  It first appeared during the
-# 13.0-CURRENT cycle, thus needs to be built on -older releases and stable
-# branches.
-.if ${BOOTSTRAPPING} < 1300059
+# flua is required to regenerate syscall files, and for the pkgbase build.
+# To protect us from changes in newer versions of flua or lua libraries
+# that might be installed on the host, always bootstrap it.
 ${_bt}-libexec/flua: ${_bt}-lib/liblua
-_flua= lib/liblua libexec/flua
-.endif
+${_bt}-libexec/flua: ${_bt}-lib/libmd ${_bt}-lib/libucl ${_bt}-lib/libyaml
 
 # r245440 mtree -N support added
 # r313404 requires sha384.h for libnetbsd, added to libmd in r292782
@@ -2564,11 +2695,12 @@ ${_bt}-usr.sbin/makefs: ${_bt}-lib/libsbuf
 .endif
 .endif
 
-# 1300102: VHDX support
-.if ${BOOTSTRAPPING} < 1201520 || \
-	(${BOOTSTRAPPING} > 1300000 && ${BOOTSTRAPPING} < 1300102) || \
+# 1600029: %align support
+.if ${BOOTSTRAPPING} < 1600029 || \
 	${MK_DISK_IMAGE_TOOLS_BOOTSTRAP} != "no"
 _mkimg=	usr.bin/mkimg
+${_bt}-usr.bin/mkimg: ${_bt}-lib/libz
+_other_bootstrap_tools+=lib/libz
 .else
 _bootstrap_tools_links+=mkimg
 .endif
@@ -2585,7 +2717,8 @@ _gensnmptree=	usr.sbin/bsnmpd/gensnmptree
 # llvm-tblgen is also needed for various llvm binutils (e.g. objcopy).
 .if ${MK_CLANG_BOOTSTRAP} != "no" || ${MK_CLANG} != "no" || \
     ${MK_LLD_BOOTSTRAP} != "no" || ${MK_LLD} != "no" || \
-    ${MK_LLDB} != "no" || ${MK_LLVM_BINUTILS} != "no"
+    ${MK_LLDB} != "no" || \
+    ${MK_LLVM_BINUTILS_BOOTSTRAP} != "no" || ${MK_LLVM_BINUTILS} != "no"
 _clang_tblgen= \
 	lib/clang/libllvmminimal \
 	usr.bin/clang/llvm-min-tblgen \
@@ -2708,8 +2841,15 @@ _basic_bootstrap_tools+=sbin/md5
 _basic_bootstrap_tools+=usr.sbin/tzsetup
 .endif
 
-# certctl is needed as an install tool
+# certctl is needed as an install tool.  libcrypto is rather heavy, so we'll
+# build that alongside it only for platforms that don't expose headers for
+# OpenSSL, like macOS, or when building on releases with OpenSSL 1.x.
 .if ${MK_CAROOT} != "no" && ${MK_OPENSSL} != "no"
+.if ${.MAKE.OS} == "Darwin" || \
+    (${.MAKE.OS} == "FreeBSD" && ${BOOTSTRAPPING} < 1400000)
+_bootstrap_libcrypto=secure/lib/libcrypto
+${_bt}-usr.sbin/certctl: ${_bt}-secure/lib/libcrypto
+.endif
 _certctl=usr.sbin/certctl
 .endif
 
@@ -2761,7 +2901,7 @@ ${_bt}-link-${_tool}: .PHONY
 	if [ ! -e "$${source_path}" ] ; then \
 		echo "Cannot find host tool '${_tool}'"; false; \
 	fi; \
-	cp -pf "$${source_path}" "${WORLDTMP}/legacy/bin/${_tool}"
+	install -p "$${source_path}" "${WORLDTMP}/legacy/bin/${_tool}"
 ${_bt}-links: ${_bt}-link-${_tool}
 .endfor
 
@@ -2776,12 +2916,17 @@ bootstrap-tools: ${_bt}-links .PHONY
     ${_strfile} \
     usr.bin/dtc \
     ${_cat} \
+    ${_bootstrap_libcrypto} \
     ${_certctl} \
     ${_kbdcontrol} \
     ${_elftoolchain_libs} \
     ${_libkldelf} \
     ${_kldxref} \
+    lib/liblua \
+    lib/libmd \
     lib/libopenbsd \
+    lib/libucl \
+    lib/libyaml \
     usr.bin/mandoc \
     usr.bin/rpcgen \
     ${_yacc} \
@@ -2791,7 +2936,7 @@ bootstrap-tools: ${_bt}-links .PHONY
     usr.bin/xinstall \
     ${_gensnmptree} \
     usr.sbin/config \
-    ${_flua} \
+    libexec/flua \
     ${_crunchide} \
     ${_crunchgen} \
     ${_etdump} \
@@ -2806,6 +2951,15 @@ bootstrap-tools: ${_bt}-links .PHONY
     ${_mkesdb} \
     ${_zic} \
     ${LOCAL_BSTOOL_DIRS}
+# We don't enforce any particular uniqueness of targets in the above list; it
+# may be the case that different bootstrap tools may have shared dependencies
+# at different BOOTSTRAPPING points, so we don't object to them using their own
+# conditionals and duplicating them into their ${_foo} variable to ease future
+# maintenance if we purge some entries.  These target names are purposefully
+# unique and this is the only place that should be generating commands for them,
+# but the target may have been defined earlier to express dependencies -- thus,
+# we specifically want commands() here.
+.if !commands(${_bt}-${_tool})
 ${_bt}-${_tool}: ${_bt}-links .PHONY .MAKE
 	${_+_}@${ECHODIR} "===> ${_tool} (obj,all,install)"; \
 		cd ${.CURDIR}/${_tool}; \
@@ -2815,8 +2969,8 @@ ${_bt}-${_tool}: ${_bt}-links .PHONY .MAKE
 		fi; \
 		${MAKE} DIRPRFX=${_tool}/ all; \
 		${MAKE} DIRPRFX=${_tool}/ DESTDIR=${WORLDTMP}/legacy install
-
 bootstrap-tools: ${_bt}-${_tool}
+.endif
 .endfor
 .if target(${_bt}-lib/libmd)
 # If we are bootstrapping libmd (e.g. when building on macOS/Linux) add the
@@ -2824,6 +2978,11 @@ bootstrap-tools: ${_bt}-${_tool}
 ${_bt}-usr.bin/sort: ${_bt}-lib/libmd
 ${_bt}-usr.bin/xinstall: ${_bt}-lib/libmd
 ${_bt}-sbin/md5: ${_bt}-lib/libmd
+.endif
+.if target(${_bt}-lib/libz)
+# If we are bootstrapping libz (e.g. when building on macOS/Linux) add the
+# necessary dependency:
+${_bt}-usr.bin/mandoc: ${_bt}-lib/libz
 .endif
 
 
@@ -2928,8 +3087,16 @@ _clang=		usr.bin/clang/clang
 .if ${MK_LLD_BOOTSTRAP} != "no"
 _lld=		usr.bin/clang/lld
 .endif
-.if ${MK_CLANG_BOOTSTRAP} != "no" || ${MK_LLD_BOOTSTRAP} != "no"
+.if ${MK_CLANG_BOOTSTRAP} != "no" || ${MK_LLD_BOOTSTRAP} != "no" || \
+    ${MK_LLVM_BINUTILS_BOOTSTRAP} != "no"
 _clang_libs=	lib/clang
+.endif
+.if ${MK_LLVM_BINUTILS_BOOTSTRAP} != "no"
+_llvm_binutils=	usr.bin/clang/llvm-ar \
+		usr.bin/clang/llvm-nm \
+		usr.bin/clang/llvm-objcopy \
+		usr.bin/clang/llvm-size \
+		usr.bin/clang/toolchain
 .endif
 .if ${MK_USB} != "no"
 _usb_tools=	stand/usb/tools
@@ -2946,6 +3113,7 @@ cross-tools: .MAKE .PHONY
     ${_clang_libs} \
     ${_clang} \
     ${_lld} \
+    ${_llvm_binutils} \
     ${_elftctools} \
     ${_dtrace_tools} \
     ${_btxld} \
@@ -3062,6 +3230,7 @@ NXBMAKEARGS+= \
 	MK_DEBUG_FILES=no \
 	MK_HTML=no \
 	MK_LLDB=no \
+	MK_LLVM_LINK_STATIC_LIBRARIES=yes \
 	MK_MAN=no \
 	MK_MAN_UTILS=yes \
 	MK_OFED=no \
@@ -3194,13 +3363,14 @@ _startup_libs+=	lib/libc_nonshared
 _startup_libs+=	lib/libcxxrt
 _startup_libs+=	lib/libsys
 
-_prereq_libs+=	lib/libgcc_eh lib/libgcc_s
-_startup_libs+=	lib/libgcc_eh lib/libgcc_s
+_prereq_libs+=	lib/libgcc_eh lib/libgcc_s lib/libgcc_s_asneeded
+_startup_libs+=	lib/libgcc_eh lib/libgcc_s lib/libgcc_s_asneeded
 
 lib/libc__L: lib/libsys__L
 lib/libgcc_s__L: lib/libc__L
 lib/libgcc_s__L: lib/libc_nonshared__L
-lib/libcxxrt__L: lib/libgcc_s__L
+lib/libgcc_s_asneeded__L: lib/libgcc_s__L
+lib/libcxxrt__L: lib/libgcc_s_asneeded__L
 lib/libcrypt__L: lib/libmd__L
 
 _prebuild_libs=	${_kerberos5_lib_libasn1} \
@@ -3217,7 +3387,6 @@ _prebuild_libs=	${_kerberos5_lib_libasn1} \
 		lib/libbz2 ${_libcom_err} lib/libcrypt \
 		lib/libc++ \
 		lib/libelf lib/libexpat \
-		lib/libfigpar \
 		${_lib_libgssapi} \
 		lib/libjail \
 		lib/libkiconv lib/libkldelf lib/libkvm \
@@ -3243,12 +3412,10 @@ _prebuild_libs=	${_kerberos5_lib_libasn1} \
 		lib/libgeom \
 		${_lib_librt} \
 		${_cddl_lib_libumem} ${_cddl_lib_libnvpair} \
-		${_cddl_lib_libuutil} \
 		${_cddl_lib_libavl} \
 		${_cddl_lib_libicp} \
 		${_cddl_lib_libicp_rescue} \
 		${_cddl_lib_libspl} \
-		${_cddl_lib_libtpool} \
 		${_cddl_lib_libzfs_core} ${_cddl_lib_libzfs} \
 		${_cddl_lib_libzutil} \
 		${_cddl_lib_libctf} ${_cddl_lib_libzfsbootenv} \
@@ -3257,11 +3424,6 @@ _prebuild_libs=	${_kerberos5_lib_libasn1} \
 		lib/libxo \
 		${_secure_lib_libcrypto} ${_secure_lib_libssl} \
 		${_lib_libldns} ${_secure_lib_libssh}
-
-.if ${MK_DIALOG} != "no"
-_prebuild_libs+= gnu/lib/libdialog
-gnu/lib/libdialog__L: lib/msun__L lib/ncurses/tinfo__L lib/ncurses/ncurses__L
-.endif
 
 .if ${MK_GOOGLETEST} != "no"
 _prebuild_libs+= lib/libregex
@@ -3285,10 +3447,12 @@ _prebuild_libs+= \
 	lib/ofed/libibmad \
 	lib/ofed/libibumad \
 	lib/ofed/complib \
+	lib/ofed/libbnxtre \
 	lib/ofed/libmlx5
 
 lib/ofed/libibmad__L:	lib/ofed/libibumad__L
 lib/ofed/complib__L:	lib/libthr__L
+lib/ofed/libbnxtre__L:	lib/ofed/libibverbs__L lib/libthr__L
 lib/ofed/libmlx5__L:	lib/ofed/libibverbs__L lib/libthr__L
 .endif
 
@@ -3302,7 +3466,7 @@ lib/liblzma__L: lib/libmd__L lib/libthr__L
 lib/libzstd__L: lib/libthr__L
 lib/librt__L: lib/libthr__L
 
-_generic_libs=	${_cddl_lib} gnu/lib ${_kerberos5_lib} lib ${_secure_lib}
+_generic_libs=	${_cddl_lib} ${_kerberos5_lib} lib ${_secure_lib}
 .if ${MK_IPFILTER} != "no"
 _generic_libs+=	sbin/ipf/libipf
 .endif
@@ -3319,32 +3483,27 @@ lib/libxo__L: lib/libutil__L
 _cddl_lib_libumem= cddl/lib/libumem
 _cddl_lib_libnvpair= cddl/lib/libnvpair
 _cddl_lib_libavl= cddl/lib/libavl
-_cddl_lib_libuutil= cddl/lib/libuutil
 _cddl_lib_libspl= cddl/lib/libspl
 
 cddl/lib/libavl__L: cddl/lib/libspl__L
 cddl/lib/libnvpair__L: cddl/lib/libspl__L
-cddl/lib/libuutil__L: cddl/lib/libavl__L cddl/lib/libspl__L
 
 .if ${MK_ZFS} != "no"
 _lib_librt= lib/librt
 _cddl_lib_libicp= cddl/lib/libicp
 _cddl_lib_libicp_rescue= cddl/lib/libicp_rescue
-_cddl_lib_libtpool= cddl/lib/libtpool
 _cddl_lib_libzutil= cddl/lib/libzutil
 _cddl_lib_libzfs_core= cddl/lib/libzfs_core
 _cddl_lib_libzfs= cddl/lib/libzfs
 _cddl_lib_libzfsbootenv= cddl/lib/libzfsbootenv
 
-cddl/lib/libtpool__L: cddl/lib/libspl__L
-
-cddl/lib/libzutil__L: cddl/lib/libavl__L lib/libgeom__L lib/msun__L cddl/lib/libtpool__L
+cddl/lib/libzutil__L: cddl/lib/libavl__L lib/libgeom__L lib/msun__L
 
 cddl/lib/libzfs_core__L: cddl/lib/libnvpair__L cddl/lib/libspl__L cddl/lib/libzutil__L
 
 cddl/lib/libzfs__L: cddl/lib/libzfs_core__L lib/msun__L lib/libutil__L lib/librt__L
 cddl/lib/libzfs__L: lib/libthr__L lib/libmd__L lib/libz__L cddl/lib/libumem__L
-cddl/lib/libzfs__L: cddl/lib/libuutil__L cddl/lib/libavl__L lib/libgeom__L
+cddl/lib/libzfs__L: cddl/lib/libavl__L lib/libgeom__L
 cddl/lib/libzfs__L: cddl/lib/libnvpair__L cddl/lib/libzutil__L
 cddl/lib/libzfs__L: secure/lib/libcrypto__L
 
@@ -3379,7 +3538,7 @@ secure/lib/libssh__L: lib/libz__L secure/lib/libcrypto__L lib/libcrypt__L
 secure/lib/libssh__L: lib/libldns__L
 .endif
 
-.if ${MK_GSSAPI} != "no" && ${MK_KERBEROS_SUPPORT} != "no"
+.if ${MK_KERBEROS_SUPPORT} != "no"
 .if ${MK_MITKRB5} != "no"
 secure/lib/libssh__L: krb5/lib/gssapi__L krb5/lib/krb5__L \
      krb5/lib/crypto__L krb5/util/et__L lib/libmd__L krb5/util/support__L
@@ -3438,10 +3597,8 @@ kerberos5/lib/libheimipcc__L: kerberos5/lib/libroken__L kerberos5/lib/libheimbas
 
 lib/libsqlite3__L: lib/libthr__L
 
-.if ${MK_GSSAPI} != "no"
-.if ${MK_MITKRB5} == "no"
+.if ${MK_KERBEROS} != "no" && ${MK_MITKRB5} == "no"
 _lib_libgssapi=	lib/libgssapi
-.endif
 .endif
 
 .if ${MK_KERBEROS} != "no"
@@ -3695,6 +3852,15 @@ check-old-libs: .PHONY
 	while read file; do \
 		if [ -f "${DESTDIR}/$${file}" -o -L "${DESTDIR}/$${file}" ]; then \
 			echo "${DESTDIR}/$${file}"; \
+			if packages=$$(${LOCALBASE:Q}/sbin/pkg -r ${DESTDIR:U/} \
+			    shlib -qP $${file##*/} 2>/dev/null) && \
+			    [ -n "$${packages}" ]; then \
+				echo "    also provided by:" $${packages}; \
+			elif packages=$$(${LOCALBASE:Q}/sbin/pkg -r ${DESTDIR:U/} \
+			    shlib -qR $${file##*/} 2>/dev/null) && \
+			    [ -n "$${packages}" ]; then \
+				echo "    required by:" $${packages}; \
+			fi; \
 		fi; \
 		for ext in debug symbols; do \
 		  if [ -f "${DESTDIR}${DEBUGDIR}/$${file}.$${ext}" ]; then \
@@ -3706,7 +3872,7 @@ check-old-libs: .PHONY
 list-old-dirs: .PHONY
 	@cd ${.CURDIR}; \
 	${MAKE} -f ${.CURDIR}/Makefile.inc1 ${.MAKEFLAGS} ${.TARGET} \
-	    -V OLD_DIRS | sed -E 's/[[:space:]]+/\n/g' | sort -r
+	    -V "OLD_DIRS:ts\n" | sort -r
 
 delete-old-dirs: .PHONY
 	@echo ">>> Removing old directories"

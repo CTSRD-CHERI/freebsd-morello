@@ -1,17 +1,14 @@
 .include <src.opts.mk>
 
+.include "Makefile.inc"
+
 PACKAGE=lib${LIB}
-_LIBARCHIVEDIR=	${SRCTOP}/contrib/libarchive
 
 LIB=	archive
 
 # FreeBSD SHLIB_MAJOR value is managed as part of the FreeBSD system.
 # It has no real relation to the libarchive version number.
 SHLIB_MAJOR= 7
-
-CFLAGS+=	-I${.OBJDIR}
-CFLAGS+=	-I${SRCTOP}/sys/contrib/zstd/lib
-.include "Makefile.inc"
 
 .if ${MACHINE_ARCH:Marm*} != "" || ${MACHINE_ARCH:Mpowerpc*} != ""
 NO_WCAST_ALIGN=	yes
@@ -32,6 +29,7 @@ SRCS=	archive_acl.c					\
 	archive_blake2s_ref.c				\
 	archive_check_magic.c				\
 	archive_cmdline.c				\
+	archive_crc32.c					\
 	archive_cryptor.c				\
 	archive_disk_acl_freebsd.c			\
 	archive_digest.c				\
@@ -102,6 +100,7 @@ SRCS=	archive_acl.c					\
 	archive_string.c				\
 	archive_string_sprintf.c			\
 	archive_time.c					\
+	archive_umask.c					\
 	archive_util.c					\
 	archive_version_details.c			\
 	archive_virtual.c				\
@@ -184,12 +183,13 @@ MAN=	archive_entry.3					\
 	archive_write_new.3				\
 	archive_write_open.3				\
 	archive_write_set_options.3			\
-	cpio.5						\
 	libarchive.3					\
 	libarchive_changes.3				\
-	libarchive_internals.3				\
-	libarchive-formats.5				\
-	tar.5
+	libarchive_internals.3
+
+MANNODEV=	cpio.5			\
+		libarchive-formats.5	\
+		tar.5
 
 # Symlink the man pages under each function name.
 MLINKS+=	archive_entry.3 archive_entry_clear.3

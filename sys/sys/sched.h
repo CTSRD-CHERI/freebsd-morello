@@ -36,6 +36,11 @@
 /*-
  * Copyright (c) 2002-2008, Jeffrey Roberson <jeff@freebsd.org>
  * All rights reserved.
+ * Copyright (c) 2026 The FreeBSD Foundation
+ *
+ * Portions of this software were developed by Olivier Certner
+ * <olce@FreeBSD.org> at Kumacom SARL under sponsorship from the FreeBSD
+ * Foundation.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -65,60 +70,343 @@
 #ifdef _KERNEL
 
 #include <sys/types.h>
-#ifdef SCHED_STATS
 #include <sys/pcpu.h>
-#endif
+#include <sys/linker_set.h>
+#include <sys/sdt.h>
+
+/*
+ * Scheduler interface.
+ *
+ * The scheduler interface is the list of functions that external users can
+ * call.  It consists of two parts: Functions that must be provided directly by
+ * a scheduler implementation (called an "instance"), and functions with
+ * a common implementation (which may indirectly call instance functions).
+ *
+ * The former are declared in an abstract manner with some of the SCHED_ITF_*()
+ * macros (SCHED_ITF_INTERNAL() being a notable exception), described in detail
+ * below.  A FUN() line declares a function, and the final interface function
+ * name is the symbol in the third argument prefixed by 'sched_'.  E.g., such
+ * lines:
+ *
+ * FUN((__VA_ARGS__), int, load)
+ * FUN((__VA_ARGS__), void, switch, struct thread *, td, int, flags)
+ *
+ * lead to the C declarations (among others):
+ *
+ * int sched_load(void);
+ * void sched_switch(struct thread *, int);
+ *
+ * and each implementation (instance) must implement corresponding functions,
+ * e.g., for ULE:
+ *
+ * int sched_ule_load(void);
+ * void sched_ule_switch(struct thread *td, int flags);
+ *
+ * Such interface functions are grouped and commented in the SCHED_ITF*()
+ * macros listing them.
+ *
+ * Functions with a common implementation are declared under "Common functions"
+ * below as commented plain C declarations.
+ */
+
+/*
+ * Macros SCHED_ITF_*() define functions that must be provided by an instance.
+ * Please see their herald comments for details about their differences.  They
+ * are X macros to avoid repetitions in function signatures, slot names,
+ * dispatch code, and scheduler instance declaration.  They take as an argument
+ * the FUN() macro, which is expanded on each interface's function descriptor.
+ *
+ * The arguments passed to FUN() are:
+ * - The variable arguments to the X macro, as the first argument.
+ * - The function descriptor, consisting of:
+ *   - Field name in 'struct sched_instance'.
+ *   - Return type.
+ *   - Function name; prefixed by 'sched_' for the publicly visible functions,
+ *     and by 'sched_<instance_name>_' for instance's implementation.
+ *   - Function arguments, each being represented as a pair of successive macro
+ *     parameters, the first being the argument's type and the second its name.
+ * Note that FUN() is passed a variable number of arguments for flexibility.
+ *
+ * In SCHED_ITF_*() macros, please keep the function's parameters on a separate
+ * line for clarity, even if everything would fit on a single line.
+ */
+
+/* sched_add() arguments. */
+#define	SRQ_BORING	0x0000		/* No special circumstances. */
+#define	SRQ_YIELDING	0x0001		/* We are yielding (from mi_switch). */
+#define	SRQ_OURSELF	0x0002		/* It is ourself (from mi_switch). */
+#define	SRQ_INTR	0x0004		/* It is probably urgent. */
+#define	SRQ_PREEMPTED	0x0008		/* has been preempted.. be kind */
+#define	SRQ_BORROWING	0x0010		/* Priority updated due to prio_lend */
+#define	SRQ_HOLD	0x0020		/* Return holding original td lock */
+#define	SRQ_HOLDTD	0x0040		/* Return holding td lock */
+
+/*
+ * Functions to be directly dispatched to the active scheduler instance.
+ *
+ * These are implemented using ifuncs for zero-cost dispatch.
+ */
+#define SCHED_ITF_DISPATCH(FUN, ...)					\
+	/*								\
+	 * General scheduling info.					\
+	 *								\
+	 * sched_load:							\
+	 *	Total runnable non-ithread threads in the system.	\
+	 *								\
+	 * sched_runnable:						\
+	 *	Runnable threads for this processor.			\
+	 */								\
+	FUN((__VA_ARGS__), int, load)					\
+	FUN((__VA_ARGS__), int, rr_interval)				\
+	FUN((__VA_ARGS__), bool, runnable)				\
+									\
+	/*								\
+	 * Proc related scheduling hooks.				\
+	 */								\
+	FUN((__VA_ARGS__), void, exit,					\
+	    struct proc *, p, struct thread *, child)			\
+	FUN((__VA_ARGS__), void, fork,					\
+	    struct thread *, td, struct thread *, child)		\
+	FUN((__VA_ARGS__), void, fork_exit,				\
+	    struct thread *, td)					\
+	FUN((__VA_ARGS__), void, class,					\
+	    struct thread *, td, int, class)				\
+	FUN((__VA_ARGS__), void, nice,					\
+	    struct proc *, p, int, nice)				\
+									\
+	/*								\
+	 * Threads are switched in and out, block on resources,		\
+	 * have temporary priorities inherited from their procs,	\
+	 * and use up cpu time.						\
+	 */								\
+	FUN((__VA_ARGS__), void, ap_entry)				\
+	FUN((__VA_ARGS__), void, exit_thread,				\
+	    struct thread *, td, struct thread *, child)		\
+	FUN((__VA_ARGS__), u_int, estcpu,				\
+	    struct thread *, td)					\
+	FUN((__VA_ARGS__), void, fork_thread,				\
+	    struct thread *, td, struct thread *, child)		\
+	FUN((__VA_ARGS__), void, ithread_prio,				\
+	    struct thread *, td, u_char, prio)				\
+	FUN((__VA_ARGS__), void, lend_prio,				\
+	    struct thread *, td, u_char, prio)				\
+	FUN((__VA_ARGS__), void, lend_user_prio,			\
+	    struct thread *, td, u_char, pri)				\
+	FUN((__VA_ARGS__), void, lend_user_prio_cond,			\
+	    struct thread *, td, u_char, pri)				\
+	FUN((__VA_ARGS__), fixpt_t, pctcpu,				\
+	    struct thread *, td)					\
+	FUN((__VA_ARGS__), void, prio,					\
+	    struct thread *, td, u_char, prio)				\
+	FUN((__VA_ARGS__), void, sleep,					\
+	    struct thread *, td, int, prio)				\
+	FUN((__VA_ARGS__), void, switch,				\
+	    struct thread *, td, int, flags)				\
+	FUN((__VA_ARGS__), void, throw,					\
+	    struct thread *, td)					\
+	FUN((__VA_ARGS__), void, unlend_prio,				\
+	    struct thread *, td, u_char, prio)				\
+	FUN((__VA_ARGS__), void, user_prio,				\
+	    struct thread *, td, u_char, prio)				\
+	FUN((__VA_ARGS__), void, userret_slowpath,			\
+	    struct thread *, td)					\
+									\
+	/*								\
+	 * Threads are moved on and off of run queues			\
+	 */								\
+	FUN((__VA_ARGS__), void, add,					\
+	    struct thread *, td, int, flags)				\
+	FUN((__VA_ARGS__), struct thread *, choose)			\
+	FUN((__VA_ARGS__), void, clock,					\
+	    struct thread *, td, int, cnt)				\
+	FUN((__VA_ARGS__), void, idletd,				\
+	    void *, dummy)						\
+	FUN((__VA_ARGS__), void, preempt,				\
+	    struct thread *, td)					\
+	FUN((__VA_ARGS__), void, relinquish,				\
+	    struct thread *, td)					\
+	FUN((__VA_ARGS__), void, rem,					\
+	    struct thread *, td)					\
+	FUN((__VA_ARGS__), void, wakeup,				\
+	    struct thread *, td, int, srqflags)				\
+									\
+	/*								\
+	 * Binding makes cpu affinity permanent while pinning is used	\
+	 * to temporarily hold a thread on a particular CPU.		\
+	 */								\
+	FUN((__VA_ARGS__), void, bind,					\
+	    struct thread *, td, int, cpu)				\
+	FUN((__VA_ARGS__), void, unbind,				\
+	    struct thread *, td)					\
+	FUN((__VA_ARGS__), int, is_bound,				\
+	    struct thread *, td)					\
+	FUN((__VA_ARGS__), void, affinity,				\
+	    struct thread *, td)					\
+									\
+	/*								\
+	 * These procedures tell the process data structure allocation  \
+	 * code how many bytes to actually allocate.			\
+	 */								\
+	FUN((__VA_ARGS__), int, sizeof_proc)				\
+	FUN((__VA_ARGS__), int, sizeof_thread)				\
+									\
+	/*								\
+	 * This routine provides a consistent thread name for use with	\
+	 * KTR graphing FUNctions.					\
+	 */								\
+	FUN((__VA_ARGS__), char *, tdname,				\
+	    struct thread *, td)					\
+	FUN((__VA_ARGS__), void, clear_tdname,				\
+	    struct thread *, td)					\
+									\
+	/*								\
+	 * Find an L2 neighbor of the given CPU or return -1 if none	\
+	 * found.  This does not distinguish among multiple L2		\
+	 * if the given CPU has more than one (it will always return	\
+	 * the same result in that case).				\
+	 */								\
+	FUN((__VA_ARGS__), int,	find_l2_neighbor,			\
+	    int, cpu)							\
+									\
+	/*								\
+	 * Fixup scheduler state for secondary APs			\
+	 */								\
+	FUN((__VA_ARGS__), void, init_ap)
+
+/*
+ * Instance functions to be specifically wrapped.
+ *
+ * An explicit common implementation must be provided for these, and it is
+ * expected to call the instance's implementation.
+ */
+#define SCHED_ITF_WRAP(FUN, ...)					\
+	/*								\
+	 * Initialize scheduler state for proc0 and thread0.		\
+	 */								\
+	FUN((__VA_ARGS__), void, init)
+
+/*
+ * Instance functions used internally.
+ *
+ * Functions here are not made available for external callers.
+ */
+#define SCHED_ITF_INTERNAL(FUN, ...)					\
+	/*								\
+	 * Setup run queues ('cpu_top' filled by the shim machinery).   \
+	 */								\
+	FUN((__VA_ARGS__), void, setup)					\
+									\
+	/*								\
+	 * Determines time constants after stathz and hz are setup.	\
+	 */								\
+	FUN((__VA_ARGS__), void, initticks)				\
+									\
+	/*								\
+	 * Final steps after all the rest has been initialized.		\
+	 */								\
+	FUN((__VA_ARGS__), void, sysinit)
+
+/* All parts at once, but common functions. */
+#define SCHED_ITF_NOCOMMON(FUN, ...)					\
+	SCHED_ITF_DISPATCH(FUN, __VA_ARGS__)				\
+	SCHED_ITF_WRAP(FUN, __VA_ARGS__)				\
+	SCHED_ITF_INTERNAL(FUN, __VA_ARGS__)
+
+/*
+ * Machinery to help define FUN() macros.
+ */
+#define _SCHED_ITF_ARG1(a0, ...)					\
+	a0
+#define _SCHED_ITF_ARG2(a0, a1, ...)					\
+	a1
+#define _SCHED_ITF_ARG9(a0, a1, a2, a3, a4, a5, a6, a7, a8, ...)	\
+	a8
+#define _SCHED_ITF_NARGS(...)						\
+	_SCHED_ITF_ARG9(__VA_ARGS__ __VA_OPT__(,) 4, ERR, 3, ERR, 2,	\
+	    ERR, 1, ERR, 0)
+#define _SCHED_ITF_NARGS_DISP(PREFIX, disp_args, full_args)		\
+	__CONCAT(__CONCAT(PREFIX, _), _SCHED_ITF_NARGS disp_args)	\
+		full_args
+#define _SCHED_ITF_ARGS_PAIR_ERR					\
+	"Two macro arguments per interface function argument expected."
+#define _SCHED_ITF_ARGS_PROTO_NAME_0()					\
+	void
+#define _SCHED_ITF_ARGS_PROTO_NAME_1(t1, a1)				\
+	t1 a1
+#define _SCHED_ITF_ARGS_PROTO_NAME_2(t1, a1, t2, a2)			\
+	t1 a1, t2 a2
+#define _SCHED_ITF_ARGS_PROTO_NAME_3(t1, a1, t2, a2, t3, a3)		\
+	t1 a1, t2 a2, t3 a3
+#define _SCHED_ITF_ARGS_PROTO_NAME_4(t1, a1, t2, a2, t3, a3, t4, a4)	\
+	t1 a1, t2 a2, t3 a3, t4 a4
+#define _SCHED_ITF_ARGS_PROTO_NAME_ERR(...)				\
+	_SCHED_ITF_ARGS_PAIR_ERR
+#define SCHED_ITF_ARGS_PROTO_NAME(...)					\
+	_SCHED_ITF_NARGS_DISP(_SCHED_ITF_ARGS_PROTO_NAME,		\
+	    (__VA_ARGS__), (__VA_ARGS__))
+#define _SCHED_ITF_ARGS_PROTO_NONAME_0()				\
+	void
+#define _SCHED_ITF_ARGS_PROTO_NONAME_1(t1, a1)				\
+	t1
+#define _SCHED_ITF_ARGS_PROTO_NONAME_2(t1, a1, t2, a2)			\
+	t1, t2
+#define _SCHED_ITF_ARGS_PROTO_NONAME_3(t1, a1, t2, a2, t3, a3)		\
+	t1, t2, t3
+#define _SCHED_ITF_ARGS_PROTO_NONAME_4(t1, a1, t2, a2, t3, a3, t4, a4)	\
+	t1, t2, t3, t4
+#define _SCHED_ITF_ARGS_PROTO_NONAME_ERR(...)				\
+	_SCHED_ITF_ARGS_PAIR_ERR
+#define SCHED_ITF_ARGS_PROTO_NONAME(...)				\
+	_SCHED_ITF_NARGS_DISP(_SCHED_ITF_ARGS_PROTO_NONAME,		\
+	    (__VA_ARGS__), (__VA_ARGS__))
+
+#define SCHED_ITF_FIELD_NAME(fn)					\
+	__CONCAT(fn, _impl)
+#define SCHED_ITF_FUNCTION_NAME(fn)					\
+	__CONCAT(sched_, fn)
+#define SCHED_ITF_IMPL_FUNCTION_NAME(sched_name, fn)			\
+	SCHED_ITF_FUNCTION_NAME(__CONCAT(__CONCAT(sched_name, _),	\
+	    fn))
 
 struct proc;
 struct thread;
 
-/*
- * General scheduling info.
- *
- * sched_load:
- *	Total runnable non-ithread threads in the system.
- *
- * sched_runnable:
- *	Runnable threads for this processor.
- */
-int	sched_load(void);
-int	sched_rr_interval(void);
-bool	sched_runnable(void);
-
-/* 
- * Proc related scheduling hooks.
- */
-void	sched_exit(struct proc *p, struct thread *childtd);
-void	sched_fork(struct thread *td, struct thread *childtd);
-void	sched_fork_exit(struct thread *td);
-void	sched_class(struct thread *td, int class);
-void	sched_nice(struct proc *p, int nice);
+#ifndef SCHED_IMPLEMENTATION
 
 /*
- * Threads are switched in and out, block on resources, have temporary
- * priorities inherited from their procs, and use up cpu time.
+ * C declaration of first part of interface functions.
  */
-void	sched_ap_entry(void);
-void	sched_exit_thread(struct thread *td, struct thread *child);
-u_int	sched_estcpu(struct thread *td);
-void	sched_fork_thread(struct thread *td, struct thread *child);
-void	sched_ithread_prio(struct thread *td, u_char prio);
-void	sched_lend_prio(struct thread *td, u_char prio);
-void	sched_lend_user_prio(struct thread *td, u_char pri);
-void	sched_lend_user_prio_cond(struct thread *td, u_char pri);
-fixpt_t	sched_pctcpu(struct thread *td);
-void	sched_prio(struct thread *td, u_char prio);
-void	sched_sleep(struct thread *td, int prio);
-void	sched_switch(struct thread *td, int flags);
-void	sched_throw(struct thread *td);
-void	sched_unlend_prio(struct thread *td, u_char prio);
-void	sched_user_prio(struct thread *td, u_char prio);
-void	sched_userret_slowpath(struct thread *td);
-#ifdef	RACCT
-#ifdef	SCHED_4BSD
-fixpt_t	sched_pctcpu_delta(struct thread *td);
-#endif
-#endif
+/* Eliding argument names to avoid collisions with C++ keywords. */
+#define _SCHED_ITF_FUN(args, ret_type, fn, ...)				\
+	ret_type							\
+	SCHED_ITF_FUNCTION_NAME(fn)					\
+		(SCHED_ITF_ARGS_PROTO_NONAME(__VA_ARGS__));
+SCHED_ITF_DISPATCH(_SCHED_ITF_FUN, );
+SCHED_ITF_WRAP(_SCHED_ITF_FUN, );
+#undef _SCHED_ITF_FUN
+
+#else /* SCHED_IMPLEMENTATION */
+
+/*
+ * C declarations for implementation functions.
+ *
+ * SCHED_IMPLEMENTATION must be defined to the scheduler name as used in
+ * variable names (i.e., lower case, such as 4bsd or ule).
+ */
+#define _SCHED_ITF_FUN(args, ret_type, fn, ...)				\
+	static ret_type							\
+	SCHED_ITF_IMPL_FUNCTION_NAME(_SCHED_ITF_ARG1 args, fn)		\
+		(SCHED_ITF_ARGS_PROTO_NAME(__VA_ARGS__));
+SCHED_ITF_NOCOMMON(_SCHED_ITF_FUN, SCHED_IMPLEMENTATION)
+#undef _SCHED_ITF_FUN
+
+#endif /* !SCHED_IMPLEMENTATION */
+
+/*
+ * Common functions.
+ */
+
+#ifndef SCHED_IMPLEMENTATION
 
 static inline void
 sched_userret(struct thread *td)
@@ -139,44 +427,7 @@ sched_userret(struct thread *td)
 		sched_userret_slowpath(td);
 }
 
-/*
- * Threads are moved on and off of run queues
- */
-void	sched_add(struct thread *td, int flags);
-struct thread *sched_choose(void);
-void	sched_clock(struct thread *td, int cnt);
-void	sched_idletd(void *);
-void	sched_preempt(struct thread *td);
-void	sched_relinquish(struct thread *td);
-void	sched_rem(struct thread *td);
-void	sched_wakeup(struct thread *td, int srqflags);
-
-/*
- * Binding makes cpu affinity permanent while pinning is used to temporarily
- * hold a thread on a particular CPU.
- */
-void	sched_bind(struct thread *td, int cpu);
-static __inline void sched_pin(void);
-void	sched_unbind(struct thread *td);
-static __inline void sched_unpin(void);
-int	sched_is_bound(struct thread *td);
-void	sched_affinity(struct thread *td);
-
-/*
- * These procedures tell the process data structure allocation code how
- * many bytes to actually allocate.
- */
-int	sched_sizeof_proc(void);
-int	sched_sizeof_thread(void);
-
-/*
- * This routine provides a consistent thread name for use with KTR graphing
- * functions.
- */
-char	*sched_tdname(struct thread *td);
-#ifdef KTR
-void	sched_clear_tdname(struct thread *td);
-#endif
+#endif /* SCHED_IMPLEMENTATION */
 
 static __inline void
 sched_pin(void)
@@ -193,17 +444,9 @@ sched_unpin(void)
 	curthread->td_pinned--;
 }
 
-/* sched_add arguments (formerly setrunqueue) */
-#define	SRQ_BORING	0x0000		/* No special circumstances. */
-#define	SRQ_YIELDING	0x0001		/* We are yielding (from mi_switch). */
-#define	SRQ_OURSELF	0x0002		/* It is ourself (from mi_switch). */
-#define	SRQ_INTR	0x0004		/* It is probably urgent. */
-#define	SRQ_PREEMPTED	0x0008		/* has been preempted.. be kind */
-#define	SRQ_BORROWING	0x0010		/* Priority updated due to prio_lend */
-#define	SRQ_HOLD	0x0020		/* Return holding original td lock */
-#define	SRQ_HOLDTD	0x0040		/* Return holding td lock */
-
-/* Scheduler stats. */
+/*
+ * Scheduler statistics.
+ */
 #ifdef SCHED_STATS
 DPCPU_DECLARE(long, sched_switch_stats[SWT_COUNT]);
 
@@ -221,6 +464,10 @@ SYSINIT(name, SI_SUB_LAST, SI_ORDER_MIDDLE, name ## _add_proc, NULL);
 #define	SCHED_STAT_DEFINE(name, descr)					\
     DPCPU_DEFINE(unsigned long, name);					\
     SCHED_STAT_DEFINE_VAR(name, &DPCPU_NAME(name), descr)
+
+#define	SCHED_STAT_DECLARE(name)					\
+    DPCPU_DECLARE(unsigned long, name);
+
 /*
  * Sched stats are always incremented in critical sections so no atomic
  * is necessary to increment them.
@@ -229,18 +476,80 @@ SYSINIT(name, SI_SUB_LAST, SI_ORDER_MIDDLE, name ## _add_proc, NULL);
 #else
 #define	SCHED_STAT_DEFINE_VAR(name, descr, ptr)
 #define	SCHED_STAT_DEFINE(name, descr)
+#define	SCHED_STAT_DECLARE(name)
 #define SCHED_STAT_INC(var)			(void)0
 #endif
 
+SCHED_STAT_DECLARE(ithread_demotions);
+SCHED_STAT_DECLARE(ithread_preemptions);
+
+/* Dtrace. */
+SDT_PROBE_DECLARE(sched, , , change__pri);
+SDT_PROBE_DECLARE(sched, , , dequeue);
+SDT_PROBE_DECLARE(sched, , , enqueue);
+SDT_PROBE_DECLARE(sched, , , lend__pri);
+SDT_PROBE_DECLARE(sched, , , load__change);
+SDT_PROBE_DECLARE(sched, , , off__cpu);
+SDT_PROBE_DECLARE(sched, , , on__cpu);
+SDT_PROBE_DECLARE(sched, , , remain__cpu);
+SDT_PROBE_DECLARE(sched, , , surrender);
+
+#ifdef KDTRACE_HOOKS
+#include <sys/dtrace_bsd.h>
+extern int dtrace_vtime_active;
+extern dtrace_vtime_switch_func_t dtrace_vtime_switch_func;
+#endif
+
+#if defined(SCHED_IMPLEMENTATION) || defined(SCHED_SHIM)
 /*
- * Fixup scheduler state for proc0 and thread0
+ * Scheduler instance structure.
  */
-void schedinit(void);
+#define _SCHED_ITF_FUN(args, ret_type, fn, ...)				\
+	ret_type (*SCHED_ITF_FIELD_NAME(fn))				\
+	(SCHED_ITF_ARGS_PROTO_NONAME(__VA_ARGS__));
+struct sched_instance {
+	SCHED_ITF_NOCOMMON(_SCHED_ITF_FUN, )
+};
+#undef _SCHED_ITF_FUN
 
 /*
- * Fixup scheduler state for secondary APs
+ * Scheduler instance declaration.
  */
-void schedinit_ap(void);
+struct sched_selection {
+	const char *name;
+	const struct sched_instance *instance;
+};
+
+#define _SCHED_DECLARE_FIELD_FUN(args, ret_type, fn, ...)		\
+	.SCHED_ITF_FIELD_NAME(fn) = &SCHED_ITF_IMPL_FUNCTION_NAME(	\
+	    _SCHED_ITF_ARG1 args, fn),
+#endif /* SCHED_IMPLEMENTATION || SCHED_SHIM */
+
+#ifdef SCHED_IMPLEMENTATION
+#define	DECLARE_SCHEDULER(string_name)					\
+	static const struct sched_instance				\
+	__CONCAT(_sched_instance_, SCHED_IMPLEMENTATION) = {		\
+		SCHED_ITF_NOCOMMON(_SCHED_DECLARE_FIELD_FUN,		\
+		    SCHED_IMPLEMENTATION)				\
+	};								\
+	static const struct sched_selection				\
+	__CONCAT(_sched_selector_, SCHED_IMPLEMENTATION) = {		\
+		.name = string_name,					\
+		.instance = &__CONCAT(_sched_instance_,			\
+		    SCHED_IMPLEMENTATION),				\
+	};								\
+	DATA_SET(sched_instance_set,					\
+	    __CONCAT(_sched_selector_, SCHED_IMPLEMENTATION));
+#endif /* SCHED_IMPLEMENTATION */
+
+void sched_instance_select(void);
+
+/*
+ * Miscellaneous.
+ */
+
+void ast_scheduler(struct thread *td, int tda);
+
 #endif /* _KERNEL */
 
 /* POSIX 1003.1b Process Scheduling */
@@ -256,10 +565,10 @@ struct sched_param {
         int     sched_priority;
 };
 
+#ifndef _KERNEL
 /*
  * POSIX scheduling declarations for userland.
  */
-#ifndef _KERNEL
 #include <sys/cdefs.h>
 #include <sys/_timespec.h>
 #include <sys/_types.h>
@@ -267,7 +576,7 @@ struct sched_param {
 #ifndef _PID_T_DECLARED
 typedef __pid_t         pid_t;
 #define _PID_T_DECLARED
-#endif
+#endif /* !_PID_T_DECLARED */
 
 __BEGIN_DECLS
 int     sched_get_priority_max(int);
@@ -280,5 +589,6 @@ int     sched_setscheduler(pid_t, int, const struct sched_param *);
 int     sched_yield(void);
 __END_DECLS
 
-#endif
+#endif /* !_KERNEL */
+
 #endif /* !_SCHED_H_ */

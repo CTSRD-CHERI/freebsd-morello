@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: ISC
 /*
  * Copyright (c) 2018 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/completion.h>
@@ -244,7 +245,7 @@ static int ath10k_qmi_bdf_dnld_send_sync(struct ath10k_qmi *qmi)
 	const u8 *temp;
 	int ret;
 
-	req = kzalloc(sizeof(*req), GFP_KERNEL);
+	req = kzalloc_obj(*req);
 	if (!req)
 		return -ENOMEM;
 
@@ -436,7 +437,7 @@ ath10k_qmi_cfg_send_sync_msg(struct ath10k *ar,
 	int ret;
 	u32 i;
 
-	req = kzalloc(sizeof(*req), GFP_KERNEL);
+	req = kzalloc_obj(*req);
 	if (!req)
 		return -ENOMEM;
 
@@ -577,7 +578,7 @@ static int ath10k_qmi_cap_send_sync_msg(struct ath10k_qmi *qmi)
 	struct qmi_txn txn;
 	int ret;
 
-	resp = kzalloc(sizeof(*resp), GFP_KERNEL);
+	resp = kzalloc_obj(*resp);
 	if (!resp)
 		return -ENOMEM;
 
@@ -876,7 +877,7 @@ ath10k_qmi_driver_event_post(struct ath10k_qmi *qmi,
 {
 	struct ath10k_qmi_driver_event *event;
 
-	event = kzalloc(sizeof(*event), GFP_ATOMIC);
+	event = kzalloc_obj(*event, GFP_ATOMIC);
 	if (!event)
 		return -ENOMEM;
 
@@ -985,7 +986,7 @@ static int ath10k_qmi_new_server(struct qmi_handle *qmi_hdl,
 
 	ath10k_dbg(ar, ATH10K_DBG_QMI, "wifi fw qmi service found\n");
 
-	ret = kernel_connect(qmi_hdl->sock, (struct sockaddr *)&qmi->sq,
+	ret = kernel_connect(qmi_hdl->sock, (struct sockaddr_unsized *)&qmi->sq,
 			     sizeof(qmi->sq), 0);
 	if (ret) {
 		ath10k_err(ar, "failed to connect to a remote QMI service port\n");
@@ -1039,6 +1040,10 @@ static void ath10k_qmi_driver_event_work(struct work_struct *work)
 		switch (event->type) {
 		case ATH10K_QMI_EVENT_SERVER_ARRIVE:
 			ath10k_qmi_event_server_arrive(qmi);
+			if (qmi->no_msa_ready_indicator) {
+				ath10k_info(ar, "qmi not waiting for msa_ready indicator");
+				ath10k_qmi_event_msa_ready(qmi);
+			}
 			break;
 		case ATH10K_QMI_EVENT_SERVER_EXIT:
 			ath10k_qmi_event_server_exit(qmi);
@@ -1047,6 +1052,10 @@ static void ath10k_qmi_driver_event_work(struct work_struct *work)
 			ath10k_qmi_event_fw_ready_ind(qmi);
 			break;
 		case ATH10K_QMI_EVENT_MSA_READY_IND:
+			if (qmi->no_msa_ready_indicator) {
+				ath10k_warn(ar, "qmi unexpected msa_ready indicator");
+				break;
+			}
 			ath10k_qmi_event_msa_ready(qmi);
 			break;
 		default:
@@ -1066,7 +1075,7 @@ int ath10k_qmi_init(struct ath10k *ar, u32 msa_size)
 	struct ath10k_qmi *qmi;
 	int ret;
 
-	qmi = kzalloc(sizeof(*qmi), GFP_KERNEL);
+	qmi = kzalloc_obj(*qmi);
 	if (!qmi)
 		return -ENOMEM;
 
@@ -1075,6 +1084,9 @@ int ath10k_qmi_init(struct ath10k *ar, u32 msa_size)
 
 	if (of_property_read_bool(dev->of_node, "qcom,msa-fixed-perm"))
 		qmi->msa_fixed_perm = true;
+
+	if (of_property_read_bool(dev->of_node, "qcom,no-msa-ready-indicator"))
+		qmi->no_msa_ready_indicator = true;
 
 	ret = qmi_handle_init(&qmi->qmi_hdl,
 			      WLFW_BDF_DOWNLOAD_REQ_MSG_V01_MAX_MSG_LEN,

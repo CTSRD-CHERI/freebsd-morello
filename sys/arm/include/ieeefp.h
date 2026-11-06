@@ -7,6 +7,8 @@
 #ifndef _MACHINE_IEEEFP_H_
 #define _MACHINE_IEEEFP_H_
 
+#include <sys/cdefs.h>
+
 /* Deprecated historical FPU control interface */
 
 /* FP exception codes */
@@ -48,5 +50,15 @@ typedef enum {
 } fp_prec_t;
 
 #define fp_except_t	int
+
+/* Augment the userland declarations. */
+__BEGIN_DECLS
+extern fp_rnd_t    fpgetround(void);
+extern fp_rnd_t    fpsetround(fp_rnd_t);
+extern fp_except_t fpgetmask(void);
+extern fp_except_t fpsetmask(fp_except_t);
+extern fp_except_t fpgetsticky(void);
+extern fp_except_t fpsetsticky(fp_except_t);
+__END_DECLS
 
 #endif /* _MACHINE_IEEEFP_H_ */

@@ -49,8 +49,8 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
- * 	NetBSD: tumbler.c,v 1.28 2008/05/16 03:49:54 macallan Exp
- *	Id: tumbler.c,v 1.11 2002/10/31 17:42:13 tsubai Exp 
+ *	NetBSD: tumbler.c,v 1.28 2008/05/16 03:49:54 macallan Exp
+ *	Id: tumbler.c,v 1.11 2002/10/31 17:42:13 tsubai Exp
  */
 
 /*
@@ -65,6 +65,7 @@
 #include <sys/malloc.h>
 #include <sys/lock.h>
 #include <sys/mutex.h>
+#include <sys/taskqueue.h>
 #include <machine/dbdma.h>
 #include <machine/intr_machdep.h>
 #include <machine/resource.h>
@@ -91,22 +92,25 @@ struct tumbler_softc
 {
 	device_t sc_dev;
 	uint32_t sc_addr;
+	struct mtx sc_volume_mtx;
+	struct task sc_volume_task;
+	uint8_t sc_volume_reg[6];
 };
 
 static int	tumbler_probe(device_t);
-static int 	tumbler_attach(device_t);
+static int	tumbler_attach(device_t);
 static int	tumbler_init(struct snd_mixer *m);
 static int	tumbler_uninit(struct snd_mixer *m);
 static int	tumbler_reinit(struct snd_mixer *m);
 static int	tumbler_set(struct snd_mixer *m, unsigned dev, unsigned left,
 		    unsigned right);
-static u_int32_t	tumbler_setrecsrc(struct snd_mixer *m, u_int32_t src);
+static uint32_t	tumbler_setrecsrc(struct snd_mixer *m, uint32_t src);
 
 static device_method_t tumbler_methods[] = {
 	/* Device interface. */
 	DEVMETHOD(device_probe,		tumbler_probe),
 	DEVMETHOD(device_attach,	tumbler_attach),
-	{ 0, 0 }
+	DEVMETHOD_END
 };
 
 static driver_t tumbler_driver = {
@@ -120,11 +124,11 @@ MODULE_VERSION(tumbler, 1);
 MODULE_DEPEND(tumbler, iicbus, 1, 1, 1);
 
 static kobj_method_t tumbler_mixer_methods[] = {
-	KOBJMETHOD(mixer_init, 		tumbler_init),
-	KOBJMETHOD(mixer_uninit, 	tumbler_uninit),
-	KOBJMETHOD(mixer_reinit, 	tumbler_reinit),
-	KOBJMETHOD(mixer_set, 		tumbler_set),
-	KOBJMETHOD(mixer_setrecsrc, 	tumbler_setrecsrc),
+	KOBJMETHOD(mixer_init,		tumbler_init),
+	KOBJMETHOD(mixer_uninit,	tumbler_uninit),
+	KOBJMETHOD(mixer_reinit,	tumbler_reinit),
+	KOBJMETHOD(mixer_set,		tumbler_set),
+	KOBJMETHOD(mixer_setrecsrc,	tumbler_setrecsrc),
 	KOBJMETHOD_END
 };
 
@@ -134,7 +138,7 @@ MIXER_DECLARE(tumbler_mixer);
 
 /* Tumbler (Texas Instruments TAS3001) registers. */
 #define TUMBLER_MCR		0x01	/* Main control register (1byte) */
-#define TUMBLER_DRC         	0x02    /* Dynamic Range Compression (2bytes) */
+#define TUMBLER_DRC		0x02    /* Dynamic Range Compression (2bytes) */
 #define TUMBLER_VOLUME		0x04	/* Volume (6bytes) */
 #define TUMBLER_TREBLE		0x05	/* Treble control (1byte) */
 #define TUMBLER_BASS		0x06	/* Bass control (1byte) */
@@ -177,36 +181,36 @@ MIXER_DECLARE(tumbler_mixer);
  */
 
 struct tumbler_reg {
-	u_char MCR[1];
-        u_char DRC[2];
-	u_char VOLUME[6];
-	u_char TREBLE[1];
-	u_char BASS[1];
-	u_char MIXER1[3];
-	u_char MIXER2[3];
-	u_char LB0[15];
-	u_char LB1[15];
-	u_char LB2[15];
-	u_char LB3[15];
-	u_char LB4[15];
-	u_char LB5[15];
-	u_char RB0[15];
-	u_char RB1[15];
-	u_char RB2[15];
-	u_char RB3[15];
-	u_char RB4[15];
-	u_char RB5[15];
+	uint8_t MCR[1];
+        uint8_t DRC[2];
+	uint8_t VOLUME[6];
+	uint8_t TREBLE[1];
+	uint8_t BASS[1];
+	uint8_t MIXER1[3];
+	uint8_t MIXER2[3];
+	uint8_t LB0[15];
+	uint8_t LB1[15];
+	uint8_t LB2[15];
+	uint8_t LB3[15];
+	uint8_t LB4[15];
+	uint8_t LB5[15];
+	uint8_t RB0[15];
+	uint8_t RB1[15];
+	uint8_t RB2[15];
+	uint8_t RB3[15];
+	uint8_t RB4[15];
+	uint8_t RB5[15];
 };
 
 const struct tumbler_reg tumbler_initdata = {
-	{ TUMBLER_MCR_SC_64 | TUMBLER_MCR_SM_I2S | 
+	{ TUMBLER_MCR_SC_64 | TUMBLER_MCR_SM_I2S |
           TUMBLER_MCR_ISM_I2S | TUMBLER_MCR_W_16 },             /* MCR */
         { TUMBLER_DRC_COMP_31, TUMBLER_DRC_DEFL_TH },           /* DRC */
         { 0, 0, 0, 0, 0, 0 },				        /* VOLUME */
 	{ 0x72 },						/* TREBLE */
 	{ 0x3e },						/* BASS */
-	{ 0x10, 0x00, 0x00 },	                		/* MIXER1 */
-	{ 0x00, 0x00, 0x00 },		                	/* MIXER2 */
+	{ 0x10, 0x00, 0x00 },					/* MIXER1 */
+	{ 0x00, 0x00, 0x00 },					/* MIXER2 */
 	{ 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },	/* BIQUAD */
 	{ 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },	/* BIQUAD */
 	{ 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },	/* BIQUAD */
@@ -229,7 +233,7 @@ const char tumbler_regsize[] = {
 	sizeof tumbler_initdata.VOLUME,		/* 0x04 */
 	sizeof tumbler_initdata.TREBLE,		/* 0x05 */
 	sizeof tumbler_initdata.BASS,		/* 0x06 */
-	sizeof tumbler_initdata.MIXER1, 	/* 0x07 */
+	sizeof tumbler_initdata.MIXER1,		/* 0x07 */
 	sizeof tumbler_initdata.MIXER2,	        /* 0x08 */
 	0,					/* 0x09 */
 	sizeof tumbler_initdata.LB0,		/* 0x0a */
@@ -250,7 +254,7 @@ const char tumbler_regsize[] = {
 };
 
 /* dB = 20 * log (x) table. */
-static u_int	tumbler_volume_table[100] = {      	
+static unsigned int	tumbler_volume_table[100] = {
 	0x00000148,   0x0000015C,   0x00000171,   0x00000186,   // -46.0,	-45.5,	-45.0,	-44.5,
 	0x0000019E,   0x000001B6,   0x000001D0,   0x000001EB,   // -44.0,	-43.5,	-43.0,	-42.5,
 	0x00000209,   0x00000227,   0x00000248,   0x0000026B,   // -42.0,	-41.5,	-41.0,	-40.5,
@@ -281,13 +285,13 @@ static u_int	tumbler_volume_table[100] = {
 static int
 tumbler_write(struct tumbler_softc *sc, uint8_t reg, const void *data)
 {
-	u_int size;
+	unsigned int size;
 	uint8_t buf[16];
 
 	struct iic_msg msg[] = {
 		{ sc->sc_addr, IIC_M_WR, 0, buf }
 	};
-		
+
 	KASSERT(reg < sizeof(tumbler_regsize), ("bad reg"));
 	size = tumbler_regsize[reg];
 	msg[0].len = size + 1;
@@ -299,6 +303,24 @@ tumbler_write(struct tumbler_softc *sc, uint8_t reg, const void *data)
 	return (0);
 }
 
+/*
+ * tumbler_write() sleeps in iicbus_transfer(), so tumbler_set() cannot
+ * program the volume registers inline. Hand the new values to a task
+ * instead, which runs with no lock held.
+ */
+static void
+tumbler_volume_task(void *arg, int pending __unused)
+{
+	struct tumbler_softc *sc = arg;
+	uint8_t reg[6];
+
+	mtx_lock(&sc->sc_volume_mtx);
+	memcpy(reg, sc->sc_volume_reg, sizeof(reg));
+	mtx_unlock(&sc->sc_volume_mtx);
+
+	tumbler_write(sc, TUMBLER_VOLUME, reg);
+}
+
 static int
 tumbler_probe(device_t dev)
 {
@@ -308,7 +330,7 @@ tumbler_probe(device_t dev)
 	if (name == NULL)
 		return (ENXIO);
 
-	if (strcmp(name, "deq") == 0 && iicbus_get_addr(dev) == 
+	if (strcmp(name, "deq") == 0 && iicbus_get_addr(dev) ==
 	    TUMBLER_IICADDR) {
 		device_set_desc(dev, "Texas Instruments TAS3001 Audio Codec");
 		return (0);
@@ -321,10 +343,13 @@ static int
 tumbler_attach(device_t dev)
 {
 	struct tumbler_softc *sc;
-		
+
 	sc = device_get_softc(dev);
 	sc->sc_dev = dev;
 	sc->sc_addr = iicbus_get_addr(dev);
+
+	mtx_init(&sc->sc_volume_mtx, "tumbler volume", NULL, MTX_DEF);
+	TASK_INIT(&sc->sc_volume_task, 0, tumbler_volume_task, sc);
 
 	i2s_mixer_class = &tumbler_mixer_class;
 	i2s_mixer = dev;
@@ -336,7 +361,7 @@ static int
 tumbler_init(struct snd_mixer *m)
 {
 	struct tumbler_softc *sc;
-	u_int		x = 0;
+	unsigned int		x = 0;
 
 	sc = device_get_softc(mix_getdevinfo(m));
 
@@ -370,6 +395,12 @@ tumbler_init(struct snd_mixer *m)
 static int
 tumbler_uninit(struct snd_mixer *m)
 {
+	struct tumbler_softc *sc;
+
+	sc = device_get_softc(mix_getdevinfo(m));
+
+	taskqueue_drain(taskqueue_thread, &sc->sc_volume_task);
+
 	return (0);
 }
 
@@ -383,14 +414,10 @@ static int
 tumbler_set(struct snd_mixer *m, unsigned dev, unsigned left, unsigned right)
 {
 	struct tumbler_softc *sc;
-	struct mtx *mixer_lock;
-	int locked;
-	u_int l, r;
-	u_char reg[6];
+	unsigned int l, r;
+	uint8_t reg[6];
 
 	sc = device_get_softc(mix_getdevinfo(m));
-	mixer_lock = mixer_get_lock(m);
-	locked = mtx_owned(mixer_lock);
 
 	switch (dev) {
 	case SOUND_MIXER_VOLUME:
@@ -399,7 +426,7 @@ tumbler_set(struct snd_mixer *m, unsigned dev, unsigned left, unsigned right)
 
 		l = (left == 0 ? 0 : tumbler_volume_table[left - 1]);
 		r = (right == 0 ? 0 : tumbler_volume_table[right - 1]);
-		
+
 		reg[0] = (l & 0xff0000) >> 16;
 		reg[1] = (l & 0x00ff00) >> 8;
 		reg[2] = l & 0x0000ff;
@@ -407,20 +434,11 @@ tumbler_set(struct snd_mixer *m, unsigned dev, unsigned left, unsigned right)
 		reg[4] = (r & 0x00ff00) >> 8;
 		reg[5] = r & 0x0000ff;
 
-		/*
-		 * We need to unlock the mixer lock because iicbus_transfer()
-		 * may sleep. The mixer lock itself is unnecessary here
-		 * because it is meant to serialize hardware access, which
-		 * is taken care of by the I2C layer, so this is safe.
-		 */
+		mtx_lock(&sc->sc_volume_mtx);
+		memcpy(sc->sc_volume_reg, reg, sizeof(reg));
+		mtx_unlock(&sc->sc_volume_mtx);
 
-		if (locked)
-			mtx_unlock(mixer_lock);
-
-		tumbler_write(sc, TUMBLER_VOLUME, reg);
-
-		if (locked)
-			mtx_lock(mixer_lock);
+		taskqueue_enqueue(taskqueue_thread, &sc->sc_volume_task);
 
 		return (left | (right << 8));
 	}
@@ -428,8 +446,8 @@ tumbler_set(struct snd_mixer *m, unsigned dev, unsigned left, unsigned right)
 	return (0);
 }
 
-static u_int32_t
-tumbler_setrecsrc(struct snd_mixer *m, u_int32_t src)
+static uint32_t
+tumbler_setrecsrc(struct snd_mixer *m, uint32_t src)
 {
 	return (0);
 }

@@ -38,7 +38,7 @@ struct inotify_event {
 #define	IN_MOVE_SELF		0x00000800
 #define	IN_ALL_EVENTS		0x00000fff
 
-/* Events report only for entries in a watched dir, not the dir itself. */
+/* Events reported only for entries in a watched dir, not the dir itself. */
 #define	_IN_DIR_EVENTS		(IN_CLOSE_WRITE | IN_DELETE | IN_MODIFY | \
 				 IN_MOVED_FROM | IN_MOVED_TO)
 
@@ -89,9 +89,9 @@ struct vnode;
 int	inotify_create_file(struct thread *, struct file *, int, int *);
 void	inotify_log(struct vnode *, const char *, size_t, int, __uint32_t);
 
-int	kern_inotify_rm_watch(int, uint32_t, struct thread *);
-int	kern_inotify_add_watch(int, int, const char *, uint32_t,
-	    struct thread *);
+int	kern_inotify_rm_watch(struct thread *, int, uint32_t);
+int	kern_inotify_add_watch(struct thread *, int, int, const char *,
+	    uint32_t);
 
 void	vn_inotify(struct vnode *, struct vnode *, struct componentname *, int,
 	    uint32_t);

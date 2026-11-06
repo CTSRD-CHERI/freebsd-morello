@@ -4,7 +4,7 @@
  * Copyright (c) 2010 Panasas, Inc.
  * Copyright (c) 2013-2019 Mellanox Technologies, Ltd.
  * All rights reserved.
- * Copyright (c) 2020-2021 The FreeBSD Foundation
+ * Copyright (c) 2020-2025 The FreeBSD Foundation
  * Copyright (c) 2020-2022 Bjoern A. Zeeb
  *
  * Portions of this software were developed by Björn Zeeb
@@ -160,6 +160,30 @@ struct net_device {
 
 #define	SET_NETDEV_DEV(_ndev, _dev)	(_ndev)->dev.parent = _dev;
 
+enum net_device_path_type {
+	DEV_PATH_MTK_WDMA,
+};
+
+struct net_device_path {
+	enum net_device_path_type		type;
+	const struct net_device			*dev;
+	/* We assume there's a struct per type. */
+	union {
+		struct {
+			uint16_t		wcid;
+			uint8_t			wdma_idx;
+			uint8_t			queue;
+			uint8_t			bss;
+			uint8_t			amsdu;
+		} mtk_wdma;
+	};
+};
+
+struct net_device_path_ctx {
+	const struct net_device			*dev;
+};
+
+
 /* -------------------------------------------------------------------------- */
 /* According to linux::ipoib_main.c. */
 struct netdev_notifier_info {
@@ -300,6 +324,13 @@ netdev_rss_key_fill(uint32_t *buf, size_t len)
 	 * iwlwifi is looking for a 10byte "secret" so stay with random for now.
 	 */
 	get_random_bytes(buf, len);
+}
+
+static inline void
+__hw_addr_init(struct netdev_hw_addr_list *list)
+{
+	list->count = 0;
+	INIT_LIST_HEAD(&list->addr_list);
 }
 
 static inline int
@@ -477,6 +508,21 @@ netdev_priv(const struct net_device *ndev)
 
 	return (__DECONST(void *, ndev->drv_priv));
 }
+
+/* -------------------------------------------------------------------------- */
+
+static __inline void
+netif_device_attach(struct net_device *ndev)
+{
+	pr_debug("%s: TODO\n", __func__);
+}
+
+static __inline void
+netif_device_detach(struct net_device *ndev)
+{
+	pr_debug("%s: TODO\n", __func__);
+}
+
 
 /* -------------------------------------------------------------------------- */
 /* This is really rtnetlink and probably belongs elsewhere. */

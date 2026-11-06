@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  *
  * Copyright (c) 2011 NetApp, Inc.
+ * Copyright (c) 2026 Hans Rosenfeld
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -51,6 +52,7 @@
 #include <machine/vmm_dev.h>
 #include <vmmapi.h>
 
+#include "ipc.h"
 #ifdef BHYVE_SNAPSHOT
 #include "snapshot.h"
 #endif
@@ -70,6 +72,7 @@ static int get_active_cpus, get_debug_cpus, get_suspended_cpus;
 static uint64_t memsize;
 static int run;
 static int get_cpu_topology;
+static int get_vm_pid;
 #ifdef BHYVE_SNAPSHOT
 static int vm_suspend_opt;
 #endif
@@ -86,6 +89,7 @@ enum {
 	SET_CHECKPOINT_FILE,
 	SET_SUSPEND_FILE,
 #endif
+	SET_RUNDIR,
 	OPT_LAST,
 };
 
@@ -134,10 +138,12 @@ setup_options(void)
 		{ "get-debug-cpus",	NO_ARG,	&get_debug_cpus,	1 },
 		{ "get-suspended-cpus", NO_ARG,	&get_suspended_cpus, 	1 },
 		{ "get-cpu-topology",	NO_ARG, &get_cpu_topology,	1 },
+		{ "get-vm-pid",		NO_ARG, &get_vm_pid,		1 },
 #ifdef BHYVE_SNAPSHOT
 		{ "checkpoint", 	REQ_ARG, 0,	SET_CHECKPOINT_FILE},
 		{ "suspend", 		REQ_ARG, 0,	SET_SUSPEND_FILE},
 #endif
+		{ "rundir", 		REQ_ARG, 0,	SET_RUNDIR},
 	};
 
 	return (bhyvectl_opts(common_opts, nitems(common_opts)));
@@ -155,6 +161,7 @@ usage(const struct option *opts)
 	    [SET_CHECKPOINT_FILE] = "filename",
 	    [SET_SUSPEND_FILE] = "filename",
 #endif
+	    [SET_RUNDIR] = "path",
 	};
 	(void)fprintf(stderr, "Usage: %s --vm=<vmname>\n", progname);
 	for (const struct option *o = opts; o->name; o++) {
@@ -249,12 +256,14 @@ show_memseg(struct vmctx *ctx)
 	}
 }
 
-#ifdef BHYVE_SNAPSHOT
-static int
-send_message(const char *vmname, nvlist_t *nvl)
+static int __unused
+ipc_send_message(const char *vmname, nvlist_t *request, const char *rundir,
+    nvlist_t **replyp)
 {
+	int err = 0, socket_fd, ret;
 	struct sockaddr_un addr;
-	int err = 0, socket_fd;
+	const char* errmsg;
+	nvlist_t *reply = NULL;
 
 	socket_fd = socket(PF_UNIX, SOCK_STREAM, 0);
 	if (socket_fd < 0) {
@@ -264,8 +273,15 @@ send_message(const char *vmname, nvlist_t *nvl)
 	}
 
 	memset(&addr, 0, sizeof(struct sockaddr_un));
-	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s%s",
-	    BHYVE_RUN_DIR, vmname);
+	ret = snprintf(addr.sun_path, sizeof(addr.sun_path), "%s/%s",
+	    rundir, vmname);
+	if ((ret < 0) || ((size_t)ret >= sizeof(addr.sun_path))) {
+		fprintf(stderr, "%s: error setting socket path (%d)",
+		    __func__, ret);
+		err = 1;
+		goto done;
+	}
+
 	addr.sun_family = AF_UNIX;
 	addr.sun_len = SUN_LEN(&addr);
 
@@ -275,18 +291,59 @@ send_message(const char *vmname, nvlist_t *nvl)
 		goto done;
 	}
 
-	if (nvlist_send(socket_fd, nvl) < 0) {
-		perror("nvlist_send() failed");
+	reply = nvlist_xfer(socket_fd, request, 0);
+	request = NULL;
+	if (reply == NULL) {
+		perror("nvlist_xfer() failed");
 		err = errno;
+		goto done;
+	}
+	if (nvlist_exists_string(reply, "error")) {
+		errmsg = nvlist_get_string(reply, "error");
+		fprintf(stderr, "%s: IPC command failed: %s\n",
+		    __func__, errmsg);
+		err = -1;
+	} else if (replyp != NULL) {
+		*replyp = reply;
+		reply = NULL;
 	}
 done:
-	nvlist_destroy(nvl);
+	if (request != NULL)
+		nvlist_destroy(request);
+	if (reply != NULL)
+		nvlist_destroy(reply);
 
 	if (socket_fd >= 0)
 		close(socket_fd);
 	return (err);
 }
 
+static int
+vm_pid_request(const char *vmname, const char *rundir, pid_t *pid)
+{
+	nvlist_t *nvl, *reply;
+	int error;
+
+	nvl = nvlist_create(0);
+	nvlist_add_string(nvl, "cmd", "get_vm_pid");
+	error = ipc_send_message(vmname, nvl, rundir, &reply);
+	if (error == -1)
+		error = EOPNOTSUPP;
+	else if (error == ENOENT || error == ECONNREFUSED)
+		error = ESRCH;
+	if (error == 0) {
+		if (nvlist_exists_number(reply, "pid"))
+			*pid = (pid_t)nvlist_get_number(reply, "pid");
+		else
+			error = EPROTO;
+		nvlist_destroy(reply);
+	}
+	if (error != 0)
+		errno = error;
+	return (error);
+}
+
+#ifdef BHYVE_SNAPSHOT
 static int
 open_directory(const char *file)
 {
@@ -304,7 +361,7 @@ open_directory(const char *file)
 }
 
 static int
-snapshot_request(const char *vmname, char *file, bool suspend)
+snapshot_request(const char *vmname, char *file, bool suspend, const char *rundir)
 {
 	nvlist_t *nvl;
 	int fd;
@@ -318,7 +375,7 @@ snapshot_request(const char *vmname, char *file, bool suspend)
 	nvlist_add_bool(nvl, "suspend", suspend);
 	nvlist_move_descriptor(nvl, "fddir", fd);
 
-	return (send_message(vmname, nvl));
+	return (ipc_send_message(vmname, nvl, rundir, NULL));
 }
 #endif
 
@@ -326,7 +383,7 @@ int
 main(int argc, char *argv[])
 {
 	char *vmname;
-	int error, ch, vcpuid;
+	int action_opts, error, ch, vcpuid;
 	struct vm_run vmrun;
 	struct vmctx *ctx;
 	struct vcpu *vcpu;
@@ -335,9 +392,11 @@ main(int argc, char *argv[])
 #ifdef BHYVE_SNAPSHOT
 	char *checkpoint_file = NULL;
 #endif
+	const char *rundir = NULL;
 
 	opts = setup_options();
 
+	action_opts = 0;
 	vcpuid = 0;
 	vmname = NULL;
 	progname = basename(argv[0]);
@@ -377,7 +436,11 @@ main(int argc, char *argv[])
 			checkpoint_file = optarg;
 			vm_suspend_opt = (ch == SET_SUSPEND_FILE);
 			break;
+
 #endif
+		case SET_RUNDIR:
+			rundir = optarg;
+			break;
 		default:
 			usage(opts);
 		}
@@ -388,6 +451,19 @@ main(int argc, char *argv[])
 	if (vmname == NULL)
 		usage(opts);
 
+	if (rundir == NULL)
+		rundir = BHYVE_RUN_DIR;
+
+	action_opts = create + destroy + force_reset + force_poweroff;
+#ifdef BHYVE_SNAPSHOT
+	if (checkpoint_file)
+		action_opts++;
+#endif
+
+	if (action_opts > 1) {
+		fprintf(stderr, "mutually exclusive actions specified\n");
+		exit(1);
+	}
 
 	ctx = vm_openf(vmname, create ? VMMAPI_OPEN_CREATE : 0);
 	if (ctx == NULL) {
@@ -397,6 +473,12 @@ main(int argc, char *argv[])
 		exit(1);
 	}
 	vcpu = vm_vcpu_open(ctx, vcpuid);
+	if (vcpu == NULL) {
+		fprintf(stderr,
+		    "vm_vcpu_open: %s vcpu %d could not be opened: %s\n",
+		    vmname, vcpuid, strerror(errno));
+		exit(1);
+	}
 
 	error = 0;
 	if (!error && memsize)
@@ -488,6 +570,14 @@ main(int argc, char *argv[])
 		    "maxcpus=%hu\n", sockets, cores, threads, maxcpus);
 	}
 
+	if (!error && get_vm_pid) {
+		pid_t pid;
+
+		error = vm_pid_request(vmname, rundir, &pid);
+		if (!error)
+			printf("vm pid:\t%d\n", pid);
+	}
+
 	if (!error && run) {
 		struct vm_exit vmexit;
 		cpuset_t cpuset;
@@ -508,16 +598,18 @@ main(int argc, char *argv[])
 	if (!error && force_poweroff)
 		error = vm_suspend(ctx, VM_SUSPEND_POWEROFF);
 
+#ifdef BHYVE_SNAPSHOT
+	if (!error && checkpoint_file)
+		error = snapshot_request(vmname, checkpoint_file,
+				vm_suspend_opt,
+				rundir);
+#endif
+
 	if (error)
 		printf("errno = %d\n", errno);
 
 	if (!error && destroy)
 		vm_destroy(ctx);
-
-#ifdef BHYVE_SNAPSHOT
-	if (!error && checkpoint_file)
-		error = snapshot_request(vmname, checkpoint_file, vm_suspend_opt);
-#endif
 
 	free(opts);
 	exit(error);

@@ -179,20 +179,6 @@
  */
 #define	NFSMUTEX_T		struct mtx
 
-/* Just define the NFSD_VNETxxx() macros as VNETxxx() macros. */
-#define	NFSD_VNET_NAME(n)		VNET_NAME(n)
-#define	NFSD_VNET_DECLARE(t, n)		VNET_DECLARE(t, n)
-#define	NFSD_VNET_DEFINE(t, n)		VNET_DEFINE(t, n)
-#define	NFSD_VNET_DEFINE_STATIC(t, n)	VNET_DEFINE_STATIC(t, n)
-#define	NFSD_VNET(n)			VNET(n)
-
-#define	CTLFLAG_NFSD_VNET		CTLFLAG_VNET
-
-#define	NFSD_CURVNET_SET(n)		CURVNET_SET(n)
-#define	NFSD_CURVNET_SET_QUIET(n)	CURVNET_SET_QUIET(n)
-#define	NFSD_CURVNET_RESTORE()		CURVNET_RESTORE()
-#define	NFSD_TD_TO_VNET(n)		TD_TO_VNET(n)
-
 #endif	/* _KERNEL */
 
 /*
@@ -909,15 +895,6 @@ int nfsmsleep(void *, void *, int, const char *, struct timespec *);
 #define	NFSBZERO(s, l)		bzero((s), (l))
 
 /*
- * Some queue.h files don't have these dfined in them.
- */
-#ifndef LIST_END
-#define	LIST_END(head)		NULL
-#define	SLIST_END(head)		NULL
-#define	TAILQ_END(head)		NULL
-#endif
-
-/*
  * This must be defined to be a global variable that increments once
  * per second, but never stops or goes backwards, even when a "date"
  * command changes the TOD clock. It is used for delta times for
@@ -1026,7 +1003,7 @@ MALLOC_DECLARE(M_NEWNFSDSESSION);
 int nfscl_loadattrcache(struct vnode **, struct nfsvattr *, void *, int, int);
 int newnfs_realign(struct mbuf **, int);
 bool ncl_pager_setsize(struct vnode *vp, u_quad_t *nsizep);
-void ncl_copy_vattr(struct vattr *dst, struct vattr *src);
+void ncl_copy_vattr(struct vnode *vp, struct vattr *dst, struct vattr *src);
 
 /*
  * If the port runs on an SMP box that can enforce Atomic ops with low
@@ -1037,9 +1014,6 @@ void ncl_copy_vattr(struct vattr *dst, struct vattr *src);
 #define	NFSINCRGLOBAL(a)	((a)++)
 #define	NFSDECRGLOBAL(a)	((a)--)
 
-/*
- * Assorted funky stuff to make things work under Darwin8.
- */
 /*
  * These macros checks for a field in vattr being set.
  */
@@ -1052,6 +1026,7 @@ void ncl_copy_vattr(struct vattr *dst, struct vattr *src);
 #define	NFSSTA_HASWRITEVERF	0x00040000  /* Has write verifier */
 #define	NFSSTA_GOTFSINFO	0x00100000  /* Got the fsinfo */
 #define	NFSSTA_OPENMODE		0x00200000  /* Must use correct open mode */
+#define	NFSSTA_CASEINSENSITIVE	0x00400000  /* Case insensitive fs */
 #define	NFSSTA_FLEXFILE		0x00800000  /* Use Flex File Layout */
 #define	NFSSTA_NOLAYOUTCOMMIT	0x04000000  /* Don't do LayoutCommit */
 #define	NFSSTA_SESSPERSIST	0x08000000  /* Has a persistent session */
@@ -1085,10 +1060,14 @@ void ncl_copy_vattr(struct vattr *dst, struct vattr *src);
 #define	NFSHASPNFS(n)		((n)->nm_state & NFSSTA_PNFS)
 #define	NFSHASFLEXFILE(n)	((n)->nm_state & NFSSTA_FLEXFILE)
 #define	NFSHASOPENMODE(n)	((n)->nm_state & NFSSTA_OPENMODE)
+#define	NFSHASCASEINSENSITIVE(n) ((n)->nm_state & NFSSTA_CASEINSENSITIVE)
 #define	NFSHASONEOPENOWN(n)	(((n)->nm_flag & NFSMNT_ONEOPENOWN) != 0 &&	\
 				    (n)->nm_minorvers > 0)
 #define	NFSHASTLS(n)		(((n)->nm_newflag & NFSMNT_TLS) != 0)
 #define	NFSHASSYSKRB5(n)	(((n)->nm_newflag & NFSMNT_SYSKRB5) != 0)
+#define	NFSHASRDMA(n)		(((n)->nm_newflag & NFSMNT_RDMA) != 0)
+#define	NFSHASNOWRITEREDUCE(n)	(((n)->nm_newflag & NFSMNT_NOWRITEREDUCE) != 0)
+#define	NFSHASNOREADREDUCE(n)	(((n)->nm_newflag & NFSMNT_NOREADREDUCE) != 0)
 
 /*
  * Set boottime.

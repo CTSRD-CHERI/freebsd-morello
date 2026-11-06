@@ -1,9 +1,9 @@
 .\"
 .\" SPDX-License-Identifier: BSD-2-Clause
 .\"
-.\" Copyright (c) 2025 Mateusz Piotrowski <0mp@FreeBSD.org>
+.\" Copyright (c) 2025-2026 Mateusz Piotrowski <0mp@FreeBSD.org>
 .\"
-.Dd June 14, 2025
+.Dd May 20, 2026
 .Dt D 7
 .Os
 .Sh NAME
@@ -18,12 +18,14 @@
 .Sm on
 .Sm off
 .Oo
+.Oo
 .Cm /
 .Ar predicate
 .Cm /
 .Sm on
 .Oc
-.Op Cm \&{ Ns Ar action Ns Cm \&}
+.Cm \&{ Ns Ar action Ns Cm \&}
+.Oc
 .Sh DESCRIPTION
 .Nm D
 is the
@@ -37,6 +39,41 @@ This manual page serves as a short reference of the language.
 Refer to books listed in
 .Sx SEE ALSO
 for a complete reference.
+.Sh MACRO VARIABLES
+.Bl -column "$1, $2, $3, ..." "Syntax"
+.It Sy Name Ta Sy Description
+.It  Va  $1 , $2 , $3 , .\&.\&.  Ta  Macro arguments
+.It  Va  $egid                   Ta  Effective group ID Pq Xr getegid 2
+.It  Va  $euid                   Ta  Effective user ID Pq Xr geteuid 2
+.It  Va  $gid                    Ta  Real group ID Pq Xr getgid 2
+.It  Va  $pid                    Ta  Process ID Pq Xr getpid 2
+.It  Va  $pgid                   Ta  Process group ID Pq Xr getpgrp 2
+.It  Va  $ppid                   Ta  Parent process ID Pq Xr getppid 2
+.It  Va  $sid                    Ta  Session ID Pq Xr getsid 2
+.It  Va  $target                 Ta  Target process ID of the process
+specified via the
+.Fl p
+flag or created via the
+.Fl c
+flag.
+.It  Va  $uid                    Ta  Real user ID Pq Xr getuid 2
+.El
+.Pp
+The macro arguments correspond to the command-line operands.
+They expand to an integer, identifier, or string depending on the context.
+Prepending a macro argument with an extra dollar sign
+.Pq Ql $
+forces string expansion.
+.Pp
+For example,
+.Bd -literal -compact -offset indent
+dtrace -n 'syscall::fstatat: /execname == $$1/ {}' -- ls
+.Ed
+uses
+.Va $$1
+instead of
+.Va $1
+to expand to a string instead rather than to a global variable identifier.
 .Sh PROBE'S DESCRIPTION
 A probe's description consists of four elements:
 .Sm off
@@ -54,9 +91,9 @@ depends on
 .Bl -column "thread-local" "Syntax"
 .It Sy Type Ta Sy Syntax
 .It global       Ta Va variable_name
+.It aggregate    Ta Sy @ Ns Va variable_name
 .It thread-local Ta Sy self-> Ns Va variable_name
 .It clause-local Ta Sy this-> Ns Va variable_name
-.It aggregate  Ta Sy @ Ns Va variable_name
 .El
 .Pp
 .Em Tips :
@@ -196,6 +233,130 @@ The number of nanoseconds since the Epoch
 Suitable for timestamping logs.
 .El
 .Sh BUILT-IN FUNCTIONS
+.\" Keep the indentation wide enough for the reader to be able to skim through
+.\" function names quickly.
+.Bl -tag -width "size_t strlen"
+.It Ft string Fn strchr "string s" "char c"
+Return a substring of
+.Fa s
+starting at the first occurrence of
+.Fa c
+in
+.Fa s .
+Return
+.Dv NULL
+if
+.Fa c
+does not occur in
+.Fa s .
+.Pp
+For example,
+.Bd -literal -compact -offset indent
+strchr("abc", 'b');
+.Ed
+returns
+.Ql "bc"
+and
+.Bd -literal -compact -offset indent
+strchr("abc", 'd');
+.Ed
+returns
+.Dv NULL .
+.It Ft string Fn strjoin "string s1" "string s2"
+Return a string resulting from concatenating
+.Fa s1
+and
+.Fa s2 .
+.Pp
+For example,
+.Bd -literal -compact -offset indent
+strjoin("abc", "def")
+.Ed
+returns
+.Ql abcdef .
+.It Ft string Fn strrchr "string s" "char c"
+Return a substring of
+.Fa s
+starting at the last occurrence of
+.Fa c
+in
+.Fa s .
+Similar to
+.Fn strchr .
+.It Ft string Fn strstr "string haystack" "string needle"
+Return a substring of
+.Fa haystack
+starting at the first occurrence of
+.Fa needle .
+Return
+.Dv NULL
+if
+.Fa needle
+is not a substring of
+.Fa haystack .
+.Pp
+For example,
+.Bd -literal -compact -offset indent
+strstr("abc1bc2", "bc")
+.Ed
+returns
+.Ql bc1bc2
+and
+.Bd -literal -compact -offset indent
+strstr("abc", "xy")
+.Ed
+returns
+.Dv NULL .
+.It Ft string Fn strtok "string s" "string separators"
+Tokenize
+.Fa s
+with
+.Fa separators .
+.Pp
+For example,
+.Bd -literal -compact -offset indent
+strtok("abcdefg", "xyzd")
+.Ed
+returns
+.Ql abc .
+.It Ft size_t Fn strlen "string s"
+Return the length of string
+.Fa s .
+.It Ft string Fn substr "string s" "int position" "[int length]"
+Return a
+substring of string
+.Fa s
+starting at
+.Fa position .
+The substring will be at most
+.Fa length Ns -long .
+If
+.Fa length
+is not specified, use the rest of the string.
+If
+.Fa position
+is greater than
+the size of
+.Fa s ,
+return an empty string.
+.Pp
+For example,
+.Bd -literal -compact -offset indent
+substr("abcd", 2)
+.Ed
+returns
+.Ql cd ,
+.Bd -literal -compact -offset indent
+substr("abcd", 2, 1)
+.Ed
+returns
+.Ql c ,
+and
+.Bd -literal -compact -offset indent
+substr("abcd", 99)
+.Ed
+returns an empty string.
+.El
 .Ss Aggregation Functions
 .Bl -tag -compact -width "llquantize(value, factor, low, high, nsteps)"
 .It Fn avg value
@@ -267,7 +428,7 @@ base.
 .%A Robert N. M. Watson
 .%C Cambridge, United Kingdom
 .%D August 2018
-.%T Univeristy of Cambridge Computer Laboratory
+.%T University of Cambridge Computer Laboratory
 .%R OpenDTrace Specification version 1.0
 .%U https://www.cl.cam.ac.uk/techreports/UCAM-CL-TR-924.pdf
 .Re
@@ -285,3 +446,18 @@ variable which typically provides the current working directory is
 not supported on
 .Fx
 at the moment.
+.Pp
+Macro variables
+.Va $projid
+and
+.Va $taskid
+are always 0 on
+.Fx .
+.Pp
+Functions
+.Fn ddi_pathname ,
+.Fn getmajor ,
+and
+.Fn getminor
+are not supported on
+.Fx .

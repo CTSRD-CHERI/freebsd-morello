@@ -35,6 +35,7 @@
 #include "dpaa2_types.h"
 #include "dpaa2_buf.h"
 #include "dpaa2_bp.h"
+#include "dpaa2_frame.h"
 
 /*
  * DPAA2 QBMan software portal.
@@ -200,10 +201,8 @@
 
 #define DPAA2_EQ_DESC_SIZE		32u	/* Enqueue Command Descriptor */
 #define DPAA2_FDR_DESC_SIZE		32u	/* Descriptor of the FDR */
-#define DPAA2_FD_SIZE			32u	/* Frame Descriptor */
 #define DPAA2_FDR_SIZE			64u	/* Frame Dequeue Response */
 #define DPAA2_SCN_SIZE			16u	/* State Change Notification */
-#define DPAA2_FA_SIZE			64u	/* SW Frame Annotation */
 #define DPAA2_SGE_SIZE			16u	/* S/G table entry */
 #define DPAA2_DQ_SIZE			64u	/* Dequeue Response */
 #define DPAA2_SWP_CMD_SIZE		64u	/* SWP Command */
@@ -232,6 +231,11 @@ enum dpaa2_fd_format {
 	DPAA2_FD_LIST,
 	DPAA2_FD_SG
 };
+
+/**
+ * Forward declaration to avoid circular include.
+ */
+struct dpaa2_io_softc;
 
 /**
  * @brief Enqueue command descriptor.
@@ -283,54 +287,6 @@ struct dpaa2_scn {
 	uint64_t	ctx;
 } __packed;
 CTASSERT(sizeof(struct dpaa2_scn) == DPAA2_SCN_SIZE);
-
-/**
- * @brief DPAA2 frame descriptor.
- *
- * addr:		Memory address of the start of the buffer holding the
- *			frame data or the buffer containing the scatter/gather
- *			list.
- * data_length:		Length of the frame data (in bytes).
- * bpid_ivp_bmt:	Buffer pool ID (14 bit + BMT bit + IVP bit)
- * offset_fmt_sl:	Frame data offset, frame format and short-length fields.
- * frame_ctx:		Frame context. This field allows the sender of a frame
- *			to communicate some out-of-band information to the
- *			receiver of the frame.
- * ctrl:		Control bits (ERR, CBMT, ASAL, PTAC, DROPP, SC, DD).
- * flow_ctx:		Frame flow context. Associates the frame with a flow
- *			structure. QMan may use the FLC field for 3 purposes:
- *			stashing control, order definition point identification,
- *			and enqueue replication control.
- */
-struct dpaa2_fd {
-	uint64_t	addr;
-	uint32_t	data_length;
-	uint16_t	bpid_ivp_bmt;
-	uint16_t	offset_fmt_sl;
-	uint32_t	frame_ctx;
-	uint32_t	ctrl;
-	uint64_t	flow_ctx;
-} __packed;
-CTASSERT(sizeof(struct dpaa2_fd) == DPAA2_FD_SIZE);
-
-/**
- * @brief DPAA2 frame annotation.
- */
-struct dpaa2_fa {
-	uint32_t		 magic;
-	struct dpaa2_buf	*buf;
-#ifdef __notyet__
-	union {
-		struct { /* Tx frame annotation */
-			struct dpaa2_ni_tx_ring *tx;
-		};
-		struct { /* Rx frame annotation */
-			uint64_t		 _notused;
-		};
-	};
-#endif
-} __packed;
-CTASSERT(sizeof(struct dpaa2_fa) <= DPAA2_FA_SIZE);
 
 /**
  * @brief DPAA2 scatter/gather entry.
@@ -490,8 +446,7 @@ struct dpaa2_swp {
 };
 
 /* Management routines. */
-int dpaa2_swp_init_portal(struct dpaa2_swp **swp, struct dpaa2_swp_desc *desc,
-    uint16_t flags);
+int dpaa2_swp_init_portal(struct dpaa2_io_softc *softc, uint16_t flags);
 void dpaa2_swp_free_portal(struct dpaa2_swp *swp);
 uint32_t dpaa2_swp_set_cfg(uint8_t max_fill, uint8_t wn, uint8_t est,
     uint8_t rpm, uint8_t dcm, uint8_t epm, int sd, int sp, int se, int dp,

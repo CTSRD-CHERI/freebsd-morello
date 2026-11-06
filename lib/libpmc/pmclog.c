@@ -287,8 +287,8 @@ pmclog_get_event(void *cookie, char **data, ssize_t *len,
 		return -1;
 	}
 
-	/* copy out the time stamp */
-	ev->pl_ts.tv_sec = ph->pl_tsc;
+	/* copy out the TSC from the event header */
+	ev->pl_tsc = ph->pl_tsc;
 	le += sizeof(*ph)/4;
 
 	evlen = PMCLOG_HEADER_TO_LENGTH(h);
@@ -338,7 +338,7 @@ pmclog_get_event(void *cookie, char **data, ssize_t *len,
 	case PMCLOG_TYPE_MAP_IN:
 		PMCLOG_GET_PATHLEN(pathlen,evlen,pmclog_map_in);
 		PMCLOG_READ32(le,ev->pl_u.pl_mi.pl_pid);
-		PMCLOG_SKIP32(le);
+		PMCLOG_READ32(le,ev->pl_u.pl_mi.pl_u);
 		PMCLOG_READADDR(le,ev->pl_u.pl_mi.pl_start);
 		PMCLOG_READSTRING(le, ev->pl_u.pl_mi.pl_pathname, pathlen);
 		break;

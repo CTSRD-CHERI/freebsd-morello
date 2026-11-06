@@ -29,7 +29,6 @@ DIRDEPS_FILTER.host = \
 	Nlib/libcompiler_rt \
 	Nlib/[mn]* \
 	Nlib/lib[t]* \
-	Ngnu/lib/lib[a-r]* \
 	Nsecure/lib* \
 	Nusr.bin/xinstall* \
 
@@ -185,7 +184,7 @@ C_DIRDEPS= \
 
 # libgcc is needed as well but is added later.
 
-.if ${MK_GSSAPI} != "no"
+.if ${MK_KERBEROS} != "no" && ${MK_MITKRB5} == "no"
 C_DIRDEPS+=  include/gssapi
 .endif
 

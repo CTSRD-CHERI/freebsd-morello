@@ -40,10 +40,10 @@ time_t nfsdev_time = 0;
 int nfsrv_layouthashsize;
 volatile int nfsrv_layoutcnt = 0;
 
-NFSD_VNET_DEFINE(struct nfsrv_stablefirst, nfsrv_stablefirst);
+VNET_DEFINE(struct nfsrv_stablefirst, nfsrv_stablefirst);
 
-NFSD_VNET_DECLARE(int, nfsrv_numnfsd);
-NFSD_VNET_DECLARE(struct nfsstatsv1 *, nfsstatsv1_p);
+VNET_DECLARE(int, nfsrv_numnfsd);
+VNET_DECLARE(struct nfsstatsv1 *, nfsstatsv1_p);
 
 extern uint32_t nfs_srvmaxio;
 extern int nfsrv_lease;
@@ -63,6 +63,7 @@ extern struct nfsdontlisthead nfsrv_dontlisthead;
 extern volatile int nfsrv_devidcnt;
 extern struct nfslayouthead nfsrv_recalllisthead;
 extern char *nfsrv_zeropnfsdat;
+extern uint64_t nfsrv_stripesiz;
 
 SYSCTL_DECL(_vfs_nfsd);
 int	nfsrv_statehashsize = NFSSTATEHASHSIZE;
@@ -115,17 +116,17 @@ SYSCTL_INT(_vfs_nfsd, OID_AUTO, flexlinuxhack, CTLFLAG_RW,
     &nfsrv_flexlinuxhack, 0,
     "For Linux clients, hack around Flex File Layout bug");
 
-NFSD_VNET_DEFINE_STATIC(bool, nfsd_disable_grace) = false;
+VNET_DEFINE_STATIC(bool, nfsd_disable_grace) = false;
 SYSCTL_BOOL(_vfs_nfsd, OID_AUTO, testing_disable_grace,
-    CTLFLAG_NFSD_VNET | CTLFLAG_RW, &NFSD_VNET_NAME(nfsd_disable_grace),
+    CTLFLAG_VNET | CTLFLAG_RW, &VNET_NAME(nfsd_disable_grace),
     0, "Disable grace for testing");
 
 /*
  * Hash lists for nfs V4.
  */
-NFSD_VNET_DEFINE(struct nfsclienthashhead *, nfsclienthash);
-NFSD_VNET_DEFINE(struct nfslockhashhead *, nfslockhash);
-NFSD_VNET_DEFINE(struct nfssessionhash *, nfssessionhash);
+VNET_DEFINE(struct nfsclienthashhead *, nfsclienthash);
+VNET_DEFINE(struct nfslockhashhead *, nfslockhash);
+VNET_DEFINE(struct nfssessionhash *, nfssessionhash);
 
 struct nfslayouthash		*nfslayouthash;
 volatile int nfsrv_dontlistlen = 0;
@@ -137,7 +138,7 @@ static int nfsrv_nogsscallback = 0;
 static volatile int nfsrv_writedelegcnt = 0;
 static int nfsrv_faildscnt;
 
-NFSD_VNET_DEFINE_STATIC(time_t, nfsrvboottime);
+VNET_DEFINE_STATIC(time_t, nfsrvboottime);
 
 /* local functions */
 static void nfsrv_dumpaclient(struct nfsclient *clp,
@@ -165,7 +166,6 @@ static void nfsrv_insertlock(struct nfslock *new_lop,
     struct nfslock *insert_lop, struct nfsstate *stp, struct nfslockfile *lfp);
 static void nfsrv_updatelock(struct nfsstate *stp, struct nfslock **new_lopp,
     struct nfslock **other_lopp, struct nfslockfile *lfp);
-static int nfsrv_getipnumber(u_char *cp);
 static int nfsrv_checkrestart(nfsquad_t clientid, u_int32_t flags,
     nfsv4stateid_t *stateidp, int specialid);
 static int nfsrv_checkgrace(struct nfsrv_descript *nd, struct nfsclient *clp,
@@ -237,7 +237,8 @@ static int nfsrv_fndclid(nfsquad_t *clidvec, nfsquad_t clid, int clidcnt);
 static struct nfslayout *nfsrv_filelayout(struct nfsrv_descript *nd, int iomode,
     fhandle_t *fhp, fhandle_t *dsfhp, char *devid, fsid_t fs);
 static struct nfslayout *nfsrv_flexlayout(struct nfsrv_descript *nd, int iomode,
-    int mirrorcnt, fhandle_t *fhp, fhandle_t *dsfhp, char *devid, fsid_t fs);
+    int mirrorcnt, uint64_t stripesiz, int stripecnt, fhandle_t *fhp,
+    fhandle_t *dsfhp, char *devid, fsid_t fs);
 static int nfsrv_dontlayout(fhandle_t *fhp);
 static int nfsrv_createdsfile(vnode_t vp, fhandle_t *fhp, struct pnfsdsfile *pf,
     vnode_t dvp, struct nfsdevice *ds, struct ucred *cred, NFSPROC_T *p,
@@ -252,6 +253,7 @@ static void nfsrv_issuedelegation(struct vnode *vp, struct nfsclient *clp,
     nfsv4stateid_t *delegstateidp);
 static void nfsrv_clientlock(bool mlocked);
 static void nfsrv_clientunlock(bool mlocked);
+static void nfsrv_freelockifnotinuse(struct nfslockfile *lfp);
 
 /*
  * Lock the client structure, either with the mutex or the exclusive nfsd lock.
@@ -352,7 +354,7 @@ nfsrv_setclient(struct nfsrv_descript *nd, struct nfsclient **new_clpp,
 	 */
 	gotit = i = 0;
 	while (i < nfsrv_clienthashsize && !gotit) {
-	    LIST_FOREACH(clp, &NFSD_VNET(nfsclienthash)[i], lc_hash) {
+	    LIST_FOREACH(clp, &VNET(nfsclienthash)[i], lc_hash) {
 		if (new_clp->lc_idlen == clp->lc_idlen &&
 		    !NFSBCMP(new_clp->lc_id, clp->lc_id, clp->lc_idlen)) {
 			gotit = 1;
@@ -399,7 +401,7 @@ nfsrv_setclient(struct nfsrv_descript *nd, struct nfsclient **new_clpp,
 			confirmp->qval = new_clp->lc_confirm.qval =
 			    ++confirm_index;
 		clientidp->lval[0] = new_clp->lc_clientid.lval[0] =
-		    NFSD_VNET(nfsrvboottime);
+		    VNET(nfsrvboottime);
 		clientidp->lval[1] = new_clp->lc_clientid.lval[1] =
 		    nfsrv_nextclientindex();
 		new_clp->lc_stateindex = 0;
@@ -415,7 +417,7 @@ nfsrv_setclient(struct nfsrv_descript *nd, struct nfsclient **new_clpp,
 			LIST_INIT(&new_clp->lc_stateid[i]);
 		LIST_INSERT_HEAD(NFSCLIENTHASH(new_clp->lc_clientid), new_clp,
 		    lc_hash);
-		NFSD_VNET(nfsstatsv1_p)->srvclients++;
+		VNET(nfsstatsv1_p)->srvclients++;
 		nfsrv_openpluslock++;
 		nfsrv_clients++;
 		nfsrv_clientunlock(mlocked);
@@ -512,7 +514,7 @@ nfsrv_setclient(struct nfsrv_descript *nd, struct nfsclient **new_clpp,
 			confirmp->qval = new_clp->lc_confirm.qval =
 			    ++confirm_index;
 		clientidp->lval[0] = new_clp->lc_clientid.lval[0] =
-		    NFSD_VNET(nfsrvboottime);
+		    VNET(nfsrvboottime);
 		clientidp->lval[1] = new_clp->lc_clientid.lval[1] =
 		    nfsrv_nextclientindex();
 		new_clp->lc_stateindex = 0;
@@ -543,7 +545,7 @@ nfsrv_setclient(struct nfsrv_descript *nd, struct nfsclient **new_clpp,
 		LIST_INIT(&new_clp->lc_session);
 		LIST_INSERT_HEAD(NFSCLIENTHASH(new_clp->lc_clientid), new_clp,
 		    lc_hash);
-		NFSD_VNET(nfsstatsv1_p)->srvclients++;
+		VNET(nfsstatsv1_p)->srvclients++;
 		nfsrv_openpluslock++;
 		nfsrv_clients++;
 		if (!mlocked) {
@@ -618,7 +620,7 @@ nfsrv_setclient(struct nfsrv_descript *nd, struct nfsclient **new_clpp,
 		LIST_INIT(&new_clp->lc_session);
 		LIST_INSERT_HEAD(NFSCLIENTHASH(new_clp->lc_clientid), new_clp,
 		    lc_hash);
-		NFSD_VNET(nfsstatsv1_p)->srvclients++;
+		VNET(nfsstatsv1_p)->srvclients++;
 		nfsrv_openpluslock++;
 		nfsrv_clients++;
 	}
@@ -678,7 +680,7 @@ nfsrv_getclient(nfsquad_t clientid, int opflags, struct nfsclient **clpp,
 	if (clpp)
 		*clpp = NULL;
 	if ((nd == NULL || (nd->nd_flag & ND_NFSV41) == 0 ||
-	    opflags != CLOPS_RENEW) && NFSD_VNET(nfsrvboottime) !=
+	    opflags != CLOPS_RENEW) && VNET(nfsrvboottime) !=
 	    clientid.lval[0]) {
 		error = NFSERR_STALECLIENTID;
 		goto out;
@@ -920,7 +922,7 @@ nfsrv_destroyclient(struct nfsrv_descript *nd, nfsquad_t clientid, NFSPROC_T *p)
 	int error = 0, i;
 	bool mlocked;
 
-	if (NFSD_VNET(nfsrvboottime) != clientid.lval[0]) {
+	if (VNET(nfsrvboottime) != clientid.lval[0]) {
 		error = NFSERR_STALECLIENTID;
 		goto out;
 	}
@@ -1014,7 +1016,7 @@ nfsrv_adminrevoke(struct nfsd_clid *revokep, NFSPROC_T *p)
 	 */
 	gotit = i = 0;
 	while (i < nfsrv_clienthashsize && !gotit) {
-	    LIST_FOREACH(clp, &NFSD_VNET(nfsclienthash)[i], lc_hash) {
+	    LIST_FOREACH(clp, &VNET(nfsclienthash)[i], lc_hash) {
 		if (revokep->nclid_idlen == clp->lc_idlen &&
 		    !NFSBCMP(revokep->nclid_id, clp->lc_id, clp->lc_idlen)) {
 			gotit = 1;
@@ -1076,8 +1078,8 @@ nfsrv_dumpclients(struct nfsd_dumpclients *dumpp, int maxcnt)
 	 * Rattle through the client lists until done.
 	 */
 	while (i < nfsrv_clienthashsize && cnt < maxcnt) {
-	    clp = LIST_FIRST(&NFSD_VNET(nfsclienthash)[i]);
-	    while (clp != LIST_END(&NFSD_VNET(nfsclienthash)[i]) && cnt <
+	    clp = LIST_FIRST(&VNET(nfsclienthash)[i]);
+	    while (clp != LIST_END(&VNET(nfsclienthash)[i]) && cnt <
 		maxcnt) {
 		nfsrv_dumpaclient(clp, &dumpp[cnt]);
 		cnt++;
@@ -1354,15 +1356,15 @@ nfsrv_servertimer(void *arg __unused)
 	 * If server hasn't started yet, just return.
 	 */
 	NFSLOCKSTATE();
-	if (NFSD_VNET(nfsrv_stablefirst).nsf_eograce == 0) {
+	if (VNET(nfsrv_stablefirst).nsf_eograce == 0) {
 		NFSUNLOCKSTATE();
 		return;
 	}
-	if (!(NFSD_VNET(nfsrv_stablefirst).nsf_flags & NFSNSF_UPDATEDONE)) {
-		if (!(NFSD_VNET(nfsrv_stablefirst).nsf_flags &
+	if (!(VNET(nfsrv_stablefirst).nsf_flags & NFSNSF_UPDATEDONE)) {
+		if (!(VNET(nfsrv_stablefirst).nsf_flags &
 		      NFSNSF_GRACEOVER) &&
-		    NFSD_MONOSEC > NFSD_VNET(nfsrv_stablefirst).nsf_eograce)
-			NFSD_VNET(nfsrv_stablefirst).nsf_flags |=
+		    NFSD_MONOSEC > VNET(nfsrv_stablefirst).nsf_eograce)
+			VNET(nfsrv_stablefirst).nsf_flags |=
 			    (NFSNSF_GRACEOVER | NFSNSF_NEEDLOCK);
 		NFSUNLOCKSTATE();
 		return;
@@ -1385,8 +1387,8 @@ nfsrv_servertimer(void *arg __unused)
 	 * For each client...
 	 */
 	for (i = 0; i < nfsrv_clienthashsize; i++) {
-	    clp = LIST_FIRST(&NFSD_VNET(nfsclienthash)[i]);
-	    while (clp != LIST_END(&NFSD_VNET(nfsclienthash)[i])) {
+	    clp = LIST_FIRST(&VNET(nfsclienthash)[i]);
+	    while (clp != LIST_END(&VNET(nfsclienthash)[i])) {
 		nclp = LIST_NEXT(clp, lc_hash);
 		if (!(clp->lc_flags & LCL_EXPIREIT)) {
 		    if (((clp->lc_expiry + NFSRV_STALELEASE) < NFSD_MONOSEC
@@ -1417,7 +1419,7 @@ nfsrv_servertimer(void *arg __unused)
 			 *     by an nfsd sometime soon.
 			 */
 			clp->lc_flags |= LCL_EXPIREIT;
-			NFSD_VNET(nfsrv_stablefirst).nsf_flags |=
+			VNET(nfsrv_stablefirst).nsf_flags |=
 			    (NFSNSF_NEEDLOCK | NFSNSF_EXPIREDCLIENT);
 		    } else {
 			/*
@@ -1435,7 +1437,7 @@ nfsrv_servertimer(void *arg __unused)
 					if (stp->ls_noopens > NFSNOOPEN ||
 					    (nfsrv_openpluslock * 2) >
 					    nfsrv_v4statelimit)
-						NFSD_VNET(nfsrv_stablefirst).nsf_flags |=
+						VNET(nfsrv_stablefirst).nsf_flags |=
 							NFSNSF_NOOPENS;
 				} else {
 					stp->ls_noopens = 0;
@@ -1504,10 +1506,11 @@ nfsrv_zapclient(struct nfsclient *clp, NFSPROC_T *p)
 	newnfs_disconnect(NULL, &clp->lc_req);
 	free(clp->lc_req.nr_nam, M_SONAME);
 	NFSFREEMUTEX(&clp->lc_req.nr_mtx);
+	crfree(clp->lc_req.nr_cred);
 	free(clp->lc_stateid, M_NFSDCLIENT);
 	free(clp, M_NFSDCLIENT);
 	NFSLOCKSTATE();
-	NFSD_VNET(nfsstatsv1_p)->srvclients--;
+	VNET(nfsstatsv1_p)->srvclients--;
 	nfsrv_openpluslock--;
 	nfsrv_clients--;
 	NFSUNLOCKSTATE();
@@ -1535,22 +1538,15 @@ nfsrv_freedeleglist(struct nfsstatehead *sthp)
 static void
 nfsrv_freedeleg(struct nfsstate *stp)
 {
-	struct nfslockfile *lfp;
 
 	LIST_REMOVE(stp, ls_hash);
 	LIST_REMOVE(stp, ls_list);
 	LIST_REMOVE(stp, ls_file);
 	if ((stp->ls_flags & NFSLCK_DELEGWRITE) != 0)
 		nfsrv_writedelegcnt--;
-	lfp = stp->ls_lfp;
-	if (LIST_EMPTY(&lfp->lf_open) &&
-	    LIST_EMPTY(&lfp->lf_lock) && LIST_EMPTY(&lfp->lf_deleg) &&
-	    LIST_EMPTY(&lfp->lf_locallock) && LIST_EMPTY(&lfp->lf_rollback) &&
-	    lfp->lf_usecount == 0 &&
-	    nfsv4_testlock(&lfp->lf_locallock_lck) == 0)
-		nfsrv_freenfslockfile(lfp);
+	nfsrv_freelockifnotinuse(stp->ls_lfp);
 	free(stp, M_NFSDSTATE);
-	NFSD_VNET(nfsstatsv1_p)->srvdelegates--;
+	VNET(nfsstatsv1_p)->srvdelegates--;
 	nfsrv_openpluslock--;
 	nfsrv_delegatecnt--;
 }
@@ -1576,7 +1572,7 @@ nfsrv_freeopenowner(struct nfsstate *stp, int cansleep, NFSPROC_T *p)
 	if (stp->ls_op)
 		nfsrvd_derefcache(stp->ls_op);
 	free(stp, M_NFSDSTATE);
-	NFSD_VNET(nfsstatsv1_p)->srvopenowners--;
+	VNET(nfsstatsv1_p)->srvopenowners--;
 	nfsrv_openpluslock--;
 }
 
@@ -1630,14 +1626,9 @@ nfsrv_freeopen(struct nfsstate *stp, vnode_t vp, int cansleep, NFSPROC_T *p)
 	 * If there are locks associated with the open, the
 	 * nfslockfile structure can be freed via nfsrv_freelockowner().
 	 */
-	if (lfp != NULL && LIST_EMPTY(&lfp->lf_open) &&
-	    LIST_EMPTY(&lfp->lf_deleg) && LIST_EMPTY(&lfp->lf_lock) &&
-	    LIST_EMPTY(&lfp->lf_locallock) && LIST_EMPTY(&lfp->lf_rollback) &&
-	    lfp->lf_usecount == 0 &&
-	    nfsv4_testlock(&lfp->lf_locallock_lck) == 0)
-		nfsrv_freenfslockfile(lfp);
+	nfsrv_freelockifnotinuse(lfp);
 	free(stp, M_NFSDSTATE);
-	NFSD_VNET(nfsstatsv1_p)->srvopens--;
+	VNET(nfsstatsv1_p)->srvopens--;
 	nfsrv_openpluslock--;
 }
 
@@ -1656,7 +1647,7 @@ nfsrv_freelockowner(struct nfsstate *stp, vnode_t vp, int cansleep,
 	if (stp->ls_op)
 		nfsrvd_derefcache(stp->ls_op);
 	free(stp, M_NFSDSTATE);
-	NFSD_VNET(nfsstatsv1_p)->srvlockowners--;
+	VNET(nfsstatsv1_p)->srvlockowners--;
 	nfsrv_openpluslock--;
 }
 
@@ -1732,7 +1723,7 @@ nfsrv_freenfslock(struct nfslock *lop)
 
 	if (lop->lo_lckfile.le_prev != NULL) {
 		LIST_REMOVE(lop, lo_lckfile);
-		NFSD_VNET(nfsstatsv1_p)->srvlocks--;
+		VNET(nfsstatsv1_p)->srvlocks--;
 		nfsrv_openpluslock--;
 	}
 	LIST_REMOVE(lop, lo_lckowner);
@@ -1827,7 +1818,7 @@ nfsrv_lockctrl(vnode_t vp, struct nfsstate **new_stpp,
 	int specialid = 0;
 	struct nfslockfile *lfp;
 	struct nfslock *other_lop = NULL;
-	struct nfsstate *stp, *lckstp = NULL;
+	struct nfsstate *stp = NULL, *lckstp = NULL;	/* Shut up gcc. */
 	struct nfsclient *clp = NULL;
 	u_int32_t bits;
 	int error = 0, haslock = 0, ret, reterr;
@@ -1977,6 +1968,20 @@ tryagain:
 			     error = NFSERR_BADSTATEID;
 	      }
 	      
+	      /*
+	       * Sanity check the stateid for the Lock/LockU cases.
+	       */
+	      if (error == 0 && (new_stp->ls_flags & NFSLCK_LOCK) != 0 &&
+		  (((new_stp->ls_flags & NFSLCK_OPENTOLOCK) != 0 &&
+		    (stp->ls_flags & NFSLCK_OPEN) == 0) ||
+		   ((new_stp->ls_flags & NFSLCK_OPENTOLOCK) == 0 &&
+		    (stp->ls_flags & NFSLCK_LOCK) == 0)))
+			error = NFSERR_BADSTATEID;
+	      if (error == 0 && (new_stp->ls_flags & NFSLCK_UNLOCK) != 0 &&
+		  (stp->ls_flags & NFSLCK_LOCK) == 0)
+			error = NFSERR_BADSTATEID;
+
+		/* Sanity check the delegation stateid. */
 		if (error == 0 &&
 		  (stp->ls_flags & (NFSLCK_DELEGREAD | NFSLCK_DELEGWRITE)) &&
 		  getlckret == 0 && stp->ls_lfp != lfp)
@@ -2003,19 +2008,31 @@ tryagain:
 
 	      if (error == 0) {
 		    if (new_stp->ls_flags & NFSLCK_OPENTOLOCK) {
+			if (stp->ls_flags & NFSLCK_OPEN)
+			    nfsrv_getowner(&stp->ls_open, new_stp, &lckstp);
 			/*
 			 * If haslock set, we've already checked the seqid.
 			 */
 			if (!haslock) {
-			    if (stp->ls_flags & NFSLCK_OPEN)
-				error = nfsrv_checkseqid(nd, new_stp->ls_seq,
-				    stp->ls_openowner, new_stp->ls_op);
-			    else
+			    if (stp->ls_flags & NFSLCK_OPEN) {
+				/*
+				 * A new NFSv4.0 request cannot reuse a lock
+				 * owner.  Reject it before checkseqid consumes
+				 * the open seqid and replaces the cached reply.
+				 * The current seqid may be a retransmission of
+				 * the original LOCK; let checkseqid validate it.
+				 */
+				if (lckstp != NULL &&
+				    (nd->nd_flag & ND_NFSV41) == 0 &&
+				    new_stp->ls_seq != stp->ls_openowner->ls_seq)
+				    error = NFSERR_BADSEQID;
+				else
+				    error = nfsrv_checkseqid(nd, new_stp->ls_seq,
+					stp->ls_openowner, new_stp->ls_op);
+			    } else
 				error = NFSERR_BADSTATEID;
 			}
-			if (!error)
-			    nfsrv_getowner(&stp->ls_open, new_stp, &lckstp);
-			if (lckstp) {
+			if (!error && lckstp) {
 			    /*
 			     * For NFSv4.1 and NFSv4.2 allow an
 			     * open_to_lock_owner when the lock_owner already
@@ -2028,7 +2045,7 @@ tryagain:
 				new_stp->ls_flags &= ~NFSLCK_OPENTOLOCK;
 			    else
 				error = NFSERR_BADSEQID;
-			} else
+			} else if (lckstp == NULL)
 			    lckstp = new_stp;
 		    } else if (new_stp->ls_flags&(NFSLCK_LOCK|NFSLCK_UNLOCK)) {
 			/*
@@ -2509,7 +2526,7 @@ tryagain:
 		LIST_INSERT_HEAD(&stp->ls_open, new_stp, ls_list);
 		*new_lopp = NULL;
 		*new_stpp = NULL;
-		NFSD_VNET(nfsstatsv1_p)->srvlockowners++;
+		VNET(nfsstatsv1_p)->srvlockowners++;
 		nfsrv_openpluslock++;
 	}
 	if (filestruct_locked != 0) {
@@ -3169,12 +3186,12 @@ tryagain:
 			LIST_INSERT_HEAD(&new_stp->ls_open, new_open, ls_list);
 			LIST_INSERT_HEAD(&clp->lc_open, new_stp, ls_list);
 			*new_stpp = NULL;
-			NFSD_VNET(nfsstatsv1_p)->srvopenowners++;
+			VNET(nfsstatsv1_p)->srvopenowners++;
 			nfsrv_openpluslock++;
 		    }
 		    openstp = new_open;
 		    new_open = NULL;
-		    NFSD_VNET(nfsstatsv1_p)->srvopens++;
+		    VNET(nfsstatsv1_p)->srvopens++;
 		    nfsrv_openpluslock++;
 		    break;
 		}
@@ -3235,7 +3252,7 @@ tryagain:
 		    NFSRV_V4DELEGLIMIT(nfsrv_delegatecnt) ||
 		    !NFSVNO_DELEGOK(vp))
 		    *rflagsp |= NFSV4OPEN_RECALL;
-		NFSD_VNET(nfsstatsv1_p)->srvdelegates++;
+		VNET(nfsstatsv1_p)->srvdelegates++;
 		nfsrv_openpluslock++;
 		nfsrv_delegatecnt++;
 
@@ -3275,12 +3292,12 @@ tryagain:
 		    LIST_INSERT_HEAD(&new_stp->ls_open, new_open, ls_list);
 		    LIST_INSERT_HEAD(&clp->lc_open, new_stp, ls_list);
 		    *new_stpp = NULL;
-		    NFSD_VNET(nfsstatsv1_p)->srvopenowners++;
+		    VNET(nfsstatsv1_p)->srvopenowners++;
 		    nfsrv_openpluslock++;
 		}
 		openstp = new_open;
 		new_open = NULL;
-		NFSD_VNET(nfsstatsv1_p)->srvopens++;
+		VNET(nfsstatsv1_p)->srvopens++;
 		nfsrv_openpluslock++;
 	    } else {
 		error = NFSERR_RECLAIMCONFLICT;
@@ -3336,7 +3353,7 @@ tryagain:
 			new_open, ls_hash);
 		    openstp = new_open;
 		    new_open = NULL;
-		    NFSD_VNET(nfsstatsv1_p)->srvopens++;
+		    VNET(nfsstatsv1_p)->srvopens++;
 		    nfsrv_openpluslock++;
 
 		    /*
@@ -3400,9 +3417,9 @@ tryagain:
 		openstp = new_open;
 		new_open = NULL;
 		*new_stpp = NULL;
-		NFSD_VNET(nfsstatsv1_p)->srvopens++;
+		VNET(nfsstatsv1_p)->srvopens++;
 		nfsrv_openpluslock++;
-		NFSD_VNET(nfsstatsv1_p)->srvopenowners++;
+		VNET(nfsstatsv1_p)->srvopenowners++;
 		nfsrv_openpluslock++;
 	}
 	if (!error) {
@@ -3865,7 +3882,7 @@ nfsrv_insertlock(struct nfslock *new_lop, struct nfslock *insert_lop,
 	else
 		LIST_INSERT_AFTER(insert_lop, new_lop, lo_lckowner);
 	if (stp != NULL) {
-		NFSD_VNET(nfsstatsv1_p)->srvlocks++;
+		VNET(nfsstatsv1_p)->srvlocks++;
 		nfsrv_openpluslock++;
 	}
 }
@@ -4064,267 +4081,71 @@ out:
 }
 
 /*
- * Get the client ip address for callbacks. If the strings can't be parsed,
- * just set lc_program to 0 to indicate no callbacks are possible.
- * (For cases where the address can't be parsed or is 0.0.0.0.0.0, set
- *  the address to the client's transport address. This won't be used
- *  for callbacks, but can be printed out by nfsstats for info.)
+ * Just set lc_program to 0 to indicate no callbacks are possible.
+ * Set the address to the client's transport address. This won't be used
+ * for callbacks, but can be printed out by nfsstats for info.
  * Return error if the xdr can't be parsed, 0 otherwise.
  */
 int
 nfsrv_getclientipaddr(struct nfsrv_descript *nd, struct nfsclient *clp)
 {
-	u_int32_t *tl;
-	u_char *cp, *cp2;
-	int i, j, maxalen = 0, minalen = 0;
-	sa_family_t af;
+	uint32_t *tl;
+	int error = 0, i;
 #ifdef INET
-	struct sockaddr_in *rin = NULL, *sin;
+	struct sockaddr_in *rin, *sin;
 #endif
 #ifdef INET6
-	struct sockaddr_in6 *rin6 = NULL, *sin6;
+	struct sockaddr_in6 *rin6, *sin6;
 #endif
-	u_char *addr;
-	int error = 0, cantparse = 0;
-	union {
-		in_addr_t ival;
-		u_char cval[4];
-	} ip;
-	union {
-		in_port_t sval;
-		u_char cval[2];
-	} port;
 
-	/* 8 is the maximum length of the port# string. */
-	addr = malloc(INET6_ADDRSTRLEN + 8, M_TEMP, M_WAITOK);
 	clp->lc_req.nr_client = NULL;
 	clp->lc_req.nr_lock = 0;
-	af = AF_UNSPEC;
-	NFSM_DISSECT(tl, u_int32_t *, NFSX_UNSIGNED);
-	i = fxdr_unsigned(int, *tl);
-	if (i >= 3 && i <= 4) {
-		error = nfsrv_mtostr(nd, addr, i);
-		if (error)
-			goto nfsmout;
-#ifdef INET
-		if (!strcmp(addr, "tcp")) {
-			clp->lc_flags |= LCL_TCPCALLBACK;
-			clp->lc_req.nr_sotype = SOCK_STREAM;
-			clp->lc_req.nr_soproto = IPPROTO_TCP;
-			af = AF_INET;
-		} else if (!strcmp(addr, "udp")) {
-			clp->lc_req.nr_sotype = SOCK_DGRAM;
-			clp->lc_req.nr_soproto = IPPROTO_UDP;
-			af = AF_INET;
-		}
-#endif
-#ifdef INET6
-		if (af == AF_UNSPEC) {
-			if (!strcmp(addr, "tcp6")) {
-				clp->lc_flags |= LCL_TCPCALLBACK;
-				clp->lc_req.nr_sotype = SOCK_STREAM;
-				clp->lc_req.nr_soproto = IPPROTO_TCP;
-				af = AF_INET6;
-			} else if (!strcmp(addr, "udp6")) {
-				clp->lc_req.nr_sotype = SOCK_DGRAM;
-				clp->lc_req.nr_soproto = IPPROTO_UDP;
-				af = AF_INET6;
-			}
-		}
-#endif
-		if (af == AF_UNSPEC) {
-			cantparse = 1;
-		}
-	} else {
-		cantparse = 1;
-		if (i > 0) {
-			error = nfsm_advance(nd, NFSM_RNDUP(i), -1);
-			if (error)
-				goto nfsmout;
-		}
-	}
-	/*
-	 * The caller has allocated clp->lc_req.nr_nam to be large enough
-	 * for either AF_INET or AF_INET6 and zeroed out the contents.
-	 * maxalen is set to the maximum length of the host IP address string
-	 * plus 8 for the maximum length of the port#.
-	 * minalen is set to the minimum length of the host IP address string
-	 * plus 4 for the minimum length of the port#.
-	 * These lengths do not include NULL termination,
-	 * so INET[6]_ADDRSTRLEN - 1 is used in the calculations.
-	 */
-	switch (af) {
-#ifdef INET
-	case AF_INET:
-		rin = (struct sockaddr_in *)clp->lc_req.nr_nam;
-		rin->sin_family = AF_INET;
-		rin->sin_len = sizeof(struct sockaddr_in);
-		maxalen = INET_ADDRSTRLEN - 1 + 8;
-		minalen = 7 + 4;
-		break;
-#endif
-#ifdef INET6
-	case AF_INET6:
-		rin6 = (struct sockaddr_in6 *)clp->lc_req.nr_nam;
-		rin6->sin6_family = AF_INET6;
-		rin6->sin6_len = sizeof(struct sockaddr_in6);
-		maxalen = INET6_ADDRSTRLEN - 1 + 8;
-		minalen = 3 + 4;
-		break;
-#endif
-	}
-	NFSM_DISSECT(tl, u_int32_t *, NFSX_UNSIGNED);
+	NFSM_DISSECT(tl, uint32_t *, NFSX_UNSIGNED);
 	i = fxdr_unsigned(int, *tl);
 	if (i < 0) {
 		error = NFSERR_BADXDR;
 		goto nfsmout;
-	} else if (i == 0) {
-		cantparse = 1;
-	} else if (!cantparse && i <= maxalen && i >= minalen) {
-		error = nfsrv_mtostr(nd, addr, i);
+	} else if (i > 0) {
+		error = nfsm_advance(nd, NFSM_RNDUP(i), -1);
 		if (error)
 			goto nfsmout;
-
-		/*
-		 * Parse out the address fields. We expect 6 decimal numbers
-		 * separated by '.'s for AF_INET and two decimal numbers
-		 * preceeded by '.'s for AF_INET6.
-		 */
-		cp = NULL;
-		switch (af) {
-#ifdef INET6
-		/*
-		 * For AF_INET6, first parse the host address.
-		 */
-		case AF_INET6:
-			cp = strchr(addr, '.');
-			if (cp != NULL) {
-				*cp++ = '\0';
-				if (inet_pton(af, addr, &rin6->sin6_addr) == 1)
-					i = 4;
-				else {
-					cp = NULL;
-					cantparse = 1;
-				}
-			}
-			break;
-#endif
-#ifdef INET
-		case AF_INET:
-			cp = addr;
-			i = 0;
-			break;
-#endif
-		}
-		while (cp != NULL && *cp && i < 6) {
-			cp2 = cp;
-			while (*cp2 && *cp2 != '.')
-				cp2++;
-			if (*cp2)
-				*cp2++ = '\0';
-			else if (i != 5) {
-				cantparse = 1;
-				break;
-			}
-			j = nfsrv_getipnumber(cp);
-			if (j >= 0) {
-				if (i < 4)
-					ip.cval[3 - i] = j;
-				else
-					port.cval[5 - i] = j;
-			} else {
-				cantparse = 1;
-				break;
-			}
-			cp = cp2;
-			i++;
-		}
-		if (!cantparse) {
-			/*
-			 * The host address INADDR_ANY is (mis)used to indicate
-			 * "there is no valid callback address".
-			 */
-			switch (af) {
-#ifdef INET6
-			case AF_INET6:
-				if (!IN6_ARE_ADDR_EQUAL(&rin6->sin6_addr,
-				    &in6addr_any))
-					rin6->sin6_port = htons(port.sval);
-				else
-					cantparse = 1;
-				break;
-#endif
-#ifdef INET
-			case AF_INET:
-				if (ip.ival != INADDR_ANY) {
-					rin->sin_addr.s_addr = htonl(ip.ival);
-					rin->sin_port = htons(port.sval);
-				} else {
-					cantparse = 1;
-				}
-				break;
-#endif
-			}
-		}
-	} else {
-		cantparse = 1;
-		if (i > 0) {
-			error = nfsm_advance(nd, NFSM_RNDUP(i), -1);
-			if (error)
-				goto nfsmout;
-		}
 	}
-	if (cantparse) {
-		switch (nd->nd_nam->sa_family) {
+	NFSM_DISSECT(tl, uint32_t *, NFSX_UNSIGNED);
+	i = fxdr_unsigned(int, *tl);
+	if (i < 0) {
+		error = NFSERR_BADXDR;
+		goto nfsmout;
+	} else if (i > 0) {
+		error = nfsm_advance(nd, NFSM_RNDUP(i), -1);
+		if (error)
+			goto nfsmout;
+	}
+	switch (nd->nd_nam->sa_family) {
 #ifdef INET
-		case AF_INET:
-			sin = (struct sockaddr_in *)nd->nd_nam;
-			rin = (struct sockaddr_in *)clp->lc_req.nr_nam;
-			rin->sin_family = AF_INET;
-			rin->sin_len = sizeof(struct sockaddr_in);
-			rin->sin_addr.s_addr = sin->sin_addr.s_addr;
-			rin->sin_port = 0x0;
-			break;
+	case AF_INET:
+		sin = (struct sockaddr_in *)nd->nd_nam;
+		rin = (struct sockaddr_in *)clp->lc_req.nr_nam;
+		rin->sin_family = AF_INET;
+		rin->sin_len = sizeof(struct sockaddr_in);
+		rin->sin_addr.s_addr = sin->sin_addr.s_addr;
+		rin->sin_port = 0x0;
+		break;
 #endif
 #ifdef INET6
-		case AF_INET6:
-			sin6 = (struct sockaddr_in6 *)nd->nd_nam;
-			rin6 = (struct sockaddr_in6 *)clp->lc_req.nr_nam;
-			rin6->sin6_family = AF_INET6;
-			rin6->sin6_len = sizeof(struct sockaddr_in6);
-			rin6->sin6_addr = sin6->sin6_addr;
-			rin6->sin6_port = 0x0;
-			break;
+	case AF_INET6:
+		sin6 = (struct sockaddr_in6 *)nd->nd_nam;
+		rin6 = (struct sockaddr_in6 *)clp->lc_req.nr_nam;
+		rin6->sin6_family = AF_INET6;
+		rin6->sin6_len = sizeof(struct sockaddr_in6);
+		rin6->sin6_addr = sin6->sin6_addr;
+		rin6->sin6_port = 0x0;
+		break;
 #endif
-		}
-		clp->lc_program = 0;
 	}
+	clp->lc_program = 0;
 nfsmout:
-	free(addr, M_TEMP);
 	NFSEXITCODE2(error, nd);
 	return (error);
-}
-
-/*
- * Turn a string of up to three decimal digits into a number. Return -1 upon
- * error.
- */
-static int
-nfsrv_getipnumber(u_char *cp)
-{
-	int i = 0, j = 0;
-
-	while (*cp) {
-		if (j > 2 || *cp < '0' || *cp > '9')
-			return (-1);
-		i *= 10;
-		i += (*cp - '0');
-		cp++;
-		j++;
-	}
-	if (i < 256)
-		return (i);
-	return (-1);
 }
 
 /*
@@ -4342,11 +4163,11 @@ nfsrv_checkrestart(nfsquad_t clientid, u_int32_t flags,
 	 */
 	if (flags &
 	    (NFSLCK_OPEN | NFSLCK_TEST | NFSLCK_RELEASE | NFSLCK_DELEGPURGE)) {
-		if (clientid.lval[0] != NFSD_VNET(nfsrvboottime)) {
+		if (clientid.lval[0] != VNET(nfsrvboottime)) {
 			ret = NFSERR_STALECLIENTID;
 			goto out;
 		}
-	} else if (stateidp->other[0] != NFSD_VNET(nfsrvboottime) &&
+	} else if (stateidp->other[0] != VNET(nfsrvboottime) &&
 		specialid == 0) {
 		ret = NFSERR_STALESTATEID;
 		goto out;
@@ -4379,15 +4200,15 @@ nfsrv_checkgrace(struct nfsrv_descript *nd, struct nfsclient *clp,
 	int error = 0, notreclaimed;
 	struct nfsrv_stable *sp;
 
-	if ((NFSD_VNET(nfsrv_stablefirst).nsf_flags & (NFSNSF_UPDATEDONE |
+	if ((VNET(nfsrv_stablefirst).nsf_flags & (NFSNSF_UPDATEDONE |
 	     NFSNSF_GRACEOVER)) == 0) {
 		/*
 		 * First, check to see if all of the clients have done a
 		 * ReclaimComplete.  If so, grace can end now.
 		 */
 		notreclaimed = 0;
-		if (!NFSD_VNET(nfsd_disable_grace)) {
-			LIST_FOREACH(sp, &NFSD_VNET(nfsrv_stablefirst).nsf_head,
+		if (!VNET(nfsd_disable_grace)) {
+			LIST_FOREACH(sp, &VNET(nfsrv_stablefirst).nsf_head,
 			    nst_list) {
 				if ((sp->nst_flag & NFSNST_RECLAIMED) == 0) {
 					notreclaimed = 1;
@@ -4396,11 +4217,11 @@ nfsrv_checkgrace(struct nfsrv_descript *nd, struct nfsclient *clp,
 			}
 		}
 		if (notreclaimed == 0)
-			NFSD_VNET(nfsrv_stablefirst).nsf_flags |=
+			VNET(nfsrv_stablefirst).nsf_flags |=
 			    (NFSNSF_GRACEOVER | NFSNSF_NEEDLOCK);
 	}
 
-	if ((NFSD_VNET(nfsrv_stablefirst).nsf_flags & NFSNSF_GRACEOVER) != 0) {
+	if ((VNET(nfsrv_stablefirst).nsf_flags & NFSNSF_GRACEOVER) != 0) {
 		if (flags & NFSLCK_RECLAIM) {
 			error = NFSERR_NOGRACE;
 			goto out;
@@ -4422,8 +4243,8 @@ nfsrv_checkgrace(struct nfsrv_descript *nd, struct nfsclient *clp,
 		 * extend grace a bit.
 		 */
 		if ((NFSD_MONOSEC + NFSRV_LEASEDELTA) >
-		    NFSD_VNET(nfsrv_stablefirst).nsf_eograce)
-			NFSD_VNET(nfsrv_stablefirst).nsf_eograce =
+		    VNET(nfsrv_stablefirst).nsf_eograce)
+			VNET(nfsrv_stablefirst).nsf_eograce =
 				NFSD_MONOSEC + NFSRV_LEASEDELTA;
 	}
 
@@ -4598,7 +4419,8 @@ nfsrv_docallback(struct nfsclient *clp, int procnum, nfsv4stateid_t *stateidp,
 	if (!error) {
 		if ((nd->nd_flag & ND_NFSV41) != 0) {
 			KASSERT(sep != NULL, ("sep NULL"));
-			if (sep->sess_cbsess.nfsess_xprt != NULL)
+			if (sep->sess_cbsess.nfsess_xprt != NULL &&
+			    sep->sess_cbsess.nfsess_xprt->xp_p2 != NULL)
 				error = newnfs_request(nd, NULL, clp,
 				    &clp->lc_req, NULL, NULL, cred,
 				    clp->lc_program, clp->lc_req.nr_vers, NULL,
@@ -4675,7 +4497,7 @@ errout:
 		} else if (error == 0 && procnum == NFSV4OP_CBGETATTR)
 			error = nfsv4_loadattr(nd, NULL, nap, NULL, NULL, 0,
 			    NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL,
-			    NULL, NULL, p, NULL);
+			    NULL, NULL, NULL, p, NULL);
 		m_freem(nd->nd_mrep);
 	}
 	NFSLOCKSTATE();
@@ -4858,7 +4680,7 @@ tryagain:
 void
 nfsrv_setupstable(NFSPROC_T *p)
 {
-	struct nfsrv_stablefirst *sf = &NFSD_VNET(nfsrv_stablefirst);
+	struct nfsrv_stablefirst *sf = &VNET(nfsrv_stablefirst);
 	struct nfsrv_stable *sp, *nsp;
 	struct nfst_rec *tsp;
 	int error, i, tryagain;
@@ -4874,7 +4696,7 @@ nfsrv_setupstable(NFSPROC_T *p)
 	/*
 	 * Set Grace over just until the file reads successfully.
 	 */
-	NFSD_VNET(nfsrvboottime) = time_second;
+	VNET(nfsrvboottime) = time_second;
 	LIST_INIT(&sf->nsf_head);
 	sf->nsf_flags = (NFSNSF_GRACEOVER | NFSNSF_NEEDLOCK);
 	sf->nsf_eograce = NFSD_MONOSEC + NFSRV_LEASEDELTA;
@@ -4909,8 +4731,8 @@ nfsrv_setupstable(NFSPROC_T *p)
 	do {
 		tryagain = 0;
 		for (i = 0; i < sf->nsf_numboots; i++) {
-			if (NFSD_VNET(nfsrvboottime) == sf->nsf_bootvals[i]) {
-				NFSD_VNET(nfsrvboottime)++;
+			if (VNET(nfsrvboottime) == sf->nsf_bootvals[i]) {
+				VNET(nfsrvboottime)++;
 				tryagain = 1;
 				break;
 			}
@@ -4993,7 +4815,7 @@ nfsrv_setupstable(NFSPROC_T *p)
 void
 nfsrv_updatestable(NFSPROC_T *p)
 {
-	struct nfsrv_stablefirst *sf = &NFSD_VNET(nfsrv_stablefirst);
+	struct nfsrv_stablefirst *sf = &VNET(nfsrv_stablefirst);
 	struct nfsrv_stable *sp, *nsp;
 	int i;
 	struct nfsvattr nva;
@@ -5022,7 +4844,7 @@ nfsrv_updatestable(NFSPROC_T *p)
 		sf->nsf_bootvals = (time_t *)malloc(sizeof(time_t),
 			M_TEMP, M_WAITOK);
 	}
-	sf->nsf_bootvals[0] = NFSD_VNET(nfsrvboottime);
+	sf->nsf_bootvals[0] = VNET(nfsrvboottime);
 	sf->nsf_lease = nfsrv_lease;
 	NFSVNO_ATTRINIT(&nva);
 	NFSVNO_SETATTRVAL(&nva, size, 0);
@@ -5076,7 +4898,7 @@ nfsrv_updatestable(NFSPROC_T *p)
 void
 nfsrv_writestable(u_char *client, int len, int flag, NFSPROC_T *p)
 {
-	struct nfsrv_stablefirst *sf = &NFSD_VNET(nfsrv_stablefirst);
+	struct nfsrv_stablefirst *sf = &VNET(nfsrv_stablefirst);
 	struct nfst_rec *sp;
 	int error;
 
@@ -5109,12 +4931,12 @@ nfsrv_markstable(struct nfsclient *clp)
 	/*
 	 * First find the client structure.
 	 */
-	LIST_FOREACH(sp, &NFSD_VNET(nfsrv_stablefirst).nsf_head, nst_list) {
+	LIST_FOREACH(sp, &VNET(nfsrv_stablefirst).nsf_head, nst_list) {
 		if (sp->nst_len == clp->lc_idlen &&
 		    !NFSBCMP(sp->nst_client, clp->lc_id, sp->nst_len))
 			break;
 	}
-	if (sp == LIST_END(&NFSD_VNET(nfsrv_stablefirst).nsf_head))
+	if (sp == LIST_END(&VNET(nfsrv_stablefirst).nsf_head))
 		return;
 
 	/*
@@ -5136,12 +4958,12 @@ nfsrv_markreclaim(struct nfsclient *clp)
 	/*
 	 * First find the client structure.
 	 */
-	LIST_FOREACH(sp, &NFSD_VNET(nfsrv_stablefirst).nsf_head, nst_list) {
+	LIST_FOREACH(sp, &VNET(nfsrv_stablefirst).nsf_head, nst_list) {
 		if (sp->nst_len == clp->lc_idlen &&
 		    !NFSBCMP(sp->nst_client, clp->lc_id, sp->nst_len))
 			break;
 	}
-	if (sp == LIST_END(&NFSD_VNET(nfsrv_stablefirst).nsf_head))
+	if (sp == LIST_END(&VNET(nfsrv_stablefirst).nsf_head))
 		return;
 
 	/*
@@ -5167,7 +4989,7 @@ nfsrv_checkstable(struct nfsclient *clp)
 	/*
 	 * First, find the entry for the client.
 	 */
-	LIST_FOREACH(sp, &NFSD_VNET(nfsrv_stablefirst).nsf_head, nst_list) {
+	LIST_FOREACH(sp, &VNET(nfsrv_stablefirst).nsf_head, nst_list) {
 		if (sp->nst_len == clp->lc_idlen &&
 		    !NFSBCMP(sp->nst_client, clp->lc_id, sp->nst_len))
 			break;
@@ -5177,9 +4999,9 @@ nfsrv_checkstable(struct nfsclient *clp)
 	 * If not in the list, state was revoked or no state was issued
 	 * since the previous reboot, a reclaim is denied.
 	 */
-	if (sp == LIST_END(&NFSD_VNET(nfsrv_stablefirst).nsf_head) ||
+	if (sp == LIST_END(&VNET(nfsrv_stablefirst).nsf_head) ||
 	    (sp->nst_flag & NFSNST_REVOKE) ||
-	    !(NFSD_VNET(nfsrv_stablefirst).nsf_flags & NFSNSF_OK))
+	    !(VNET(nfsrv_stablefirst).nsf_flags & NFSNSF_OK))
 		return (1);
 	return (0);
 }
@@ -5207,7 +5029,7 @@ nfsrv_clientconflict(struct nfsclient *clp, int *haslockp, vnode_t vp,
 	 * If lease hasn't expired, we can't fix it.
 	 */
 	if (clp->lc_expiry >= NFSD_MONOSEC ||
-	    !(NFSD_VNET(nfsrv_stablefirst).nsf_flags & NFSNSF_UPDATEDONE))
+	    !(VNET(nfsrv_stablefirst).nsf_flags & NFSNSF_UPDATEDONE))
 		return (0);
 	if (*haslockp == 0) {
 		NFSUNLOCKSTATE();
@@ -5606,7 +5428,7 @@ nfsd_recalldelegation(vnode_t vp, NFSPROC_T *p)
 	 * First, check to see if the server is currently running and it has
 	 * been called for a regular file when issuing delegations.
 	 */
-	if (NFSD_VNET(nfsrv_numnfsd) == 0 || vp->v_type != VREG ||
+	if (VNET(nfsrv_numnfsd) == 0 || vp->v_type != VREG ||
 	    nfsrv_issuedelegs == 0)
 		return;
 
@@ -5840,12 +5662,12 @@ nfsrv_throwawayopens(NFSPROC_T *p)
 	int i;
 
 	NFSLOCKSTATE();
-	NFSD_VNET(nfsrv_stablefirst).nsf_flags &= ~NFSNSF_NOOPENS;
+	VNET(nfsrv_stablefirst).nsf_flags &= ~NFSNSF_NOOPENS;
 	/*
 	 * For each client...
 	 */
 	for (i = 0; i < nfsrv_clienthashsize; i++) {
-	    LIST_FOREACH_SAFE(clp, &NFSD_VNET(nfsclienthash)[i], lc_hash,
+	    LIST_FOREACH_SAFE(clp, &VNET(nfsclienthash)[i], lc_hash,
 		nclp) {
 		LIST_FOREACH_SAFE(stp, &clp->lc_open, ls_list, nstp) {
 			if (LIST_EMPTY(&stp->ls_open) &&
@@ -5913,7 +5735,7 @@ static time_t
 nfsrv_leaseexpiry(void)
 {
 
-	if (NFSD_VNET(nfsrv_stablefirst).nsf_eograce > NFSD_MONOSEC)
+	if (VNET(nfsrv_stablefirst).nsf_eograce > NFSD_MONOSEC)
 		return (NFSD_MONOSEC + 2 * (nfsrv_lease + NFSRV_LEASEDELTA));
 	return (NFSD_MONOSEC + nfsrv_lease + NFSRV_LEASEDELTA);
 }
@@ -6234,7 +6056,7 @@ nfsrv_throwawayallstate(NFSPROC_T *p)
 	 * For each client, clean out the state and then free the structure.
 	 */
 	for (i = 0; i < nfsrv_clienthashsize; i++) {
-		LIST_FOREACH_SAFE(clp, &NFSD_VNET(nfsclienthash)[i], lc_hash,
+		LIST_FOREACH_SAFE(clp, &VNET(nfsclienthash)[i], lc_hash,
 		    nclp) {
 			nfsrv_cleanclient(clp, p, false, NULL);
 			nfsrv_freedeleglist(&clp->lc_deleg);
@@ -6248,7 +6070,7 @@ nfsrv_throwawayallstate(NFSPROC_T *p)
 	 * Also, free up any remaining lock file structures.
 	 */
 	for (i = 0; i < nfsrv_lockhashsize; i++) {
-		LIST_FOREACH_SAFE(lfp, &NFSD_VNET(nfslockhash)[i], lf_hash,
+		LIST_FOREACH_SAFE(lfp, &VNET(nfslockhash)[i], lf_hash,
 		    nlfp) {
 			printf("nfsd unload: fnd a lock file struct\n");
 			nfsrv_freenfslockfile(lfp);
@@ -6377,7 +6199,7 @@ nfsrv_cache_session(struct nfsrv_descript *nd, struct mbuf **m)
 	sep = nfsrv_findsession(nd->nd_sessionid);
 	if (sep == NULL) {
 		NFSUNLOCKSESSION(shp);
-		if ((NFSD_VNET(nfsrv_stablefirst).nsf_flags &
+		if ((VNET(nfsrv_stablefirst).nsf_flags &
 		     NFSNSF_GRACEOVER) != 0) {
 			buf = malloc(INET6_ADDRSTRLEN, M_TEMP, M_WAITOK);
 			switch (nd->nd_nam->sa_family) {
@@ -6762,7 +6584,7 @@ nfsrv_freeallbackchannel_xprts(void)
 	int i;
 
 	for (i = 0; i < nfsrv_clienthashsize; i++) {
-		LIST_FOREACH(clp, &NFSD_VNET(nfsclienthash)[i], lc_hash) {
+		LIST_FOREACH(clp, &VNET(nfsclienthash)[i], lc_hash) {
 			LIST_FOREACH(sep, &clp->lc_session, sess_list) {
 				xprt = sep->sess_cbsess.nfsess_xprt;
 				sep->sess_cbsess.nfsess_xprt = NULL;
@@ -6808,7 +6630,8 @@ nfsrv_layoutget(struct nfsrv_descript *nd, vnode_t vp, struct nfsexstuff *exp,
 	struct nfslayout *lyp;
 	char *devid;
 	fhandle_t fh, *dsfhp;
-	int error, mirrorcnt;
+	int error, mirrorcnt, stripecnt;
+	uint64_t stripesiz;
 
 	if (nfsrv_devidcnt == 0)
 		return (NFSERR_UNKNLAYOUTTYPE);
@@ -6905,9 +6728,8 @@ nfsrv_layoutget(struct nfsrv_descript *nd, vnode_t vp, struct nfsexstuff *exp,
 	NFSUNLOCKLAYOUT(lhyp);
 
 	/* Find the device id and file handle. */
-	dsfhp = malloc(sizeof(fhandle_t) * NFSDEV_MAXMIRRORS, M_TEMP, M_WAITOK);
-	devid = malloc(NFSX_V4DEVICEID * NFSDEV_MAXMIRRORS, M_TEMP, M_WAITOK);
-	error = nfsrv_dsgetdevandfh(vp, p, &mirrorcnt, dsfhp, devid);
+	error = nfsrv_dsgetdevandfh(vp, p, &mirrorcnt, &stripesiz, &stripecnt,
+	    &dsfhp, &devid);
 	NFSD_DEBUG(4, "layoutget devandfh=%d\n", error);
 	if (error == 0) {
 		if (layouttype == NFSLAYOUT_NFSV4_1_FILES) {
@@ -6917,11 +6739,11 @@ nfsrv_layoutget(struct nfsrv_descript *nd, vnode_t vp, struct nfsexstuff *exp,
 				lyp = nfsrv_filelayout(nd, *iomode, &fh, dsfhp,
 				    devid, vp->v_mount->mnt_stat.f_fsid);
 		} else {
-			if (NFSX_V4FLEXLAYOUT(mirrorcnt) > maxcnt)
+			if (NFSX_V4FLEXLAYOUT(mirrorcnt, stripecnt) > maxcnt)
 				error = NFSERR_TOOSMALL;
 			else
 				lyp = nfsrv_flexlayout(nd, *iomode, mirrorcnt,
-				    &fh, dsfhp, devid,
+				    stripesiz, stripecnt, &fh, dsfhp, devid,
 				    vp->v_mount->mnt_stat.f_fsid);
 		}
 	}
@@ -6996,15 +6818,16 @@ nfsrv_filelayout(struct nfsrv_descript *nd, int iomode, fhandle_t *fhp,
  */
 static struct nfslayout *
 nfsrv_flexlayout(struct nfsrv_descript *nd, int iomode, int mirrorcnt,
-    fhandle_t *fhp, fhandle_t *dsfhp, char *devid, fsid_t fs)
+    uint64_t stripesiz, int stripecnt, fhandle_t *fhp, fhandle_t *dsfhp,
+    char *devid, fsid_t fs)
 {
 	uint32_t *tl;
 	struct nfslayout *lyp;
-	uint64_t lenval;
-	int i;
+	int i, j;
 
-	lyp = malloc(sizeof(struct nfslayout) + NFSX_V4FLEXLAYOUT(mirrorcnt),
-	    M_NFSDSTATE, M_WAITOK | M_ZERO);
+	lyp = malloc(sizeof(struct nfslayout) +
+	    NFSX_V4FLEXLAYOUT(mirrorcnt, stripecnt), M_NFSDSTATE,
+	    M_WAITOK | M_ZERO);
 	lyp->lay_type = NFSLAYOUT_FLEXFILE;
 	if (iomode == NFSLAYOUTIOMODE_RW)
 		lyp->lay_flags = NFSLAY_RW;
@@ -7018,41 +6841,42 @@ nfsrv_flexlayout(struct nfsrv_descript *nd, int iomode, int mirrorcnt,
 
 	/* Fill in the xdr for the files layout. */
 	tl = (uint32_t *)lyp->lay_xdr;
-	lenval = 0;
-	txdr_hyper(lenval, tl); tl += 2;		/* Stripe unit. */
+	txdr_hyper(stripesiz, tl); tl += 2;		/* Stripe unit. */
 	*tl++ = txdr_unsigned(mirrorcnt);		/* # of mirrors. */
 	for (i = 0; i < mirrorcnt; i++) {
-		*tl++ = txdr_unsigned(1);		/* One stripe. */
-		NFSBCOPY(devid, tl, NFSX_V4DEVICEID);	/* Device ID. */
-		tl += (NFSX_V4DEVICEID / NFSX_UNSIGNED);
-		devid += NFSX_V4DEVICEID;
-		*tl++ = txdr_unsigned(1);		/* Efficiency. */
-		*tl++ = 0;				/* Proxy Stateid. */
-		*tl++ = 0x55555555;
-		*tl++ = 0x55555555;
-		*tl++ = 0x55555555;
-		*tl++ = txdr_unsigned(1);		/* 1 file handle. */
-		*tl++ = txdr_unsigned(NFSX_V4PNFSFH);
-		NFSBCOPY(dsfhp, tl, sizeof(*dsfhp));
-		tl += (NFSM_RNDUP(NFSX_V4PNFSFH) / NFSX_UNSIGNED);
-		dsfhp++;
-		if (nfsrv_flexlinuxhack != 0) {
-			*tl++ = txdr_unsigned(strlen(FLEX_UID0));
-			*tl = 0;		/* 0 pad string. */
-			NFSBCOPY(FLEX_UID0, tl++, strlen(FLEX_UID0));
-			*tl++ = txdr_unsigned(strlen(FLEX_UID0));
-			*tl = 0;		/* 0 pad string. */
-			NFSBCOPY(FLEX_UID0, tl++, strlen(FLEX_UID0));
-		} else {
-			*tl++ = txdr_unsigned(strlen(FLEX_OWNERID));
-			NFSBCOPY(FLEX_OWNERID, tl++, NFSX_UNSIGNED);
-			*tl++ = txdr_unsigned(strlen(FLEX_OWNERID));
-			NFSBCOPY(FLEX_OWNERID, tl++, NFSX_UNSIGNED);
+		*tl++ = txdr_unsigned(stripecnt);	/* Stripe cnt. */
+		for (j = 0; j < stripecnt; j++) {
+			NFSBCOPY(devid, tl, NFSX_V4DEVICEID);	/* Device ID. */
+			tl += (NFSX_V4DEVICEID / NFSX_UNSIGNED);
+			devid += NFSX_V4DEVICEID;
+			*tl++ = txdr_unsigned(1);	/* Efficiency. */
+			*tl++ = 0;			/* Proxy Stateid. */
+			*tl++ = 0x55555555;
+			*tl++ = 0x55555555;
+			*tl++ = 0x55555555;
+			*tl++ = txdr_unsigned(1);	/* 1 file handle. */
+			*tl++ = txdr_unsigned(NFSX_V4PNFSFH);
+			NFSBCOPY(dsfhp, tl, sizeof(*dsfhp));
+			tl += (NFSM_RNDUP(NFSX_V4PNFSFH) / NFSX_UNSIGNED);
+			dsfhp++;
+			if (nfsrv_flexlinuxhack != 0) {
+				*tl++ = txdr_unsigned(strlen(FLEX_UID0));
+				*tl = 0;		/* 0 pad string. */
+				NFSBCOPY(FLEX_UID0, tl++, strlen(FLEX_UID0));
+				*tl++ = txdr_unsigned(strlen(FLEX_UID0));
+				*tl = 0;		/* 0 pad string. */
+				NFSBCOPY(FLEX_UID0, tl++, strlen(FLEX_UID0));
+			} else {
+				*tl++ = txdr_unsigned(strlen(FLEX_OWNERID));
+				NFSBCOPY(FLEX_OWNERID, tl++, NFSX_UNSIGNED);
+				*tl++ = txdr_unsigned(strlen(FLEX_OWNERID));
+				NFSBCOPY(FLEX_OWNERID, tl++, NFSX_UNSIGNED);
+			}
 		}
 	}
 	*tl++ = txdr_unsigned(0);		/* ff_flags. */
 	*tl = txdr_unsigned(60);		/* Status interval hint. */
-	lyp->lay_layoutlen = NFSX_V4FLEXLAYOUT(mirrorcnt);
+	lyp->lay_layoutlen = NFSX_V4FLEXLAYOUT(mirrorcnt, stripecnt);
 	return (lyp);
 }
 
@@ -7308,7 +7132,7 @@ nfsrv_layoutreturn(struct nfsrv_descript *nd, vnode_t vp,
 		error = nfsvno_getfh(vp, &fh, p);
 		if (error == 0) {
 			error = nfsrv_updatemdsattr(vp, &na, p);
-			if (error != 0)
+			if (error != 0 && error != ESTALE)
 				printf("nfsrv_layoutreturn: updatemdsattr"
 				    " failed=%d\n", error);
 		}
@@ -7478,7 +7302,7 @@ nfsrv_addlayout(struct nfsrv_descript *nd, struct nfslayout **lypp,
 	/* Insert the new layout in the lists. */
 	*lypp = NULL;
 	atomic_add_int(&nfsrv_layoutcnt, 1);
-	NFSD_VNET(nfsstatsv1_p)->srvlayouts++;
+	VNET(nfsstatsv1_p)->srvlayouts++;
 	NFSBCOPY(lyp->lay_xdr, layp, lyp->lay_layoutlen);
 	*layoutlenp = lyp->lay_layoutlen;
 	TAILQ_INSERT_HEAD(&lhyp->list, lyp, lay_list);
@@ -7571,7 +7395,7 @@ nfsrv_freelayout(struct nfslayouthead *lhp, struct nfslayout *lyp)
 
 	NFSD_DEBUG(4, "Freelayout=%p\n", lyp);
 	atomic_add_int(&nfsrv_layoutcnt, -1);
-	NFSD_VNET(nfsstatsv1_p)->srvlayouts--;
+	VNET(nfsstatsv1_p)->srvlayouts--;
 	TAILQ_REMOVE(lhp, lyp, lay_list);
 	free(lyp, M_NFSDSTATE);
 }
@@ -7716,8 +7540,9 @@ nfsrv_setdsserver(char *dspathp, char *mdspathp, NFSPROC_T *p,
 	struct nfsdevice *ds;
 	struct mount *mp;
 	int error, i;
-	char *dsdirpath;
+	char *cp, *dsdirpath, *endcp;
 	size_t dsdirsize;
+	u_quad_t stripesiz;
 
 	NFSD_DEBUG(4, "setdssrv path=%s\n", dspathp);
 	*dsp = NULL;
@@ -7731,6 +7556,7 @@ nfsrv_setdsserver(char *dspathp, char *mdspathp, NFSPROC_T *p,
 	NFSD_DEBUG(4, "lookup=%d\n", error);
 	if (error != 0)
 		return (error);
+	NDFREE_PNBUF(&nd);
 	if (nd.ni_vp->v_type != VDIR) {
 		vput(nd.ni_vp);
 		NFSD_DEBUG(4, "dspath not dir\n");
@@ -7754,6 +7580,7 @@ nfsrv_setdsserver(char *dspathp, char *mdspathp, NFSPROC_T *p,
 	    M_NFSDSTATE, M_WAITOK | M_ZERO);
 	ds->nfsdev_dvp = nd.ni_vp;
 	ds->nfsdev_nmp = VFSTONFS(nd.ni_vp->v_mount);
+	ds->nfsdev_mdsstripesiz = nfsrv_stripesiz;
 	NFSVOPUNLOCK(nd.ni_vp);
 
 	dsdirsize = strlen(dspathp) + 16;
@@ -7767,6 +7594,7 @@ nfsrv_setdsserver(char *dspathp, char *mdspathp, NFSPROC_T *p,
 		NFSD_DEBUG(4, "dsdirpath=%s lookup=%d\n", dsdirpath, error);
 		if (error != 0)
 			break;
+		NDFREE_PNBUF(&nd);
 		if (nd.ni_vp->v_type != VDIR) {
 			vput(nd.ni_vp);
 			error = ENOTDIR;
@@ -7785,6 +7613,9 @@ nfsrv_setdsserver(char *dspathp, char *mdspathp, NFSPROC_T *p,
 	free(dsdirpath, M_TEMP);
 
 	if (strlen(mdspathp) > 0) {
+		cp = strchr(mdspathp, '@');
+		if (cp != NULL)
+			*cp = '\0';
 		/*
 		 * This DS stores file for a specific MDS exported file
 		 * system.
@@ -7795,6 +7626,7 @@ nfsrv_setdsserver(char *dspathp, char *mdspathp, NFSPROC_T *p,
 		NFSD_DEBUG(4, "mds lookup=%d\n", error);
 		if (error != 0)
 			goto out;
+		NDFREE_PNBUF(&nd);
 		if (nd.ni_vp->v_type != VDIR) {
 			vput(nd.ni_vp);
 			error = ENOTDIR;
@@ -7811,6 +7643,19 @@ nfsrv_setdsserver(char *dspathp, char *mdspathp, NFSPROC_T *p,
 		ds->nfsdev_mdsfsid = mp->mnt_stat.f_fsid;
 		ds->nfsdev_mdsisset = 1;
 		vput(nd.ni_vp);
+		if (cp != NULL) {
+			/* There is a stripesiz specified. */
+			endcp = NULL;
+			if (*(cp + 1) != '\0')
+				stripesiz = strtouq(cp + 1, &endcp, 10);
+			if (endcp == NULL || *endcp != '\0') {
+				error = ENXIO;
+				NFSD_DEBUG(4, "mds stripesiz invalid\n");
+				goto out;
+			}
+			ds->nfsdev_mdsstripesiz = stripesiz;
+			*cp = '@';
+		}
 	}
 
 out:
@@ -8633,7 +8478,7 @@ nfsrv_mdscopymr(char *mdspathp, char *dspathp, char *curdspathp, char *buf,
 	struct vnode *vp, *curvp;
 	struct pnfsdsfile *pf;
 	struct nfsmount *nmp, *curnmp;
-	int dsdir, error, mirrorcnt, ippos;
+	int dsdir, error, ippos;
 
 	vp = NULL;
 	curvp = NULL;
@@ -8654,6 +8499,7 @@ nfsrv_mdscopymr(char *mdspathp, char *dspathp, char *curdspathp, char *buf,
 	NFSD_DEBUG(4, "lookup=%d\n", error);
 	if (error != 0)
 		return (error);
+	NDFREE_PNBUF(&nd);
 	if (nd.ni_vp->v_type != VREG) {
 		vput(nd.ni_vp);
 		NFSD_DEBUG(4, "mdspath not reg\n");
@@ -8675,6 +8521,7 @@ nfsrv_mdscopymr(char *mdspathp, char *dspathp, char *curdspathp, char *buf,
 			vput(vp);
 			return (error);
 		}
+		NDFREE_PNBUF(&nd);
 		if (nd.ni_vp->v_type != VDIR) {
 			vput(nd.ni_vp);
 			vput(vp);
@@ -8717,6 +8564,7 @@ nfsrv_mdscopymr(char *mdspathp, char *dspathp, char *curdspathp, char *buf,
 				vput(curvp);
 			return (error);
 		}
+		NDFREE_PNBUF(&nd);
 		if (nd.ni_vp->v_type != VDIR || nd.ni_vp == curvp) {
 			vput(nd.ni_vp);
 			vput(vp);
@@ -8767,7 +8615,7 @@ nfsrv_mdscopymr(char *mdspathp, char *dspathp, char *curdspathp, char *buf,
 	 * on the MDS file (as checked via the nmp argument),
 	 * nfsrv_dsgetsockmnt() returns EEXIST, so no copying will occur.
 	 */
-	error = nfsrv_dsgetsockmnt(vp, 0, buf, buflenp, &mirrorcnt, p,
+	error = nfsrv_dsgetsockmnt(vp, 0, buf, buflenp, NULL, NULL, NULL, p,
 	    NULL, NULL, NULL, fname, nvpp, &nmp, curnmp, &ippos, &dsdir);
 	if (curvp != NULL)
 		vput(curvp);
@@ -9004,7 +8852,7 @@ nfsrv_issuedelegation(struct vnode *vp, struct nfsclient *clp,
 		    new_deleg, ls_hash);
 		LIST_INSERT_HEAD(&clp->lc_deleg, new_deleg, ls_list);
 		*new_delegp = NULL;
-		NFSD_VNET(nfsstatsv1_p)->srvdelegates++;
+		VNET(nfsstatsv1_p)->srvdelegates++;
 		nfsrv_openpluslock++;
 		nfsrv_delegatecnt++;
 	}
@@ -9034,4 +8882,76 @@ nfsrv_removedeleg(fhandle_t *fhp, struct nfsrv_descript *nd, NFSPROC_T *p)
 			nfsrv_freedeleg(stp);
 	}
 	NFSUNLOCKSTATE();
+}
+
+/*
+ * Free the nfslockfile structure if not in use.
+ */
+static void
+nfsrv_freelockifnotinuse(struct nfslockfile *lfp)
+{
+
+	/*
+	 * The nfslockfile is freed here if there are no locks
+	 * associated with the open.
+	 * If there are locks associated with the open, the
+	 * nfslockfile structure can be freed via nfsrv_freelockowner().
+	 */
+	if (lfp != NULL && LIST_EMPTY(&lfp->lf_open) &&
+	    LIST_EMPTY(&lfp->lf_deleg) && LIST_EMPTY(&lfp->lf_lock) &&
+	    LIST_EMPTY(&lfp->lf_locallock) && LIST_EMPTY(&lfp->lf_rollback) &&
+	    lfp->lf_usecount == 0 &&
+	    nfsv4_testlock(&lfp->lf_locallock_lck) == 0)
+		nfsrv_freenfslockfile(lfp);
+}
+
+/*
+ * Free stranded open/lock/delegation/layouts.
+ * (These become stranded if the file has been deleted.)
+ */
+void
+nfsrv_freestrandedstate(struct nfsrvfh *nfp)
+{
+	struct nfslockfile *lfp;
+	struct nfsstate *stp, *nstp;
+	struct nfslayouthash *lhyp;
+	struct nfslayout *lyp, *nlyp;
+	fhandle_t *fhp;
+
+	if (nfp->nfsrvfh_len != NFSX_MYFH)
+		return;
+	fhp = (fhandle_t *)nfp->nfsrvfh_data;
+	NFSLOCKSTATE();
+	if (nfsrv_getlockfile(0, NULL, &lfp, fhp, 0) < 0) {
+		NFSUNLOCKSTATE();
+		return;
+	}
+	lfp->lf_usecount++;	/* So nfsrv_freeopen() does not free it. */
+	/* Note that nfsrv_freeopen() will also free the byte range locks. */
+	LIST_FOREACH_SAFE(stp, &lfp->lf_open, ls_file, nstp)
+		nfsrv_freeopen(stp, NULL, 0, curthread);
+
+	/*
+	 * Normally, a delegation will have been recalled when the file is
+	 * removed.  However, get rid of any that have somehow been
+	 * left stranded.
+	 */
+	LIST_FOREACH_SAFE(stp, &lfp->lf_deleg, ls_file, nstp)
+		nfsrv_freedeleg(stp);
+
+	/* Get rid of the nfslockfile, if no longer in use. */
+	lfp->lf_usecount--;
+	nfsrv_freelockifnotinuse(lfp);
+	NFSUNLOCKSTATE();
+
+	/* Free any layouts for the pNFS server case. */
+	if (nfsrv_devidcnt == 0)
+		return;
+	lhyp = NFSLAYOUTHASH(fhp);
+	NFSLOCKLAYOUT(lhyp);
+	TAILQ_FOREACH_SAFE(lyp, &lhyp->list, lay_list, nlyp) {
+		if (NFSBCMP(&lyp->lay_fh, fhp, sizeof(*fhp)) == 0)
+			nfsrv_freelayout(&lhyp->list, lyp);
+	}
+	NFSUNLOCKLAYOUT(lhyp);
 }

@@ -68,7 +68,10 @@ int bnxt_hwrm_stat_ctx_alloc(struct bnxt_softc *softc, struct bnxt_cp_ring *cpr,
     uint64_t paddr);
 int bnxt_hwrm_stat_ctx_free(struct bnxt_softc *softc, struct bnxt_cp_ring *cpr);
 int bnxt_hwrm_port_qstats(struct bnxt_softc *softc);
+int bnxt_hwrm_generic_qstats(struct bnxt_softc *softc, uint8_t flags);
 int bnxt_hwrm_port_qstats_ext(struct bnxt_softc *softc);
+int bnxt_hwrm_port_led_qcaps(struct bnxt_softc *softc);
+int bnxt_hwrm_port_led_cfg(struct bnxt_softc *softc, bool led_on);
 int bnxt_hwrm_ring_grp_alloc(struct bnxt_softc *softc,
     struct bnxt_grp_info *grp);
 int bnxt_hwrm_ring_grp_free(struct bnxt_softc *softc, struct bnxt_grp_info *gr);
@@ -125,6 +128,7 @@ uint16_t bnxt_hwrm_get_wol_fltrs(struct bnxt_softc *softc, uint16_t handle);
 int bnxt_hwrm_alloc_wol_fltr(struct bnxt_softc *softc);
 int bnxt_hwrm_free_wol_fltr(struct bnxt_softc *softc);
 int bnxt_hwrm_set_coal(struct bnxt_softc *softc);
+void bnxt_hwrm_coal_params_qcaps(struct bnxt_softc *softc);
 int bnxt_hwrm_func_rgtr_async_events(struct bnxt_softc *softc, unsigned long *bmap,
 				     int bmap_size);
 int bnxt_hwrm_func_backing_store_qcaps(struct bnxt_softc *softc);
@@ -141,4 +145,5 @@ int bnxt_hwrm_passthrough(struct bnxt_softc *softc, void *req, uint32_t req_len,
 int	_hwrm_send_message(struct bnxt_softc *, void *, uint32_t);
 int	hwrm_send_message(struct bnxt_softc *, void *, uint32_t);
 void	bnxt_hwrm_cmd_hdr_init(struct bnxt_softc *, void *, uint16_t);
+int bnxt_hwrm_reserve_vf_rings (struct bnxt_softc *softc);
 #endif

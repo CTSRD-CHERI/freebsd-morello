@@ -478,14 +478,14 @@ struct r92s_fw_cmd_set_key {
 
 	uint8_t	cam_id;
 	uint8_t	grpkey;
-	uint8_t	key[IEEE80211_KEYBUF_SIZE];
+	uint8_t	key[IEEE80211_KEYBUF_128_SIZE]; /* XXX firmware */
 } __packed;
 
 /* Structure for R92S_CMD_SET_STA_KEY. */
 struct r92s_fw_cmd_set_key_mac {
 	uint8_t	macaddr[IEEE80211_ADDR_LEN];
 	uint8_t	algo;
-	uint8_t	key[IEEE80211_KEYBUF_SIZE];
+	uint8_t	key[IEEE80211_KEYBUF_128_SIZE]; /* XXX firmware */
 } __packed;
 
 /* Structures for R92S_EVENT_SURVEY/R92S_CMD_JOIN_BSS. */
@@ -593,7 +593,14 @@ struct r92s_event_join_bss {
 	struct		ndis_wlan_bssid_ex bss;
 } __packed;
 
-#define R92S_MACID_BSS	5	/* XXX hardcoded somewhere */
+/*
+ * This is hard-coded in the firmware for a STA mode
+ * BSS join.  If you turn on FWDEBUG, you'll see this
+ * in the logs:
+ *
+ * rsu0: FWDBG: mac id #5: 0000005b, 000fffff, 00000000
+ */
+#define R92S_MACID_BSS	5
 
 /* Rx MAC descriptor. */
 struct r92s_rx_stat {

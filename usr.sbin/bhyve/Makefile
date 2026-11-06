@@ -25,6 +25,7 @@ SRCS=	\
 	block_if.c		\
 	bootrom.c		\
 	config.c		\
+	config_schema.c		\
 	console.c		\
 	crc16.c			\
 	ctl_nvme_all.c		\
@@ -32,6 +33,7 @@ SRCS=	\
 	ctl_util.c		\
 	hda_codec.c		\
 	iov.c			\
+	ipc.c			\
 	mem.c			\
 	mevent.c		\
 	net_backend_netmap.c	\
@@ -53,6 +55,7 @@ SRCS=	\
 	pci_virtio_net.c	\
 	pci_virtio_rnd.c	\
 	pci_virtio_scsi.c	\
+	pci_virtio_scsi_ctl.c	\
 	pci_xhci.c		\
 	qemu_fwcfg.c		\
 	qemu_loader.c		\
@@ -77,6 +80,8 @@ SRCS+=	snapshot.c
 
 .include "${MACHINE_CPUARCH}/Makefile.inc"
 
+SUBDIR+= slirp
+
 .if defined(BHYVE_FDT_SUPPORT)
 LIBADD+= fdt
 CFLAGS+= -I${SRCTOP}/sys/contrib/libfdt
@@ -95,7 +100,7 @@ CFLAGS+=-I${.CURDIR}		\
 	-I${.CURDIR}/../../contrib/lib9p \
 	-I${SRCTOP}/sys
 
-LIBADD+= vmmapi md nv pthread z util sbuf cam 9p
+LIBADD+= vmmapi md nv uvmem pthread z util sbuf cam 9p
 
 .if ${MK_BHYVE_SNAPSHOT} != "no"
 LIBADD+= ucl xo

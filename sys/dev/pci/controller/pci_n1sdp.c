@@ -83,7 +83,7 @@ static int
 n1sdp_init(struct generic_pcie_n1sdp_softc *sc)
 {
 	struct pcie_discovery_data *shared_data;
-	vm_offset_t vaddr;
+	void *vaddr;
 	vm_paddr_t paddr_rc;
 	vm_paddr_t paddr;
 	vm_page_t m[BDF_TABLE_SIZE / PAGE_SIZE];
@@ -101,7 +101,7 @@ n1sdp_init(struct generic_pcie_n1sdp_softc *sc)
 	}
 
 	vaddr = kva_alloc((vm_size_t)BDF_TABLE_SIZE);
-	if (vaddr == 0) {
+	if (vaddr == NULL) {
 		printf("%s: Can't allocate KVA memory.", __func__);
 		error = ENXIO;
 		goto out;
@@ -345,6 +345,17 @@ n1sdp_pcie_write_config(device_t dev, u_int bus, u_int slot,
 	bus_space_write_4(t, h, offset & ~3, data);
 }
 
+static int
+n1sdp_pcie_acpi_request_feature(device_t pcib __unused, device_t dev __unused,
+    enum pci_feature feature __unused)
+{
+	/*
+	 * HotPlug isn't supported on the N1SDP as it causes an interrupt storm
+	 */
+	return (EINVAL);
+}
+
+
 static device_method_t n1sdp_pcie_acpi_methods[] = {
 	DEVMETHOD(device_probe,		n1sdp_pcie_acpi_probe),
 	DEVMETHOD(device_attach,	n1sdp_pcie_acpi_attach),
@@ -352,6 +363,7 @@ static device_method_t n1sdp_pcie_acpi_methods[] = {
 	/* pcib interface */
 	DEVMETHOD(pcib_read_config,	n1sdp_pcie_read_config),
 	DEVMETHOD(pcib_write_config,	n1sdp_pcie_write_config),
+	DEVMETHOD(pcib_request_feature, n1sdp_pcie_acpi_request_feature),
 
 	DEVMETHOD_END
 };

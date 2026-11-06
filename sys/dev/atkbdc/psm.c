@@ -352,6 +352,8 @@ typedef struct elantechhw {
 	int			dptracey;
 	int			issemimt;
 	int			isclickpad;
+	int			hassmbusnotify;
+	int			has3buttons;
 	int			hascrc;
 	int			hastrackpoint;
 	int			haspressure;
@@ -417,7 +419,7 @@ enum {
     ((pb)->ipacket[0] & 0x0c) == 0x0c && ((pb)->ipacket[3] & 0xce) == 0x0c)
 #define	ELANTECH_PKT_IS_V4(pb, hascrc) ((hascrc) ? 			\
     ((pb)->ipacket[3] & 0x08) == 0x00 :					\
-    ((pb)->ipacket[0] & 0x0c) == 0x04 && ((pb)->ipacket[3] & 0x1c) == 0x10)
+    ((pb)->ipacket[0] & 0x08) == 0x00 && ((pb)->ipacket[3] & 0x1c) == 0x10)
 
 typedef struct elantechaction {
 	finger_t		fingers[ELANTECH_MAX_FINGERS];
@@ -743,7 +745,7 @@ static device_method_t psm_methods[] = {
 	DEVMETHOD(device_attach,	psmattach),
 	DEVMETHOD(device_detach,	psmdetach),
 	DEVMETHOD(device_resume,	psmresume),
-	{ 0, 0 }
+	DEVMETHOD_END
 };
 
 static driver_t psm_driver = {
@@ -1930,8 +1932,11 @@ psm_register_elantech(device_t dev)
 	evdev_support_key(evdev_a, BTN_TOUCH);
 	evdev_support_nfingers(evdev_a, ELANTECH_MAX_FINGERS);
 	evdev_support_key(evdev_a, BTN_LEFT);
-	if (!sc->elanhw.isclickpad)
+	if (!sc->elanhw.isclickpad) {
 		evdev_support_key(evdev_a, BTN_RIGHT);
+		if (sc->elanhw.has3buttons)
+			evdev_support_key(evdev_a, BTN_MIDDLE);
+	}
 	psm_support_abs_bulk(evdev_a, elantech_absinfo);
 
 	error = evdev_register_mtx(evdev_a, &Giant);
@@ -3675,7 +3680,7 @@ proc_synaptics_mux(struct psm_softc *sc, packetbuf_t *pb)
 	 * While in hidden multiplexing mode KBC does some editing of the
 	 * packet stream. It remembers the button bits from the last packet
 	 * received from each device, and replaces the button bits of every
-	 * packet with the logical OR of all devices’ most recent button bits.
+	 * packet with the logical OR of all devices' most recent button bits.
 	 * This button crosstalk should be filtered out as Synaptics and
 	 * generic mouse encode middle button presses in a different way.
 	 */
@@ -4666,6 +4671,13 @@ proc_elantech(struct psm_softc *sc, packetbuf_t *pb, mousestatus_t *ms,
 		mask = sc->elanaction.mask;
 		nfingers = bitcount(mask);
 
+		/* The motion packet can only update two fingers at a time.
+		 * Copy the previous state to get all active fingers. */
+		for (id = 0; id < ELANTECH_MAX_FINGERS; id++)
+			if (sc->elanaction.mask & (1 << id))
+				f[id] = sc->elanaction.fingers[id];
+
+		/* Update finger positions from the new packet */
 		scale = (pb->ipacket[0] & 0x10) ? 5 : 1;
 		for (i = 0; i <= 3; i += 3) {
 			id = ((pb->ipacket[i] & 0xe0) >> 5) - 1;
@@ -4748,6 +4760,9 @@ proc_elantech(struct psm_softc *sc, packetbuf_t *pb, mousestatus_t *ms,
 		touchpad_button =
 		    ((pb->ipacket[0] & 0x01) ? MOUSE_BUTTON1DOWN : 0) |
 		    ((pb->ipacket[0] & 0x02) ? MOUSE_BUTTON3DOWN : 0);
+		if (sc->elanhw.has3buttons)
+			touchpad_button |=
+			    ((pb->ipacket[0] & 0x04) ? MOUSE_BUTTON2DOWN : 0);
 	}
 
 #ifdef EVDEV_SUPPORT
@@ -5287,6 +5302,7 @@ static const struct filterops psmfiltops = {
 	.f_isfd = 1,
 	.f_detach = psmfilter_detach,
 	.f_event = psmfilter,
+	.f_copy = knote_triv_copy,
 };
 
 static int
@@ -7339,6 +7355,9 @@ enable_elantech(struct psm_softc *sc, enum probearg arg)
 	elanhw.hwversion = hwversion;
 	elanhw.issemimt = hwversion == 2;
 	elanhw.isclickpad = (resp[1] & 0x10) != 0;
+	elanhw.hassmbusnotify =
+	    icversion == 0x0f && (resp[1] & 0x20) != 0 && resp[2] != 0;
+	elanhw.has3buttons = elanhw.hassmbusnotify;
 	elanhw.hascrc = (resp[1] & 0x40) != 0;
 	elanhw.haspressure = elanhw.fwversion >= 0x020800;
 
@@ -7524,7 +7543,7 @@ static	device_attach_t			psmcpnp_attach;
 static device_method_t psmcpnp_methods[] = {
 	DEVMETHOD(device_probe,		psmcpnp_probe),
 	DEVMETHOD(device_attach,	psmcpnp_attach),
-	{ 0, 0 }
+	DEVMETHOD_END
 };
 
 static driver_t psmcpnp_driver = {

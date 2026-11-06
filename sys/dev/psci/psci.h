@@ -39,9 +39,13 @@ typedef int (*psci_callfn_t)(register_t, register_t, register_t, register_t,
 extern bool psci_present;
 
 int	psci_cpu_on(unsigned long, unsigned long, unsigned long);
+int	psci_cpu_off(void);	/* Operates on caller. */
 void	psci_reset(void);
 int32_t	psci_features(uint32_t);
 int	psci_get_version(void);
+
+void	psci_init(void *dummy);
+bool	psci_conduit_is_smc(void);
 
 /* Handler to let us call into the PSCI/SMCCC firmware */
 extern psci_callfn_t psci_callfn;

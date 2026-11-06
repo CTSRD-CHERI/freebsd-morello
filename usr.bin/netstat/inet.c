@@ -83,7 +83,7 @@ static void inetprint(const char *, struct in_addr *, int, const char *, int,
     const int);
 #endif
 #ifdef INET6
-static int udp_done, tcp_done, sdp_done;
+static int udp_done, udplite_done, tcp_done, sdp_done;
 #endif /* INET6 */
 
 static int
@@ -99,6 +99,9 @@ pcblist_sysctl(int proto, const char *name, char **bufp)
 		break;
 	case IPPROTO_UDP:
 		mibvar = "net.inet.udp.pcblist";
+		break;
+	case IPPROTO_UDPLITE:
+		mibvar = "net.inet.udplite.pcblist";
 		break;
 	default:
 		mibvar = "net.inet.raw.pcblist";
@@ -222,11 +225,18 @@ protopr(u_long off, const char *name, int af1, int proto)
 			udp_done = 1;
 #endif
 		break;
+	case IPPROTO_UDPLITE:
+#ifdef INET6
+		if (udplite_done != 0)
+			return;
+		else
+			udplite_done = 1;
+#endif
+		break;
 	}
 
 	if (!pcblist_sysctl(proto, name, &buf))
 		return;
-
 	if (istcp && (cflag || Cflag)) {
 		fnamelen = strlen("Stack");
 		cnamelen = strlen("CC");
@@ -318,18 +328,18 @@ protopr(u_long off, const char *name, int af1, int proto)
 				    "Proto", "Listen", "Local Address");
 			else if (Tflag)
 				xo_emit((Aflag && !Wflag) ?
-    "{T:/%-5.5s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-18.18s} {T:/%s}" :
+    "{T:/%-9.9s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-18.18s} {T:/%s}" :
 				    ((!Wflag || af1 == AF_INET) ?
-    "{T:/%-5.5s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-22.22s} {T:/%s}" :
-    "{T:/%-5.5s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-45.45s} {T:/%s}"),
+    "{T:/%-9.9s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-22.22s} {T:/%s}" :
+    "{T:/%-9.9s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-45.45s} {T:/%s}"),
 				    "Proto", "Rexmit", "OOORcv", "0-win",
 				    "Local Address", "Foreign Address");
 			else {
 				xo_emit((Aflag && !Wflag) ?
-    "{T:/%-5.5s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-18.18s} {T:/%-18.18s}" :
+    "{T:/%-9.9s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-18.18s} {T:/%-18.18s}" :
 				    ((!Wflag || af1 == AF_INET) ?
-    "{T:/%-5.5s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-22.22s} {T:/%-22.22s}" :
-    "{T:/%-5.5s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-45.45s} {T:/%-45.45s}"),
+    "{T:/%-9.9s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-22.22s} {T:/%-22.22s}" :
+    "{T:/%-9.9s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-45.45s} {T:/%-45.45s}"),
 				    "Proto", "Recv-Q", "Send-Q",
 				    "Local Address", "Foreign Address");
 				if (!xflag && !Rflag)
@@ -382,9 +392,13 @@ protopr(u_long off, const char *name, int af1, int proto)
 		vchar = ((inp->inp_vflag & INP_IPV4) != 0) ?
 		    "4" : "";
 		if (istcp && (tp->t_flags & TF_TOE) != 0)
-			xo_emit("{:protocol/%-3.3s%-2.2s/%s%s} ", "toe", vchar);
-		else
-			xo_emit("{:protocol/%-3.3s%-2.2s/%s%s} ", name, vchar);
+			xo_emit("{:protocol/%-3.3s%-6.6s/%s%s} ", "toe", vchar);
+		else {
+			int l = max (2, 9 - strlen(name));
+
+			xo_emit("{d:protocol/%.7s%-*.*s} ", name, l, l, vchar);
+			xo_emit("{e:protocol/%s%s}", name, vchar);
+		}
 		if (Lflag) {
 			char buf1[33];
 
@@ -508,9 +522,9 @@ protopr(u_long off, const char *name, int af1, int proto)
 		}
 		if (istcp && !Lflag && !xflag && !Tflag && !Rflag) {
 			if (tp->t_state < 0 || tp->t_state >= TCP_NSTATES)
-				xo_emit("{:tcp-state/%-11d}", tp->t_state);
+				xo_emit("{:tcp-state/%-11d/%d}", tp->t_state);
 			else {
-				xo_emit("{:tcp-state/%-11s}",
+				xo_emit("{:tcp-state/%-11s/%s}",
 				    tcpstates[tp->t_state]);
 #if defined(TF_NEEDSYN) && defined(TF_NEEDFIN)
 				/* Show T/TCP `hidden state' */
@@ -527,11 +541,11 @@ protopr(u_long off, const char *name, int af1, int proto)
 		}
 		if (istcp) {
 			if (cflag)
-				xo_emit(" {:stack/%-*.*s}",
+				xo_emit(" {t:stack/%-*.*s}",
 					
 					fnamelen, fnamelen, tp->xt_stack);
 			if (Cflag)
-				xo_emit(" {:cc/%-*.*s}"
+				xo_emit(" {t:cc/%-*.*s}"
 					" {:snd-cwnd/%10lu}"
 					" {:snd-ssthresh/%10lu}"
 					" {:t-maxseg/%5u} {:ecn/%3s}",
@@ -598,6 +612,8 @@ tcp_stats(u_long off, const char *name, int af1 __unused, int proto __unused)
 	xo_emit(m, (uintmax_t )tcpstat.f, plural(tcpstat.f))
 #define	p1a(f, m) if (tcpstat.f || sflag <= 1)				\
 	xo_emit(m, (uintmax_t )tcpstat.f)
+#define	p1b(f, m) if (tcpstat.f || sflag <= 1) \
+	xo_emit(m, (uintmax_t )tcpstat.f, plurales(tcpstat.f))
 #define	p2(f1, f2, m) if (tcpstat.f1 || tcpstat.f2 || sflag <= 1)	\
 	xo_emit(m, (uintmax_t )tcpstat.f1, plural(tcpstat.f1),		\
 	    (uintmax_t )tcpstat.f2, plural(tcpstat.f2))
@@ -700,23 +716,9 @@ tcp_stats(u_long off, const char *name, int af1 __unused, int proto __unused)
 	    "{N:/ignored RSTs in the window%s}\n");
 	p(tcps_connects, "\t{:connections-established/%ju} "
 	    "{N:/connection%s established (including accepts)}\n");
-	p(tcps_usedrtt, "\t\t{:connections-hostcache-rtt/%ju} "
-	    "{N:/time%s used RTT from hostcache}\n");
-	p(tcps_usedrttvar, "\t\t{:connections-hostcache-rttvar/%ju} "
-	    "{N:/time%s used RTT variance from hostcache}\n");
-	p(tcps_usedssthresh, "\t\t{:connections-hostcache-ssthresh/%ju} "
-	    "{N:/time%s used slow-start threshold from hostcache}\n");
 	p2(tcps_closed, tcps_drops, "\t{:connections-closed/%ju} "
 	    "{N:/connection%s closed (including} "
 	    "{:connection-drops/%ju} {N:/drop%s})\n");
-	p(tcps_cachedrtt, "\t\t{:connections-updated-rtt-on-close/%ju} "
-	    "{N:/connection%s updated cached RTT on close}\n");
-	p(tcps_cachedrttvar, "\t\t"
-	    "{:connections-updated-variance-on-close/%ju} "
-	    "{N:/connection%s updated cached RTT variance on close}\n");
-	p(tcps_cachedssthresh, "\t\t"
-	    "{:connections-updated-ssthresh-on-close/%ju} "
-	    "{N:/connection%s updated cached ssthresh on close}\n");
 	p(tcps_conndrops, "\t{:embryonic-connections-dropped/%ju} "
 	    "{N:/embryonic connection%s dropped}\n");
 	p2(tcps_rttupdated, tcps_segstimed, "\t{:segments-updated-rtt/%ju} "
@@ -767,22 +769,56 @@ tcp_stats(u_long off, const char *name, int af1 __unused, int proto __unused)
 	p1a(tcps_sc_badack, "\t\t{:bad-ack/%ju} {N:/badack}\n");
 	p1a(tcps_sc_unreach, "\t\t{:unreachable/%ju} {N:/unreach}\n");
 	p(tcps_sc_zonefail, "\t\t{:zone-failures/%ju} {N:/zone failure%s}\n");
-	p(tcps_sc_sendcookie, "\t{:sent-cookies/%ju} {N:/cookie%s sent}\n");
-	p(tcps_sc_recvcookie, "\t{:received-cookies/%ju} "
-	    "{N:/cookie%s received}\n");
-	p(tcps_sc_spurcookie, "\t{:spurious-cookies/%ju} "
-	    "{N:/spurious cookie%s rejected}\n");
-	p(tcps_sc_failcookie, "\t{:failed-cookies/%ju} "
-	    "{N:/failed cookie%s rejected}\n");
 
 	xo_close_container("syncache");
+
+	xo_open_container("syncookies");
+
+	p(tcps_sc_sendcookie, "\t{:sent-cookies/%ju} {N:/cookie%s sent}\n");
+	p(tcps_sc_recvcookie, "\t\t{:received-cookies/%ju} "
+	    "{N:/cookie%s received}\n");
+	p(tcps_sc_spurcookie, "\t\t{:spurious-cookies/%ju} "
+	    "{N:/spurious cookie%s rejected}\n");
+	p(tcps_sc_failcookie, "\t\t{:failed-cookies/%ju} "
+	    "{N:/failed cookie%s rejected}\n");
+
+	xo_close_container("syncookies");
 
 	xo_open_container("hostcache");
 
 	p3(tcps_hc_added, "\t{:entries-added/%ju} "
 	    "{N:/hostcache entr%s added}\n");
-	p1a(tcps_hc_bucketoverflow, "\t\t{:buffer-overflows/%ju} "
-	    "{N:/bucket overflow}\n");
+	p(tcps_hc_hits, "\t\t{:cache-hits/%ju} "
+	    "{N:/cache lookup hit%s}\n");
+	p1b(tcps_hc_misses, "\t\t{:cache-misses/%ju} "
+	    "{N:/cache lookup miss%s}\n");
+	p(tcps_hc_bucketoverflow, "\t\t{:bucket-overflows/%ju} "
+	    "{N:/bucket overflow%s}\n");
+	p(tcps_hc_allocfail, "\t\t{:allocation-failures/%ju} "
+	    "{N:/allocation failure%s}\n");
+	p(tcps_cachedrtt, "\t\t{:connections-updated-rtt-on-close/%ju} "
+	    "{N:/connection%s updated cached RTT on close}\n");
+	p(tcps_usedrtt, "\t\t{:connections-hostcache-rtt/%ju} "
+	    "{N:/time%s used RTT from hostcache}\n");
+	p(tcps_cachedrttvar, "\t\t"
+	    "{:connections-updated-variance-on-close/%ju} "
+	    "{N:/connection%s updated cached RTT variance on close}\n");
+	p(tcps_usedrttvar, "\t\t{:connections-hostcache-rttvar/%ju} "
+	    "{N:/time%s used RTT variance from hostcache}\n");
+	p(tcps_cachedssthresh, "\t\t"
+	    "{:connections-updated-ssthresh-on-close/%ju} "
+	    "{N:/connection%s updated cached ssthresh on close}\n");
+	p(tcps_usedssthresh, "\t\t{:connections-hostcache-ssthresh/%ju} "
+	    "{N:/time%s used slow-start threshold from hostcache}\n");
+	p(tcps_cachedcwnd, "\t\t"
+	    "{:connections-updated-cwnd-on-close/%ju} "
+	    "{N:/connection%s updated cached congestion windows on close}\n");
+	p(tcps_cachedsendpipe, "\t\t"
+	    "{:connections-updated-send-space-on-close/%ju} "
+	    "{N:/connection%s updated cached send buffer space on close}\n");
+	p(tcps_cachedrecvpipe, "\t\t"
+	    "{:connections-updated-recv-space-on-close/%ju} "
+	    "{N:/connection%s updated cached recv buffer space on close}\n");
 
 	xo_close_container("hostcache");
 

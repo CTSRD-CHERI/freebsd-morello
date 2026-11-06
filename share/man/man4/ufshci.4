@@ -7,24 +7,18 @@
 .\"
 .\" Author: Jaeyoon Choi <j_yoon.choi@samsung.com>
 .\"
-.Dd July 17, 2025
+.Dd October 23, 2026
 .Dt UFSHCI 4
 .Os
 .Sh NAME
 .Nm ufshci
 .Nd Universal Flash Storage Host Controller Interface driver
 .Sh SYNOPSIS
-To compile this driver into the kernel,
-place the following line in the kernel configuration file:
-.Bd -ragged -offset indent
-.Cd "device ufshci"
-.Ed
+.Cd device ufshci
 .Pp
-Or, to load the driver as a module at boot, place the following line in
+In
 .Xr loader.conf 5 :
-.Bd -literal -offset indent
-ufshci_load="YES"
-.Ed
+.Cd ufshci_load="YES"
 .Sh DESCRIPTION
 Universal Flash Storage (UFS) is a low-power, high-performance storage
 standard composed of a host controller and a single target device.
@@ -58,7 +52,7 @@ The
 .Nm
 driver supports both host controllers and devices implementing the
 Universal Flash Storage Host Controller Interface 4.1 and earlier.
-.Sh CONFIGURATION
+.Sh LOADER TUNABLES
 The
 .Nm
 driver currently operates with a single doorbell (one I/O-queue), so any
@@ -68,37 +62,33 @@ become available, the following queue count tunable values will take effect:
 .Pp
 To force a single I/O queue pair shared by all CPUs, set the following
 tunable value in loader.conf(5):
-.Bd -literal -offset indent
-hw.ufshci.per_cpu_io_queues=0
-.Ed
+.Pp
+.Dl Va hw.ufshci.per_cpu_io_queues=0
 .Pp
 To assign more than one CPU per I/O queue pair, thereby reducing the
 number of MSI-X vectors consumed by the device, set the following tunable
 value in loader.conf(5):
-.Bd -literal -offset indent
-hw.ufshci.min_cpus_per_ioq=X
-.Ed
+.Pp
+.Dl Va hw.ufshci.min_cpus_per_ioq=X
 .Pp
 To change the I/O command timeout value (in seconds), set the following tunable
 value in loader.conf(5):
-.Bd -literal -offset indent
-hw.ufshci.timeout_period=X
-.Ed
+.Pp
+.Dl Va hw.ufshci.timeout_period=X
 .Pp
 To change the I/O command retry count, set the following tunable value in
 loader.conf(5):
-.Bd -literal -offset indent
-hw.ufshci.retry_count=X
-.Ed
+.Pp
+.Dl Va hw.ufshci.retry_count=X
 .Pp
 To force the driver to use legacy INTx interrupts, set the following tunable
 value in loader.conf(5):
-.br
-(Note: until MCQ support is available the driver always uses legacy INTx, so
-this value effectively remains 1)
-.Bd -literal -offset indent
-hw.ufshci.force_intx=1
-.Ed
+.Pp
+.Dl Va hw.ufshci.force_intx=1
+.Pp
+.Sy Note:
+until MCQ support is available the driver always uses legacy INTx,
+so this value effectively remains 1.
 .Sh SYSCTL VARIABLES
 The following controller-level
 .Xr sysctl 8
@@ -124,9 +114,41 @@ nodes are currently implemented:
 (R) Host controller minor version.
 .It Va dev.ufshci.0.major_version
 (R) Host controller major version.
+.It Va dev.ufshci.0.wb_enabled
+(R) WriteBooster enable/disable.
+.It Va dev.ufshci.0.wb_flush_enabled
+(R) WriteBooster flush enable/disable.
+.It Va dev.ufshci.0.wb_buffer_type
+(R) WriteBooster type.
+.It Va dev.ufshci.0.wb_buffer_size_mb
+(R) WriteBooster buffer size in MB.
+.It Va dev.ufshci.0.wb_user_space_config_option
+(R) WriteBooster preserve user space mode.
+.It Va dev.ufshci.0.auto_hibernation_supported
+(R) Device auto hibernation support.
+.It Va dev.ufshci.0.auto_hibernate_idle_timer_value
+(R) Auto-Hibernate Idle Timer Value (in microseconds).
+.It Va dev.ufshci.0.power_mode_supported
+(R) Device power mode support.
+.It Va dev.ufshci.0.power_mode
+(R) Current device power mode.
+.It Va dev.ufshci.0.tx_rx_power_mode
+(R) Current TX/RX PA_PWRMode value.
+.It Va dev.ufshci.0.max_tx_lanes
+(R) Maximum available TX data lanes.
+.It Va dev.ufshci.0.max_rx_lanes
+(R) Maximum available RX data lanes.
+.It Va dev.ufshci.0.tx_lanes
+(R) Active TX data lanes.
+.It Va dev.ufshci.0.rx_lanes
+(R) Active RX data lanes.
+.It Va dev.ufshci.0.max_rx_hs_gear
+(R) Maximum available RX HS gear.
+.It Va dev.ufshci.0.hs_gear
+(R) Active HS gear.
 .It Va dev.ufshci.0.utmrq.num_failures
 (R) Number of failed UTP task-management requests.
-.It Va dev.ufshci.0.utmrq.ioq.num_retries
+.It Va dev.ufshci.0.utmrq.num_retries
 (R) Number of retried UTP task-management requests.
 .It Va dev.ufshci.0.utmrq.num_intr_handler_calls
 (R) Number of interrupt handler calls caused by UTP task-management requests.
@@ -160,6 +182,18 @@ nodes are currently implemented:
 (R) Number of trackers in the UTP transfer queue.
 .It Va dev.ufshci.0.ioq.0.num_entries
 (R) Number of entries in the UTP transfer queue.
+.It Va dev.ufshci.0.force_reset
+(RW) Write a non-zero value to reset the controller now.
+This is a debug aid for exercising the recovery path.
+.It Va dev.ufshci.0.drop_next_ios
+(RW) Number of I/O requests whose doorbell the driver drops, so that they
+time out and drive the recovery path.
+This is a debug aid.
+.It Va dev.ufshci.0.drop_next_admins
+(RW) Number of admin requests whose doorbell the driver drops.
+The driver waits for its own admin requests while it brings the
+controller up, so this stalls a reset the way a dead link does.
+This is a debug aid.
 .El
 .Sh SEE ALSO
 .Xr cam 4 ,

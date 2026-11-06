@@ -4,8 +4,6 @@
 
 set -e
 
-unset NO_ROOT
-
 export ASSUME_ALWAYS_YES="YES"
 export PKG_DBDIR="/tmp/pkg"
 export PERMISSIVE="YES"
@@ -14,7 +12,12 @@ export ROOTDIR="$PWD/dvd"
 export PORTSDIR="${PORTSDIR:-/usr/ports}"
 
 _DVD_PACKAGES="
+comms/usbmuxd
 devel/git@lite
+editors/emacs@nox
+editors/vim
+filesystems/ext2
+filesystems/ntfs
 misc/freebsd-doc-all
 net/mpd5
 net/rsync
@@ -29,7 +32,6 @@ sysutils/tmux
 www/firefox
 www/links
 x11/gnome
-x11/kde
 x11/sddm
 x11/xorg
 x11-wm/sway
@@ -51,15 +53,13 @@ usage()
 
 while getopts N opt; do
 	case "$opt" in
-	N)	NO_ROOT=1 ;;
+	N)	;;
 	*)	usage ;;
 	esac
 done
 
-PKG_ARGS="-d --rootdir ${ROOTDIR}"
-if [ $NO_ROOT ]; then
-	PKG_ARGS="$PKG_ARGS -o INSTALL_AS_USER=1"
-fi
+PKG_ARGS="--rootdir ${ROOTDIR}"
+PKG_ARGS="$PKG_ARGS -o INSTALL_AS_USER=1"
 PKGCMD="/usr/sbin/pkg ${PKG_ARGS}"
 
 if [ ! -x /usr/local/sbin/pkg ]; then
@@ -73,7 +73,7 @@ export PKG_REPODIR="packages/${PKG_ABI}"
 
 /bin/mkdir -p ${ROOTDIR}/${PKG_REPODIR}
 if [ -n "${PKG_ALTABI}" ]; then
-	ln -s ${PKG_ABI} ${ROOTDIR}/packages/${PKG_ALTABI}
+	ln -nfs ${PKG_ABI} ${ROOTDIR}/packages/${PKG_ALTABI}
 fi
 
 # Ensure the ports listed in _DVD_PACKAGES exist to sanitize the
@@ -104,14 +104,12 @@ ${PKGCMD} fetch -o ${PKG_REPODIR} -d ${DVD_PACKAGES}
 # using the on-disc packages.
 export LATEST_DIR="${ROOTDIR}/${PKG_REPODIR}/Latest"
 mkdir -p ${LATEST_DIR}
-ln -s ../All/$(${PKGCMD} rquery %n-%v pkg).pkg ${LATEST_DIR}/pkg.pkg
+ln -nfs ../All/$(${PKGCMD} rquery %n-%v pkg).pkg ${LATEST_DIR}/pkg.pkg
 
 ${PKGCMD} repo ${PKG_REPODIR}
 
-if [ $NO_ROOT ]; then
-	mtree -c -p $ROOTDIR | mtree -C -k type,mode,link,size | \
-	    grep '^./packages/' >> $ROOTDIR/METALOG
-fi
+mtree -c -p $ROOTDIR | mtree -C -k type,mode,link,size | \
+    grep '^./packages[/ ]' >> $ROOTDIR/METALOG
 
 # Always exit '0', even if pkg(8) complains about conflicts.
 exit 0

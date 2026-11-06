@@ -52,6 +52,7 @@
 #include "ib_verbs.h"
 #include "bnxt_re-abi.h"
 #include "bnxt.h"
+#include "bnxt_log.h"
 
 static char drv_version[] =
 		"Broadcom NetXtreme-C/E RoCE Driver " ROCE_DRV_MODULE_NAME \
@@ -65,6 +66,7 @@ MODULE_LICENSE("Dual BSD/GPL");
 MODULE_DEPEND(bnxt_re, linuxkpi, 1, 1, 1);
 MODULE_DEPEND(bnxt_re, ibcore, 1, 1, 1);
 MODULE_DEPEND(bnxt_re, if_bnxt, 1, 1, 1);
+MODULE_DEPEND(bnxt_re, iflib, 1, 1, 1);
 MODULE_VERSION(bnxt_re, 1);
 
 
@@ -112,8 +114,7 @@ static int bnxt_re_hwrm_qcfg(struct bnxt_re_dev *rdev, u32 *db_len,
 static int bnxt_re_ib_init(struct bnxt_re_dev *rdev);
 static void bnxt_re_ib_init_2(struct bnxt_re_dev *rdev);
 void _bnxt_re_remove(struct auxiliary_device *adev);
-void writel_fbsd(struct bnxt_softc *bp, u32, u8, u32);
-u32 readl_fbsd(struct bnxt_softc *bp, u32, u8);
+
 static int bnxt_re_hwrm_dbr_pacing_qcfg(struct bnxt_re_dev *rdev);
 
 int bnxt_re_register_netdevice_notifier(struct notifier_block *nb)
@@ -133,43 +134,6 @@ int bnxt_re_unregister_netdevice_notifier(struct notifier_block *nb)
 void bnxt_re_set_dma_device(struct ib_device *ibdev, struct bnxt_re_dev *rdev)
 {
 	ibdev->dma_device = &rdev->en_dev->pdev->dev;
-}
-
-void bnxt_re_init_resolve_wq(struct bnxt_re_dev *rdev)
-{
-	rdev->resolve_wq = create_singlethread_workqueue("bnxt_re_resolve_wq");
-	 INIT_LIST_HEAD(&rdev->mac_wq_list);
-}
-
-void bnxt_re_uninit_resolve_wq(struct bnxt_re_dev *rdev)
-{
-	struct bnxt_re_resolve_dmac_work *tmp_work = NULL, *tmp_st;
-	if (!rdev->resolve_wq)
-		return;
-	flush_workqueue(rdev->resolve_wq);
-	list_for_each_entry_safe(tmp_work, tmp_st, &rdev->mac_wq_list, list) {
-			list_del(&tmp_work->list);
-			kfree(tmp_work);
-	}
-	destroy_workqueue(rdev->resolve_wq);
-	rdev->resolve_wq = NULL;
-}
-
-u32 readl_fbsd(struct bnxt_softc *bp, u32 reg_off, u8 bar_idx)
-{
-
-	if (bar_idx)
-		return bus_space_read_8(bp->doorbell_bar.tag, bp->doorbell_bar.handle, reg_off);
-	else
-		return bus_space_read_8(bp->hwrm_bar.tag, bp->hwrm_bar.handle, reg_off);
-}
-
-void writel_fbsd(struct bnxt_softc *bp, u32 reg_off, u8 bar_idx, u32 val)
-{
-	if (bar_idx)
-		bus_space_write_8(bp->doorbell_bar.tag, bp->doorbell_bar.handle, reg_off, htole32(val));
-	else
-		bus_space_write_8(bp->hwrm_bar.tag, bp->hwrm_bar.handle, reg_off, htole32(val));
 }
 
 static void bnxt_re_update_fifo_occup_slabs(struct bnxt_re_dev *rdev,
@@ -546,7 +510,8 @@ static void __wait_for_fifo_occupancy_below_th(struct bnxt_re_dev *rdev)
 	 * below pacing algo threshold as soon as pacing kicks in.
 	 */
 	while (1) {
-		read_val = readl_fbsd(rdev->en_dev->softc, rdev->dbr_db_fifo_reg_off, 0);
+		read_val = readl_fbsd(rdev->en_dev->softc, rdev->dbr_db_fifo_reg_off,
+				      BNXT_HWRM_BAR_IDX);
 		fifo_occup = pacing_data->fifo_max_depth -
 			     ((read_val & pacing_data->fifo_room_mask) >>
 			      pacing_data->fifo_room_shift);
@@ -584,7 +549,8 @@ static bool bnxt_re_check_if_dbq_intr_triggered(struct bnxt_re_dev *rdev)
 	int j;
 
 	for (j = 0; j < 10; j++) {
-		read_val = readl_fbsd(rdev->en_dev->softc, rdev->dbr_aeq_arm_reg_off, 0);
+		read_val = readl_fbsd(rdev->en_dev->softc, rdev->dbr_aeq_arm_reg_off,
+				      BNXT_HWRM_BAR_IDX);
 		dev_dbg(rdev_to_dev(rdev), "AEQ ARM status = 0x%x\n",
 			read_val);
 		if (!read_val)
@@ -604,8 +570,10 @@ int bnxt_re_set_dbq_throttling_reg(struct bnxt_re_dev *rdev, u16 nq_id, u32 thro
 	if (bnxt_qplib_dbr_pacing_ext_en(rdev->chip_ctx)) {
 		cag_ring_water_mark = (nq_id & CAG_RING_MASK) << CAG_RING_SHIFT |
 				      (throttle_val & WATERMARK_MASK);
-		writel_fbsd(rdev->en_dev->softc,  rdev->dbr_throttling_reg_off, 0, cag_ring_water_mark);
-		read_val = readl_fbsd(rdev->en_dev->softc , rdev->dbr_throttling_reg_off, 0);
+		writel_fbsd(rdev->en_dev->softc, rdev->dbr_throttling_reg_off,
+			    BNXT_HWRM_BAR_IDX, cag_ring_water_mark);
+		read_val = readl_fbsd(rdev->en_dev->softc, rdev->dbr_throttling_reg_off,
+				      BNXT_HWRM_BAR_IDX);
 		dev_dbg(rdev_to_dev(rdev),
 			"%s: dbr_throttling_reg_off read_val = 0x%x\n",
 			__func__, read_val);
@@ -616,7 +584,7 @@ int bnxt_re_set_dbq_throttling_reg(struct bnxt_re_dev *rdev, u16 nq_id, u32 thro
 			return 1;
 		}
 	}
-	writel_fbsd(rdev->en_dev->softc,  rdev->dbr_aeq_arm_reg_off, 0, 1);
+	writel_fbsd(rdev->en_dev->softc, rdev->dbr_aeq_arm_reg_off, BNXT_HWRM_BAR_IDX, 1);
 	return 0;
 }
 
@@ -661,7 +629,8 @@ static void bnxt_re_handle_dbr_nq_pacing_notification(struct bnxt_re_dev *rdev)
 		return;
 	}
 	/*Configure GRC access for Throttling and aeq_arm register */
-	writel_fbsd(rdev->en_dev->softc,  BNXT_GRCPF_REG_WINDOW_BASE_OUT + 28, 0,
+	writel_fbsd(rdev->en_dev->softc, BNXT_GRCPF_REG_WINDOW_BASE_OUT + 28,
+		    BNXT_HWRM_BAR_IDX,
 		    rdev->chip_ctx->dbr_aeq_arm_reg & BNXT_GRC_BASE_MASK);
 
 	rdev->dbr_throttling_reg_off =
@@ -865,7 +834,8 @@ static void bnxt_re_pacing_timer_exp(struct work_struct *work)
 		return;
 
 	pacing_data = rdev->qplib_res.pacing_data;
-	read_val = readl_fbsd(rdev->en_dev->softc , rdev->dbr_db_fifo_reg_off, 0);
+	read_val = readl_fbsd(rdev->en_dev->softc, rdev->dbr_db_fifo_reg_off,
+			      BNXT_HWRM_BAR_IDX);
 	fifo_occup = pacing_data->fifo_max_depth -
 		     ((read_val & pacing_data->fifo_room_mask) >>
 		      pacing_data->fifo_room_shift);
@@ -1101,7 +1071,6 @@ static int bnxt_re_handle_start(struct auxiliary_device *adev)
 	rc = bnxt_re_add_device(&rdev, real_dev,
 				en_info->gsi_mode,
 				BNXT_RE_POST_RECOVERY_INIT,
-				en_info->wqe_mode,
 				en_info->num_msix_requested, adev);
 	if (rc) {
 		/* Add device failed. Unregister the device.
@@ -1328,6 +1297,68 @@ static void bnxt_re_start_irq(void *handle, struct bnxt_msix_entry *ent)
 }
 
 /*
+ * bnxt_re_create_snapdump_logs - Collect required debug data for snapdump.
+ * @rdev     -   rdma device instance
+ *
+ * This function will use bnxt_ulp_log_live API and dump all
+ * the required information for debugging.
+ *
+ * Returns: Nothing
+ */
+static void
+bnxt_re_create_snapdump_logs(struct bnxt_re_dev *rdev)
+{
+	struct bnxt_re_ext_rstat *ext_s;
+
+	ext_s = &rdev->stats.dstat.ext_rstat[0];
+
+	bnxt_ulp_log_live(rdev->en_dev, BNXT_LOGGER_ROCE,
+			  "tx_atomic_req: %llu", ext_s->tx.atomic_req);
+	bnxt_ulp_log_live(rdev->en_dev, BNXT_LOGGER_ROCE,
+			  "rx_atomic_req: %llu", ext_s->rx.atomic_req);
+	bnxt_ulp_log_live(rdev->en_dev, BNXT_LOGGER_ROCE,
+			  "tx_read_req: %llu\n", ext_s->tx.read_req);
+	bnxt_ulp_log_live(rdev->en_dev, BNXT_LOGGER_ROCE,
+			  "tx_read_resp: %llu\n", ext_s->tx.read_resp);
+	bnxt_ulp_log_live(rdev->en_dev, BNXT_LOGGER_ROCE,
+			  "rx_read_req: %llu\n", ext_s->rx.read_req);
+	bnxt_ulp_log_live(rdev->en_dev, BNXT_LOGGER_ROCE,
+			  "rx_read_resp: %llu\n", ext_s->rx.read_resp);
+	bnxt_ulp_log_live(rdev->en_dev, BNXT_LOGGER_ROCE,
+			  "tx_write_req: %llu\n", ext_s->tx.write_req);
+	bnxt_ulp_log_live(rdev->en_dev, BNXT_LOGGER_ROCE,
+			  "rx_write_req: %llu\n", ext_s->rx.write_req);
+	bnxt_ulp_log_live(rdev->en_dev, BNXT_LOGGER_ROCE,
+			  "tx_send_req: %llu\n", ext_s->tx.send_req);
+	bnxt_ulp_log_live(rdev->en_dev, BNXT_LOGGER_ROCE,
+			  "rx_send_req: %llu\n", ext_s->rx.send_req);
+	bnxt_ulp_log_live(rdev->en_dev, BNXT_LOGGER_ROCE,
+			  "rx_good_pkts: %llu\n", ext_s->grx.rx_pkts);
+	bnxt_ulp_log_live(rdev->en_dev, BNXT_LOGGER_ROCE,
+			  "rx_good_bytes: %llu\n", ext_s->grx.rx_bytes);
+}
+
+/*
+ * bnxt_re_ulp_log_live - Callback from L2 driver to collect snapdump
+ * @handle     -   en_dev information. L2 and RoCE device information
+ *
+ * This function is callback to support L2 and RoCE common API.
+ * bnxt_ulp_ops.ulp_log_live().
+ *
+ * Returns: Nothing
+ */
+static void
+bnxt_re_ulp_log_live(void *handle)
+{
+	struct bnxt_re_en_dev_info *en_info = auxiliary_get_drvdata(handle);
+
+	if (!en_info || !en_info->rdev)
+		return;
+
+	bnxt_re_create_snapdump_logs(en_info->rdev);
+}
+
+/*
  * Except for ulp_async_notifier, the remaining ulp_ops
  * below are called with rtnl_lock held
  */
@@ -1338,6 +1369,7 @@ static struct bnxt_ulp_ops bnxt_re_ulp_ops = {
 	.ulp_shutdown = bnxt_re_shutdown,
 	.ulp_irq_stop = bnxt_re_stop_irq,
 	.ulp_irq_restart = bnxt_re_start_irq,
+	.ulp_log_live = bnxt_re_ulp_log_live,
 };
 
 static inline const char *bnxt_re_netevent(unsigned long event)
@@ -1411,12 +1443,14 @@ static void bnxt_re_set_db_offset(struct bnxt_re_dev *rdev)
 		dev_info(rdev_to_dev(rdev),
 			 "Couldn't get DB bar size, Low latency framework is disabled\n");
 	/* set register offsets for both UC and WC */
-	if (_is_chip_p7(cctx))
-		res->dpi_tbl.ucreg.offset = offset;
-	else
+	if (_is_chip_p7(cctx)) {
+		res->dpi_tbl.ucreg.offset = en_dev->l2_db_offset;
+		res->dpi_tbl.wcreg.offset = en_dev->l2_db_size;
+	} else {
 		res->dpi_tbl.ucreg.offset = res->is_vf ? BNXT_QPLIB_DBR_VF_DB_OFFSET :
 							 BNXT_QPLIB_DBR_PF_DB_OFFSET;
-	res->dpi_tbl.wcreg.offset = res->dpi_tbl.ucreg.offset;
+		res->dpi_tbl.wcreg.offset = res->dpi_tbl.ucreg.offset;
+	}
 
 	/* If WC mapping is disabled by L2 driver then en_dev->l2_db_size
 	 * is equal to the DB-Bar actual size. This indicates that L2
@@ -1433,15 +1467,15 @@ static void bnxt_re_set_db_offset(struct bnxt_re_dev *rdev)
 	return;
 }
 
-static void bnxt_re_set_drv_mode(struct bnxt_re_dev *rdev, u8 mode)
+static void bnxt_re_set_drv_mode(struct bnxt_re_dev *rdev)
 {
 	struct bnxt_qplib_chip_ctx *cctx;
 	struct bnxt_en_dev *en_dev;
 
 	en_dev = rdev->en_dev;
 	cctx = rdev->chip_ctx;
-	cctx->modes.wqe_mode = _is_chip_gen_p5_p7(rdev->chip_ctx) ?
-					mode : BNXT_QPLIB_WQE_MODE_STATIC;
+	cctx->modes.wqe_mode = _is_chip_p7(rdev->chip_ctx) ?
+			BNXT_QPLIB_WQE_MODE_VARIABLE : BNXT_QPLIB_WQE_MODE_STATIC;
 	cctx->modes.te_bypass = false;
 	if (bnxt_re_hwrm_qcaps(rdev))
 		dev_err(rdev_to_dev(rdev),
@@ -1490,7 +1524,7 @@ static void bnxt_re_destroy_chip_ctx(struct bnxt_re_dev *rdev)
 	kfree(chip_ctx);
 }
 
-static int bnxt_re_setup_chip_ctx(struct bnxt_re_dev *rdev, u8 wqe_mode)
+static int bnxt_re_setup_chip_ctx(struct bnxt_re_dev *rdev)
 {
 	struct bnxt_qplib_chip_ctx *chip_ctx;
 	struct bnxt_en_dev *en_dev;
@@ -1525,7 +1559,7 @@ static int bnxt_re_setup_chip_ctx(struct bnxt_re_dev *rdev, u8 wqe_mode)
 		rc = -ENOMEM;
 		goto fail;
 	}
-	bnxt_re_set_drv_mode(rdev, wqe_mode);
+	bnxt_re_set_drv_mode(rdev);
 
 	bnxt_re_set_db_offset(rdev);
 	rc = bnxt_qplib_map_db_bar(&rdev->qplib_res);
@@ -2029,11 +2063,30 @@ static ssize_t show_hca(struct device *device, struct device_attribute *attr,
 	return scnprintf(buf, PAGE_SIZE, "%s\n", rdev->ibdev.node_desc);
 }
 
+static ssize_t show_board_id(struct device *device, struct device_attribute *attr,
+				char *buf)
+{
+	struct bnxt_re_dev *rdev = to_bnxt_re_dev(device, ibdev.dev);
+	char buffer[BNXT_VPD_PN_FLD_LEN] = {};
+
+	if (!rdev->is_virtfn)
+		memcpy(buffer, rdev->en_dev->board_part_number,
+			BNXT_VPD_PN_FLD_LEN - 1);
+	else
+		scnprintf(buffer, BNXT_VPD_PN_FLD_LEN,
+			"0x%x-VF", rdev->en_dev->pdev->device);
+
+	return scnprintf(buf, PAGE_SIZE, "%s\n", buffer);
+}
+
 static DEVICE_ATTR(hw_rev, 0444, show_rev, NULL);
 static DEVICE_ATTR(hca_type, 0444, show_hca, NULL);
+static DEVICE_ATTR(board_id, 0444, show_board_id, NULL);
+
 static struct device_attribute *bnxt_re_attributes[] = {
 	&dev_attr_hw_rev,
-	&dev_attr_hca_type
+	&dev_attr_hca_type,
+	&dev_attr_board_id
 };
 
 int ib_register_device_compat(struct bnxt_re_dev *rdev)
@@ -2114,7 +2167,6 @@ static int bnxt_re_register_ib(struct bnxt_re_dev *rdev)
 	ibdev->modify_port		= bnxt_re_modify_port;
 	ibdev->get_port_immutable	= bnxt_re_get_port_immutable;
 	ibdev->query_pkey		= bnxt_re_query_pkey;
-	ibdev->query_gid		= bnxt_re_query_gid;
 	ibdev->get_netdev		= bnxt_re_get_netdev;
 	ibdev->add_gid			= bnxt_re_add_gid;
 	ibdev->del_gid			= bnxt_re_del_gid;
@@ -3329,7 +3381,8 @@ static int bnxt_re_initialize_dbr_pacing(struct bnxt_re_dev *rdev)
 		goto fail;
 	}
 	/* MAP grc window 2 for reading db fifo depth */
-	writel_fbsd(rdev->en_dev->softc,  BNXT_GRCPF_REG_WINDOW_BASE_OUT + 4, 0,
+	writel_fbsd(rdev->en_dev->softc, BNXT_GRCPF_REG_WINDOW_BASE_OUT + 4,
+			BNXT_HWRM_BAR_IDX,
 			rdev->chip_ctx->dbr_stat_db_fifo & BNXT_GRC_BASE_MASK);
 	rdev->dbr_db_fifo_reg_off =
 		(rdev->chip_ctx->dbr_stat_db_fifo & BNXT_GRC_OFFSET_MASK) +
@@ -3395,12 +3448,14 @@ int bnxt_re_enable_dbr_pacing(struct bnxt_re_dev *rdev)
 			return -EIO;
 		}
 		/* MAP grc window 8 for ARMing the NQ DBQ */
-		writel_fbsd(rdev->en_dev->softc, BNXT_GRCPF_REG_WINDOW_BASE_OUT + 28 , 0,
+		writel_fbsd(rdev->en_dev->softc, BNXT_GRCPF_REG_WINDOW_BASE_OUT + 28,
+			    BNXT_HWRM_BAR_IDX,
 			    rdev->chip_ctx->dbr_aeq_arm_reg & BNXT_GRC_BASE_MASK);
 		rdev->dbr_aeq_arm_reg_off =
 			(rdev->chip_ctx->dbr_aeq_arm_reg &
 			 BNXT_GRC_OFFSET_MASK) + 0x8000;
-		writel_fbsd(rdev->en_dev->softc, rdev->dbr_aeq_arm_reg_off , 0, 1);
+		writel_fbsd(rdev->en_dev->softc, rdev->dbr_aeq_arm_reg_off,
+			    BNXT_HWRM_BAR_IDX, 1);
 	}
 
 	return 0;
@@ -3449,7 +3504,6 @@ static void bnxt_re_dev_uninit(struct bnxt_re_dev *rdev, u8 op_type)
 		mutex_unlock(&bnxt_re_dev_lock);
 	}
 
-	bnxt_re_uninit_resolve_wq(rdev);
 	bnxt_re_uninit_dcb_wq(rdev);
 	bnxt_re_uninit_aer_wq(rdev);
 
@@ -3530,7 +3584,7 @@ static void bnxt_re_dev_uninit(struct bnxt_re_dev *rdev, u8 op_type)
 	}
 }
 
-static int bnxt_re_dev_init(struct bnxt_re_dev *rdev, u8 op_type, u8 wqe_mode)
+static int bnxt_re_dev_init(struct bnxt_re_dev *rdev, u8 op_type)
 {
 	struct bnxt_re_ring_attr rattr = {};
 	struct bnxt_qplib_creq_ctx *creq;
@@ -3545,7 +3599,7 @@ static int bnxt_re_dev_init(struct bnxt_re_dev *rdev, u8 op_type, u8 wqe_mode)
 	}
 	set_bit(BNXT_RE_FLAG_NETDEV_REGISTERED, &rdev->flags);
 
-	rc = bnxt_re_setup_chip_ctx(rdev, wqe_mode);
+	rc = bnxt_re_setup_chip_ctx(rdev);
 	if (rc) {
 		dev_err(rdev_to_dev(rdev), "Failed to get chip context rc 0x%x", rc);
 		bnxt_re_unregister_netdev(rdev);
@@ -3592,19 +3646,24 @@ static int bnxt_re_dev_init(struct bnxt_re_dev *rdev, u8 op_type, u8 wqe_mode)
 		goto release_rtnl;
 	}
 
+	set_bit(BNXT_RE_FLAG_NET_RING_ALLOC, &rdev->flags);
+
 	if (!rdev->chip_ctx)
 		goto release_rtnl;
-	/* Program the NQ ID for DBQ notification */
-	if (rdev->chip_ctx->modes.dbr_pacing_v0 ||
-	    bnxt_qplib_dbr_pacing_en(rdev->chip_ctx) ||
-	    bnxt_qplib_dbr_pacing_ext_en(rdev->chip_ctx)) {
-		rc = bnxt_re_initialize_dbr_pacing(rdev);
-		if (!rc)
-			rdev->dbr_pacing = true;
-		else
-			rdev->dbr_pacing = false;
-		dev_dbg(rdev_to_dev(rdev), "%s: initialize db pacing ret %d\n",
-			__func__, rc);
+
+	if (!(_is_chip_p7(rdev->chip_ctx))) {
+		/* Program the NQ ID for DBQ notification */
+		if (rdev->chip_ctx->modes.dbr_pacing_v0 ||
+		    bnxt_qplib_dbr_pacing_en(rdev->chip_ctx) ||
+		    bnxt_qplib_dbr_pacing_ext_en(rdev->chip_ctx)) {
+			rc = bnxt_re_initialize_dbr_pacing(rdev);
+			if (!rc)
+				rdev->dbr_pacing = true;
+			else
+				rdev->dbr_pacing = false;
+			dev_dbg(rdev_to_dev(rdev), "%s: initialize db pacing ret %d\n",
+				__func__, rc);
+		}
 	}
 
 	vec = rdev->nqr.msix_entries[BNXT_RE_AEQ_IDX].vector;
@@ -3714,7 +3773,6 @@ static int bnxt_re_dev_init(struct bnxt_re_dev *rdev, u8 op_type, u8 wqe_mode)
 
 	bnxt_re_init_dcb_wq(rdev);
 	bnxt_re_init_aer_wq(rdev);
-	bnxt_re_init_resolve_wq(rdev);
 	mutex_lock(&bnxt_re_dev_lock);
 	list_add_tail_rcu(&rdev->list, &bnxt_re_dev_list);
 	/* Added to the list, not in progress anymore */
@@ -3811,6 +3869,7 @@ static int bnxt_re_dev_reg(struct bnxt_re_dev **rdev, struct ifnet *netdev,
 void bnxt_re_get_link_speed(struct bnxt_re_dev *rdev)
 {
 	rdev->espeed = rdev->en_dev->espeed;
+	rdev->lanes = rdev->en_dev->lanes;
 	return;
 }
 
@@ -3852,7 +3911,7 @@ void bnxt_re_remove_device(struct bnxt_re_dev *rdev, u8 op_type,
 
 int bnxt_re_add_device(struct bnxt_re_dev **rdev,
 		       struct ifnet *netdev,
-		       u8 qp_mode, u8 op_type, u8 wqe_mode,
+		       u8 qp_mode, u8 op_type,
 		       u32 num_msix_requested,
 		       struct auxiliary_device *aux_dev)
 {
@@ -3925,7 +3984,7 @@ int bnxt_re_add_device(struct bnxt_re_dev **rdev,
 	rtnl_lock();
 	en_info->rdev = *rdev;
 	rtnl_unlock();
-	rc = bnxt_re_dev_init(*rdev, op_type, wqe_mode);
+	rc = bnxt_re_dev_init(*rdev, op_type);
 	if (rc) {
 ref_error:
 		bnxt_re_dev_unreg(*rdev);
@@ -4374,7 +4433,6 @@ static int bnxt_re_probe(struct auxiliary_device *adev,
 	rc = bnxt_re_add_device(&rdev, en_dev->net,
 				BNXT_RE_GSI_MODE_ALL,
 				BNXT_RE_COMPLETE_INIT,
-				BNXT_QPLIB_WQE_MODE_STATIC,
 				BNXT_RE_MSIX_FROM_MOD_PARAM, adev);
 	if (rc) {
 		mutex_unlock(&bnxt_re_mutex);

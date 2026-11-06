@@ -39,6 +39,23 @@
 
 #define	VIRT_BITS	48
 
+/*
+ * Loads a 64-bit value into reg using 1 to 4 mov/movk instructions.
+ * This can be used early on when we don't know the CPUs endianness.
+ */
+.macro	mov_q reg, val
+	movz	\reg, :abs_g0_nc:\val
+.if (\val >> 16) & 0xffff != 0
+	movk	\reg, :abs_g1_nc:\val
+.endif
+.if (\val >> 32) & 0xffff != 0
+	movk	\reg, :abs_g2_nc:\val
+.endif
+.if (\val >> 48) & 0xffff != 0
+	movk	\reg, :abs_g3:\val
+.endif
+.endm
+
 #if PAGE_SIZE == PAGE_SIZE_16K
 /*
  * The number of level 3 tables to create. 32 will allow for 1G of address
@@ -111,8 +128,7 @@ virtdone:
 
 	/* Set up the stack */
 	adrp	x25, initstack_end
-	add	x25, x25, :lo12:initstack_end
-	sub	sp, x25, #PCB_SIZE
+	add	sp, x25, :lo12:initstack_end
 
 	/* Zero the BSS */
 	ldr	x15, .Lbss
@@ -140,7 +156,7 @@ virtdone:
 	add	x25, x25, :lo12:initstack
 	str	x25, [x0, #BP_KERN_STACK]
 	str	x27, [x0, #BP_KERN_TTBR0]
-	str	x23, [x0, #BP_BOOT_EL]
+	str	w23, [x0, #BP_BOOT_EL]
 
 	/* Set these before they are used in kasan_init_early */
 	adrp	x1, pmap_sh_attr
@@ -308,6 +324,19 @@ mp_virtdone:
 
 	b	init_secondary
 LEND(mpentry_common)
+
+ENTRY(mp_cpu_spinloop)
+0:
+	wfe
+	ldr	x0, mp_cpu_spin_table_release_addr
+	cbz	x0, 0b
+	blr	x0
+	.globl mp_cpu_spin_table_release_addr
+mp_cpu_spin_table_release_addr:
+	.quad	0
+	.globl mp_cpu_spinloop_end
+mp_cpu_spinloop_end:
+END(mp_cpu_spinloop)
 #endif
 
 /*
@@ -320,19 +349,27 @@ LEND(mpentry_common)
  */
 LENTRY(enter_kernel_el)
 	mrs	x23, CurrentEL
-	and	x23, x23, #(CURRENTEL_EL_MASK)
-	cmp	x23, #(CURRENTEL_EL_EL2)
+	and	x23, x23, #(CurrentEL_EL_MASK)
+	cmp	x23, #(CurrentEL_EL_EL2)
 	b.eq	1f
 
-	ldr	x2, =SCTLR_MMU_OFF
+	/*
+	 * Ensure there are no memory operations here. If the boot loader
+	 * enters the kernel in big-endian mode then loading sctlr will
+	 * be incorrect. As instructions are the same in both endians it is
+	 * safe to use mov instructions.
+	 */
+	mov_q	x2, SCTLR_MMU_OFF
 	msr	sctlr_el1, x2
-	/* SCTLR_EOS is set so eret is a context synchronizing event so we
+	/*
+	 * SCTLR_EOS is set to make eret a context synchronizing event. We
 	 * need an isb here to ensure it's observed by later instructions,
 	 * but don't need it in the eret below.
 	 */
 	isb
 
-	/* Ensure SPSR_EL1 and pstate are in sync. The only way to set the
+	/*
+	 * Ensure SPSR_EL1 and pstate are in sync. The only way to set the
 	 * latter is to set the former and return from an exception with eret.
 	 */
 	mov	x2, #(PSR_DAIF | PSR_M_EL1h)
@@ -346,13 +383,21 @@ LENTRY(enter_kernel_el)
 	 * Set just the reserved bits in sctlr_el2. This will disable the
 	 * MMU which may have broken the kernel if we enter the kernel in
 	 * EL2, e.g. when using VHE.
+	 *
+	 * As with sctlr_el1 above use mov instructions to ensure there are
+	 * no memory operations.
 	 */
-	ldr	x2, =(SCTLR_EL2_RES1 | SCTLR_EL2_EIS | SCTLR_EL2_EOS)
+	mov_q	x2, (SCTLR_EL2_RES1 | SCTLR_EL2_EIS | SCTLR_EL2_EOS)
 	msr	sctlr_el2, x2
 	isb
 
+	/*
+	 * The hardware is now in little-endian mode so memory operations
+	 * are safe.
+	 */
+
 	/* Configure the Hypervisor */
-	ldr	x2, =(HCR_RW | HCR_APK | HCR_API)
+	ldr	x2, =(HCR_RW | HCR_APK | HCR_API | HCR_ATA)
 	msr	hcr_el2, x2
 
 	/* Stash value of HCR_EL2 for later */
@@ -385,7 +430,7 @@ LENTRY(enter_kernel_el)
 
 	msr	SCTLR_EL12_REG, x2
 	mov	x2, xzr /* CPTR_EL2 is managed by vfp.c */
-	ldr	x3, =(CNTHCTL_E2H_EL1PCTEN | CNTHCTL_E2H_EL1PTEN)
+	ldr	x3, =(CNTHCTL_E2H_EL1PCTEN_NOTRAP | CNTHCTL_E2H_EL1PTEN_NOTRAP)
 	ldr	x5, =(PSR_DAIF | PSR_M_EL2h)
 	b	.Ldone_vhe
 
@@ -396,12 +441,12 @@ LENTRY(enter_kernel_el)
 	msr	vbar_el2, x2
 
 	ldr	x2, =(CPTR_RES1)
-	ldr	x3, =(CNTHCTL_EL1PCTEN | CNTHCTL_EL1PCEN)
+	ldr	x3, =(CNTHCTL_EL1PCTEN_NOTRAP | CNTHCTL_EL1PCEN_NOTRAP)
 	ldr	x5, =(PSR_DAIF | PSR_M_EL1h)
 
 	/* Enable SPE at EL1 via Monitor Debug Configuration Register */
-	mov	x6, (0b11 << MDCR_E2PB_SHIFT)
-	msr	mdcr_el2, x6
+	mov     x6, MDCR_EL2_E2PB_EL1_0_NO_TRAP
+	msr     mdcr_el2, x6
 
 .Ldone_vhe:
 
@@ -446,6 +491,29 @@ LENTRY(enter_kernel_el)
 	eret
 LEND(enter_kernel_el)
 
+/* Turn off the MMU.  Install ttbr0 from the bootstrap page table, and go there.
+ * Does not return.
+ * - x0 - target address to jump to after stopping the MMU.
+ * - x1 - kernel load address
+ */
+ENTRY(stop_mmu)
+	mov	x16, x0	/* Save target. */
+	ldr	x2, =(1f - KERNBASE)
+	add	x17, x1, x2
+	ldr	x3, =(pagetable_l0_ttbr0_bootstrap - KERNBASE)
+	add	x1, x1, x3
+	msr	ttbr0_el1, x1
+	isb
+	br	x17
+1:
+	BTI_J
+	mrs	x0, sctlr_el1
+	bic	x0, x0, SCTLR_M
+	bic	x0, x0, SCTLR_C
+	msr	sctlr_el1, x0
+	isb
+	br	x16
+END(stop_mmu)
 /*
  * Get the physical address the kernel was loaded at.
  */
@@ -730,7 +798,7 @@ common:
 	adrp	x9, socdev_va
 	str	x17, [x9, :lo12:socdev_va]
 
-	mov	x9, #(SOCDEV_PA & ~L2_OFFSET)	/* PA start */
+	ldr	x9, =(SOCDEV_PA)	/* PA start */
 	mov	x10, #1
 	bl	build_l2_block_pagetable
 #endif
@@ -928,7 +996,7 @@ LEND(link_l2_pagetable)
  * VA start (x8) modulo L3C_SIZE must equal PA start (x9) modulo L3C_SIZE.
  */
 LENTRY(build_l3_page_pagetable)
-	cbz	x10, 2f
+	cbz	x10, 4f
 	/*
 	 * Build the L3 table entry.
 	 */
@@ -968,7 +1036,7 @@ LENTRY(build_l3_page_pagetable)
 	add	x11, x11, #1
 	add	x9, x9, #1
 	cbnz	x10, 1b
-2:
+4:
 
 	ret
 LEND(build_l3_page_pagetable)
@@ -994,6 +1062,21 @@ LENTRY(start_mmu)
 	isb
 
 	ldr	x2, mair
+
+	/*
+	 * If FEAT_MTE2 is supported, configure GCR_EL1 and clear the TFSR
+	 * registers of any pending tag check faults
+	 */
+	CHECK_CPU_FEAT(x3, ID_AA64PFR1, MTE, MTE2, 1f)
+
+	/* Set GCR_EL1, non-zero tags excluded by default */
+	mov	x3, #(GCR_Exclude_MASK | GCR_RRND)
+	msr	GCR_EL1_REG, x3
+
+	/* Clear any pending tag check faults */
+	msr TFSR_EL1_REG, xzr
+	msr TFSRE0_EL1_REG, xzr
+1:
 	msr	mair_el1, x2
 
 	/*
@@ -1050,7 +1133,8 @@ mair:
 		MAIR_ATTR(MAIR_NORMAL_NC, VM_MEMATTR_UNCACHEABLE)   |	\
 		MAIR_ATTR(MAIR_NORMAL_WB, VM_MEMATTR_WRITE_BACK)    |	\
 		MAIR_ATTR(MAIR_NORMAL_WT, VM_MEMATTR_WRITE_THROUGH) |	\
-		MAIR_ATTR(MAIR_DEVICE_nGnRE, VM_MEMATTR_DEVICE_nGnRE)
+		MAIR_ATTR(MAIR_DEVICE_nGnRE, VM_MEMATTR_DEVICE_nGnRE) | \
+		MAIR_ATTR(MAIR_NORMAL_TG, VM_MEMATTR_TAGGED)
 tcr:
 #if PAGE_SIZE == PAGE_SIZE_4K
 #define	TCR_TG	(TCR_TG1_4K | TCR_TG0_4K)
@@ -1065,12 +1149,19 @@ tcr:
 	    TCR_SH0_IS | TCR_ORGN0_WBWA | TCR_IRGN0_WBWA)
 LEND(start_mmu)
 
+ENTRY(switch_stack)
+	mov	sp, x0
+	mov 	x16, x1
+	br	x16
+END(switch_stack)
+
 ENTRY(abort)
 	b abort
 END(abort)
 
 .bss
 	.align	PAGE_SHIFT
+	.globl	initstack_end
 initstack:
 	.space	BOOT_STACK_SIZE
 initstack_end:
@@ -1087,6 +1178,7 @@ initstack_end:
 	 *           L0 for user
 	 */
 	.globl pagetable_l0_ttbr1
+	.globl pagetable_l0_ttbr0_bootstrap
 pagetable:
 pagetable_l3_ttbr1:
 	.space	(PAGE_SIZE * L3_PAGE_COUNT)

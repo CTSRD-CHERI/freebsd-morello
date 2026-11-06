@@ -116,15 +116,17 @@ struct mod_pnp_match_info
 	};								\
 	DATA_SET(modmetadata_set, MODULE_METADATA_CONCAT(uniquifier))
 
+#define	MODULE_DEPEND_CONCAT(module, mdepend)	_##module##_depend_on_##mdepend
 #define	MODULE_DEPEND(module, mdepend, vmin, vpref, vmax)		\
-	static struct mod_depend _##module##_depend_on_##mdepend	\
+	static struct mod_depend MODULE_DEPEND_CONCAT(module, mdepend)	\
 	    __section(".data") = {					\
 		vmin,							\
 		vpref,							\
 		vmax							\
 	};								\
-	MODULE_METADATA(_md_##module##_on_##mdepend, MDT_DEPEND,	\
-	    &_##module##_depend_on_##mdepend, #mdepend)
+	MODULE_METADATA(MODULE_DEPEND_CONCAT(module, mdepend),		\
+	    MDT_DEPEND, &MODULE_DEPEND_CONCAT(module, mdepend),		\
+	    __XSTRING(mdepend))
 
 /*
  * Every kernel has a 'kernel' module with the version set to
@@ -148,7 +150,7 @@ struct mod_pnp_match_info
 #define	DECLARE_MODULE(name, data, sub, order)				\
 	DECLARE_MODULE_WITH_MAXVER(name, data, sub, order, __FreeBSD_version)
 #else
-#define	DECLARE_MODULE(name, data, sub, order)							\
+#define	DECLARE_MODULE(name, data, sub, order)				\
 	DECLARE_MODULE_WITH_MAXVER(name, data, sub, order, MODULE_KERNEL_MAXVER)
 #endif
 

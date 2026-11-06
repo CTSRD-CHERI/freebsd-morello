@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -638,6 +628,7 @@ dmu_objset_open_impl(spa_t *spa, dsl_dataset_t *ds, blkptr_t *bp,
 			}
 		}
 		if (err != 0) {
+			dsl_prop_unregister_all(ds, os);
 			arc_buf_destroy(os->os_phys_buf, &os->os_phys_buf);
 			kmem_free(os, sizeof (objset_t));
 			return (err);
@@ -1452,7 +1443,8 @@ dmu_objset_upgrade_stop(objset_t *os)
 		os->os_upgrade_id = 0;
 		mutex_exit(&os->os_upgrade_lock);
 
-		if ((taskq_cancel_id(os->os_spa->spa_upgrade_taskq, id)) == 0) {
+		if ((taskq_cancel_id(os->os_spa->spa_upgrade_taskq, id,
+		    B_TRUE)) == 0) {
 			dsl_dataset_long_rele(dmu_objset_ds(os), upgrade_tag);
 		}
 		txg_wait_synced(os->os_spa->spa_dsl_pool, 0);
@@ -1858,7 +1850,7 @@ do_userquota_cacheflush(objset_t *os, userquota_cache_t *cache, dmu_tx_t *tx)
 	    &cookie)) != NULL) {
 		/*
 		 * os_userused_lock protects against concurrent calls to
-		 * zap_increment_int().  It's needed because zap_increment_int()
+		 * zap_increment().  It's needed because zap_increment()
 		 * is not thread-safe (i.e. not atomic).
 		 */
 		mutex_enter(&os->os_userused_lock);
@@ -2037,6 +2029,8 @@ userquota_updates_task(void *arg)
 				dn->dn_id_flags |= DN_ID_CHKED_BONUS;
 		}
 		dn->dn_id_flags &= ~(DN_ID_NEW_EXIST);
+		ASSERT3U(dn->dn_dirtycnt, >, 0);
+		dn->dn_dirtycnt--;
 		mutex_exit(&dn->dn_mtx);
 
 		multilist_sublist_remove(list, dn);
@@ -2070,6 +2064,10 @@ dnode_rele_task(void *arg)
 
 	dnode_t *dn;
 	while ((dn = multilist_sublist_head(list)) != NULL) {
+		mutex_enter(&dn->dn_mtx);
+		ASSERT3U(dn->dn_dirtycnt, >, 0);
+		dn->dn_dirtycnt--;
+		mutex_exit(&dn->dn_mtx);
 		multilist_sublist_remove(list, dn);
 		dnode_rele(dn, &os->os_synced_dnodes);
 	}
@@ -3004,7 +3002,7 @@ dmu_objset_get_user(objset_t *os)
 int
 dmu_fsname(const char *snapname, char *buf)
 {
-	char *atp = strchr(snapname, '@');
+	const char *atp = strchr(snapname, '@');
 	if (atp == NULL)
 		return (SET_ERROR(EINVAL));
 	if (atp - snapname >= ZFS_MAX_DATASET_NAME_LEN)
@@ -3034,12 +3032,30 @@ dmu_objset_willuse_space(objset_t *os, int64_t space, dmu_tx_t *tx)
 
 	if (ds != NULL) {
 		dsl_dir_willuse_space(ds->ds_dir, aspace, tx);
+		dsl_pool_dirty_space(dmu_tx_pool(tx), space, tx);
+	} else {
+		dsl_pool_dirty_mos_space(dmu_tx_pool(tx), space, tx);
 	}
-
-	dsl_pool_dirty_space(dmu_tx_pool(tx), space, tx);
 }
 
-#if defined(_KERNEL)
+/*
+ * Check if a block is shared with a snapshot in this objset.
+ * Returns B_TRUE if block was created before or at the time of the
+ * previous snapshot, B_FALSE otherwise.
+ */
+boolean_t
+dmu_objset_block_is_shared(objset_t *os, const blkptr_t *bp)
+{
+	if (BP_IS_HOLE(bp))
+		return (B_FALSE);
+
+	dsl_dataset_t *ds = os->os_dsl_dataset;
+	if (ds == NULL)
+		return (B_FALSE);
+
+	return (BP_GET_BIRTH(bp) <= dsl_dataset_phys(ds)->ds_prev_snap_txg);
+}
+
 EXPORT_SYMBOL(dmu_objset_zil);
 EXPORT_SYMBOL(dmu_objset_pool);
 EXPORT_SYMBOL(dmu_objset_ds);
@@ -3083,4 +3099,4 @@ EXPORT_SYMBOL(dmu_objset_projectquota_enabled);
 EXPORT_SYMBOL(dmu_objset_projectquota_present);
 EXPORT_SYMBOL(dmu_objset_projectquota_upgradable);
 EXPORT_SYMBOL(dmu_objset_id_quota_upgrade);
-#endif
+EXPORT_SYMBOL(dmu_objset_block_is_shared);

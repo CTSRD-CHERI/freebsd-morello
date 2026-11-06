@@ -220,10 +220,13 @@ struct sc_pcminfo {
 	struct hdsp_channel	*hc;
 };
 
+/* Maximum number of PCM children. */
+#define	HDSP_MAX_PCMDEV		4
+
 /* HDSP device private data */
 struct sc_info {
 	device_t		dev;
-	struct mtx		*lock;
+	struct mtx		lock;
 
 	uint32_t		ctrl_register;
 	uint32_t		type;
@@ -235,7 +238,7 @@ struct sc_info {
 	bus_space_handle_t	csh;
 
 	struct resource		*irq;
-	int			irqid;
+	int			rid;
 	void			*ih;
 	bus_dma_tag_t		dmat;
 
@@ -245,10 +248,19 @@ struct sc_info {
 	uint32_t		bufsize;
 	bus_dmamap_t		pmap;
 	bus_dmamap_t		rmap;
+	/* DMA buffer bus addresses. */
+	uint32_t		paddr;
+	uint32_t		raddr;
 	uint32_t		period;
 	uint32_t		speed;
 	uint32_t		force_period;
 	uint32_t		force_speed;
+
+	/* PCM children used for interrupt dispatch. */
+	struct sc_pcminfo	*pcms[HDSP_MAX_PCMDEV];
+	unsigned int		pcm_refs[HDSP_MAX_PCMDEV];
+	bool			pcm_detaching[HDSP_MAX_PCMDEV];
+	struct cv		pcm_cv;
 };
 
 #define	hdsp_read_1(sc, regno)						\

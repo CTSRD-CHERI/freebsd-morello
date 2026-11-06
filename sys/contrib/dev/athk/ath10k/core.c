@@ -3,17 +3,17 @@
  * Copyright (c) 2005-2011 Atheros Communications Inc.
  * Copyright (c) 2011-2017 Qualcomm Atheros, Inc.
  * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #if defined(__FreeBSD__)
 #define	LINUXKPI_PARAM_PREFIX	ath10k_core_
 #endif
 
+#include <linux/export.h>
 #include <linux/module.h>
 #include <linux/firmware.h>
-#if defined(__linux__) || (defined(__FreeBSD__) && defined(CONFIG_OF))
 #include <linux/of.h>
-#endif
 #include <linux/property.h>
 #include <linux/dmi.h>
 #include <linux/ctype.h>
@@ -35,6 +35,7 @@
 #if defined(CONFIG_FWLOG)
 #include "fwlog.h"
 #endif
+#include "leds.h"
 
 unsigned int ath10k_debug_mask;
 EXPORT_SYMBOL(ath10k_debug_mask);
@@ -76,6 +77,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca988x hw2.0",
 		.patch_load_addr = QCA988X_HW_2_0_PATCH_LOAD_ADDR,
 		.uart_pin = 7,
+		.led_pin = 1,
 		.cc_wraparound_type = ATH10K_HW_CC_WRAP_SHIFTED_ALL,
 		.otp_exe_param = 0,
 		.channel_counters_freq_hz = 88000,
@@ -83,7 +85,6 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.cal_data_len = 2116,
 		.fw = {
 			.dir = QCA988X_HW_2_0_FW_DIR,
-			.board = QCA988X_HW_2_0_BOARD_DATA_FILE,
 			.board_size = QCA988X_BOARD_DATA_SZ,
 			.board_ext_size = QCA988X_BOARD_EXT_DATA_SZ,
 		},
@@ -109,6 +110,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.hw_restart_disconnect = false,
 		.use_fw_tx_credits = true,
 		.delay_unmap_buffer = false,
+		.mcast_frame_registration = false,
 	},
 	{
 		.id = QCA988X_HW_2_0_VERSION,
@@ -116,6 +118,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca988x hw2.0 ubiquiti",
 		.patch_load_addr = QCA988X_HW_2_0_PATCH_LOAD_ADDR,
 		.uart_pin = 7,
+		.led_pin = 0,
 		.cc_wraparound_type = ATH10K_HW_CC_WRAP_SHIFTED_ALL,
 		.otp_exe_param = 0,
 		.channel_counters_freq_hz = 88000,
@@ -123,7 +126,6 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.cal_data_len = 2116,
 		.fw = {
 			.dir = QCA988X_HW_2_0_FW_DIR,
-			.board = QCA988X_HW_2_0_BOARD_DATA_FILE,
 			.board_size = QCA988X_BOARD_DATA_SZ,
 			.board_ext_size = QCA988X_BOARD_EXT_DATA_SZ,
 		},
@@ -149,6 +151,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.hw_restart_disconnect = false,
 		.use_fw_tx_credits = true,
 		.delay_unmap_buffer = false,
+		.mcast_frame_registration = false,
 	},
 	{
 		.id = QCA9887_HW_1_0_VERSION,
@@ -157,6 +160,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca9887 hw1.0",
 		.patch_load_addr = QCA9887_HW_1_0_PATCH_LOAD_ADDR,
 		.uart_pin = 7,
+		.led_pin = 1,
 		.cc_wraparound_type = ATH10K_HW_CC_WRAP_SHIFTED_ALL,
 		.otp_exe_param = 0,
 		.channel_counters_freq_hz = 88000,
@@ -164,7 +168,6 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.cal_data_len = 2116,
 		.fw = {
 			.dir = QCA9887_HW_1_0_FW_DIR,
-			.board = QCA9887_HW_1_0_BOARD_DATA_FILE,
 			.board_size = QCA9887_BOARD_DATA_SZ,
 			.board_ext_size = QCA9887_BOARD_EXT_DATA_SZ,
 		},
@@ -190,6 +193,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.hw_restart_disconnect = false,
 		.use_fw_tx_credits = true,
 		.delay_unmap_buffer = false,
+		.mcast_frame_registration = false,
 	},
 	{
 		.id = QCA6174_HW_3_2_VERSION,
@@ -198,13 +202,13 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca6174 hw3.2 sdio",
 		.patch_load_addr = QCA6174_HW_3_0_PATCH_LOAD_ADDR,
 		.uart_pin = 19,
+		.led_pin = 0,
 		.otp_exe_param = 0,
 		.channel_counters_freq_hz = 88000,
 		.max_probe_resp_desc_thres = 0,
 		.cal_data_len = 0,
 		.fw = {
 			.dir = QCA6174_HW_3_0_FW_DIR,
-			.board = QCA6174_HW_3_0_BOARD_DATA_FILE,
 			.board_size = QCA6174_BOARD_DATA_SZ,
 			.board_ext_size = QCA6174_BOARD_EXT_DATA_SZ,
 		},
@@ -226,6 +230,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.hw_restart_disconnect = false,
 		.use_fw_tx_credits = true,
 		.delay_unmap_buffer = false,
+		.mcast_frame_registration = false,
 	},
 	{
 		.id = QCA6174_HW_2_1_VERSION,
@@ -234,13 +239,13 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca6164 hw2.1",
 		.patch_load_addr = QCA6174_HW_2_1_PATCH_LOAD_ADDR,
 		.uart_pin = 6,
+		.led_pin = 0,
 		.otp_exe_param = 0,
 		.channel_counters_freq_hz = 88000,
 		.max_probe_resp_desc_thres = 0,
 		.cal_data_len = 8124,
 		.fw = {
 			.dir = QCA6174_HW_2_1_FW_DIR,
-			.board = QCA6174_HW_2_1_BOARD_DATA_FILE,
 			.board_size = QCA6174_BOARD_DATA_SZ,
 			.board_ext_size = QCA6174_BOARD_EXT_DATA_SZ,
 		},
@@ -266,6 +271,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.hw_restart_disconnect = false,
 		.use_fw_tx_credits = true,
 		.delay_unmap_buffer = false,
+		.mcast_frame_registration = false,
 	},
 	{
 		.id = QCA6174_HW_2_1_VERSION,
@@ -274,13 +280,13 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca6174 hw2.1",
 		.patch_load_addr = QCA6174_HW_2_1_PATCH_LOAD_ADDR,
 		.uart_pin = 6,
+		.led_pin = 0,
 		.otp_exe_param = 0,
 		.channel_counters_freq_hz = 88000,
 		.max_probe_resp_desc_thres = 0,
 		.cal_data_len = 8124,
 		.fw = {
 			.dir = QCA6174_HW_2_1_FW_DIR,
-			.board = QCA6174_HW_2_1_BOARD_DATA_FILE,
 			.board_size = QCA6174_BOARD_DATA_SZ,
 			.board_ext_size = QCA6174_BOARD_EXT_DATA_SZ,
 		},
@@ -306,6 +312,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.hw_restart_disconnect = false,
 		.use_fw_tx_credits = true,
 		.delay_unmap_buffer = false,
+		.mcast_frame_registration = false,
 	},
 	{
 		.id = QCA6174_HW_3_0_VERSION,
@@ -314,13 +321,13 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca6174 hw3.0",
 		.patch_load_addr = QCA6174_HW_3_0_PATCH_LOAD_ADDR,
 		.uart_pin = 6,
+		.led_pin = 0,
 		.otp_exe_param = 0,
 		.channel_counters_freq_hz = 88000,
 		.max_probe_resp_desc_thres = 0,
 		.cal_data_len = 8124,
 		.fw = {
 			.dir = QCA6174_HW_3_0_FW_DIR,
-			.board = QCA6174_HW_3_0_BOARD_DATA_FILE,
 			.board_size = QCA6174_BOARD_DATA_SZ,
 			.board_ext_size = QCA6174_BOARD_EXT_DATA_SZ,
 		},
@@ -346,6 +353,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.hw_restart_disconnect = false,
 		.use_fw_tx_credits = true,
 		.delay_unmap_buffer = false,
+		.mcast_frame_registration = false,
 	},
 	{
 		.id = QCA6174_HW_3_2_VERSION,
@@ -354,6 +362,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca6174 hw3.2",
 		.patch_load_addr = QCA6174_HW_3_0_PATCH_LOAD_ADDR,
 		.uart_pin = 6,
+		.led_pin = 0,
 		.otp_exe_param = 0,
 		.channel_counters_freq_hz = 88000,
 		.max_probe_resp_desc_thres = 0,
@@ -361,7 +370,6 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.fw = {
 			/* uses same binaries as hw3.0 */
 			.dir = QCA6174_HW_3_0_FW_DIR,
-			.board = QCA6174_HW_3_0_BOARD_DATA_FILE,
 			.board_size = QCA6174_BOARD_DATA_SZ,
 			.board_ext_size = QCA6174_BOARD_EXT_DATA_SZ,
 		},
@@ -390,6 +398,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.hw_restart_disconnect = false,
 		.use_fw_tx_credits = true,
 		.delay_unmap_buffer = false,
+		.mcast_frame_registration = true,
 	},
 	{
 		.id = QCA99X0_HW_2_0_DEV_VERSION,
@@ -398,6 +407,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca99x0 hw2.0",
 		.patch_load_addr = QCA99X0_HW_2_0_PATCH_LOAD_ADDR,
 		.uart_pin = 7,
+		.led_pin = 17,
 		.otp_exe_param = 0x00000700,
 		.continuous_frag_desc = true,
 		.cck_rate_map_rev2 = true,
@@ -409,7 +419,6 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.cal_data_len = 12064,
 		.fw = {
 			.dir = QCA99X0_HW_2_0_FW_DIR,
-			.board = QCA99X0_HW_2_0_BOARD_DATA_FILE,
 			.board_size = QCA99X0_BOARD_DATA_SZ,
 			.board_ext_size = QCA99X0_BOARD_EXT_DATA_SZ,
 		},
@@ -436,6 +445,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.hw_restart_disconnect = false,
 		.use_fw_tx_credits = true,
 		.delay_unmap_buffer = false,
+		.mcast_frame_registration = false,
 	},
 	{
 		.id = QCA9984_HW_1_0_DEV_VERSION,
@@ -444,6 +454,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca9984/qca9994 hw1.0",
 		.patch_load_addr = QCA9984_HW_1_0_PATCH_LOAD_ADDR,
 		.uart_pin = 7,
+		.led_pin = 17,
 		.cc_wraparound_type = ATH10K_HW_CC_WRAP_SHIFTED_EACH,
 		.otp_exe_param = 0x00000700,
 		.continuous_frag_desc = true,
@@ -456,8 +467,6 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.cal_data_len = 12064,
 		.fw = {
 			.dir = QCA9984_HW_1_0_FW_DIR,
-			.board = QCA9984_HW_1_0_BOARD_DATA_FILE,
-			.eboard = QCA9984_HW_1_0_EBOARD_DATA_FILE,
 			.board_size = QCA99X0_BOARD_DATA_SZ,
 			.board_ext_size = QCA99X0_BOARD_EXT_DATA_SZ,
 			.ext_board_size = QCA99X0_EXT_BOARD_DATA_SZ,
@@ -489,6 +498,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.hw_restart_disconnect = false,
 		.use_fw_tx_credits = true,
 		.delay_unmap_buffer = false,
+		.mcast_frame_registration = false,
 	},
 	{
 		.id = QCA9888_HW_2_0_DEV_VERSION,
@@ -497,6 +507,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca9888 hw2.0",
 		.patch_load_addr = QCA9888_HW_2_0_PATCH_LOAD_ADDR,
 		.uart_pin = 7,
+		.led_pin = 17,
 		.cc_wraparound_type = ATH10K_HW_CC_WRAP_SHIFTED_EACH,
 		.otp_exe_param = 0x00000700,
 		.continuous_frag_desc = true,
@@ -508,7 +519,6 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.cal_data_len = 12064,
 		.fw = {
 			.dir = QCA9888_HW_2_0_FW_DIR,
-			.board = QCA9888_HW_2_0_BOARD_DATA_FILE,
 			.board_size = QCA99X0_BOARD_DATA_SZ,
 			.board_ext_size = QCA99X0_BOARD_EXT_DATA_SZ,
 		},
@@ -539,6 +549,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.hw_restart_disconnect = false,
 		.use_fw_tx_credits = true,
 		.delay_unmap_buffer = false,
+		.mcast_frame_registration = false,
 	},
 	{
 		.id = QCA9377_HW_1_0_DEV_VERSION,
@@ -547,13 +558,13 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca9377 hw1.0",
 		.patch_load_addr = QCA9377_HW_1_0_PATCH_LOAD_ADDR,
 		.uart_pin = 6,
+		.led_pin = 0,
 		.otp_exe_param = 0,
 		.channel_counters_freq_hz = 88000,
 		.max_probe_resp_desc_thres = 0,
 		.cal_data_len = 8124,
 		.fw = {
 			.dir = QCA9377_HW_1_0_FW_DIR,
-			.board = QCA9377_HW_1_0_BOARD_DATA_FILE,
 			.board_size = QCA9377_BOARD_DATA_SZ,
 			.board_ext_size = QCA9377_BOARD_EXT_DATA_SZ,
 		},
@@ -579,6 +590,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.hw_restart_disconnect = false,
 		.use_fw_tx_credits = true,
 		.delay_unmap_buffer = false,
+		.mcast_frame_registration = false,
 	},
 	{
 		.id = QCA9377_HW_1_1_DEV_VERSION,
@@ -587,13 +599,13 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca9377 hw1.1",
 		.patch_load_addr = QCA9377_HW_1_0_PATCH_LOAD_ADDR,
 		.uart_pin = 6,
+		.led_pin = 0,
 		.otp_exe_param = 0,
 		.channel_counters_freq_hz = 88000,
 		.max_probe_resp_desc_thres = 0,
 		.cal_data_len = 8124,
 		.fw = {
 			.dir = QCA9377_HW_1_0_FW_DIR,
-			.board = QCA9377_HW_1_0_BOARD_DATA_FILE,
 			.board_size = QCA9377_BOARD_DATA_SZ,
 			.board_ext_size = QCA9377_BOARD_EXT_DATA_SZ,
 		},
@@ -621,6 +633,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.hw_restart_disconnect = false,
 		.use_fw_tx_credits = true,
 		.delay_unmap_buffer = false,
+		.mcast_frame_registration = false,
 	},
 	{
 		.id = QCA9377_HW_1_1_DEV_VERSION,
@@ -629,13 +642,13 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca9377 hw1.1 sdio",
 		.patch_load_addr = QCA9377_HW_1_0_PATCH_LOAD_ADDR,
 		.uart_pin = 19,
+		.led_pin = 0,
 		.otp_exe_param = 0,
 		.channel_counters_freq_hz = 88000,
 		.max_probe_resp_desc_thres = 0,
 		.cal_data_len = 8124,
 		.fw = {
 			.dir = QCA9377_HW_1_0_FW_DIR,
-			.board = QCA9377_HW_1_0_BOARD_DATA_FILE,
 			.board_size = QCA9377_BOARD_DATA_SZ,
 			.board_ext_size = QCA9377_BOARD_EXT_DATA_SZ,
 		},
@@ -654,6 +667,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.hw_restart_disconnect = false,
 		.use_fw_tx_credits = true,
 		.delay_unmap_buffer = false,
+		.mcast_frame_registration = false,
 	},
 	{
 		.id = QCA4019_HW_1_0_DEV_VERSION,
@@ -662,6 +676,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca4019 hw1.0",
 		.patch_load_addr = QCA4019_HW_1_0_PATCH_LOAD_ADDR,
 		.uart_pin = 7,
+		.led_pin = 0,
 		.cc_wraparound_type = ATH10K_HW_CC_WRAP_SHIFTED_EACH,
 		.otp_exe_param = 0x0010000,
 		.continuous_frag_desc = true,
@@ -674,7 +689,6 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.cal_data_len = 12064,
 		.fw = {
 			.dir = QCA4019_HW_1_0_FW_DIR,
-			.board = QCA4019_HW_1_0_BOARD_DATA_FILE,
 			.board_size = QCA4019_BOARD_DATA_SZ,
 			.board_ext_size = QCA4019_BOARD_EXT_DATA_SZ,
 		},
@@ -701,18 +715,22 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.hw_restart_disconnect = false,
 		.use_fw_tx_credits = true,
 		.delay_unmap_buffer = false,
+		.mcast_frame_registration = false,
 	},
 	{
 		.id = WCN3990_HW_1_0_DEV_VERSION,
 		.dev_id = 0,
 		.bus = ATH10K_BUS_SNOC,
 		.name = "wcn3990 hw1.0",
+		.led_pin = 0,
 		.continuous_frag_desc = true,
 		.tx_chain_mask = 0x7,
 		.rx_chain_mask = 0x7,
 		.max_spatial_stream = 4,
 		.fw = {
 			.dir = WCN3990_HW_1_0_FW_DIR,
+			.board_size = WCN3990_BOARD_DATA_SZ,
+			.board_ext_size = WCN3990_BOARD_EXT_DATA_SZ,
 		},
 		.sw_decrypt_mcast_mgmt = true,
 		.rx_desc_ops = &wcn3990_rx_desc_ops,
@@ -734,6 +752,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.hw_restart_disconnect = true,
 		.use_fw_tx_credits = false,
 		.delay_unmap_buffer = true,
+		.mcast_frame_registration = false,
 	},
 };
 
@@ -934,11 +953,20 @@ static const struct firmware *ath10k_fetch_fw_file(struct ath10k *ar,
 	if (dir == NULL)
 		dir = ".";
 
+	if (ar->board_name) {
+		snprintf(filename, sizeof(filename), "%s/%s/%s",
+			 dir, ar->board_name, file);
+		ret = firmware_request_nowarn(&fw, filename, ar->dev);
+		ath10k_dbg(ar, ATH10K_DBG_BOOT, "boot fw request '%s': %d\n",
+			   filename, ret);
+		if (!ret)
+			return fw;
+	}
+
 	snprintf(filename, sizeof(filename), "%s/%s", dir, file);
 	ret = firmware_request_nowarn(&fw, filename, ar->dev);
 	ath10k_dbg(ar, ATH10K_DBG_BOOT, "boot fw request '%s': %d\n",
 		   filename, ret);
-
 	if (ret)
 		return ERR_PTR(ret);
 
@@ -1156,8 +1184,11 @@ int ath10k_core_check_dt(struct ath10k *ar)
 	if (!node)
 		return -ENOENT;
 
-	of_property_read_string(node, "qcom,ath10k-calibration-variant",
+	of_property_read_string(node, "qcom,calibration-variant",
 				&variant);
+	if (!variant)
+		of_property_read_string(node, "qcom,ath10k-calibration-variant",
+					&variant);
 	if (!variant)
 		return -ENODATA;
 
@@ -1178,7 +1209,7 @@ static int ath10k_download_fw(struct ath10k *ar)
 	u32 address, data_len;
 	const void *data;
 	int ret;
-	struct pm_qos_request latency_qos;
+	struct pm_qos_request latency_qos = {};
 
 	address = ar->hw_params.patch_load_addr;
 
@@ -1193,7 +1224,7 @@ static int ath10k_download_fw(struct ath10k *ar)
 	}
 
 	ath10k_dbg(ar, ATH10K_DBG_BOOT,
-		   "boot uploading firmware image %pK len %d\n",
+		   "boot uploading firmware image %p len %d\n",
 		   data, data_len);
 
 	/* Check if device supports to download firmware via
@@ -1212,7 +1243,6 @@ static int ath10k_download_fw(struct ath10k *ar)
 			    ret);
 	}
 
-	memset(&latency_qos, 0, sizeof(latency_qos));
 	cpu_latency_qos_add_request(&latency_qos, 0);
 
 	ret = ath10k_bmi_fast_download(ar, address, data, data_len);
@@ -1296,11 +1326,6 @@ static int ath10k_core_fetch_board_data_api_1(struct ath10k *ar, int bd_ie_type)
 	char boardname[100];
 
 	if (bd_ie_type == ATH10K_BD_IE_BOARD) {
-		if (!ar->hw_params.fw.board) {
-			ath10k_err(ar, "failed to find board file fw entry\n");
-			return -EINVAL;
-		}
-
 		scnprintf(boardname, sizeof(boardname), "board-%s-%s.bin",
 			  ath10k_bus_str(ar->hif.bus), dev_name(ar->dev));
 
@@ -1310,7 +1335,7 @@ static int ath10k_core_fetch_board_data_api_1(struct ath10k *ar, int bd_ie_type)
 		if (IS_ERR(ar->normal_mode_fw.board)) {
 			fw = ath10k_fetch_fw_file(ar,
 						  ar->hw_params.fw.dir,
-						  ar->hw_params.fw.board);
+						  ATH10K_BOARD_DATA_FILE);
 			ar->normal_mode_fw.board = fw;
 		}
 
@@ -1320,13 +1345,8 @@ static int ath10k_core_fetch_board_data_api_1(struct ath10k *ar, int bd_ie_type)
 		ar->normal_mode_fw.board_data = ar->normal_mode_fw.board->data;
 		ar->normal_mode_fw.board_len = ar->normal_mode_fw.board->size;
 	} else if (bd_ie_type == ATH10K_BD_IE_BOARD_EXT) {
-		if (!ar->hw_params.fw.eboard) {
-			ath10k_err(ar, "failed to find eboard file fw entry\n");
-			return -EINVAL;
-		}
-
 		fw = ath10k_fetch_fw_file(ar, ar->hw_params.fw.dir,
-					  ar->hw_params.fw.eboard);
+					  ATH10K_EBOARD_DATA_FILE);
 		ar->normal_mode_fw.ext_board = fw;
 		if (IS_ERR(ar->normal_mode_fw.ext_board))
 			return PTR_ERR(ar->normal_mode_fw.ext_board);
@@ -1582,7 +1602,7 @@ static int ath10k_core_create_board_name(struct ath10k *ar, char *name,
 					 bool with_chip_id)
 {
 	/* strlen(',variant=') + strlen(ar->id.bdf_ext) */
-	char variant[9 + ATH10K_SMBIOS_BDF_EXT_STR_LENGTH] = { 0 };
+	char variant[9 + ATH10K_SMBIOS_BDF_EXT_STR_LENGTH] = {};
 
 	if (with_variant && ar->id.bdf_ext[0] != '\0')
 		scnprintf(variant, sizeof(variant), ",variant=%s",
@@ -1845,7 +1865,7 @@ static int ath10k_download_and_run_otp(struct ath10k *ar)
 
 	if (!ar->running_fw->fw_file.otp_data ||
 	    !ar->running_fw->fw_file.otp_len) {
-		ath10k_warn(ar, "Not running otp, calibration will be incorrect (otp-data %pK otp_len %zd)!\n",
+		ath10k_warn(ar, "Not running otp, calibration will be incorrect (otp-data %p otp_len %zd)!\n",
 			    ar->running_fw->fw_file.otp_data,
 			    ar->running_fw->fw_file.otp_len);
 		return 0;
@@ -2026,7 +2046,7 @@ static int ath10k_download_cal_nvmem(struct ath10k *ar, const char *cell_name)
 	ret = ath10k_download_board_data(ar, buf, len);
 	kfree(buf);
 #elif defined(__FreeBSD__)
-	ret = -ENXIO;
+	ret = -EOPNOTSUPP;
 #endif
 	if (ret)
 		ath10k_warn(ar, "failed to download calibration data from nvmem-cell '%s': %d\n",
@@ -2315,7 +2335,9 @@ static int ath10k_core_pre_cal_download(struct ath10k *ar)
 		   "boot did not find a pre calibration file, try DT next: %d\n",
 		   ret);
 
-	ret = ath10k_download_cal_dt(ar, "qcom,ath10k-pre-calibration-data");
+	ret = ath10k_download_cal_dt(ar, "qcom,pre-calibration-data");
+	if (ret == -ENOENT)
+		ret = ath10k_download_cal_dt(ar, "qcom,ath10k-pre-calibration-data");
 	if (ret) {
 		ath10k_dbg(ar, ATH10K_DBG_BOOT,
 			   "unable to load pre cal data from DT: %d\n", ret);
@@ -2393,7 +2415,9 @@ static int ath10k_download_cal_data(struct ath10k *ar)
 		   "boot did not find a calibration file, try DT next: %d\n",
 		   ret);
 
-	ret = ath10k_download_cal_dt(ar, "qcom,ath10k-calibration-data");
+	ret = ath10k_download_cal_dt(ar, "qcom,calibration-data");
+	if (ret == -ENOENT)
+		ret = ath10k_download_cal_dt(ar, "qcom,ath10k-calibration-data");
 	if (ret == 0) {
 		ar->cal_mode = ATH10K_CAL_MODE_DT;
 		goto done;
@@ -2542,14 +2566,50 @@ static int ath10k_init_hw_params(struct ath10k *ar)
 	return 0;
 }
 
-void ath10k_core_start_recovery(struct ath10k *ar)
+static void ath10k_core_recovery_check_work(struct work_struct *work)
 {
-	if (test_and_set_bit(ATH10K_FLAG_RESTARTING, &ar->dev_flags)) {
-		ath10k_warn(ar, "already restarting\n");
+	struct ath10k *ar = container_of(work, struct ath10k, recovery_check_work);
+	long time_left;
+
+	/* Sometimes the recovery will fail and then the next all recovery fail,
+	 * so avoid infinite recovery.
+	 */
+	if (atomic_read(&ar->fail_cont_count) >= ATH10K_RECOVERY_MAX_FAIL_COUNT) {
+		ath10k_err(ar, "consecutive fail %d times, will shutdown driver!",
+			   atomic_read(&ar->fail_cont_count));
+		ar->state = ATH10K_STATE_WEDGED;
 		return;
 	}
 
+	ath10k_dbg(ar, ATH10K_DBG_BOOT, "total recovery count: %d", ++ar->recovery_count);
+
+	if (atomic_read(&ar->pending_recovery)) {
+		/* Sometimes it happened another recovery work before the previous one
+		 * completed, then the second recovery work will destroy the previous
+		 * one, thus below is to avoid that.
+		 */
+		time_left = wait_for_completion_timeout(&ar->driver_recovery,
+							ATH10K_RECOVERY_TIMEOUT_HZ);
+		if (time_left) {
+			ath10k_warn(ar, "previous recovery succeeded, skip this!\n");
+			return;
+		}
+
+		/* Record the continuous recovery fail count when recovery failed. */
+		atomic_inc(&ar->fail_cont_count);
+
+		/* Avoid having multiple recoveries at the same time. */
+		return;
+	}
+
+	atomic_inc(&ar->pending_recovery);
 	queue_work(ar->workqueue, &ar->restart_work);
+}
+
+void ath10k_core_start_recovery(struct ath10k *ar)
+{
+	/* Use workqueue_aux to avoid blocking recovery tracking */
+	queue_work(ar->workqueue_aux, &ar->recovery_check_work);
 }
 EXPORT_SYMBOL(ath10k_core_start_recovery);
 
@@ -2582,6 +2642,8 @@ static void ath10k_core_restart(struct work_struct *work)
 {
 	struct ath10k *ar = container_of(work, struct ath10k, restart_work);
 	int ret;
+
+	reinit_completion(&ar->driver_recovery);
 
 	set_bit(ATH10K_FLAG_CRASH_FLUSH, &ar->dev_flags);
 
@@ -2647,8 +2709,6 @@ static void ath10k_core_restart(struct work_struct *work)
 	if (ret)
 		ath10k_warn(ar, "failed to send firmware crash dump via devcoredump: %d",
 			    ret);
-
-	complete(&ar->driver_recovery);
 }
 
 static void ath10k_core_set_coverage_class_work(struct work_struct *work)
@@ -2657,7 +2717,7 @@ static void ath10k_core_set_coverage_class_work(struct work_struct *work)
 					 set_coverage_class_work);
 
 	if (ar->hw_params.hw_ops->set_coverage_class)
-		ar->hw_params.hw_ops->set_coverage_class(ar, -1);
+		ar->hw_params.hw_ops->set_coverage_class(ar, -1, -1);
 }
 
 static int ath10k_core_init_firmware_features(struct ath10k *ar)
@@ -3306,6 +3366,10 @@ int ath10k_core_start(struct ath10k *ar, enum ath10k_firmware_mode mode,
 		goto err_hif_stop;
 	}
 
+	status = ath10k_leds_start(ar);
+	if (status)
+		goto err_hif_stop;
+
 	return 0;
 
 err_hif_stop:
@@ -3370,7 +3434,7 @@ EXPORT_SYMBOL(ath10k_core_stop);
  */
 static int ath10k_core_probe_fw(struct ath10k *ar)
 {
-	struct bmi_target_info target_info;
+	struct bmi_target_info target_info = {};
 	int ret = 0;
 
 	ret = ath10k_hif_power_up(ar, ATH10K_FIRMWARE_MODE_NORMAL);
@@ -3381,7 +3445,6 @@ static int ath10k_core_probe_fw(struct ath10k *ar)
 
 	switch (ar->hif.bus) {
 	case ATH10K_BUS_SDIO:
-		memset(&target_info, 0, sizeof(target_info));
 		ret = ath10k_bmi_get_target_info_sdio(ar, &target_info);
 		if (ret) {
 			ath10k_err(ar, "could not get target info (%d)\n", ret);
@@ -3393,7 +3456,6 @@ static int ath10k_core_probe_fw(struct ath10k *ar)
 	case ATH10K_BUS_PCI:
 	case ATH10K_BUS_AHB:
 	case ATH10K_BUS_USB:
-		memset(&target_info, 0, sizeof(target_info));
 		ret = ath10k_bmi_get_target_info(ar, &target_info);
 		if (ret) {
 			ath10k_err(ar, "could not get target info (%d)\n", ret);
@@ -3403,7 +3465,6 @@ static int ath10k_core_probe_fw(struct ath10k *ar)
 		ar->hw->wiphy->hw_version = target_info.version;
 		break;
 	case ATH10K_BUS_SNOC:
-		memset(&target_info, 0, sizeof(target_info));
 		ret = ath10k_hif_get_target_info(ar, &target_info);
 		if (ret) {
 			ath10k_err(ar, "could not get target info (%d)\n", ret);
@@ -3567,9 +3628,18 @@ static void ath10k_core_register_work(struct work_struct *work)
 	ath10k_fwlog_register(ar);
 #endif
 
+	status = ath10k_leds_register(ar);
+	if (status) {
+		ath10k_err(ar, "could not register leds: %d\n",
+			   status);
+		goto err_thermal_unregister;
+	}
+
 	set_bit(ATH10K_FLAG_CORE_REGISTERED, &ar->dev_flags);
 	return;
 
+err_thermal_unregister:
+	ath10k_thermal_unregister(ar);
 err_spectral_destroy:
 	ath10k_spectral_destroy(ar);
 err_debug_destroy:
@@ -3604,6 +3674,8 @@ void ath10k_core_unregister(struct ath10k *ar)
 
 	if (!test_bit(ATH10K_FLAG_CORE_REGISTERED, &ar->dev_flags))
 		return;
+
+	ath10k_leds_unregister(ar);
 
 	ath10k_thermal_unregister(ar);
 	/* Stop spectral before unregistering from mac80211 to remove the
@@ -3686,7 +3758,7 @@ struct ath10k *ath10k_core_create(size_t priv_size, struct device *dev,
 	default:
 		ath10k_err(ar, "unsupported core hardware revision %d\n",
 			   hw_rev);
-		ret = -ENOTSUPP;
+		ret = -EOPNOTSUPP;
 		goto err_free_mac;
 	}
 
@@ -3743,14 +3815,17 @@ struct ath10k *ath10k_core_create(size_t priv_size, struct device *dev,
 
 	INIT_WORK(&ar->register_work, ath10k_core_register_work);
 	INIT_WORK(&ar->restart_work, ath10k_core_restart);
+	INIT_WORK(&ar->recovery_check_work, ath10k_core_recovery_check_work);
 	INIT_WORK(&ar->set_coverage_class_work,
 		  ath10k_core_set_coverage_class_work);
 
-	init_dummy_netdev(&ar->napi_dev);
+	ar->napi_dev = alloc_netdev_dummy(0);
+	if (!ar->napi_dev)
+		goto err_free_tx_complete;
 
 	ret = ath10k_coredump_create(ar);
 	if (ret)
-		goto err_free_tx_complete;
+		goto err_free_netdev;
 
 	ret = ath10k_debug_create(ar);
 	if (ret)
@@ -3760,6 +3835,8 @@ struct ath10k *ath10k_core_create(size_t priv_size, struct device *dev,
 
 err_free_coredump:
 	ath10k_coredump_destroy(ar);
+err_free_netdev:
+	free_netdev(ar->napi_dev);
 err_free_tx_complete:
 	destroy_workqueue(ar->workqueue_tx_complete);
 err_free_aux_wq:
@@ -3781,6 +3858,7 @@ void ath10k_core_destroy(struct ath10k *ar)
 
 	destroy_workqueue(ar->workqueue_tx_complete);
 
+	free_netdev(ar->napi_dev);
 	ath10k_debug_destroy(ar);
 	ath10k_coredump_destroy(ar);
 	ath10k_htt_tx_destroy(&ar->htt);
@@ -3792,3 +3870,9 @@ EXPORT_SYMBOL(ath10k_core_destroy);
 MODULE_AUTHOR("Qualcomm Atheros");
 MODULE_DESCRIPTION("Core module for Qualcomm Atheros 802.11ac wireless LAN cards.");
 MODULE_LICENSE("Dual BSD/GPL");
+#if defined(__FreeBSD__)
+MODULE_VERSION(ath10k, 1);
+MODULE_DEPEND(ath10k, linuxkpi, 1, 1, 1);
+MODULE_DEPEND(ath10k, linuxkpi_wlan, 1, 1, 1);
+MODULE_DEPEND(ath10k, athk_common, 1, 1, 1);
+#endif

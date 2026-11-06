@@ -31,7 +31,6 @@
 
 #include "assym.inc"
 #include "opt_kstack_pages.h"
-#include "opt_sched.h"
 
 #include <sys/elf_common.h>
 
@@ -76,7 +75,7 @@
  * void cpu_throw(struct thread *old, struct thread *new)
  */
 ENTRY(cpu_throw)
-	/* Of old == NULL skip disabling stepping */
+	/* If old == NULL skip disabling stepping */
 	cbz	x0, 1f
 
 	/* If we were single stepping, disable it */
@@ -97,8 +96,9 @@ ENTRY(cpu_throw)
 	mov	x0, x1
 #endif
 
-	/* This returns the thread pointer so no need to save it */
+	/* These return the thread pointer so no need to save it */
 	bl	ptrauth_switch
+	bl	mte_switch
 #ifdef PERTHREAD_SSP
 	mov	x19, x0
 #endif
@@ -177,8 +177,9 @@ ENTRY(cpu_switch)
 	mov	x0, x1
 #endif
 
-	/* This returns the thread pointer so no need to save it */
+	/* These return the thread pointer so no need to save it */
 	bl	ptrauth_switch
+	bl	mte_switch
 	/* This returns the thread pcb */
 	bl	pmap_switch
 	/* Move the new pcb out of the way */
@@ -197,7 +198,7 @@ ENTRY(cpu_switch)
 	 * Release the old thread.
 	 */
 	stlr	x2, [x0, #TD_LOCK]
-#if defined(SCHED_ULE) && defined(SMP)
+#if defined(SMP)
 	/* Spin if TD_LOCK points to a blocked_lock */
 	ldr	x2, =_C_LABEL(blocked_lock)
 1:
@@ -276,6 +277,8 @@ ENTRY(fork_trampoline)
 	ldp	x24, x25, [sp, #TF_X + 24 * 8]
 	ldp	x26, x27, [sp, #TF_X + 26 * 8]
 	ldp	x28, x29, [sp, #TF_X + 28 * 8]
+
+	add	sp, sp, #(TF_SIZE)
 
 	/*
 	 * No need for interrupts reenabling since PSR

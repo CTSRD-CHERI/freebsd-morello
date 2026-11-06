@@ -22,7 +22,7 @@
 .\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 .\" SUCH DAMAGE.
 .\"
-.Dd February 3, 2023
+.Dd December 28, 2025
 .Dt LOCKING 9
 .Os
 .Sh NAME
@@ -205,11 +205,6 @@ The functions
 and
 .Fn wakeup_one
 also handle event-based thread blocking.
-Unlike condition variables,
-arbitrary addresses may be used as wait channels and a dedicated
-structure does not need to be allocated.
-However, care must be taken to ensure that wait channel addresses are
-unique to an event.
 If a thread must wait for an external event, it is put to sleep by
 .Fn tsleep ,
 .Fn msleep ,
@@ -221,6 +216,16 @@ Threads may also wait using one of the locking primitive sleep routines
 .Xr rw_sleep 9 ,
 or
 .Xr sx_sleep 9 .
+.Pp
+Unlike condition variables,
+arbitrary addresses may be used as wait channels and a dedicated
+structure does not need to be allocated.
+However, care must be taken to ensure that wait channel addresses are
+unique to an event.
+For example, the memory address of a sleepable lock such as a
+.Xr sx 9
+must not be used as a sleep channel, because the lock implementation
+will internally use the same address as a wait channel.
 .Pp
 The parameter
 .Fa chan
@@ -371,9 +376,9 @@ functions,
 and any of the
 .Fn sleep
 functions.
-.Bl -column ".Ic xxxxxxxxxxxxxxxx" ".Xr XXXXXXXXX" ".Xr XXXXXXXXX" ".Xr XXXXXXX" ".Xr XXXXXXXXX" ".Xr XXXXXX" -offset 3n
+.Bl -column "       You want:" "spin mtx " "mutex/rw " "rmlock " "sleep rm " "sx/lk "  -offset 3n
 .It Em "       You want:" Ta spin mtx Ta mutex/rw Ta rmlock Ta sleep rm Ta sx/lk Ta sleep
-.It Em "You have:     " Ta -------- Ta -------- Ta ------ Ta -------- Ta ------ Ta ------
+.It Em "You have:"        Ta -------- Ta -------- Ta ------ Ta -------- Ta ----- Ta ------
 .It spin mtx  Ta \&ok Ta \&no Ta \&no Ta \&no Ta \&no Ta \&no-1
 .It mutex/rw  Ta \&ok Ta \&ok Ta \&ok Ta \&no Ta \&no Ta \&no-1
 .It rmlock    Ta \&ok Ta \&ok Ta \&ok Ta \&no Ta \&no Ta \&no-1
@@ -407,13 +412,13 @@ Note that non-blocking try operations on locks are always permitted.
 .Ss Context mode table
 The next table shows what can be used in different contexts.
 At this time this is a rather easy to remember table.
-.Bl -column ".Ic Xxxxxxxxxxxxxxxxxxx" ".Xr XXXXXXXXX" ".Xr XXXXXXXXX" ".Xr XXXXXXX" ".Xr XXXXXXXXX" ".Xr XXXXXX" -offset 3n
+.Bl -column "interrupt filter: " "spin mtx " "mutex/rw " "rmlock " "sleep rm " "sx/lk " -offset 3n
 .It Em "Context:"  Ta spin mtx Ta mutex/rw Ta rmlock Ta sleep rm Ta sx/lk Ta sleep
 .It interrupt filter:  Ta \&ok Ta \&no Ta \&no Ta \&no Ta \&no Ta \&no
 .It interrupt thread:  Ta \&ok Ta \&ok Ta \&ok Ta \&no Ta \&no Ta \&no
-.It callout:    Ta \&ok Ta \&ok Ta \&ok Ta \&no Ta \&no Ta \&no
-.It direct callout:  Ta \&ok Ta \&no Ta \&no Ta \&no Ta \&no Ta \&no
-.It system call:    Ta \&ok Ta \&ok Ta \&ok Ta \&ok Ta \&ok Ta \&ok
+.It callout:           Ta \&ok Ta \&ok Ta \&ok Ta \&no Ta \&no Ta \&no
+.It direct callout:    Ta \&ok Ta \&no Ta \&no Ta \&no Ta \&no Ta \&no
+.It system call:       Ta \&ok Ta \&ok Ta \&ok Ta \&ok Ta \&ok Ta \&ok
 .El
 .Sh SEE ALSO
 .Xr lockstat 1 ,

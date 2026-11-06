@@ -314,7 +314,7 @@ siis_intr(void *data)
 }
 
 static struct resource *
-siis_alloc_resource(device_t dev, device_t child, int type, int *rid,
+siis_alloc_resource(device_t dev, device_t child, int type, int rid,
 		    rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
 {
 	struct siis_controller *ctlr = device_get_softc(dev);
@@ -339,7 +339,7 @@ siis_alloc_resource(device_t dev, device_t child, int type, int *rid,
 		}
 		break;
 	case SYS_RES_IRQ:
-		if (*rid == ATA_IRQ_RID)
+		if (rid == ATA_IRQ_RID)
 			res = ctlr->irq.r_irq;
 		break;
 	}
@@ -433,7 +433,7 @@ static device_method_t siis_methods[] = {
 	DEVMETHOD(bus_teardown_intr,siis_teardown_intr),
 	DEVMETHOD(bus_child_location, siis_child_location),
 	DEVMETHOD(bus_get_dma_tag,  siis_get_dma_tag),
-	{ 0, 0 }
+	DEVMETHOD_END
 };
 
 static driver_t siis_driver = {
@@ -631,7 +631,7 @@ static device_method_t siisch_methods[] = {
 	DEVMETHOD(device_detach,    siis_ch_detach),
 	DEVMETHOD(device_suspend,   siis_ch_suspend),
 	DEVMETHOD(device_resume,    siis_ch_resume),
-	{ 0, 0 }
+	DEVMETHOD_END
 };
 
 static driver_t siisch_driver = {

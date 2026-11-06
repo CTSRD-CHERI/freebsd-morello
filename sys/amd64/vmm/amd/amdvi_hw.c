@@ -274,6 +274,7 @@ amdvi_get_cmd_tail(struct amdvi_softc *softc)
 
 	tail = (struct amdvi_cmd *)((uint8_t *)softc->cmd +
 	    ctrl->cmd_tail);
+	memset(tail, 0, sizeof(*tail));
 
 	return (tail);
 }
@@ -316,7 +317,6 @@ amdvi_cmd_cmp(struct amdvi_softc *softc, const uint64_t data)
 	uint64_t pa;
 
 	cmd = amdvi_get_cmd_tail(softc);
-	KASSERT(cmd != NULL, ("Cmd is NULL"));
 
 	pa = vtophys(&softc->cmp_data);
 	cmd->opcode = AMDVI_CMP_WAIT_OPCODE;
@@ -334,7 +334,6 @@ amdvi_cmd_inv_dte(struct amdvi_softc *softc, uint16_t devid)
 	struct amdvi_cmd *cmd;
 
 	cmd = amdvi_get_cmd_tail(softc);
-	KASSERT(cmd != NULL, ("Cmd is NULL"));
 	cmd->opcode = AMDVI_INVD_DTE_OPCODE;
 	cmd->word0 = devid;
 	amdvi_update_cmd_tail(softc);
@@ -352,7 +351,6 @@ amdvi_cmd_inv_iommu_pages(struct amdvi_softc *softc, uint16_t domain_id,
 	struct amdvi_cmd *cmd;
 
 	cmd = amdvi_get_cmd_tail(softc);
-	KASSERT(cmd != NULL, ("Cmd is NULL"));
 
 	cmd->opcode = AMDVI_INVD_PAGE_OPCODE;
 	cmd->word1 = domain_id;
@@ -383,7 +381,6 @@ amdvi_cmd_inv_iotlb(struct amdvi_softc *softc, uint16_t devid)
 		      qlen, RID2PCI_STR(devid));
 	}
 	cmd = amdvi_get_cmd_tail(softc);
-	KASSERT(cmd != NULL, ("Cmd is NULL"));
 
 #ifdef AMDVI_DEBUG_CMD
 	device_printf(softc->dev, "Invalidate IOTLB devID 0x%x"
@@ -406,7 +403,6 @@ amdvi_cmd_inv_intr_map(struct amdvi_softc *softc,
 	struct amdvi_cmd *cmd;
 
 	cmd = amdvi_get_cmd_tail(softc);
-	KASSERT(cmd != NULL, ("Cmd is NULL"));
 	cmd->opcode = AMDVI_INVD_INTR_OPCODE;
 	cmd->word0 = devid;
 	amdvi_update_cmd_tail(softc);
@@ -420,10 +416,6 @@ amdvi_cmd_inv_intr_map(struct amdvi_softc *softc,
 static void
 amdvi_inv_domain(struct amdvi_softc *softc, uint16_t domain_id)
 {
-	struct amdvi_cmd *cmd __diagused;
-
-	cmd = amdvi_get_cmd_tail(softc);
-	KASSERT(cmd != NULL, ("Cmd is NULL"));
 
 	/*
 	 * See section 3.3.3 of IOMMU spec rev 2.0, software note
@@ -657,7 +649,7 @@ amdvi_decode_evt(struct amdvi_event *evt)
 	case AMDVI_EVENT_CMD_HW_ERROR:
 		printf("\t[%s EVT]\n", (evt->opcode == AMDVI_EVENT_ILLEGAL_CMD) ?
 		    "ILLEGAL CMD" : "CMD HW ERR");
-		cmd = (struct amdvi_cmd *)PHYS_TO_DMAP(evt->addr);
+		cmd = PHYS_TO_DMAP(evt->addr);
 		printf("\tCMD opcode= 0x%x 0x%x 0x%x 0x%lx\n",
 		    cmd->opcode, cmd->word0, cmd->word1, cmd->addr);
 		break;
@@ -1044,8 +1036,7 @@ amdvi_free_ptp(uint64_t *ptp, int level)
 			continue;
 #endif
 
-		amdvi_free_ptp((uint64_t *)PHYS_TO_DMAP(ptp[i]
-		    & AMDVI_PT_MASK), level - 1);
+		amdvi_free_ptp(PHYS_TO_DMAP(ptp[i] & AMDVI_PT_MASK), level - 1);
 	}
 
 	free(ptp, M_AMDVI);
@@ -1106,7 +1097,7 @@ amdvi_set_pt(uint64_t *pt, int level, vm_paddr_t gpa,
 #endif
 #define PTE2PA(x)	((uint64_t)(x) & AMDVI_PT_MASK)
 		pa = PTE2PA(pt[index]);
-		pt = (uint64_t *)PHYS_TO_DMAP(pa);
+		pt = PHYS_TO_DMAP(pa);
 		shift -= PT_SHIFT;
 		level--;
 	}

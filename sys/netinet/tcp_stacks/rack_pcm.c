@@ -78,8 +78,6 @@
 #include <netinet/in_kdtrace.h>
 #include <netinet/in_pcb.h>
 #include <netinet/ip.h>
-#include <netinet/ip_icmp.h>	/* required for icmp_var.h */
-#include <netinet/icmp_var.h>	/* for ICMP_BANDLIM */
 #include <netinet/ip_var.h>
 #include <netinet/ip6.h>
 #include <netinet6/in6_pcb.h>
@@ -198,16 +196,21 @@ rack_update_pcm_ack(struct tcp_rack *rack, int was_cumack, uint32_t start, uint3
 		} else {
 			/* Need to expand the array */
 			struct rack_pcm_stats *n;
-			uint16_t new_cnt;
+			size_t new_cnt;
 
-			new_cnt = rack->r_ctl.pcm_i.cnt_alloc * 2;
-			sz = (sizeof(struct rack_pcm_stats) * new_cnt);
-			n = malloc(sz,M_TCPPCM, M_NOWAIT);
-			if (n == NULL) {
-				/* We are dead, no memory */
+			new_cnt = (size_t)rack->r_ctl.pcm_i.cnt_alloc * 2;
+			if (new_cnt > RACK_MAX_PCM_ARRAY) {
+				/* Too many entries required. */
+stop_measurement:
 				rack->pcm_in_progress = 0;
 				rack->r_ctl.pcm_i.cnt = 0;
 				return;
+			}
+			sz = (sizeof(struct rack_pcm_stats) * new_cnt);
+			n = malloc(sz, M_TCPPCM, M_NOWAIT);
+			if (n == NULL) {
+				/* We are dead, no memory. */
+				goto stop_measurement;
 			}
 			sz = (sizeof(struct rack_pcm_stats) * rack->r_ctl.pcm_i.cnt_alloc);
 			memcpy(n, rack->r_ctl.pcm_s, sz);

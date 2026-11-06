@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
- *
  * This file and its contents are supplied under the terms of the
  * Common Development and Distribution License ("CDDL"), version 1.0.
  * You may only use this file in accordance with the terms of version
@@ -9,9 +7,7 @@
  *
  * A full copy of the text of the CDDL should have accompanied this
  * source.  A copy of the CDDL is also available via the Internet at
- * http://www.illumos.org/license/CDDL.
- *
- * CDDL HEADER END
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -459,13 +455,14 @@ vdev_indirect_mapping_add_entries(vdev_indirect_mapping_t *vim,
 		dmu_write(vim->vim_objset, vim->vim_object,
 		    vim->vim_phys->vimp_num_entries * sizeof (*mapbuf),
 		    i * sizeof (*mapbuf),
-		    mapbuf, tx);
+		    mapbuf, tx, DMU_READ_NO_PREFETCH);
 		if (vim->vim_havecounts) {
 			dmu_write(vim->vim_objset,
 			    vim->vim_phys->vimp_counts_object,
 			    vim->vim_phys->vimp_num_entries *
 			    sizeof (*countbuf),
-			    i * sizeof (*countbuf), countbuf, tx);
+			    i * sizeof (*countbuf), countbuf, tx,
+			    DMU_READ_NO_PREFETCH);
 		}
 		vim->vim_phys->vimp_num_entries += i;
 	}
@@ -599,7 +596,6 @@ vdev_indirect_mapping_free_obsolete_counts(vdev_indirect_mapping_t *vim,
 	vmem_free(counts, vim->vim_phys->vimp_num_entries * sizeof (uint32_t));
 }
 
-#if defined(_KERNEL)
 EXPORT_SYMBOL(vdev_indirect_mapping_add_entries);
 EXPORT_SYMBOL(vdev_indirect_mapping_alloc);
 EXPORT_SYMBOL(vdev_indirect_mapping_bytes_mapped);
@@ -616,4 +612,3 @@ EXPORT_SYMBOL(vdev_indirect_mapping_num_entries);
 EXPORT_SYMBOL(vdev_indirect_mapping_object);
 EXPORT_SYMBOL(vdev_indirect_mapping_open);
 EXPORT_SYMBOL(vdev_indirect_mapping_size);
-#endif

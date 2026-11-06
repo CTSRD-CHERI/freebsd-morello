@@ -262,7 +262,7 @@ ue_attach_post_task(struct usb_proc_msg *_task)
 
 	snprintf(num, sizeof(num), "%u", ue->ue_unit);
 	ue->ue_sysctl_oid = SYSCTL_ADD_NODE(&ue->ue_sysctl_ctx,
-	    &SYSCTL_NODE_CHILDREN(_net, ue),
+	    SYSCTL_STATIC_CHILDREN(_net_ue),
 	    OID_AUTO, num, CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "");
 	SYSCTL_ADD_PROC(&ue->ue_sysctl_ctx,
 	    SYSCTL_CHILDREN(ue->ue_sysctl_oid), OID_AUTO, "%parent",
@@ -533,6 +533,7 @@ uether_ioctl(if_t ifp, u_long command, caddr_t data)
 		UE_UNLOCK(ue);
 		break;
 	case SIOCGIFMEDIA:
+	case SIOCGIFXMEDIA:
 	case SIOCSIFMEDIA:
 		if (ue->ue_miibus != NULL) {
 			mii = device_get_softc(ue->ue_miibus);

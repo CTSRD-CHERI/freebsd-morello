@@ -226,7 +226,7 @@ ocs_mgmt_get_list(ocs_t *ocs, ocs_textbuf_t *textbuf)
 
 	ocs_mgmt_start_unnumbered_section(textbuf, "ocs");
 
-	for (i=0;i<ARRAY_SIZE(mgmt_table);i++) {
+	for (i = 0; i < ARRAY_SIZE(mgmt_table); i++) {
 		access = 0;
 		if (mgmt_table[i].get_handler) {
 			access |= MGMT_MODE_RD;
@@ -305,7 +305,7 @@ ocs_mgmt_get(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 	if (ocs_strncmp(name, qualifier, strlen(qualifier)) == 0) {
 		char *unqualified_name = name + strlen(qualifier) + 1;
 
-		for (i=0;i<ARRAY_SIZE(mgmt_table);i++) {
+		for (i = 0; i < ARRAY_SIZE(mgmt_table); i++) {
 			if (ocs_strcmp(unqualified_name, mgmt_table[i].name) == 0) {
 				if (mgmt_table[i].get_handler) {
 					mgmt_table[i].get_handler(ocs, name, textbuf);
@@ -387,7 +387,7 @@ ocs_mgmt_set(ocs_t *ocs, char *name, char *value)
 		char *unqualified_name = name + strlen(qualifier) +1;
 
 		/* See if it's a value I can set */
-		for (i=0;i<ARRAY_SIZE(mgmt_table);i++) {
+		for (i = 0; i < ARRAY_SIZE(mgmt_table); i++) {
 			if (ocs_strcmp(unqualified_name, mgmt_table[i].name) == 0) {
 				if (mgmt_table[i].set_handler) {
 					return mgmt_table[i].set_handler(ocs, name, value);
@@ -469,7 +469,7 @@ ocs_mgmt_exec(ocs_t *ocs, char *action, void *arg_in,
 		char *unqualified_name = action + strlen(qualifier) +1;
 
 		/* See if it's an action I can perform */
-		for (i=0;i<ARRAY_SIZE(mgmt_table); i++) {
+		for (i = 0; i < ARRAY_SIZE(mgmt_table); i++) {
 			if (ocs_strcmp(unqualified_name, mgmt_table[i].name) == 0) {
 				if (mgmt_table[i].action_handler) {
 					return mgmt_table[i].action_handler(ocs, action, arg_in, arg_in_length,
@@ -527,7 +527,7 @@ ocs_mgmt_get_all(ocs_t *ocs, ocs_textbuf_t *textbuf)
 
 	ocs_mgmt_start_unnumbered_section(textbuf, "ocs");
 
-	for (i=0;i<ARRAY_SIZE(mgmt_table);i++) {
+	for (i = 0; i < ARRAY_SIZE(mgmt_table); i++) {
 		if (mgmt_table[i].get_handler) {
 			mgmt_table[i].get_handler(ocs, mgmt_table[i].name, textbuf);
 		} else if (mgmt_table[i].action_handler) {
@@ -1212,7 +1212,7 @@ get_sfp_a2(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 		int buffer_remaining = (SFP_PAGE_SIZE * 3) + 1;
 		int bytes_added;
 
-		for (i=0; i < bytes_read; i++) {
+		for (i = 0; i < bytes_read; i++) {
 			bytes_added = ocs_snprintf(d, buffer_remaining, "%02x ", *s);
 			++s;
 			d += bytes_added;
@@ -2040,7 +2040,7 @@ get_profile_list(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 			result_buf = ocs_malloc(ocs, BUFFER_SIZE, OCS_M_ZERO);
 			bytes_left = BUFFER_SIZE;
 
-			for (i=0; i<result.list->num_descriptors; i++) {
+			for (i = 0; i < result.list->num_descriptors; i++) {
 				sprintf(result_line, "0x%02x:%s\n", result.list->descriptors[i].profile_id,
 					result.list->descriptors[i].profile_description);
 				if (strlen(result_line) < bytes_left) {
@@ -2076,7 +2076,8 @@ ocs_mgmt_get_active_profile_cb(int32_t status, uint32_t active_profile, void *ul
 	ocs_sem_v(&(result->semaphore));
 }
 
-#define MAX_PROFILE_LENGTH 5
+/* "0x", up to 8 hex digits and a NUL for a uint32_t id */
+#define MAX_PROFILE_LENGTH 11
 
 /**
  * @brief  Get active profile
@@ -2107,7 +2108,7 @@ get_active_profile(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 		}
 		if (result.status == 0) {
 			/* Success. */
-			sprintf(result_string, "0x%02x", result.active_profile_id);
+			ocs_snprintf(result_string, sizeof(result_string), "0x%02x", result.active_profile_id);
 			ocs_mgmt_emit_string(textbuf, MGMT_MODE_RW, "active_profile", result_string);
 		} else {
 			ocs_log_test(ocs, "getting active profile status 0x%x\n", result.status);
@@ -2225,7 +2226,8 @@ get_nv_wwpn(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 		}
 		if (result.status == 0) {
 			/* Success.  Copy wwpn from result struct to result string */
-			sprintf(result_string, "%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x",
+			ocs_snprintf(result_string, sizeof(result_string),
+					"%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x",
 					result.wwpn[0], result.wwpn[1], result.wwpn[2],
 					result.wwpn[3], result.wwpn[4], result.wwpn[5],
 					result.wwpn[6], result.wwpn[7]);

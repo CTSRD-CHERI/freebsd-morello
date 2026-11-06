@@ -2,7 +2,8 @@ PACKAGE=			tests
 
 .include <bsd.own.mk>
 
-.if ${MACHINE_CPUARCH} != "aarch64" && ${MACHINE_CPUARCH} != "riscv"
+.if ${MACHINE_CPUARCH} == "amd64" || ${MACHINE_CPUARCH} == "arm" || \
+    ${MACHINE_CPUARCH} == "i386" || ${MACHINE_CPUARCH} == "powerpc"
 ATF_TESTS_C+=			brk_test
 .endif
 ATF_TESTS_C+=			cpuset_test
@@ -22,6 +23,7 @@ NETBSD_ATF_TESTS_C+=		dup_test
 NETBSD_ATF_TESTS_C+=		fsync_test
 NETBSD_ATF_TESTS_C+=		getcontext_test
 NETBSD_ATF_TESTS_C+=		getgroups_test
+FORTIFY_SOURCE.t_getgroups.c=	0
 NETBSD_ATF_TESTS_C+=		getitimer_test
 NETBSD_ATF_TESTS_C+=		getlogin_test
 NETBSD_ATF_TESTS_C+=		getpid_test

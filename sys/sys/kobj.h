@@ -29,6 +29,13 @@
 #ifndef _SYS_KOBJ_H_
 #define _SYS_KOBJ_H_
 
+#include <sys/types.h>
+
+/* XXX workaround for bool type for tools/build/test-includes */
+#if !defined(_KERNEL) && !defined(_STANDALONE)
+#include <stdbool.h>
+#endif
+
 /*
  * Forward declarations
  */
@@ -57,7 +64,9 @@ struct kobj_method {
 	size_t		size;		/* object size */		\
 	kobj_class_t	*baseclasses;	/* base classes */		\
 	u_int		refs;		/* reference count */		\
-	kobj_ops_t	ops		/* compiled method table */
+	kobj_ops_t	ops;		/* compiled method table */	\
+	size_t		total_size;	/* total object size */		\
+	bool		total_size_inited
 
 struct kobj_class {
 	KOBJ_CLASS_FIELDS;
@@ -206,6 +215,16 @@ void		kobj_init_static(kobj_t obj, kobj_class_t cls);
  * Delete an object. If mtype is non-zero, free the memory.
  */
 void		kobj_delete(kobj_t obj, struct malloc_type *mtype);
+
+/*
+ * Get the data offset for the given class.
+ */
+size_t		kobj_instance_offset(kobj_class_t cls, kobj_class_t subclass);
+
+/*
+ * Get the total data size of this class and all its subclasses.
+ */
+size_t		kobj_total_data_size(kobj_class_t cls);
 
 /*
  * Maintain stats on hits/misses in lookup caches.

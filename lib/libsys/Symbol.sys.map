@@ -182,6 +182,7 @@ FBSD_1.0 {
 	rename;
 	revoke;
 	rfork;
+	rfork_thread;
 	rmdir;
 	rtprio;
 	rtprio_thread;
@@ -382,9 +383,21 @@ FBSD_1.8 {
 	getrlimitusage;
 	inotify_add_watch_at;
 	inotify_rm_watch;
+	jail_attach_jd;
+	jail_remove_jd;
 	kcmp;
 	setcred;
 	setgroups;
+};
+
+FBSD_1.9 {
+	kexec_load;
+	pddupfd;
+	pdopenpid;
+	pdptrace;
+	pdrfork;
+	pdrfork_thread;
+	renameat2;
 };
 
 FBSDprivate_1.0 {

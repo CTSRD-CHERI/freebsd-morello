@@ -1,4 +1,4 @@
-/*	$NetBSD: blacklistd.c,v 1.38 2019/02/27 02:20:18 christos Exp $	*/
+/*	$NetBSD: blocklistd.c,v 1.15 2026/02/07 14:32:04 christos Exp $	*/
 
 /*-
  * Copyright (c) 2015 The NetBSD Foundation, Inc.
@@ -31,8 +31,11 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
+#ifdef HAVE_SYS_CDEFS_H
 #include <sys/cdefs.h>
-__RCSID("$NetBSD: blacklistd.c,v 1.38 2019/02/27 02:20:18 christos Exp $");
+#endif
+__RCSID("$NetBSD: blocklistd.c,v 1.15 2026/02/07 14:32:04 christos Exp $");
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -64,8 +67,8 @@ __RCSID("$NetBSD: blacklistd.c,v 1.38 2019/02/27 02:20:18 christos Exp $");
 #include <ifaddrs.h>
 #include <netinet/in.h>
 
-#include "bl.h"
-#include "internal.h"
+#include "old_bl.h"
+#include "old_internal.h"
 #include "conf.h"
 #include "run.h"
 #include "state.h"
@@ -175,6 +178,8 @@ process(bl_t bl)
 	struct dbinfo dbi;
 	struct timespec ts;
 
+	memset(&dbi, 0, sizeof(dbi));
+	memset(&c, 0, sizeof(c));
 	if (clock_gettime(CLOCK_REALTIME, &ts) == -1) {
 		(*lfun)(LOG_ERR, "clock_gettime failed (%m)");
 		return;
@@ -188,10 +193,12 @@ process(bl_t bl)
 	if (getremoteaddress(bi, &rss, &rsl) == -1)
 		goto out;
 
-	if (debug) {
+	if (debug || bi->bi_msg[0]) {
 		sockaddr_snprintf(rbuf, sizeof(rbuf), "%a:%p", (void *)&rss);
-		(*lfun)(LOG_DEBUG, "processing type=%d fd=%d remote=%s msg=%s"
-		    " uid=%lu gid=%lu", bi->bi_type, bi->bi_fd, rbuf,
+		(*lfun)(bi->bi_msg[0] ? LOG_INFO : LOG_DEBUG,
+		    "processing type=%d fd=%d remote=%s msg=\"%s\" "
+		    "uid=%lu gid=%lu",
+		    bi->bi_type, bi->bi_fd, rbuf,
 		    bi->bi_msg, (unsigned long)bi->bi_uid,
 		    (unsigned long)bi->bi_gid);
 	}
@@ -220,7 +227,7 @@ process(bl_t bl)
 		 * set the number of fails to be one less than the
 		 * configured limit.  Fallthrough to the normal BL_ADD
 		 * processing, which will increment the failure count
-		 * to the threshhold, and block the abusive address.
+		 * to the threshold, and block the abusive address.
 		 */
 		if (c.c_nfail != -1)
 			dbi.count = c.c_nfail - 1;
@@ -325,8 +332,8 @@ again:
 			(*lfun)(LOG_INFO, "released %s/%d:%d after %d seconds",
 			    buf, c.c_lmask, c.c_port, c.c_duration);
 		}
-		state_del(state, &c);
-		goto again;
+		if (state_del(state, &c) == 0)
+			goto again;
 	}
 }
 
@@ -334,15 +341,15 @@ static void
 addfd(struct pollfd **pfdp, bl_t **blp, size_t *nfd, size_t *maxfd,
     const char *path)
 {
-	bl_t bl = bl_create(true, path, vflag ? vdlog : vsyslog);
+	bl_t bl = bl_create(true, path, vflag ? vdlog : vsyslog_r);
 	if (bl == NULL || !bl_isconnected(bl))
 		exit(EXIT_FAILURE);
 	if (*nfd >= *maxfd) {
 		*maxfd += 10;
-		*blp = realloc(*blp, sizeof(**blp) * *maxfd);
+		*blp = reallocarray(*blp, *maxfd, sizeof(**blp));
 		if (*blp == NULL)
 			err(EXIT_FAILURE, "malloc");
-		*pfdp = realloc(*pfdp, sizeof(**pfdp) * *maxfd);
+		*pfdp = reallocarray(*pfdp, *maxfd, sizeof(**pfdp));
 		if (*pfdp == NULL)
 			err(EXIT_FAILURE, "malloc");
 	}
@@ -366,7 +373,7 @@ uniqueadd(struct conf ***listp, size_t *nlist, size_t *mlist, struct conf *c)
 	}
 	if (*nlist == *mlist) {
 		*mlist += 10;
-		void *p = realloc(*listp, *mlist * sizeof(*list));
+		void *p = reallocarray(*listp, *mlist, sizeof(*list));
 		if (p == NULL)
 			err(EXIT_FAILURE, "Can't allocate for rule list");
 		list = *listp = p;
@@ -395,15 +402,25 @@ rules_flush(void)
 static void
 rules_restore(void)
 {
+	DB *db;
 	struct conf c;
 	struct dbinfo dbi;
 	unsigned int f;
 
-	for (f = 1; state_iterate(state, &c, &dbi, f) == 1; f = 0) {
+	db = state_open(dbfile, O_RDONLY, 0);
+	if (db == NULL) {
+		(*lfun)(LOG_ERR, "Can't open `%s' to restore state (%m)",
+		    dbfile);
+		return;
+	}
+	for (f = 1; state_iterate(db, &c, &dbi, f) == 1; f = 0) {
 		if (dbi.id[0] == '\0')
 			continue;
 		(void)run_change("add", &c, dbi.id, sizeof(dbi.id));
+		state_put(state, &c, &dbi);
 	}
+	state_close(db);
+	state_sync(state);
 }
 
 int
@@ -451,12 +468,12 @@ main(int argc, char *argv[])
 		case 's':
 			if (nblsock >= maxblsock) {
 				maxblsock += 10;
-				void *p = realloc(blsock,
-				    sizeof(*blsock) * maxblsock);
+				void *p = reallocarray(blsock, maxblsock,
+				    sizeof(*blsock));
 				if (p == NULL)
-				    err(EXIT_FAILURE,
-					"Can't allocate memory for %zu sockets",
-					maxblsock);
+					err(EXIT_FAILURE, "Can't allocate "
+					    "memory for %zu sockets",
+					    maxblsock);
 				blsock = p;
 			}
 			blsock[nblsock++] = optarg;
@@ -527,14 +544,15 @@ main(int argc, char *argv[])
 	state = state_open(dbfile, flags, 0600);
 	if (state == NULL)
 		state = state_open(dbfile,  flags | O_CREAT, 0600);
-	if (state == NULL)
-		return EXIT_FAILURE;
-
-	if (restore) {
-		if (!flush)
-			rules_flush();
-		rules_restore();
+	else {
+		if (restore) {
+			if (!flush)
+				rules_flush();
+			rules_restore();
+		}
 	}
+	if (state == NULL)
+		exit(EXIT_FAILURE);
 
 	if (!debug) {
 		if (daemon(0, 0) == -1)
@@ -556,7 +574,7 @@ main(int argc, char *argv[])
 			if (errno == EINTR)
 				continue;
 			(*lfun)(LOG_ERR, "poll (%m)");
-			return EXIT_FAILURE;
+			exit(EXIT_FAILURE);
 		case 0:
 			state_sync(state);
 			break;
@@ -572,5 +590,5 @@ main(int argc, char *argv[])
 		update();
 	}
 	state_close(state);
-	return 0;
+	exit(EXIT_SUCCESS);
 }

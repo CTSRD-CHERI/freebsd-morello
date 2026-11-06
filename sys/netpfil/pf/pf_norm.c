@@ -82,6 +82,7 @@ struct pf_frnode {
 	struct pf_addr		fn_dst;		/* ip destination address */
 	sa_family_t		fn_af;		/* address family */
 	u_int8_t		fn_proto;	/* protocol for fragments in fn_tree */
+	u_int8_t		fn_direction;	/* pf packet direction */
 	u_int32_t		fn_fragments;	/* number of entries in fn_tree */
 
 	RB_ENTRY(pf_frnode)	fn_entry;
@@ -155,22 +156,23 @@ static struct pf_fragment *pf_fillup_fragment(struct pf_frnode *, u_int32_t,
 		    struct pf_frent *, u_short *);
 static struct mbuf *pf_join_fragment(struct pf_fragment *);
 #ifdef INET
-static int	pf_reassemble(struct mbuf **, u_short *);
+static int	pf_reassemble(struct mbuf **, uint8_t, u_short *);
 #endif	/* INET */
 #ifdef INET6
 static int	pf_reassemble6(struct mbuf **,
-		    struct ip6_frag *, uint16_t, uint16_t, u_short *);
+		    struct ip6_frag *, uint16_t, uint16_t, uint8_t, u_short *);
 #endif	/* INET6 */
 
 #ifdef INET
 static void
-pf_ip2key(struct ip *ip, struct pf_frnode *key)
+pf_ip2key(struct ip *ip, struct pf_frnode *key, uint8_t dir)
 {
 
 	key->fn_src.v4 = ip->ip_src;
 	key->fn_dst.v4 = ip->ip_dst;
 	key->fn_af = AF_INET;
 	key->fn_proto = ip->ip_p;
+	key->fn_direction = dir;
 }
 #endif	/* INET */
 
@@ -211,6 +213,12 @@ pf_normalize_cleanup(void)
 	mtx_destroy(&V_pf_frag_mtx);
 }
 
+uint64_t
+pf_normalize_get_frag_count(void)
+{
+	return (uma_zone_get_cur(V_pf_frent_z));
+}
+
 static int
 pf_frnode_compare(struct pf_frnode *a, struct pf_frnode *b)
 {
@@ -219,6 +227,8 @@ pf_frnode_compare(struct pf_frnode *a, struct pf_frnode *b)
 	if ((diff = a->fn_proto - b->fn_proto) != 0)
 		return (diff);
 	if ((diff = a->fn_af - b->fn_af) != 0)
+		return (diff);
+	if ((diff = a->fn_direction - b->fn_direction) != 0)
 		return (diff);
 	if ((diff = pf_addr_cmp(&a->fn_src, &b->fn_src, a->fn_af)) != 0)
 		return (diff);
@@ -230,10 +240,10 @@ pf_frnode_compare(struct pf_frnode *a, struct pf_frnode *b)
 static __inline int
 pf_frag_compare(struct pf_fragment *a, struct pf_fragment *b)
 {
-	int	diff;
-
-	if ((diff = a->fr_id - b->fr_id) != 0)
-		return (diff);
+	if (a->fr_id > b->fr_id)
+		return (1);
+	if (a->fr_id < b->fr_id)
+		return (-1);
 
 	return (0);
 }
@@ -314,6 +324,7 @@ pf_free_fragment(struct pf_fragment *frag)
 	/* Free all fragment entries */
 	while ((frent = TAILQ_FIRST(&frag->fr_queue)) != NULL) {
 		TAILQ_REMOVE(&frag->fr_queue, frent, fr_next);
+		counter_u64_add(V_pf_status.ncounters[NCNT_FRAG_REMOVALS], 1);
 
 		m_freem(frent->fe_m);
 		uma_zfree(V_pf_frent_z, frent);
@@ -331,6 +342,7 @@ pf_find_fragment(struct pf_frnode *key, uint32_t id)
 	PF_FRAG_ASSERT();
 
 	frnode = RB_FIND(pf_frnode_tree, &V_pf_frnode_tree, key);
+	counter_u64_add(V_pf_status.ncounters[NCNT_FRAG_SEARCH], 1);
 	if (frnode == NULL)
 		return (NULL);
 	MPASS(frnode->fn_fragments >= 1);
@@ -438,6 +450,7 @@ pf_frent_insert(struct pf_fragment *frag, struct pf_frent *frent,
 		    ("overlapping fragment"));
 		TAILQ_INSERT_AFTER(&frag->fr_queue, prev, frent, fr_next);
 	}
+	counter_u64_add(V_pf_status.ncounters[NCNT_FRAG_INSERT], 1);
 
 	if (frag->fr_firstoff[index] == NULL) {
 		KASSERT(prev == NULL || pf_frent_index(prev) < index,
@@ -496,6 +509,7 @@ pf_frent_remove(struct pf_fragment *frag, struct pf_frent *frent)
 	}
 
 	TAILQ_REMOVE(&frag->fr_queue, frent, fr_next);
+	counter_u64_add(V_pf_status.ncounters[NCNT_FRAG_REMOVALS], 1);
 
 	KASSERT(frag->fr_entries[index] > 0, ("No fragments remaining"));
 	frag->fr_entries[index]--;
@@ -768,6 +782,7 @@ pf_join_fragment(struct pf_fragment *frag)
 
 	frent = TAILQ_FIRST(&frag->fr_queue);
 	TAILQ_REMOVE(&frag->fr_queue, frent, fr_next);
+	counter_u64_add(V_pf_status.ncounters[NCNT_FRAG_REMOVALS], 1);
 
 	m = frent->fe_m;
 	if ((frent->fe_hdrlen + frent->fe_len) < m->m_pkthdr.len)
@@ -775,6 +790,7 @@ pf_join_fragment(struct pf_fragment *frag)
 	uma_zfree(V_pf_frent_z, frent);
 	while ((frent = TAILQ_FIRST(&frag->fr_queue)) != NULL) {
 		TAILQ_REMOVE(&frag->fr_queue, frent, fr_next);
+		counter_u64_add(V_pf_status.ncounters[NCNT_FRAG_REMOVALS], 1);
 
 		m2 = frent->fe_m;
 		/* Strip off ip header. */
@@ -795,7 +811,7 @@ pf_join_fragment(struct pf_fragment *frag)
 
 #ifdef INET
 static int
-pf_reassemble(struct mbuf **m0, u_short *reason)
+pf_reassemble(struct mbuf **m0, uint8_t dir, u_short *reason)
 {
 	struct mbuf		*m = *m0;
 	struct ip		*ip = mtod(m, struct ip *);
@@ -819,7 +835,7 @@ pf_reassemble(struct mbuf **m0, u_short *reason)
 	frent->fe_off = (ntohs(ip->ip_off) & IP_OFFMASK) << 3;
 	frent->fe_mff = ntohs(ip->ip_off) & IP_MF;
 
-	pf_ip2key(ip, &key);
+	pf_ip2key(ip, &key, dir);
 
 	if ((frag = pf_fillup_fragment(&key, ip->ip_id, frent, reason)) == NULL)
 		return (PF_DROP);
@@ -890,7 +906,7 @@ pf_reassemble(struct mbuf **m0, u_short *reason)
 #ifdef INET6
 static int
 pf_reassemble6(struct mbuf **m0, struct ip6_frag *fraghdr,
-    uint16_t hdrlen, uint16_t extoff, u_short *reason)
+    uint16_t hdrlen, uint16_t extoff, uint8_t dir, u_short *reason)
 {
 	struct mbuf		*m = *m0;
 	struct ip6_hdr		*ip6 = mtod(m, struct ip6_hdr *);
@@ -924,6 +940,7 @@ pf_reassemble6(struct mbuf **m0, struct ip6_frag *fraghdr,
 	key.fn_af = AF_INET6;
 	/* Only the first fragment's protocol is relevant. */
 	key.fn_proto = 0;
+	key.fn_direction = dir;
 
 	if ((frag = pf_fillup_fragment(&key, fraghdr->ip6f_ident, frent, reason)) == NULL) {
 		PF_FRAG_UNLOCK();
@@ -1166,7 +1183,7 @@ pf_normalize_ip(u_short *reason, struct pf_pdesc *pd)
 	 */
 	scrub_compat = (r != NULL);
 	while (r != NULL) {
-		pf_counter_u64_add(&r->evaluations, 1);
+		counter_u64_add(r->evaluations, 1);
 		if (pfi_kkif_match(r->kif, pd->kif) == r->ifnot)
 			r = r->skip[PF_SKIP_IFP];
 		else if (r->direction && r->direction != pd->dir)
@@ -1196,10 +1213,8 @@ pf_normalize_ip(u_short *reason, struct pf_pdesc *pd)
 		if (r == NULL || r->action == PF_NOSCRUB)
 			return (PF_PASS);
 
-		pf_counter_u64_critical_enter();
-		pf_counter_u64_add_protected(&r->packets[pd->dir == PF_OUT], 1);
-		pf_counter_u64_add_protected(&r->bytes[pd->dir == PF_OUT], pd->tot_len);
-		pf_counter_u64_critical_exit();
+		counter_u64_add(r->packets[pd->dir == PF_OUT], 1);
+		counter_u64_add(r->bytes[pd->dir == PF_OUT], pd->tot_len);
 		pf_rule_to_actions(r, &pd->act);
 	}
 
@@ -1262,7 +1277,7 @@ pf_normalize_ip(u_short *reason, struct pf_pdesc *pd)
 		PF_FRAG_LOCK();
 		DPFPRINTF(PF_DEBUG_MISC, "reass frag %d @ %d-%d",
 		    h->ip_id, fragoff, max);
-		verdict = pf_reassemble(&pd->m, reason);
+		verdict = pf_reassemble(&pd->m, pd->dir, reason);
 		PF_FRAG_UNLOCK();
 
 		if (verdict != PF_PASS)
@@ -1320,7 +1335,7 @@ pf_normalize_ip6(int off, u_short *reason,
 	 */
 	scrub_compat = (r != NULL);
 	while (r != NULL) {
-		pf_counter_u64_add(&r->evaluations, 1);
+		counter_u64_add(r->evaluations, 1);
 		if (pfi_kkif_match(r->kif, pd->kif) == r->ifnot)
 			r = r->skip[PF_SKIP_IFP];
 		else if (r->direction && r->direction != pd->dir)
@@ -1347,14 +1362,12 @@ pf_normalize_ip6(int off, u_short *reason,
 		if (r == NULL || r->action == PF_NOSCRUB)
 			return (PF_PASS);
 
-		pf_counter_u64_critical_enter();
-		pf_counter_u64_add_protected(&r->packets[pd->dir == PF_OUT], 1);
-		pf_counter_u64_add_protected(&r->bytes[pd->dir == PF_OUT], pd->tot_len);
-		pf_counter_u64_critical_exit();
+		counter_u64_add(r->packets[pd->dir == PF_OUT], 1);
+		counter_u64_add(r->bytes[pd->dir == PF_OUT], pd->tot_len);
 		pf_rule_to_actions(r, &pd->act);
 	}
 
-	if (!pf_pull_hdr(pd->m, off, &frag, sizeof(frag), NULL, reason, AF_INET6))
+	if (!pf_pull_hdr(pd->m, off, &frag, sizeof(frag), reason, AF_INET6))
 		return (PF_DROP);
 
 	/* Offset now points to data portion. */
@@ -1363,7 +1376,8 @@ pf_normalize_ip6(int off, u_short *reason,
 	if (pd->virtual_proto == PF_VPROTO_FRAGMENT) {
 		/* Returns PF_DROP or *m0 is NULL or completely reassembled
 		 * mbuf. */
-		if (pf_reassemble6(&pd->m, &frag, off, pd->extoff, reason) != PF_PASS)
+		if (pf_reassemble6(&pd->m, &frag, off, pd->extoff, pd->dir, reason)
+		    != PF_PASS)
 			return (PF_DROP);
 		if (pd->m == NULL)
 			return (PF_DROP);
@@ -1393,7 +1407,7 @@ pf_normalize_tcp(struct pf_pdesc *pd)
 	 * packet normalization operation just like in OpenBSD. */
 	srs = (r != NULL);
 	while (r != NULL) {
-		pf_counter_u64_add(&r->evaluations, 1);
+		counter_u64_add(r->evaluations, 1);
 		if (pfi_kkif_match(r->kif, pd->kif) == r->ifnot)
 			r = r->skip[PF_SKIP_IFP];
 		else if (r->direction && r->direction != pd->dir)
@@ -1430,10 +1444,8 @@ pf_normalize_tcp(struct pf_pdesc *pd)
 		if (rm == NULL || rm->action == PF_NOSCRUB)
 			return (PF_PASS);
 
-		pf_counter_u64_critical_enter();
-		pf_counter_u64_add_protected(&r->packets[pd->dir == PF_OUT], 1);
-		pf_counter_u64_add_protected(&r->bytes[pd->dir == PF_OUT], pd->tot_len);
-		pf_counter_u64_critical_exit();
+		counter_u64_add(r->packets[pd->dir == PF_OUT], 1);
+		counter_u64_add(r->bytes[pd->dir == PF_OUT], pd->tot_len);
 		pf_rule_to_actions(rm, &pd->act);
 	}
 
@@ -1542,7 +1554,7 @@ pf_normalize_tcp_init(struct pf_pdesc *pd, struct tcphdr *th,
 
 	olen = (th->th_off << 2) - sizeof(*th);
 	if (olen < TCPOLEN_TIMESTAMP || !pf_pull_hdr(pd->m,
-	    pd->off + sizeof(*th), opts, olen, NULL, NULL, pd->af))
+	    pd->off + sizeof(*th), opts, olen, NULL, pd->af))
 		return (0);
 
 	opt = opts;
@@ -1645,7 +1657,7 @@ pf_normalize_tcp_stateful(struct pf_pdesc *pd,
 	if (olen >= TCPOLEN_TIMESTAMP &&
 	    ((src->scrub && (src->scrub->pfss_flags & PFSS_TIMESTAMP)) ||
 	    (dst->scrub && (dst->scrub->pfss_flags & PFSS_TIMESTAMP))) &&
-	    pf_pull_hdr(pd->m, pd->off + sizeof(*th), opts, olen, NULL, NULL, pd->af)) {
+	    pf_pull_hdr(pd->m, pd->off + sizeof(*th), opts, olen, NULL, pd->af)) {
 		/* Modulate the timestamps.  Can be used for NAT detection, OS
 		 * uptime determination or reboot detection.
 		 */
@@ -1975,7 +1987,7 @@ pf_normalize_mss(struct pf_pdesc *pd)
 	olen = (pd->hdr.tcp.th_off << 2) - sizeof(struct tcphdr);
 	optsoff = pd->off + sizeof(struct tcphdr);
 	if (olen < TCPOLEN_MAXSEG ||
-	    !pf_pull_hdr(pd->m, optsoff, opts, olen, NULL, NULL, pd->af))
+	    !pf_pull_hdr(pd->m, optsoff, opts, olen, NULL, pd->af))
 		return (0);
 
 	opt = opts;
@@ -2009,7 +2021,7 @@ pf_scan_sctp(struct pf_pdesc *pd)
 	int ret;
 
 	while (pd->off + chunk_off < pd->tot_len) {
-		if (!pf_pull_hdr(pd->m, pd->off + chunk_off, &ch, sizeof(ch), NULL,
+		if (!pf_pull_hdr(pd->m, pd->off + chunk_off, &ch, sizeof(ch),
 		    NULL, pd->af))
 			return (PF_DROP);
 
@@ -2026,7 +2038,7 @@ pf_scan_sctp(struct pf_pdesc *pd)
 			struct sctp_init_chunk init;
 
 			if (!pf_pull_hdr(pd->m, pd->off + chunk_start, &init,
-			    sizeof(init), NULL, NULL, pd->af))
+			    sizeof(init), NULL, pd->af))
 				return (PF_DROP);
 
 			/*
@@ -2148,7 +2160,7 @@ pf_normalize_sctp(struct pf_pdesc *pd)
 	 * packet normalization operation just like in OpenBSD. */
 	srs = (r != NULL);
 	while (r != NULL) {
-		pf_counter_u64_add(&r->evaluations, 1);
+		counter_u64_add(r->evaluations, 1);
 		if (pfi_kkif_match(r->kif, pd->kif) == r->ifnot)
 			r = r->skip[PF_SKIP_IFP];
 		else if (r->direction && r->direction != pd->dir)
@@ -2181,10 +2193,8 @@ pf_normalize_sctp(struct pf_pdesc *pd)
 		if (rm == NULL || rm->action == PF_NOSCRUB)
 			return (PF_PASS);
 
-		pf_counter_u64_critical_enter();
-		pf_counter_u64_add_protected(&r->packets[pd->dir == PF_OUT], 1);
-		pf_counter_u64_add_protected(&r->bytes[pd->dir == PF_OUT], pd->tot_len);
-		pf_counter_u64_critical_exit();
+		counter_u64_add(r->packets[pd->dir == PF_OUT], 1);
+		counter_u64_add(r->bytes[pd->dir == PF_OUT], pd->tot_len);
 	}
 
 	/* Verify we're a multiple of 4 bytes long */
@@ -2232,14 +2242,14 @@ pf_scrub(struct pf_pdesc *pd)
 	    h->ip_ttl < pd->act.min_ttl) {
 		u_int16_t ip_ttl = h->ip_ttl;
 
-		h->ip_ttl = pd->act.min_ttl;
+		pd->ttl = h->ip_ttl = pd->act.min_ttl;
 		h->ip_sum = pf_cksum_fixup(h->ip_sum, ip_ttl, h->ip_ttl, 0);
 	}
 #ifdef INET6
 	/* Enforce a minimum ttl, may cause endless packet loops */
 	if (pd->af == AF_INET6 && pd->act.min_ttl &&
 	    h6->ip6_hlim < pd->act.min_ttl)
-		h6->ip6_hlim = pd->act.min_ttl;
+		pd->ttl = h6->ip6_hlim = pd->act.min_ttl;
 #endif /* INET6 */
 	/* Enforce tos */
 	if (pd->act.flags & PFSTATE_SETTOS) {
@@ -2249,6 +2259,7 @@ pf_scrub(struct pf_pdesc *pd)
 
 			ov = *(u_int16_t *)h;
 			h->ip_tos = pd->act.set_tos | (h->ip_tos & IPTOS_ECN_MASK);
+			pd->tos = h->ip_tos & ~IPTOS_ECN_MASK;
 			nv = *(u_int16_t *)h;
 
 			h->ip_sum = pf_cksum_fixup(h->ip_sum, ov, nv, 0);
@@ -2258,6 +2269,7 @@ pf_scrub(struct pf_pdesc *pd)
 		case AF_INET6:
 			h6->ip6_flow &= IPV6_FLOWLABEL_MASK | IPV6_VERSION_MASK;
 			h6->ip6_flow |= htonl((pd->act.set_tos | IPV6_ECN(h6)) << 20);
+			pd->tos = IPV6_DSCP(h6);
 			break;
 #endif /* INET6 */
 		}

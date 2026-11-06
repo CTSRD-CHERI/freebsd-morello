@@ -75,7 +75,7 @@
  * ivars codes
  */
 enum smbus_ivars {
-    SMBUS_IVAR_ADDR,	/* slave address of the device */
+	SMBUS_IVAR_ADDR = BUS_IVARS_PRIVATE, /* slave address of the device */
 };
 
 int	smbus_request_bus(device_t, device_t, int);
@@ -114,6 +114,8 @@ extern driver_t smbus_driver;
 	(SMBUS_BWRITE(device_get_parent(bus), slave, cmd, count, buf))
 #define smbus_bread(bus,slave,cmd,count,buf) \
 	(SMBUS_BREAD(device_get_parent(bus), slave, cmd, count, buf))
+#define smbus_bpcall(bus,slave,cmd,wcount,wbuf,rcount,rbuf) \
+	(SMBUS_BPCALL(device_get_parent(bus), slave, cmd, wcount, wbuf, rcount, rbuf))
 #define smbus_trans(bus,slave,cmd,op,wbuf,wcount,rbuf,rcount,actualp) \
 	(SMBUS_TRANS(device_get_parent(bus), slave, cmd, op, \
 	wbuf, wcount, rbuf, rcount, actualp))

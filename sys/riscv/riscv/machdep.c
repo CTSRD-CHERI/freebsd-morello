@@ -1,6 +1,6 @@
 /*-
  * Copyright (c) 2014 Andrew Turner
- * Copyright (c) 2015-2017 Ruslan Bukin <br@bsdpad.com>
+ * Copyright (c) 2015-2026 Ruslan Bukin <br@bsdpad.com>
  * All rights reserved.
  *
  * Portions of this software were developed by SRI International and the
@@ -105,6 +105,7 @@
 struct pcpu __pcpu[MAXCPU];
 
 static struct trapframe proc0_tf;
+static struct pcb pcb0;
 
 int early_boot = 1;
 int cold = 1;
@@ -118,7 +119,7 @@ uint32_t boot_hart = BOOT_HART_INVALID;	/* The hart we booted on. */
 
 cpuset_t all_harts;
 
-extern int *end;
+extern char end[];
 
 static char static_kenv[PAGE_SIZE];
 
@@ -287,7 +288,7 @@ makectx(struct trapframe *tf, struct pcb *pcb)
 }
 
 static void
-init_proc0(vm_offset_t kstack)
+init_proc0(void *kstack)
 {
 	struct pcpu *pcpup;
 
@@ -296,9 +297,9 @@ init_proc0(vm_offset_t kstack)
 	proc_linkup0(&proc0, &thread0);
 	thread0.td_kstack = kstack;
 	thread0.td_kstack_pages = KSTACK_PAGES;
-	thread0.td_pcb = (struct pcb *)(thread0.td_kstack +
-	    thread0.td_kstack_pages * PAGE_SIZE) - 1;
+	thread0.td_pcb = &pcb0;
 	thread0.td_pcb->pcb_fpflags = 0;
+	thread0.td_pcb->pcb_vsflags = 0;
 	thread0.td_frame = &proc0_tf;
 	pcpup->pc_curpcb = thread0.td_pcb;
 }
@@ -623,6 +624,10 @@ initriscv(struct riscv_bootparams *rvbp)
 	 * Identify CPU/ISA features.
 	 */
 	identify_cpu(0);
+
+	sched_instance_select();
+
+	link_elf_ireloc();
 
 	/* Do basic tuning, hz etc */
 	init_param1();

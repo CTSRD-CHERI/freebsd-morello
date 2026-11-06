@@ -95,33 +95,35 @@ static const struct ipspec intparams[] = {
     [IP_VNET_INTERFACE] =	{"vnet.interface",	PF_INTERNAL},
     [IP_ZFS_DATASET] =		{"zfs.dataset",		PF_INTERNAL},
 #ifdef INET
-    [IP__IP4_IFADDR] =		{"ip4.addr",	PF_INTERNAL | PF_CONV | PF_REV},
+    [IP__IP4_IFADDR] =		{JAIL_PARAM_IP4_ADDR,
+				    PF_INTERNAL | PF_CONV | PF_REV},
 #endif
 #ifdef INET6
-    [IP__IP6_IFADDR] =		{"ip6.addr",	PF_INTERNAL | PF_CONV | PF_REV},
+    [IP__IP6_IFADDR] =		{JAIL_PARAM_IP6_ADDR,
+				    PF_INTERNAL | PF_CONV | PF_REV},
 #endif
     [IP__MOUNT_FROM_FSTAB] =	{"mount.fstab",	PF_INTERNAL | PF_CONV | PF_REV},
     [IP__OP] =			{NULL,			PF_CONV},
-    [KP_ALLOW_CHFLAGS] =	{"allow.chflags",	0},
-    [KP_ALLOW_MOUNT] =		{"allow.mount",		0},
-    [KP_ALLOW_RAW_SOCKETS] =	{"allow.raw_sockets",	0},
-    [KP_ALLOW_SET_HOSTNAME]=	{"allow.set_hostname",	0},
-    [KP_ALLOW_SOCKET_AF] =	{"allow.socket_af",	0},
-    [KP_ALLOW_SYSVIPC] =	{"allow.sysvipc",	0},
-    [KP_DEVFS_RULESET] =	{"devfs_ruleset",	0},
-    [KP_HOST_HOSTNAME] =	{"host.hostname",	0},
+    [KP_ALLOW_CHFLAGS] =	{JAIL_PARAM_ALLOW_CHFLAGS,	0},
+    [KP_ALLOW_MOUNT] =		{JAIL_PARAM_ALLOW_MOUNT,	0},
+    [KP_ALLOW_RAW_SOCKETS] =	{JAIL_PARAM_ALLOW_RAW_SOCKETS,	0},
+    [KP_ALLOW_SET_HOSTNAME]=	{JAIL_PARAM_ALLOW_SET_HOSTNAME,	0},
+    [KP_ALLOW_SOCKET_AF] =	{JAIL_PARAM_ALLOW_SOCKET_AF,	0},
+    [KP_ALLOW_SYSVIPC] =	{JAIL_PARAM_ALLOW_SYSVIPC,	0},
+    [KP_DEVFS_RULESET] =	{JAIL_PARAM_DEVFS_RULESET,	0},
+    [KP_HOST_HOSTNAME] =	{JAIL_PARAM_HOST_HOSTNAME,	0},
 #ifdef INET
-    [KP_IP4_ADDR] =		{"ip4.addr",		0},
+    [KP_IP4_ADDR] =		{JAIL_PARAM_IP4_ADDR,		0},
 #endif
 #ifdef INET6
-    [KP_IP6_ADDR] =		{"ip6.addr",		0},
+    [KP_IP6_ADDR] =		{JAIL_PARAM_IP6_ADDR,		0},
 #endif
-    [KP_JID] =			{"jid",			PF_IMMUTABLE},
-    [KP_NAME] =			{"name",		PF_IMMUTABLE},
-    [KP_PATH] =			{"path",		0},
-    [KP_PERSIST] =		{"persist",		0},
-    [KP_SECURELEVEL] =		{"securelevel",		0},
-    [KP_VNET] =			{"vnet",		0},
+    [KP_JID] =			{JAIL_PARAM_JID,		PF_IMMUTABLE},
+    [KP_NAME] =			{JAIL_PARAM_NAME,		PF_IMMUTABLE},
+    [KP_PATH] =			{JAIL_PARAM_PATH,		0},
+    [KP_PERSIST] =		{JAIL_PARAM_PERSIST,		0},
+    [KP_SECURELEVEL] =		{JAIL_PARAM_SECURELEVEL,	0},
+    [KP_VNET] =			{JAIL_PARAM_VNET,		0},
 };
 
 /*
@@ -134,7 +136,7 @@ load_config(const char *cfname)
 	struct cfparams opp;
 	struct cfjail *j, *tj, *wj;
 	struct cfparam *p, *vp, *tp;
-	struct cfstring *s, *vs, *ns;
+	struct cfstring *s, *vs, *ns, *cs;
 	struct cfvar *v, *vv;
 	char *ep;
 	int did_self, jseq, pgen;
@@ -189,7 +191,7 @@ load_config(const char *cfname)
 		 * jail is created or found.
 		 */
 		if (j->intparams[KP_NAME] == NULL)
-			add_param(j, j->intparams[KP_JID], KP_NAME, NULL);
+			add_param(j, NULL, KP_NAME, j->name);
 
 		/* Resolve any variable substitutions. */
 		pgen = 0;
@@ -246,13 +248,14 @@ load_config(const char *cfname)
 				while ((vv = STAILQ_NEXT(vv, tq)))
 					vv->pos += vs->len;
 				s->len += vs->len;
+				cs = s;
 				while ((vs = TAILQ_NEXT(vs, tq))) {
 					ns = emalloc(sizeof(struct cfstring));
 					ns->s = estrdup(vs->s);
 					ns->len = vs->len;
 					STAILQ_INIT(&ns->vars);
-					TAILQ_INSERT_AFTER(&p->val, s, ns, tq);
-					s = ns;
+					TAILQ_INSERT_AFTER(&p->val, cs, ns, tq);
+					cs = ns;
 				}
 			free_var:
 				free(v->name);
@@ -321,6 +324,7 @@ static void
 parse_config(const char *cfname, int is_stdin)
 {
 	struct cflex cflex = {.cfname = cfname, .error = 0};
+	FILE *yfp = NULL;
 	void *scanner;
 
 	yylex_init_extra(&cflex, &scanner);
@@ -328,7 +332,7 @@ parse_config(const char *cfname, int is_stdin)
 		cflex.cfname = "STDIN";
 		yyset_in(stdin, scanner);
 	} else {
-		FILE *yfp = fopen(cfname, "r");
+		yfp = fopen(cfname, "re");
 		if (!yfp)
 			err(1, "%s", cfname);
 		yyset_in(yfp, scanner);
@@ -336,6 +340,8 @@ parse_config(const char *cfname, int is_stdin)
 	if (yyparse(scanner) || cflex.error)
 		exit(1);
 	yylex_destroy(scanner);
+	if (yfp != NULL)
+		fclose(yfp);
 }
 
 /*
@@ -367,8 +373,8 @@ add_param(struct cfjail *j, const struct cfparam *p, enum intparam ipnum,
 	struct cfparam *dp, *np;
 	struct cfstring *s, *ns;
 	struct cfvar *v, *nv;
-	const char *name;
-	char *cs, *tname;
+	const char *cs, *name;
+	char *tname;
 	unsigned flags;
 
 	if (j == NULL) {
@@ -723,7 +729,7 @@ check_intparams(struct cfjail *j)
 		TAILQ_FOREACH(s, &j->intparams[IP_MOUNT_FSTAB]->val, tq) {
 			if (s->len == 0)
 				continue;
-			f = fopen(s->s, "r");
+			f = fopen(s->s, "re");
 			if (f == NULL) {
 				jail_warnx(j, "mount.fstab: %s: %s",
 				    s->s, strerror(errno));
@@ -828,7 +834,7 @@ import_params(struct cfjail *j)
 int
 equalopts(const char *opt1, const char *opt2)
 {
-	char *p;
+	const char *p;
 
 	/* "opt" vs. "opt" or "noopt" vs. "noopt" */
 	if (strcmp(opt1, opt2) == 0)

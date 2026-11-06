@@ -193,7 +193,6 @@ FBSD_1.0 {
 	__isinff;
 	__isinfl;
 	isatty;
-	initgroups;
 	jrand48;
 	lcong48;
 	ldexp;
@@ -403,14 +402,6 @@ FBSD_1.5 {
 	devname;
 	devname_r;
 	dirname;
-	fts_children;
-	fts_close;
-	fts_get_clientptr;
-	fts_get_stream;
-	fts_open;
-	fts_read;
-	fts_set;
-	fts_set_clientptr;
 	ftw;
 	getentropy;
 	getmntinfo;
@@ -460,8 +451,8 @@ FBSD_1.8 {
 	execvpe;
 	fdscandir;
 	fdscandir_b;
-	fts_open_b;
 	glob_b;
+	initgroups;
 	inotify_add_watch;
 	inotify_init;
 	inotify_init1;
@@ -472,6 +463,28 @@ FBSD_1.8 {
 	uexterr_gettext;
 	sig2str;
 	str2sig;
+};
+
+FBSD_1.9 {
+	freadlink;
+	fts_children;
+	fts_close;
+	fts_get_clientptr;
+	fts_get_stream;
+	fts_open;
+	fts_open_b;
+	fts_read;
+	fts_set;
+	fts_set_clientptr;
+	fts_openat;
+	posix_spawn_file_actions_addchdir;
+	posix_spawn_file_actions_addfchdir;
+	posix_spawnattr_getexecfd_np;
+	posix_spawnattr_getprocdescp_np;
+	posix_spawnattr_setexecfd_np;
+	posix_spawnattr_setprocdescp_np;
+	timespec_getres;
+	uexterr_set;
 };
 
 FBSDprivate_1.0 {
@@ -602,4 +615,5 @@ FBSDprivate_1.0 {
 	__getcontextx_size;
 	__makecontext;
 	__uexterr_format;
+	__uexterr_set_ue;
 };

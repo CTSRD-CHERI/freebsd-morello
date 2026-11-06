@@ -1,58 +1,50 @@
 .\"
-.\" SPDX-License-Identifier: BSD-2-Clause
-.\"
 .\" Copyright (c) [year] [your name]
 .\"
-.\" Redistribution and use in source and binary forms, with or without
-.\" modification, are permitted provided that the following conditions
-.\" are met:
-.\" 1. Redistributions of source code must retain the above copyright
-.\"    notice, this list of conditions and the following disclaimer.
-.\" 2. Redistributions in binary form must reproduce the above copyright
-.\"    notice, this list of conditions and the following disclaimer in the
-.\"    documentation and/or other materials provided with the distribution.
-.\"
-.\" THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
-.\" ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-.\" IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-.\" ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
-.\" FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-.\" DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
-.\" OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
-.\" HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
-.\" LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
-.\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
-.\" SUCH DAMAGE.
+.\" SPDX-License-Identifier: BSD-2-Clause
 .\"
 .\" Note: The date here should be updated whenever a non-trivial
 .\" change is made to the manual page.
-.Dd July 31, 2015
-.Dt EXAMPLE 4 i386
+.Dd June 19, 2026
+.Dt EXAMPLE 4 amd64
 .Os
 .Sh NAME
 .Nm example
-.Nd "example device driver manual page"
+.Nd example device driver manual page
 .Sh SYNOPSIS
-To compile the driver into the kernel,
-place the following lines in the
-kernel configuration file:
-.Bd -ragged -offset indent
-.Cd "device example"
-.Cd "options EXAMPLE_DEBUG"
-.Ed
+.Cd device example
+.Cd options EXAMPLE_DEBUG
 .Pp
-Alternatively, to load the driver as a
-module at boot time, place the following line in
+In
+.Xr device.hints 5 :
+.Cd here.is.a.example.device.hint Ns Ao Ns = Ns Ar optional_value Ac
+.Pp
+In
+.Xr rc.conf 5 :
+.Cd kld_list="kernel_module_name"
+.Pp
+In
 .Xr loader.conf 5 :
-.Bd -literal -offset indent
-example_load="YES"
-.Ed
+.Cd here.is.a.example.tunable Ns Ao Ns = Ns Ar optional_value Ac
+.Pp
+In
+.Xr loader.conf 5
+or
+.Xr sysctl.conf 5 :
+.Cd here.is.a.example.sysctl Ns Ao Ns = Ns Ar optional_value Ac
+.Sh DEPRECATION NOTICE
+This driver is scheduled for removal prior to the release of
+.Fx 17.0 .
 .Sh DESCRIPTION
 This is an example device driver manual page for the
 .Nm
 driver.
 It is intended that this example can be used as a template
 when writing a new manual page.
+.Pp
+If the kernel is compiled with the
+.Dv EXAMPLE_DEBUG
+option, then additional debugging messages will be displayed.
 .Pp
 The
 .Nm
@@ -63,10 +55,6 @@ Example ioctl.
 .It Dv EIOCNULL
 Example ioctl.
 .El
-.Pp
-If the kernel is compiled with the
-.Dv EXAMPLE_DEBUG
-option, then additional debugging messages will be displayed.
 .Sh HARDWARE
 The
 .Nm
@@ -118,6 +106,8 @@ manual page example first appeared in
 .At v6 .
 .Sh AUTHORS
 This manual page was written by
-.An Mike Pritchard Aq Mt mpp@FreeBSD.org .
+.An Mike Pritchard Aq Mt mpp@FreeBSD.org
+and
+.An Alexander Ziaee Aq Mt ziaee@FreeBSD.org .
 .Sh BUGS
 The actual code for this device driver is vaporware.

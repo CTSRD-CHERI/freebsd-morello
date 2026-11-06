@@ -291,7 +291,7 @@ free_nat_instance(struct cfg_nat *ptr)
 static int
 ipfw_nat(struct ip_fw_args *args, struct cfg_nat *t, struct mbuf *m)
 {
-	struct mbuf *mcl;
+	struct mbuf *mcl, *mfree __diagused;
 	struct ip *ip;
 	/* XXX - libalias duct tape */
 	int ldt, retval, found;
@@ -311,17 +311,17 @@ ipfw_nat(struct ip_fw_args *args, struct cfg_nat *t, struct mbuf *m)
 	/*
 	 * XXX - Libalias checksum offload 'duct tape':
 	 *
-	 * locally generated packets have only pseudo-header checksum
-	 * calculated and libalias will break it[1], so mark them for
-	 * later fix.  Moreover there are cases when libalias modifies
+	 * When checksum offloading is used, packets contain only the
+	 * pseudo-header checksum and libalias will break it[1], so mark them
+	 * for later fix.  Moreover there are cases when libalias modifies
 	 * tcp packet data[2], mark them for later fix too.
 	 *
 	 * [1] libalias was never meant to run in kernel, so it does
 	 * not have any knowledge about checksum offloading, and
 	 * expects a packet with a full internet checksum.
-	 * Unfortunately, packets generated locally will have just the
-	 * pseudo header calculated, and when libalias tries to adjust
-	 * the checksum it will actually compute a wrong value.
+	 * Unfortunately, when checksum offloading is used, packets will
+	 * contain just the pseudo-header checksum, and when libalias tries to
+	 * adjust the checksum it will actually compute a wrong value.
 	 *
 	 * [2] when libalias modifies tcp's data content, full TCP
 	 * checksum has to be recomputed: the problem is that
@@ -340,8 +340,7 @@ ipfw_nat(struct ip_fw_args *args, struct cfg_nat *t, struct mbuf *m)
 	 * it can handle delayed checksum and tso)
 	 */
 
-	if (mcl->m_pkthdr.rcvif == NULL &&
-	    mcl->m_pkthdr.csum_flags & CSUM_DELAY_DATA)
+	if (mcl->m_pkthdr.csum_flags & CSUM_DELAY_DATA)
 		ldt = 1;
 
 	c = mtod(mcl, char *);
@@ -397,7 +396,8 @@ ipfw_nat(struct ip_fw_args *args, struct cfg_nat *t, struct mbuf *m)
 	    (retval == PKT_ALIAS_IGNORED &&
 	    (t->mode & PKT_ALIAS_DENY_INCOMING) != 0)))) {
 		/* XXX - should i add some logging? */
-		m_free(mcl);
+		mfree = m_free(mcl);
+		MPASS(mfree == NULL);
 		args->m = NULL;
 		return (IP_FW_DENY);
 	}
@@ -503,7 +503,6 @@ nat44_config(struct ip_fw_chain *chain, struct nat44_cfg_nat *ucfg)
 	gencnt = chain->gencnt;
 	ptr = lookup_nat_name(&chain->nat, ucfg->name);
 	if (ptr == NULL) {
-		IPFW_UH_WUNLOCK(chain);
 		/* New rule: allocate and init new instance. */
 		ptr = malloc(sizeof(struct cfg_nat), M_IPFW, M_WAITOK | M_ZERO);
 		ptr->lib = LibAliasInit(NULL);
@@ -514,7 +513,6 @@ nat44_config(struct ip_fw_chain *chain, struct nat44_cfg_nat *ucfg)
 		LIST_REMOVE(ptr, _next);
 		flush_nat_ptrs(chain, ptr->id);
 		IPFW_WUNLOCK(chain);
-		IPFW_UH_WUNLOCK(chain);
 	}
 
 	/*
@@ -543,7 +541,6 @@ nat44_config(struct ip_fw_chain *chain, struct nat44_cfg_nat *ucfg)
 	del_redir_spool_cfg(ptr, &ptr->redir_chain);
 	/* Add new entries. */
 	add_redir_spool_cfg((char *)(ucfg + 1), ptr);
-	IPFW_UH_WLOCK(chain);
 
 	/* Extra check to avoid race with another ipfw_nat_cfg() */
 	tcfg = NULL;
@@ -999,9 +996,11 @@ ipfw_nat_del(struct sockopt *sopt)
 {
 	struct cfg_nat *ptr;
 	struct ip_fw_chain *chain = &V_layer3_chain;
-	int i;
+	int error, i;
 
-	sooptcopyin(sopt, &i, sizeof i, sizeof i);
+	error = sooptcopyin(sopt, &i, sizeof i, sizeof i);
+	if (error != 0)
+		return (error);
 	/* XXX validate i */
 	IPFW_UH_WLOCK(chain);
 	ptr = lookup_nat(&chain->nat, i);
@@ -1047,7 +1046,6 @@ retry:
 				len += sizeof(struct cfg_spool_legacy);
 		}
 	}
-	IPFW_UH_RUNLOCK(chain);
 
 	data = malloc(len, M_TEMP, M_WAITOK | M_ZERO);
 	bcopy(&nat_cnt, data, sizeof(nat_cnt));
@@ -1055,7 +1053,6 @@ retry:
 	nat_cnt = 0;
 	len = sizeof(nat_cnt);
 
-	IPFW_UH_RLOCK(chain);
 	if (gencnt != chain->gencnt) {
 		free(data, M_TEMP);
 		goto retry;
@@ -1104,7 +1101,7 @@ ipfw_nat_get_log(struct sockopt *sopt)
 {
 	uint8_t *data;
 	struct cfg_nat *ptr;
-	int i, size;
+	int error, i, size;
 	struct ip_fw_chain *chain;
 	IPFW_RLOCK_TRACKER;
 
@@ -1134,9 +1131,9 @@ ipfw_nat_get_log(struct sockopt *sopt)
 		i += LIBALIAS_BUF_SIZE;
 	}
 	IPFW_RUNLOCK(chain);
-	sooptcopyout(sopt, data, size);
+	error = sooptcopyout(sopt, data, size);
 	free(data, M_IPFW);
-	return(0);
+	return (error);
 }
 
 static int
@@ -1166,7 +1163,7 @@ vnet_ipfw_nat_uninit(const void *arg __unused)
 }
 
 static void
-ipfw_nat_init(void)
+ipfw_nat_init(void *dummy __unused)
 {
 
 	/* init ipfw hooks */
@@ -1183,7 +1180,7 @@ ipfw_nat_init(void)
 }
 
 static void
-ipfw_nat_destroy(void)
+ipfw_nat_destroy(void *dummy __unused)
 {
 
 	EVENTHANDLER_DEREGISTER(ifaddr_event, ifaddr_event_tag);
@@ -1200,47 +1197,33 @@ ipfw_nat_destroy(void)
 static int
 ipfw_nat_modevent(module_t mod, int type, void *unused)
 {
-	int err = 0;
-
 	switch (type) {
 	case MOD_LOAD:
-		break;
-
 	case MOD_UNLOAD:
-		break;
-
+		return (0);
 	default:
-		return EOPNOTSUPP;
-		break;
+		return (EOPNOTSUPP);
 	}
-	return err;
 }
 
 static moduledata_t ipfw_nat_mod = {
-	"ipfw_nat",
-	ipfw_nat_modevent,
-	0
+	.name = "ipfw_nat",
+	.evhand = ipfw_nat_modevent,
 };
 
-/* Define startup order. */
-#define	IPFW_NAT_SI_SUB_FIREWALL	SI_SUB_PROTO_FIREWALL
-#define	IPFW_NAT_MODEVENT_ORDER		(SI_ORDER_ANY - 128) /* after ipfw */
-#define	IPFW_NAT_MODULE_ORDER		(IPFW_NAT_MODEVENT_ORDER + 1)
-#define	IPFW_NAT_VNET_ORDER		(IPFW_NAT_MODEVENT_ORDER + 2)
-
-DECLARE_MODULE(ipfw_nat, ipfw_nat_mod, IPFW_NAT_SI_SUB_FIREWALL, SI_ORDER_ANY);
+DECLARE_MODULE(ipfw_nat, ipfw_nat_mod, SI_SUB_PROTO_FIREWALL, SI_ORDER_SECOND);
 MODULE_DEPEND(ipfw_nat, libalias, 1, 1, 1);
 MODULE_DEPEND(ipfw_nat, ipfw, 3, 3, 3);
 MODULE_VERSION(ipfw_nat, 1);
 
-SYSINIT(ipfw_nat_init, IPFW_NAT_SI_SUB_FIREWALL, IPFW_NAT_MODULE_ORDER,
-    ipfw_nat_init, NULL);
-VNET_SYSINIT(vnet_ipfw_nat_init, IPFW_NAT_SI_SUB_FIREWALL, IPFW_NAT_VNET_ORDER,
+SYSINIT(ipfw_nat_init, SI_SUB_PROTO_FIREWALL, SI_ORDER_SECOND, ipfw_nat_init,
+    NULL);
+VNET_SYSINIT(vnet_ipfw_nat_init, SI_SUB_PROTO_FIREWALL, SI_ORDER_SECOND,
     vnet_ipfw_nat_init, NULL);
 
-SYSUNINIT(ipfw_nat_destroy, IPFW_NAT_SI_SUB_FIREWALL, IPFW_NAT_MODULE_ORDER,
+SYSUNINIT(ipfw_nat_destroy, SI_SUB_PROTO_FIREWALL, SI_ORDER_SECOND,
     ipfw_nat_destroy, NULL);
-VNET_SYSUNINIT(vnet_ipfw_nat_uninit, IPFW_NAT_SI_SUB_FIREWALL,
-    IPFW_NAT_VNET_ORDER, vnet_ipfw_nat_uninit, NULL);
+VNET_SYSUNINIT(vnet_ipfw_nat_uninit, SI_SUB_PROTO_FIREWALL,
+    SI_ORDER_SECOND, vnet_ipfw_nat_uninit, NULL);
 
 /* end of file */

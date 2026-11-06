@@ -1565,6 +1565,21 @@ msr_onfault:
 	POP_FRAME_POINTER
 	ret
 
+ENTRY(wrmsr_early_safe)
+	movq	%rsp,%r11
+	movl	%edi,%ecx
+	movl	%esi,%eax
+	sarq	$32,%rsi
+	movl	%esi,%edx
+	wrmsr
+	xorl	%eax,%eax
+	ret
+
+ENTRY(wrmsr_early_safe_gp_handler)
+	movq	%r11,%rsp
+	movl	$EFAULT,%eax
+	ret
+
 /*
  * void pmap_pti_pcid_invalidate(uint64_t ucr3, uint64_t kcr3);
  * Invalidates address space addressed by ucr3, then returns to kcr3.
@@ -1980,3 +1995,15 @@ ENTRY(cpu_sync_core)
 	pushq	%rdx
 	iretq
 END(cpu_sync_core)
+
+/* External retpoline thunk */
+ENTRY(__x86_indirect_thunk_r11)
+	callq	2f
+1:	pause
+	lfence
+	jmp	1b
+2:	movq	%r11, (%rsp)
+	retq
+END(__x86_indirect_thunk_r11)
+
+	.section .note.GNU-stack,"",%progbits

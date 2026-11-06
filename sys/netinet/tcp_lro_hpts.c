@@ -24,11 +24,12 @@
  * SUCH DAMAGE.
  *
  */
-#include <sys/cdefs.h>
 #include "opt_inet.h"
 #include "opt_inet6.h"
 
 #include <sys/param.h>
+#include <sys/bus.h>
+#include <sys/interrupt.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
@@ -62,6 +63,7 @@
 #include <netinet/tcp_lro.h>
 #include <netinet/tcp_var.h>
 #include <netinet/tcp_hpts.h>
+#include <netinet/tcp_hpts_internal.h>
 #ifdef TCP_BLACKBOX
 #include <netinet/tcp_log_buf.h>
 #endif
@@ -663,11 +665,13 @@ _tcp_lro_flush_tcphpts(struct lro_ctrl *lc, struct lro_entry *le)
 void
 tcp_lro_hpts_init(void)
 {
+	tcp_hpts_softclock = _tcp_hpts_softclock;
 	tcp_lro_flush_tcphpts = _tcp_lro_flush_tcphpts;
 }
 
 void
 tcp_lro_hpts_uninit(void)
 {
-	atomic_store_ptr(&tcp_lro_flush_tcphpts, NULL);
+	tcp_hpts_softclock = NULL;
+	tcp_lro_flush_tcphpts = NULL;
 }

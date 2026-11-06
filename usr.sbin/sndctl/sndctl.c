@@ -30,6 +30,7 @@
 
 #include <sys/nv.h>
 #include <sys/queue.h>
+#include <sys/sbuf.h>
 #include <sys/sndstat.h>
 #include <sys/soundcard.h>
 #include <sys/sysctl.h>
@@ -45,6 +46,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <libxo/xo.h>
+
+#define SNDCTL_XO_VERSION	"1"
 
 /* Taken from sys/dev/sound/pcm/ */
 #define STATUS_LEN	64
@@ -93,6 +97,8 @@ struct snd_dev {
 	int bitperfect;
 	int realtime;
 	int autoconv;
+	int eq;
+	char eq_preamp[BUFSIZ];
 	struct {
 		char format[FMTSTR_LEN];
 		int rate;
@@ -126,6 +132,8 @@ struct map {
 static int mod_bitperfect(struct snd_dev *, void *);
 static int mod_autoconv(struct snd_dev *, void *);
 static int mod_realtime(struct snd_dev *, void *);
+static int mod_eq(struct snd_dev *, void *);
+static int mod_eq_preamp(struct snd_dev *, void *);
 static int mod_play_vchans(struct snd_dev *, void *);
 static int mod_play_rate(struct snd_dev *, void *);
 static int mod_play_format(struct snd_dev *, void *);
@@ -145,6 +153,8 @@ static struct snd_ctl dev_ctls[] = {
 	{ "bitperfect",		F(bitperfect),		NUM,	mod_bitperfect },
 	{ "autoconv",		F(autoconv),		NUM,	mod_autoconv },
 	{ "realtime",		F(realtime),		NUM,	mod_realtime },
+	{ "eq",			F(eq),			NUM,	mod_eq },
+	{ "eq_preamp",		F(eq_preamp),		STR,	mod_eq_preamp },
 	{ "play",		F(play),		GRP,	NULL },
 	{ "play.format",	F(play.format),		STR,	mod_play_format },
 	{ "play.rate",		F(play.rate),		NUM,	mod_play_rate },
@@ -171,7 +181,7 @@ static struct snd_ctl dev_ctls[] = {
 
 static struct snd_ctl chan_ctls[] = {
 #define F(member)	offsetof(struct snd_chan, member)
-	/*{ "name",		F(name),		STR,	NULL },*/
+	{ "name",		F(name),		STR,	NULL },
 	{ "parentchan",		F(parentchan),		STR,	NULL },
 	{ "unit",		F(unit),		NUM,	NULL },
 	{ "caps",		F(caps),		STR,	NULL },
@@ -342,7 +352,7 @@ sysctl_int(const char *buf, const char *arg, int *var)
 	size = sizeof(int);
 	/* Read current value. */
 	if (sysctlbyname(buf, &prev, &size, NULL, 0) < 0) {
-		warn("sysctlbyname(%s)", buf);
+		xo_warn("sysctlbyname(%s)", buf);
 		return (-1);
 	}
 
@@ -351,24 +361,24 @@ sysctl_int(const char *buf, const char *arg, int *var)
 		errno = 0;
 		n = strtol(arg, NULL, 10);
 		if (errno == EINVAL || errno == ERANGE) {
-			warn("strtol(%s)", arg);
+			xo_warn("strtol(%s)", arg);
 			return (-1);
 		}
 
 		/* Apply new value. */
 		if (sysctlbyname(buf, NULL, 0, &n, size) < 0) {
-			warn("sysctlbyname(%s, %d)", buf, n);
+			xo_warn("sysctlbyname(%s, %d)", buf, n);
 			return (-1);
 		}
 	}
 
 	/* Read back applied value for good measure. */
 	if (sysctlbyname(buf, &n, &size, NULL, 0) < 0) {
-		warn("sysctlbyname(%s)", buf);
+		xo_warn("sysctlbyname(%s)", buf);
 		return (-1);
 	}
 
-	if (arg != NULL)
+	if (arg != NULL && xo_get_style(NULL) == XO_STYLE_TEXT)
 		printf("%s: %d -> %d\n", buf, prev, n);
 	if (var != NULL)
 		*var = n;
@@ -386,7 +396,7 @@ sysctl_str(const char *buf, const char *arg, char *var, size_t varsz)
 	/* Read current value. */
 	size = sizeof(prev);
 	if (sysctlbyname(buf, prev, &size, NULL, 0) < 0) {
-		warn("sysctlbyname(%s)", buf);
+		xo_warn("sysctlbyname(%s)", buf);
 		return (-1);
 	}
 
@@ -395,26 +405,26 @@ sysctl_str(const char *buf, const char *arg, char *var, size_t varsz)
 		size = strlen(arg);
 		/* Apply new value. */
 		if (sysctlbyname(buf, NULL, 0, arg, size) < 0) {
-			warn("sysctlbyname(%s, %s)", buf, arg);
+			xo_warn("sysctlbyname(%s, %s)", buf, arg);
 			return (-1);
 		}
 		/* Get size of new string. */
 		if (sysctlbyname(buf, NULL, &size, NULL, 0) < 0) {
-			warn("sysctlbyname(%s)", buf);
+			xo_warn("sysctlbyname(%s)", buf);
 			return (-1);
 		}
 	}
 
 	if ((tmp = calloc(1, size)) == NULL)
-		err(1, "calloc");
+		xo_err(1, "calloc");
 	/* Read back applied value for good measure. */
 	if (sysctlbyname(buf, tmp, &size, NULL, 0) < 0) {
-		warn("sysctlbyname(%s)", buf);
+		xo_warn("sysctlbyname(%s)", buf);
 		free(tmp);
 		return (-1);
 	}
 
-	if (arg != NULL)
+	if (arg != NULL && xo_get_style(NULL) == XO_STYLE_TEXT)
 		printf("%s: %s -> %s\n", buf, prev, tmp);
 	if (var != NULL)
 		strlcpy(var, tmp, varsz);
@@ -432,31 +442,32 @@ read_dev(char *path)
 	struct sndstioc_nv_arg arg;
 	struct snd_dev *dp = NULL;
 	struct snd_chan *ch;
+	char buf[64];
 	size_t nitems, nchans, i, j;
 	int fd, caps, unit, t1, t2, t3;
 
 	if ((fd = open("/dev/sndstat", O_RDONLY)) < 0)
-		err(1, "open(/dev/sndstat)");
+		xo_err(1, "open(/dev/sndstat)");
 
 	if (ioctl(fd, SNDSTIOC_REFRESH_DEVS, NULL) < 0)
-		err(1, "ioctl(SNDSTIOC_REFRESH_DEVS)");
+		xo_err(1, "ioctl(SNDSTIOC_REFRESH_DEVS)");
 
 	arg.nbytes = 0;
 	arg.buf = NULL;
 	if (ioctl(fd, SNDSTIOC_GET_DEVS, &arg) < 0)
-		err(1, "ioctl(SNDSTIOC_GET_DEVS#1)");
+		xo_err(1, "ioctl(SNDSTIOC_GET_DEVS#1)");
 
 	if ((arg.buf = malloc(arg.nbytes)) == NULL)
-		err(1, "malloc");
+		xo_err(1, "malloc");
 
 	if (ioctl(fd, SNDSTIOC_GET_DEVS, &arg) < 0)
-		err(1, "ioctl(SNDSTIOC_GET_DEVS#2)");
+		xo_err(1, "ioctl(SNDSTIOC_GET_DEVS#2)");
 
 	if ((nvl = nvlist_unpack(arg.buf, arg.nbytes, 0)) == NULL)
-		err(1, "nvlist_unpack");
+		xo_err(1, "nvlist_unpack");
 
 	if (nvlist_empty(nvl) || !nvlist_exists(nvl, SNDST_DSPS))
-		errx(1, "no soundcards attached");
+		xo_errx(1, "no soundcards attached");
 
 	if (path == NULL || (path != NULL && strcmp(basename(path), "dsp") == 0))
 		unit = mixer_get_dunit();
@@ -475,12 +486,12 @@ read_dev(char *path)
 			break;;
 	}
 	if (i == nitems)
-		errx(1, "device not found");
+		xo_errx(1, "device not found");
 
 #define NV(type, item)	\
 	nvlist_get_ ## type (di[i], SNDST_DSPS_ ## item)
 	if ((dp = calloc(1, sizeof(struct snd_dev))) == NULL)
-		err(1, "calloc");
+		xo_err(1, "calloc");
 
 	dp->unit = -1;
 	strlcpy(dp->name, NV(string, NAMEUNIT), sizeof(dp->name));
@@ -492,9 +503,9 @@ read_dev(char *path)
 #undef NV
 
 	if (dp->play.pchans && !nvlist_exists(di[i], SNDST_DSPS_INFO_PLAY))
-		errx(1, "%s: playback channel list empty", dp->name);
+		xo_errx(1, "%s: playback channel list empty", dp->name);
 	if (dp->rec.pchans && !nvlist_exists(di[i], SNDST_DSPS_INFO_REC))
-		errx(1, "%s: recording channel list empty", dp->name);
+		xo_errx(1, "%s: recording channel list empty", dp->name);
 
 #define NV(type, mode, item)						\
 	nvlist_get_ ## type (nvlist_get_nvlist(di[i],			\
@@ -526,7 +537,7 @@ read_dev(char *path)
 		goto done;
 
 	if (!nvlist_exists(di[i], SNDST_DSPS_PROVIDER_INFO))
-		errx(1, "%s: provider_info list empty", dp->name);
+		xo_errx(1, "%s: provider_info list empty", dp->name);
 
 #define NV(type, item)							\
 	nvlist_get_ ## type (nvlist_get_nvlist(di[i],			\
@@ -549,13 +560,21 @@ read_dev(char *path)
 	if (sysctl_int("hw.snd.latency", NULL, &t1) ||
 	    sysctl_int("hw.snd.latency_profile", NULL, &t2) ||
 	    sysctl_int("kern.timecounter.alloweddeviation", NULL, &t3))
-		err(1, "%s: sysctl", dp->name);
+		xo_err(1, "%s: sysctl", dp->name);
 	if (t1 == 0 && t2 == 0 && t3 == 0)
 		dp->realtime = 1;
 
+	snprintf(buf, sizeof(buf), "dev.pcm.%d.eq", dp->unit);
+	if (sysctl_int(buf, NULL, &dp->eq))
+		xo_err(1, "%s: sysctl", dp->name);
+
+	snprintf(buf, sizeof(buf), "dev.pcm.%d.eq_preamp", dp->unit);
+	if (sysctl_str(buf, NULL, dp->eq_preamp, sizeof(dp->eq_preamp)))
+		xo_err(1, "%s: sysctl", dp->name);
+
 	if (!nvlist_exists(nvlist_get_nvlist(di[i],
 	    SNDST_DSPS_PROVIDER_INFO), SNDST_DSPS_SOUND4_CHAN_INFO))
-		errx(1, "%s: channel info list empty", dp->name);
+		xo_errx(1, "%s: channel info list empty", dp->name);
 
 	cdi = nvlist_get_nvlist_array(
 	    nvlist_get_nvlist(di[i], SNDST_DSPS_PROVIDER_INFO),
@@ -567,7 +586,7 @@ read_dev(char *path)
 #define NV(type, item)	\
 	nvlist_get_ ## type (cdi[j], SNDST_DSPS_SOUND4_CHAN_ ## item)
 		if ((ch = calloc(1, sizeof(struct snd_chan))) == NULL)
-			err(1, "calloc");
+			xo_err(1, "calloc");
 
 		strlcpy(ch->name, NV(string, NAME), sizeof(ch->name));
 		strlcpy(ch->parentchan, NV(string, PARENTCHAN),
@@ -654,7 +673,7 @@ print_dev_ctl(struct snd_dev *dp, struct snd_ctl *ctl, bool simple,
 	struct snd_ctl *cp;
 	size_t len;
 
-	if (ctl->type != GRP) {
+	if (ctl->type != GRP && xo_get_style(NULL) == XO_STYLE_TEXT) {
 		if (simple)
 			printf("%s=", ctl->name);
 		else
@@ -663,10 +682,10 @@ print_dev_ctl(struct snd_dev *dp, struct snd_ctl *ctl, bool simple,
 
 	switch (ctl->type) {
 	case STR:
-		printf("%s\n", (char *)dp + ctl->off);
+		xo_emit("{a:%s/%s}\n", ctl->name, (char *)dp + ctl->off);
 		break;
 	case NUM:
-		printf("%d\n", *(int *)((intptr_t)dp + ctl->off));
+		xo_emit("{a:%s/%d}\n", ctl->name, *(int *)((intptr_t)dp + ctl->off));
 		break;
 	case VOL:
 		break;
@@ -691,7 +710,7 @@ print_chan_ctl(struct snd_chan *ch, struct snd_ctl *ctl, bool simple,
 	size_t len;
 	int v;
 
-	if (ctl->type != GRP) {
+	if (ctl->type != GRP && xo_get_style(NULL) == XO_STYLE_TEXT) {
 		if (simple)
 			printf("%s.%s=", ch->name, ctl->name);
 		else
@@ -700,14 +719,14 @@ print_chan_ctl(struct snd_chan *ch, struct snd_ctl *ctl, bool simple,
 
 	switch (ctl->type) {
 	case STR:
-		printf("%s\n", (char *)ch + ctl->off);
+		xo_emit("{a:%s/%s}\n", ctl->name, (char *)ch + ctl->off);
 		break;
 	case NUM:
-		printf("%d\n", *(int *)((intptr_t)ch + ctl->off));
+		xo_emit("{a:%s/%d}\n", ctl->name, *(int *)((intptr_t)ch + ctl->off));
 		break;
 	case VOL:
 		v = *(int *)((intptr_t)ch + ctl->off);
-		printf("%.2f:%.2f\n",
+		xo_emit("{a:%s/%.2f:%.2f}\n", ctl->name,
 		    MIX_VOLNORM(v & 0x00ff), MIX_VOLNORM((v >> 8) & 0x00ff));
 		break;
 	case GRP:
@@ -728,31 +747,46 @@ print_dev(struct snd_dev *dp)
 {
 	struct snd_chan *ch;
 	struct snd_ctl *ctl;
+	struct sbuf sb;
+	char buf[16];
 
-	if (!oflag) {
-		printf("%s: <%s> %s", dp->name, dp->desc, dp->status);
+	xo_open_instance("devices");
 
-		printf(" (");
+	if (!oflag || xo_get_style(NULL) != XO_STYLE_TEXT) {
+		sbuf_new(&sb, buf, sizeof(buf), SBUF_FIXEDLEN);
+
+		sbuf_printf(&sb, "(");
 		if (dp->play.pchans)
-			printf("play");
+			sbuf_printf(&sb, "play");
 		if (dp->play.pchans && dp->rec.pchans)
-			printf("/");
+			sbuf_printf(&sb, "/");
 		if (dp->rec.pchans)
-			printf("rec");
-		printf(")\n");
+			sbuf_printf(&sb, "rec");
+		sbuf_printf(&sb, ")");
+
+		xo_emit("{:header/%s: <%s> %s %s}\n",
+		    dp->name, dp->desc, dp->status, sbuf_data(&sb));
+
+		sbuf_delete(&sb);
 	}
 
 	for (ctl = dev_ctls; ctl->name != NULL; ctl++)
 		print_dev_ctl(dp, ctl, oflag, false);
 
 	if (vflag) {
+		xo_open_list("channels");
 		TAILQ_FOREACH(ch, &dp->chans, next) {
-			if (!oflag)
+			xo_open_instance("channels");
+			if (!oflag && xo_get_style(NULL) == XO_STYLE_TEXT)
 				printf("    %s\n", ch->name);
 			for (ctl = chan_ctls; ctl->name != NULL; ctl++)
 				print_chan_ctl(ch, ctl, oflag, false);
+			xo_close_instance("channels");
 		}
+		xo_close_list("channels");
 	}
+
+	xo_close_instance("devices");
 }
 
 static int
@@ -824,12 +858,40 @@ mod_realtime(struct snd_dev *dp, void *arg)
 }
 
 static int
+mod_eq(struct snd_dev *dp, void *arg)
+{
+	char buf[64];
+
+	if (dp->from_user)
+		return (-1);
+
+	snprintf(buf, sizeof(buf), "dev.pcm.%d.eq", dp->unit);
+
+	return (sysctl_int(buf, arg, &dp->eq));
+}
+
+static int
+mod_eq_preamp(struct snd_dev *dp, void *arg)
+{
+	char buf[64];
+
+	if (dp->from_user)
+		return (-1);
+
+	snprintf(buf, sizeof(buf), "dev.pcm.%d.eq_preamp", dp->unit);
+
+	return (sysctl_str(buf, arg, dp->eq_preamp, sizeof(dp->eq_preamp)));
+}
+
+static int
 mod_play_vchans(struct snd_dev *dp, void *arg)
 {
 	char buf[64];
 
 	if (dp->from_user)
 		return (-1);
+	if (!dp->play.pchans)
+		return (0);
 
 	snprintf(buf, sizeof(buf), "dev.pcm.%d.play.vchans", dp->unit);
 
@@ -873,6 +935,8 @@ mod_rec_vchans(struct snd_dev *dp, void *arg)
 
 	if (dp->from_user)
 		return (-1);
+	if (!dp->rec.pchans)
+		return (0);
 
 	snprintf(buf, sizeof(buf), "dev.pcm.%d.rec.vchans", dp->unit);
 
@@ -912,8 +976,9 @@ mod_rec_format(struct snd_dev *dp, void *arg)
 static void __dead2
 usage(void)
 {
-	fprintf(stderr, "usage: %s [-f device] [-hov] [control[=value] ...]\n",
+	xo_error("usage: %s [--libxo] [-f device] [-hov] [control[=value] ...]\n",
 	    getprogname());
+	xo_finish();
 	exit(1);
 }
 
@@ -927,6 +992,10 @@ main(int argc, char *argv[])
 	char *s, *propstr;
 	bool show = true, found;
 	int c;
+
+	argc = xo_parse_args(argc, argv);
+	if (argc < 0)
+		exit(1);
 
 	while ((c = getopt(argc, argv, "f:hov")) != -1) {
 		switch (c) {
@@ -948,11 +1017,20 @@ main(int argc, char *argv[])
 	argc -= optind;
 	argv += optind;
 
+	xo_set_version(SNDCTL_XO_VERSION);
+	xo_open_container("sndctl");
+
 	dp = read_dev(path);
 
+	xo_open_container("executed_controls");
 	while (argc > 0) {
-		if ((s = strdup(*argv)) == NULL)
-			err(1, "strdup(%s)", *argv);
+		if ((s = strdup(*argv)) == NULL) {
+			xo_close_container("executed_controls");
+			xo_close_container("sndctl");
+			if (xo_finish() < 0)
+				xo_err(1, "xo_finish");
+			xo_err(1, "strdup(%s)", *argv);
+		}
 
 		propstr = strsep(&s, "=");
 		if (propstr == NULL)
@@ -962,11 +1040,19 @@ main(int argc, char *argv[])
 		for (ctl = dev_ctls; ctl->name != NULL; ctl++) {
 			if (strcmp(ctl->name, propstr) != 0)
 				continue;
-			if (s == NULL) {
-				print_dev_ctl(dp, ctl, true, true);
+			if (s == NULL)
 				show = false;
-			} else if (ctl->mod != NULL && ctl->mod(dp, s) < 0)
-				warnx("%s(%s) failed", ctl->name, s);
+			else if (ctl->mod != NULL && ctl->mod(dp, s) < 0)
+				xo_warnx("%s(%s) failed", ctl->name, s);
+			if (s == NULL || xo_get_style(NULL) != XO_STYLE_TEXT) {
+				/*
+				 * Print the control in libxo mode in all
+				 * cases, otherwise we'll not be printing any
+				 * controls that were modified or whose
+				 * ctl->mod() failed.
+				 */
+				print_dev_ctl(dp, ctl, true, true);
+			}
 			found = true;
 			break;
 		}
@@ -981,24 +1067,25 @@ main(int argc, char *argv[])
 			}
 		}
 		if (!found)
-			warnx("%s: no such property", propstr);
+			xo_warnx("%s: no such property", propstr);
 next:
 		free(s);
 		argc--;
 		argv++;
 	}
+	xo_close_container("executed_controls");
 
+	if (show || xo_get_style(NULL) != XO_STYLE_TEXT) {
+		xo_open_list("devices");
+		print_dev(dp);
+		xo_close_list("devices");
+	}
 	free_dev(dp);
 
-	if (show) {
-		/*
-		 * Re-read dev to reflect new state in case we changed some
-		 * property.
-		 */
-		dp = read_dev(path);
-		print_dev(dp);
-		free_dev(dp);
-	}
+
+	xo_close_container("sndctl");
+	if (xo_finish() < 0)
+		xo_err(1, "xo_finish");
 
 	return (0);
 }

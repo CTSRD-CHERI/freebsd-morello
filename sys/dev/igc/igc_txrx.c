@@ -30,10 +30,8 @@
 #include <sys/cdefs.h>
 #include "if_igc.h"
 
-#ifdef RSS
 #include <net/rss_config.h>
 #include <netinet/in_rss.h>
-#endif
 
 #ifdef VERBOSE_DEBUG
 #define DPRINTF device_printf
@@ -319,10 +317,27 @@ igc_isc_txd_encap(void *arg, if_pkt_info_t pi)
 	txd->read.cmd_type_len |= htole32(IGC_ADVTXD_DCMD_EOP | txd_flags);
 	pi->ipi_new_pidx = i;
 
-	/* Sent data accounting for AIM */
+	/*
+	 * Sent data accounting for AIM.  For TSO, ipi_len is the whole
+	 * unsegmented payload, which is not a size the moderation calculation
+	 * can use.  Count the segments the hardware will put on the wire and
+	 * the header each of them carries, so that the average it sees is a
+	 * wire packet.
+	 */
+	if ((pi->ipi_csum_flags & CSUM_TSO) && pi->ipi_tso_segsz != 0) {
+		u32 hdrlen, segs;
+
+		hdrlen = pi->ipi_ehdrlen + pi->ipi_ip_hlen + pi->ipi_tcp_hlen;
+		if (pi->ipi_len > hdrlen) {
+			segs = howmany(pi->ipi_len - hdrlen, pi->ipi_tso_segsz);
+			txr->tx_bytes += pi->ipi_len + (segs - 1) * hdrlen;
+			txr->tx_packets += segs;
+			return (0);
+		}
+	}
+
 	txr->tx_bytes += pi->ipi_len;
 	++txr->tx_packets;
-
 	return (0);
 }
 
@@ -334,6 +349,7 @@ igc_isc_txd_flush(void *arg, uint16_t txqid, qidx_t pidx)
 	struct tx_ring *txr = &que->txr;
 
 	IGC_WRITE_REG(&sc->hw, IGC_TDT(txr->me), pidx);
+	igc_aim_publish(txr);
 }
 
 static int
@@ -425,6 +441,7 @@ igc_isc_rxd_flush(void *arg, uint16_t rxqid, uint8_t flid __unused,
 	struct rx_ring *rxr = &que->rxr;
 
 	IGC_WRITE_REG(&sc->hw, IGC_RDT(rxr->me), pidx);
+	igc_aim_publish_rx(rxr);
 }
 
 static int
@@ -488,7 +505,6 @@ igc_isc_rxd_pkt_get(void *arg, if_rxd_info_t ri)
 		    le32toh(rxd->wb.lower.lo_dword.data) & IGC_PKTTYPE_MASK;
 
 		ri->iri_len += len;
-		rxr->rx_bytes += ri->iri_len;
 
 		rxd->wb.upper.status_error = 0;
 		eop = ((staterr & IGC_RXD_STAT_EOP) == IGC_RXD_STAT_EOP);
@@ -516,6 +532,7 @@ igc_isc_rxd_pkt_get(void *arg, if_rxd_info_t ri)
 		i++;
 	} while (!eop);
 
+	rxr->rx_bytes += ri->iri_len;
 	rxr->rx_packets++;
 
 	if ((scctx->isc_capenable & IFCAP_RXCSUM) != 0)
@@ -594,7 +611,13 @@ igc_determine_rsstype(uint16_t pkt_info)
 		return M_HASHTYPE_RSS_IPV6;
 	case IGC_RXDADV_RSSTYPE_IPV6_TCP_EX:
 		return M_HASHTYPE_RSS_TCP_IPV6_EX;
+	case IGC_RXDADV_RSSTYPE_IPV4_UDP:
+		return M_HASHTYPE_RSS_UDP_IPV4;
+	case IGC_RXDADV_RSSTYPE_IPV6_UDP:
+		return M_HASHTYPE_RSS_UDP_IPV6;
+	case IGC_RXDADV_RSSTYPE_IPV6_UDP_EX:
+		return M_HASHTYPE_RSS_UDP_IPV6_EX;
 	default:
-		return M_HASHTYPE_OPAQUE;
+		return M_HASHTYPE_NONE;
 	}
 }

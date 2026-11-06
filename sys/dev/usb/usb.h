@@ -309,6 +309,9 @@ struct usb_device_descriptor {
 } __packed;
 typedef struct usb_device_descriptor usb_device_descriptor_t;
 
+/* Maximum sane wTotalLength for a BOS descriptor */
+#define	USB_BOS_DESC_MAX_LEN	4096
+
 /* Binary Device Object Store (BOS) */
 struct usb_bos_descriptor {
 	uByte	bLength;
@@ -328,6 +331,7 @@ struct usb_bos_cap_descriptor {
 #define	USB_DEVCAP_USB2EXT	0x02
 #define	USB_DEVCAP_SUPER_SPEED	0x03
 #define	USB_DEVCAP_CONTAINER_ID	0x04
+#define	USB_DEVCAP_SUPERSPEED_PLUS	0x0A
 	/* data ... */
 } __packed;
 typedef struct usb_bos_cap_descriptor usb_bos_cap_descriptor_t;
@@ -367,6 +371,33 @@ struct usb_devcap_container_id_descriptor {
 } __packed;
 typedef struct usb_devcap_container_id_descriptor
 		usb_devcap_container_id_descriptor_t;
+
+struct usb_devcap_ss_plus_descriptor_header {
+	uByte	bLength;
+	uByte	bDescriptorType;
+	uByte	bDevCapabilityType;
+	uByte	bReserved;
+#define USB_DEVCAP_SSPLUS_SSAC_GET(x) ((x) & 0x1F)
+#define USB_DEVCAP_SSPLUS_SSAC_SET(v) ((v) & 0x1F)
+#define USB_DEVCAP_SSPLUS_SSIC_SET(v) (((v) & 0x0F) << 5)
+	uDWord	bmAttributes;
+	uWord	wFunctionalitySupport;
+	uWord   wReserved;
+} __packed;
+
+struct usb_devcap_ss_plus_descriptor {
+	struct usb_devcap_ss_plus_descriptor_header hdr;
+#define USB_DEVCAP_SSPLUS_SSID_GET(x) ((x) & 0x0F)
+#define USB_DEVCAP_SSPLUS_LSE_GET(x) (((x) >> 4) & 0x03)
+#define USB_DEVCAP_SSPLUS_ST_GET(x) (((x) >> 6) & 0x03)
+#define USB_DEVCAP_SSPLUS_LP_GET(x) (((x) >> 14) & 0x03)
+#define USB_DEVCAP_SSPLUS_LP_SS 0
+#define USB_DEVCAP_SSPLUS_LP_SSP 1
+#define USB_DEVCAP_SSPLUS_LSM_GET(x)  (((x) >> 16) & 0xFFFF)
+	uDWord   bmSublinkSpeedAttr[];
+} __packed;
+typedef struct usb_devcap_ss_plus_descriptor
+		usb_devcap_ss_plus_descriptor_t;
 
 /* Device class codes */
 #define	UDCLASS_IN_INTERFACE	0x00
@@ -459,6 +490,12 @@ typedef struct usb_interface_assoc_descriptor usb_interface_assoc_descriptor_t;
 #define	UICLASS_PHYSICAL	0x05
 #define	UICLASS_IMAGE		0x06
 #define	UISUBCLASS_SIC		1	/* still image class */
+
+#define	UICLASS_VIDEO		0x0e	/* video */
+#define	UISUBCLASS_VIDEOCONTROL		1
+#define	UISUBCLASS_VIDEOSTREAMING	2
+#define	UISUBCLASS_VIDEO_IFACE_COLL	3
+
 #define	UICLASS_PRINTER		0x07
 #define	UISUBCLASS_PRINTER	1
 #define	UIPROTO_PRINTER_UNI	1
@@ -541,7 +578,7 @@ struct usb_endpoint_descriptor {
 #define	UE_XFERTYPE	0x03
 #define	UE_CONTROL	0x00
 #define	UE_ISOCHRONOUS	0x01
-#define	UE_BULK	0x02
+#define	UE_BULK		0x02
 #define	UE_INTERRUPT	0x03
 #define	UE_BULK_INTR	0xfe		/* for internal use only! */
 #define	UE_TYPE_ANY	0xff		/* for internal use only! */
@@ -746,6 +783,16 @@ struct usb_port_status {
 } __packed;
 typedef struct usb_port_status usb_port_status_t;
 
+struct usb_ext_status {
+	struct usb_port_status ps;
+	uDWord	dwExtPortStatus;
+#define UDS_RX_SUBLINK_SPEED_ID_BITS(x)  ((x) & 0xF)
+#define UDS_TX_SUBLINK_SPEED_ID_BITS(x)  (((x) >> 4) & 0xF)
+#define UDS_RX_SUBLINK_LANE_COUNT_BITS(x)  (((x) >> 8) & 0xF)
+#define UDS_TX_SUBLINK_LANE_COUNT_BITS(x)  (((x) >> 12) & 0xF)
+} __packed;
+typedef struct usb_ext_status usb_ext_status_t;
+
 /*
  * The "USB_SPEED" macros defines all the supported USB speeds.
  */
@@ -755,8 +802,12 @@ enum usb_dev_speed {
 	USB_SPEED_FULL,
 	USB_SPEED_HIGH,
 	USB_SPEED_SUPER,
+	/* Enhanced SuperSpeed links are in USB 3.2 rank order */
+	USB_SPEED_SUPER_PLUS_X2,	/* SuperSpeedPlus Gen1x2 = 10 Gbps */
+	USB_SPEED_SUPER_PLUS,		/* SuperSpeedPlus Gen2x1 = 10 Gbps */
+	USB_SPEED_SUPER_PLUS_GEN2_X2,	/* SuperSpeedPlus Gen2x2 = 20 Gbps */
+	USB_SPEED_MAX,
 };
-#define	USB_SPEED_MAX	(USB_SPEED_SUPER+1)
 
 /*
  * The "USB_REV" macros defines all the supported USB revisions.
@@ -768,9 +819,11 @@ enum usb_revision {
 	USB_REV_1_1,
 	USB_REV_2_0,
 	USB_REV_2_5,
-	USB_REV_3_0
+	USB_REV_3_0,
+	USB_REV_3_1,
+	USB_REV_3_2,
+	USB_REV_MAX,
 };
-#define	USB_REV_MAX	(USB_REV_3_0+1)
 
 /*
  * Supported host controller modes.
@@ -778,9 +831,9 @@ enum usb_revision {
 enum usb_hc_mode {
 	USB_MODE_HOST,		/* initiates transfers */
 	USB_MODE_DEVICE,	/* bus transfer target */
-	USB_MODE_DUAL		/* can be host or device */
+	USB_MODE_DUAL,		/* can be host or device */
+	USB_MODE_MAX,
 };
-#define	USB_MODE_MAX	(USB_MODE_DUAL+1)
 
 /*
  * The "USB_STATE" enums define all the supported device states.
@@ -791,8 +844,8 @@ enum usb_dev_state {
 	USB_STATE_POWERED,
 	USB_STATE_ADDRESSED,
 	USB_STATE_CONFIGURED,
+	USB_STATE_MAX,
 };
-#define	USB_STATE_MAX	(USB_STATE_CONFIGURED+1)
 
 /*
  * The "USB_EP_MODE" macros define all the currently supported

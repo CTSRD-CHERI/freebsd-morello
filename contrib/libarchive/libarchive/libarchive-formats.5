@@ -210,7 +210,7 @@ values of varying byte order and length.
 .Bl -tag -width indent
 .It Cm binary
 The libarchive library transparently reads both big-endian and
-little-endian variants of the the two binary cpio formats; the
+little-endian variants of the two binary cpio formats; the
 original one from PWB/UNIX, and the later, more widely used, variant.
 This format used 32-bit binary values for file size and mtime, and
 16-bit binary values for the other fields.  The formats support only
@@ -366,7 +366,7 @@ Central Directory, which is ordinarily located
 at the end of a Zip archive and is thus inaccessible
 to the streaming reader.
 If the program using libarchive has enabled seek support, then
-libarchive will use this to processes the central directory first.
+libarchive will use this to process the central directory first.
 .Pp
 In particular, the seeking reader must be used to
 correctly handle self-extracting archives.

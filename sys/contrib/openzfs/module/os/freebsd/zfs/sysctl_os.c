@@ -163,6 +163,29 @@ param_set_arc_int(SYSCTL_HANDLER_ARGS)
 	return (0);
 }
 
+static void
+warn_deprecated_sysctl(const char *old, const char *new)
+{
+	printf("WARNING: sysctl vfs.zfs.%s is deprecated. Use vfs.zfs.%s instead.\n",
+	    old, new);
+}
+
+int
+param_set_l2arc_dwpd_limit(SYSCTL_HANDLER_ARGS)
+{
+	uint64_t old_val = l2arc_dwpd_limit;
+	int err;
+
+	err = sysctl_handle_64(oidp, arg1, 0, req);
+	if (err != 0 || req->newptr == NULL)
+		return (err);
+
+	if (l2arc_dwpd_limit != old_val)
+		l2arc_dwpd_bump_reset();
+
+	return (0);
+}
+
 int
 param_set_arc_max(SYSCTL_HANDLER_ARGS)
 {
@@ -182,15 +205,18 @@ param_set_arc_max(SYSCTL_HANDLER_ARGS)
 	arc_tuning_update(B_TRUE);
 
 	/* Update the sysctl to the tuned value */
-	if (val != 0)
+	if (val != 0 && arc_c_max != 0)
 		zfs_arc_max = arc_c_max;
+
+	if (arg2 != 0)
+		warn_deprecated_sysctl("arc_max", "arc.max");
 
 	return (0);
 }
 
 SYSCTL_PROC(_vfs_zfs, OID_AUTO, arc_max,
 	CTLTYPE_ULONG | CTLFLAG_RWTUN | CTLFLAG_MPSAFE,
-	NULL, 0, param_set_arc_max, "LU",
+	NULL, 1, param_set_arc_max, "LU",
 	"Maximum ARC size in bytes (LEGACY)");
 
 int
@@ -204,22 +230,26 @@ param_set_arc_min(SYSCTL_HANDLER_ARGS)
 	if (err != 0 || req->newptr == NULL)
 		return (SET_ERROR(err));
 
-	if (val != 0 && (val < 2ULL << SPA_MAXBLOCKSHIFT || val > arc_c_max))
+	if (val != 0 && (val < 2ULL << SPA_MAXBLOCKSHIFT ||
+	    (arc_c_max != 0 && val > arc_c_max)))
 		return (SET_ERROR(EINVAL));
 
 	zfs_arc_min = val;
 	arc_tuning_update(B_TRUE);
 
 	/* Update the sysctl to the tuned value */
-	if (val != 0)
+	if (val != 0 && arc_c_max != 0)
 		zfs_arc_min = arc_c_min;
+
+	if (arg2 != 0)
+		warn_deprecated_sysctl("arc_min", "arc.min");
 
 	return (0);
 }
 
 SYSCTL_PROC(_vfs_zfs, OID_AUTO, arc_min,
 	CTLTYPE_ULONG | CTLFLAG_RWTUN | CTLFLAG_MPSAFE,
-	NULL, 0, param_set_arc_min, "LU",
+	NULL, 1, param_set_arc_min, "LU",
 	"Minimum ARC size in bytes (LEGACY)");
 
 extern uint_t zfs_arc_free_target;
@@ -242,6 +272,9 @@ param_set_arc_free_target(SYSCTL_HANDLER_ARGS)
 
 	zfs_arc_free_target = val;
 
+	if (arg2 != 0)
+		warn_deprecated_sysctl("arc_free_target", "arc.free_target");
+
 	return (0);
 }
 
@@ -251,7 +284,7 @@ param_set_arc_free_target(SYSCTL_HANDLER_ARGS)
  */
 SYSCTL_PROC(_vfs_zfs, OID_AUTO, arc_free_target,
 	CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_MPSAFE,
-	NULL, 0, param_set_arc_free_target, "IU",
+	NULL, 1, param_set_arc_free_target, "IU",
 	"Desired number of free pages below which ARC triggers reclaim"
 	" (LEGACY)");
 
@@ -260,7 +293,7 @@ param_set_arc_no_grow_shift(SYSCTL_HANDLER_ARGS)
 {
 	int err, val;
 
-	val = arc_no_grow_shift;
+	val = zfs_arc_no_grow_shift;
 	err = sysctl_handle_int(oidp, &val, 0, req);
 	if (err != 0 || req->newptr == NULL)
 		return (err);
@@ -268,16 +301,20 @@ param_set_arc_no_grow_shift(SYSCTL_HANDLER_ARGS)
 	if (val < 0 || val >= arc_shrink_shift)
 		return (EINVAL);
 
-	arc_no_grow_shift = val;
+	zfs_arc_no_grow_shift = val;
+
+	if (arg2 != 0)
+		warn_deprecated_sysctl("arc_no_grow_shift", "arc.no_grow_shift");
 
 	return (0);
 }
 
 SYSCTL_PROC(_vfs_zfs, OID_AUTO, arc_no_grow_shift,
 	CTLTYPE_INT | CTLFLAG_RWTUN | CTLFLAG_MPSAFE,
-	NULL, 0, param_set_arc_no_grow_shift, "I",
+	NULL, 1, param_set_arc_no_grow_shift, "I",
 	"log2(fraction of ARC which must be free to allow growing) (LEGACY)");
 
+#if 0
 extern uint64_t l2arc_write_max;
 
 SYSCTL_UQUAD(_vfs_zfs, OID_AUTO, l2arc_write_max,
@@ -331,6 +368,8 @@ extern int l2arc_norw;
 SYSCTL_INT(_vfs_zfs, OID_AUTO, l2arc_norw,
 	CTLFLAG_RWTUN, &l2arc_norw, 0,
 	"No reads during writes (LEGACY)");
+
+#endif
 
 static int
 param_get_arc_state_size(SYSCTL_HANDLER_ARGS)
@@ -474,46 +513,6 @@ param_set_active_allocator(SYSCTL_HANDLER_ARGS)
 	return (param_set_active_allocator_common(buf));
 }
 
-/*
- * In pools where the log space map feature is not enabled we touch
- * multiple metaslabs (and their respective space maps) with each
- * transaction group. Thus, we benefit from having a small space map
- * block size since it allows us to issue more I/O operations scattered
- * around the disk. So a sane default for the space map block size
- * is 8~16K.
- */
-extern int zfs_metaslab_sm_blksz_no_log;
-
-SYSCTL_INT(_vfs_zfs_metaslab, OID_AUTO, sm_blksz_no_log,
-	CTLFLAG_RDTUN, &zfs_metaslab_sm_blksz_no_log, 0,
-	"Block size for space map in pools with log space map disabled.  "
-	"Power of 2 greater than 4096.");
-
-/*
- * When the log space map feature is enabled, we accumulate a lot of
- * changes per metaslab that are flushed once in a while so we benefit
- * from a bigger block size like 128K for the metaslab space maps.
- */
-extern int zfs_metaslab_sm_blksz_with_log;
-
-SYSCTL_INT(_vfs_zfs_metaslab, OID_AUTO, sm_blksz_with_log,
-	CTLFLAG_RDTUN, &zfs_metaslab_sm_blksz_with_log, 0,
-	"Block size for space map in pools with log space map enabled.  "
-	"Power of 2 greater than 4096.");
-
-/*
- * The in-core space map representation is more compact than its on-disk form.
- * The zfs_condense_pct determines how much more compact the in-core
- * space map representation must be before we compact it on-disk.
- * Values should be greater than or equal to 100.
- */
-extern uint_t zfs_condense_pct;
-
-SYSCTL_UINT(_vfs_zfs, OID_AUTO, condense_pct,
-	CTLFLAG_RWTUN, &zfs_condense_pct, 0,
-	"Condense on-disk spacemap when it is more than this many percents"
-	" of in-memory counterpart");
-
 extern uint_t zfs_remove_max_segment;
 
 SYSCTL_UINT(_vfs_zfs, OID_AUTO, remove_max_segment,
@@ -526,32 +525,6 @@ extern int zfs_removal_suspend_progress;
 SYSCTL_INT(_vfs_zfs, OID_AUTO, removal_suspend_progress,
 	CTLFLAG_RWTUN, &zfs_removal_suspend_progress, 0,
 	"Ensures certain actions can happen while in the middle of a removal");
-
-/*
- * Minimum size which forces the dynamic allocator to change
- * it's allocation strategy.  Once the space map cannot satisfy
- * an allocation of this size then it switches to using more
- * aggressive strategy (i.e search by size rather than offset).
- */
-extern uint64_t metaslab_df_alloc_threshold;
-
-SYSCTL_QUAD(_vfs_zfs_metaslab, OID_AUTO, df_alloc_threshold,
-	CTLFLAG_RWTUN, &metaslab_df_alloc_threshold, 0,
-	"Minimum size which forces the dynamic allocator to change its"
-	" allocation strategy");
-
-/*
- * The minimum free space, in percent, which must be available
- * in a space map to continue allocations in a first-fit fashion.
- * Once the space map's free space drops below this level we dynamically
- * switch to using best-fit allocations.
- */
-extern uint_t metaslab_df_free_pct;
-
-SYSCTL_UINT(_vfs_zfs_metaslab, OID_AUTO, df_free_pct,
-	CTLFLAG_RWTUN, &metaslab_df_free_pct, 0,
-	"The minimum free space, in percent, which must be available in a"
-	" space map to continue allocations in a first-fit fashion");
 
 /* mmp.c */
 
@@ -569,27 +542,6 @@ param_set_multihost_interval(SYSCTL_HANDLER_ARGS)
 
 	return (0);
 }
-
-/* spa.c */
-
-extern int zfs_ccw_retry_interval;
-
-SYSCTL_INT(_vfs_zfs, OID_AUTO, ccw_retry_interval,
-	CTLFLAG_RWTUN, &zfs_ccw_retry_interval, 0,
-	"Configuration cache file write, retry after failure, interval"
-	" (seconds)");
-
-extern uint64_t zfs_max_missing_tvds_cachefile;
-
-SYSCTL_UQUAD(_vfs_zfs, OID_AUTO, max_missing_tvds_cachefile,
-	CTLFLAG_RWTUN, &zfs_max_missing_tvds_cachefile, 0,
-	"Allow importing pools with missing top-level vdevs in cache file");
-
-extern uint64_t zfs_max_missing_tvds_scan;
-
-SYSCTL_UQUAD(_vfs_zfs, OID_AUTO, max_missing_tvds_scan,
-	CTLFLAG_RWTUN, &zfs_max_missing_tvds_scan, 0,
-	"Allow importing pools with missing top-level vdevs during scan");
 
 /* spa_misc.c */
 
@@ -746,12 +698,15 @@ param_set_min_auto_ashift(SYSCTL_HANDLER_ARGS)
 
 	zfs_vdev_min_auto_ashift = val;
 
+	if (arg2 != 0)
+		warn_deprecated_sysctl("min_auto_ashift",
+		    "vdev.min_auto_ashift");
+
 	return (0);
 }
 
 SYSCTL_PROC(_vfs_zfs, OID_AUTO, min_auto_ashift,
-	CTLTYPE_UINT | CTLFLAG_RWTUN | CTLFLAG_MPSAFE,
-	&zfs_vdev_min_auto_ashift, sizeof (zfs_vdev_min_auto_ashift),
+	CTLTYPE_UINT | CTLFLAG_RWTUN | CTLFLAG_MPSAFE, NULL, 1,
 	param_set_min_auto_ashift, "IU",
 	"Min ashift used when creating new top-level vdev. (LEGACY)");
 
@@ -771,36 +726,12 @@ param_set_max_auto_ashift(SYSCTL_HANDLER_ARGS)
 
 	zfs_vdev_max_auto_ashift = val;
 
+	if (arg2 != 0)
+		warn_deprecated_sysctl("max_auto_ashift",
+		    "vdev.max_auto_ashift");
+
 	return (0);
 }
-
-SYSCTL_PROC(_vfs_zfs, OID_AUTO, max_auto_ashift,
-	CTLTYPE_UINT | CTLFLAG_RWTUN | CTLFLAG_MPSAFE,
-	&zfs_vdev_max_auto_ashift, sizeof (zfs_vdev_max_auto_ashift),
-	param_set_max_auto_ashift, "IU",
-	"Max ashift used when optimizing for logical -> physical sector size on"
-	" new top-level vdevs. (LEGACY)");
-
-/*
- * Since the DTL space map of a vdev is not expected to have a lot of
- * entries, we default its block size to 4K.
- */
-extern int zfs_vdev_dtl_sm_blksz;
-
-SYSCTL_INT(_vfs_zfs, OID_AUTO, dtl_sm_blksz,
-	CTLFLAG_RDTUN, &zfs_vdev_dtl_sm_blksz, 0,
-	"Block size for DTL space map.  Power of 2 greater than 4096.");
-
-/*
- * vdev-wide space maps that have lots of entries written to them at
- * the end of each transaction can benefit from a higher I/O bandwidth
- * (e.g. vdev_obsolete_sm), thus we default their block size to 128K.
- */
-extern int zfs_vdev_standard_sm_blksz;
-
-SYSCTL_INT(_vfs_zfs, OID_AUTO, standard_sm_blksz,
-	CTLFLAG_RDTUN, &zfs_vdev_standard_sm_blksz, 0,
-	"Block size for standard space map.  Power of 2 greater than 4096.");
 
 extern int vdev_validate_skip;
 

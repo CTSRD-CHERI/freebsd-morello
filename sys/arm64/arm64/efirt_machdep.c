@@ -46,6 +46,7 @@
 #include <sys/vmmeter.h>
 
 #include <machine/pte.h>
+#include <machine/rsi.h>
 #include <machine/vmparam.h>
 
 #include <vm/vm.h>
@@ -106,37 +107,38 @@ efi_1t1_l3(vm_offset_t va)
 	if (*l0 == 0) {
 		m = efi_1t1_page();
 		mphys = VM_PAGE_TO_PHYS(m);
-		*l0 = PHYS_TO_PTE(mphys) | L0_TABLE;
+		*l0 = PHYS_TO_PTE(mphys) | TATTR_UXN_TABLE |
+		    TATTR_AP_TABLE_NO_EL0 | L0_TABLE;
 	} else {
 		mphys = PTE_TO_PHYS(*l0);
 	}
 
-	l1 = (pd_entry_t *)PHYS_TO_DMAP(mphys);
+	l1 = PHYS_TO_DMAP(mphys);
 	l1_idx = pmap_l1_index(va);
 	l1 += l1_idx;
 	if (*l1 == 0) {
 		m = efi_1t1_page();
 		mphys = VM_PAGE_TO_PHYS(m);
-		*l1 = PHYS_TO_PTE(mphys) | L1_TABLE;
+		*l1 = PHYS_TO_PTE(mphys) | TATTR_UXN_TABLE |
+		    TATTR_AP_TABLE_NO_EL0 | L1_TABLE;
 	} else {
 		mphys = PTE_TO_PHYS(*l1);
 	}
 
-	l2 = (pd_entry_t *)PHYS_TO_DMAP(mphys);
+	l2 = PHYS_TO_DMAP(mphys);
 	l2_idx = pmap_l2_index(va);
 	l2 += l2_idx;
 	if (*l2 == 0) {
 		m = efi_1t1_page();
 		mphys = VM_PAGE_TO_PHYS(m);
-		*l2 = PHYS_TO_PTE(mphys) | L2_TABLE;
+		*l2 = PHYS_TO_PTE(mphys) | TATTR_UXN_TABLE |
+		    TATTR_AP_TABLE_NO_EL0 | L2_TABLE;
 	} else {
 		mphys = PTE_TO_PHYS(*l2);
 	}
 
-	l3 = (pt_entry_t *)PHYS_TO_DMAP(mphys);
+	l3 = PHYS_TO_DMAP(mphys);
 	l3 += pmap_l3_index(va);
-	KASSERT(*l3 == 0, ("%s: Already mapped: va %#jx *pt %#jx", __func__,
-	    va, *l3));
 
 	return (l3);
 }
@@ -145,7 +147,7 @@ efi_1t1_l3(vm_offset_t va)
  * Map a physical address from EFI runtime space into KVA space.  Returns 0 to
  * indicate a failed mapping so that the caller may handle error.
  */
-vm_offset_t
+void *
 efi_phys_to_kva(vm_paddr_t paddr)
 {
 	if (PHYS_IN_DMAP(paddr))
@@ -153,7 +155,7 @@ efi_phys_to_kva(vm_paddr_t paddr)
 
 	/* TODO: Map memory not in the DMAP */
 
-	return (0);
+	return (NULL);
 }
 
 /*
@@ -163,11 +165,11 @@ bool
 efi_create_1t1_map(struct efi_md *map, int ndesc, int descsz)
 {
 	struct efi_md *p;
-	pt_entry_t *l3, l3_attr;
-	vm_offset_t va;
+	pt_entry_t *l3, l3_attr, l3_entry;
+	vm_offset_t va, end;
 	vm_page_t efi_l0_page;
-	uint64_t idx;
 	int i, mode;
+	uint64_t pa;
 
 	obj_1t1_pt = vm_pager_allocate(OBJT_PHYS, NULL, L0_ENTRIES +
 	    L0_ENTRIES * Ln_ENTRIES + L0_ENTRIES * Ln_ENTRIES * Ln_ENTRIES +
@@ -176,7 +178,7 @@ efi_create_1t1_map(struct efi_md *map, int ndesc, int descsz)
 	VM_OBJECT_WLOCK(obj_1t1_pt);
 	efi_l0_page = efi_1t1_page();
 	VM_OBJECT_WUNLOCK(obj_1t1_pt);
-	efi_l0 = (pd_entry_t *)PHYS_TO_DMAP(VM_PAGE_TO_PHYS(efi_l0_page));
+	efi_l0 = VM_PAGE_TO_DMAP(efi_l0_page);
 	efi_ttbr0 = ASID_TO_OPERAND(ASID_RESERVED_FOR_EFI) |
 	    VM_PAGE_TO_PHYS(efi_l0_page);
 
@@ -218,16 +220,41 @@ efi_create_1t1_map(struct efi_md *map, int ndesc, int descsz)
 			    p->md_phys, mode, p->md_pages);
 		}
 
-		l3_attr = ATTR_AF | pmap_sh_attr | ATTR_S1_IDX(mode) |
-		    ATTR_S1_AP(ATTR_S1_AP_RW) | ATTR_S1_nG | L3_PAGE;
+		l3_attr = ATTR_S1_UXN | ATTR_AF | pmap_sh_attr |
+		    ATTR_S1_IDX(mode) | ATTR_S1_AP(ATTR_S1_AP_RW) |
+		    ATTR_S1_nG | L3_PAGE;
 		if (mode == VM_MEMATTR_DEVICE || p->md_attr & EFI_MD_ATTR_XP)
 			l3_attr |= ATTR_S1_XN;
 
 		VM_OBJECT_WLOCK(obj_1t1_pt);
-		for (va = p->md_phys, idx = 0; idx < p->md_pages;
-		    idx += (PAGE_SIZE / EFI_PAGE_SIZE), va += PAGE_SIZE) {
+		/* EFI regions can start and end within a kernel page. */
+		end = p->md_phys + p->md_pages * EFI_PAGE_SIZE;
+		for (va = trunc_page(p->md_phys); va < end; va += PAGE_SIZE) {
 			l3 = efi_1t1_l3(va);
-			*l3 = va | l3_attr;
+
+			if (mode == VM_MEMATTR_DEVICE && in_realm())
+				pa = va | prot_ns_shared_pa;
+			else
+				pa = va;
+
+			l3_entry = PHYS_TO_PTE(pa) | l3_attr;
+			if (*l3 != 0) {
+				/*
+				 * Multiple EFI regions can share a kernel page.
+				 * Their memory attributes must agree, but the
+				 * page must be executable if any region needs it.
+				 */
+				if (((*l3 ^ l3_entry) & ~ATTR_S1_PXN) != 0) {
+					VM_OBJECT_WUNLOCK(obj_1t1_pt);
+					printf("EFI Runtime entry %d has conflicting "
+					    "mapping at %#jx: %#jx != %#jx\n", i,
+					    (uintmax_t)va, (uintmax_t)*l3,
+					    (uintmax_t)l3_entry);
+					goto fail;
+				}
+				l3_entry &= *l3 | ~ATTR_S1_PXN;
+			}
+			*l3 = l3_entry;
 		}
 		VM_OBJECT_WUNLOCK(obj_1t1_pt);
 	}

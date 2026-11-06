@@ -94,6 +94,7 @@ typedef enum { B_FALSE, B_TRUE } boolean_t;
 #define	P2END(x, align)			(-(~(x) & -(align)))
 #define	P2PHASEUP(x, align, phase)	((phase) - (((phase) - (x)) & -(align)))
 #define	P2BOUNDARY(off, len, align)	(((off) ^ ((off) + (len) - 1)) > (align) - 1)
+#define	IS_P2ALIGNED(v, a)		((((uintptr_t)(v)) & ((uintptr_t)(a) - 1)) == 0)
 
 /*
  * General-purpose 32-bit and 64-bit bitfield encodings.
@@ -498,19 +499,7 @@ typedef struct zio_eck {
  * Gang block headers are self-checksumming and contain an array
  * of block pointers.
  */
-#define	SPA_GANGBLOCKSIZE	SPA_MINBLOCKSIZE
-#define	SPA_GBH_NBLKPTRS	((SPA_GANGBLOCKSIZE - \
-	sizeof (zio_eck_t)) / sizeof (blkptr_t))
-#define	SPA_GBH_FILLER		((SPA_GANGBLOCKSIZE - \
-	sizeof (zio_eck_t) - \
-	(SPA_GBH_NBLKPTRS * sizeof (blkptr_t))) /\
-	sizeof (uint64_t))
-
-typedef struct zio_gbh {
-	blkptr_t		zg_blkptr[SPA_GBH_NBLKPTRS];
-	uint64_t		zg_filler[SPA_GBH_FILLER];
-	zio_eck_t		zg_tail;
-} zio_gbh_phys_t;
+#define	SPA_OLD_GANGBLOCKSIZE	SPA_MINBLOCKSIZE
 
 #define	VDEV_RAIDZ_MAXPARITY	3
 
@@ -914,6 +903,16 @@ typedef enum pool_state {
 	POOL_STATE_UNAVAIL,		/* Internal libzfs state	*/
 	POOL_STATE_POTENTIALLY_ACTIVE	/* Internal libzfs state	*/
 } pool_state_t;
+
+/*
+ * Send TRIM commands in-line during normal pool operation while deleting.
+ *	OFF: no
+ *	ON: yes
+ */
+typedef enum {
+	SPA_AUTOTRIM_OFF = 0,
+	SPA_AUTOTRIM_ON,
+} spa_autotrim_t;
 
 /*
  * The uberblock version is incremented whenever an incompatible on-disk
@@ -2021,11 +2020,11 @@ typedef struct vdev_indirect_config {
 
 typedef struct vdev {
 	STAILQ_ENTRY(vdev) v_childlink;	/* link in parent's child list */
-	STAILQ_ENTRY(vdev) v_alllink;	/* link in global vdev list */
 	vdev_list_t	v_children;	/* children of this vdev */
 	const char	*v_name;	/* vdev name */
 	uint64_t	v_guid;		/* vdev guid */
-	uint64_t	v_txg;		/* most recent transaction */
+	uint64_t	v_label;	/* label instantiated from (top vdev) */
+	uint64_t	v_txg;		/* most recent transaction (top vdev) */
 	uint64_t	v_id;		/* index in parent */
 	uint64_t	v_psize;	/* physical device capacity */
 	int		v_ashift;	/* offset to block shift */

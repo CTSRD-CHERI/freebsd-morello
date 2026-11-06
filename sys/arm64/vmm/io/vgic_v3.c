@@ -47,7 +47,6 @@
 
 #include <dev/ofw/openfirm.h>
 
-#include <machine/armreg.h>
 #include <machine/atomic.h>
 #include <machine/bus.h>
 #include <machine/cpufunc.h>
@@ -58,7 +57,6 @@
 #include <machine/vmparam.h>
 #include <machine/intr.h>
 #include <machine/vmm.h>
-#include <machine/vmm_dev.h>
 #include <machine/vmm_instruction_emul.h>
 
 #include <arm/arm/gic_common.h>
@@ -70,7 +68,11 @@
 #include <arm64/vmm/arm64.h>
 #include <arm64/vmm/vmm_handlers.h>
 
+#include <dev/vmm/vmm_dev.h>
+#include <dev/vmm/vmm_vm.h>
+
 #include "vgic.h"
+#include "vgic_internal.h"
 #include "vgic_v3.h"
 #include "vgic_v3_reg.h"
 
@@ -91,55 +93,6 @@ struct vgic_v3_virt_features {
 	size_t ich_apr_num;
 };
 
-struct vgic_v3_irq {
-	/* List of IRQs that are active or pending */
-	TAILQ_ENTRY(vgic_v3_irq) act_pend_list;
-	struct mtx irq_spinmtx;
-	uint64_t mpidr;
-	int target_vcpu;
-	uint32_t irq;
-	bool active;
-	bool pending;
-	bool enabled;
-	bool level;
-	bool on_aplist;
-	uint8_t priority;
-	uint8_t config;
-#define	VGIC_CONFIG_MASK	0x2
-#define	VGIC_CONFIG_LEVEL	0x0
-#define	VGIC_CONFIG_EDGE	0x2
-};
-
-/* Global data not needed by EL2 */
-struct vgic_v3 {
-	struct mtx 	dist_mtx;
-	uint64_t 	dist_start;
-	size_t   	dist_end;
-
-	uint64_t 	redist_start;
-	size_t 		redist_end;
-
-	uint32_t 	gicd_ctlr;	/* Distributor Control Register */
-
-	struct vgic_v3_irq *irqs;
-};
-
-/* Per-CPU data not needed by EL2 */
-struct vgic_v3_cpu {
-	/*
-	 * We need a mutex for accessing the list registers because they are
-	 * modified asynchronously by the virtual timer.
-	 *
-	 * Note that the mutex *MUST* be a spin mutex because an interrupt can
-	 * be injected by a callout callback function, thereby modifying the
-	 * list registers from a context where sleeping is forbidden.
-	 */
-	struct mtx	lr_mtx;
-
-	struct vgic_v3_irq private_irqs[VGIC_PRV_I_NUM];
-	TAILQ_HEAD(, vgic_v3_irq) irq_act_pend;
-	u_int		ich_lr_used;
-};
 
 /* How many IRQs we support (SGIs + PPIs + SPIs). Not including LPIs */
 #define	VGIC_NIRQS	1023
@@ -154,50 +107,7 @@ static int vgic_v3_max_cpu_count(device_t dev, struct hyp *hyp);
 #define	INJECT_IRQ(hyp, vcpuid, irqid, level)			\
     vgic_v3_inject_irq(NULL, (hyp), (vcpuid), (irqid), (level))
 
-typedef void (register_read)(struct hypctx *, u_int, uint64_t *, void *);
-typedef void (register_write)(struct hypctx *, u_int, u_int, u_int,
-    uint64_t, void *);
-
-#define	VGIC_8_BIT	(1 << 0)
-/* (1 << 1) is reserved for 16 bit accesses */
-#define	VGIC_32_BIT	(1 << 2)
-#define	VGIC_64_BIT	(1 << 3)
-
-struct vgic_register {
-	u_int start;	/* Start within a memory region */
-	u_int end;
-	u_int size;
-	u_int flags;
-	register_read *read;
-	register_write *write;
-};
-
-#define	VGIC_REGISTER_RANGE(reg_start, reg_end, reg_size, reg_flags, readf, \
-    writef)								\
-{									\
-	.start = (reg_start),						\
-	.end = (reg_end),						\
-	.size = (reg_size),						\
-	.flags = (reg_flags),						\
-	.read = (readf),						\
-	.write = (writef),						\
-}
-
-#define	VGIC_REGISTER_RANGE_RAZ_WI(reg_start, reg_end, reg_size, reg_flags) \
-	VGIC_REGISTER_RANGE(reg_start, reg_end, reg_size, reg_flags,	\
-	    gic_zero_read, gic_ignore_write)
-
-#define	VGIC_REGISTER(start_addr, reg_size, reg_flags, readf, writef)	\
-	VGIC_REGISTER_RANGE(start_addr, (start_addr) + (reg_size),	\
-	    reg_size, reg_flags, readf, writef)
-
-#define	VGIC_REGISTER_RAZ_WI(start_addr, reg_size, reg_flags)		\
-	VGIC_REGISTER_RANGE_RAZ_WI(start_addr,				\
-	    (start_addr) + (reg_size), reg_size, reg_flags)
-
 static register_read gic_pidr2_read;
-static register_read gic_zero_read;
-static register_write gic_ignore_write;
 
 /* GICD_CTLR */
 static register_read dist_ctlr_read;
@@ -250,13 +160,13 @@ static struct vgic_register dist_registers[] = {
 	VGIC_REGISTER(GICD_CTLR, 4, VGIC_32_BIT, dist_ctlr_read,
 	    dist_ctlr_write),
 	VGIC_REGISTER(GICD_TYPER, 4, VGIC_32_BIT, dist_typer_read,
-	    gic_ignore_write),
+	    vgic_ignore_write),
 	VGIC_REGISTER(GICD_IIDR, 4, VGIC_32_BIT, dist_iidr_read,
-	    gic_ignore_write),
+	    vgic_ignore_write),
 	VGIC_REGISTER_RAZ_WI(GICD_STATUSR, 4, VGIC_32_BIT),
-	VGIC_REGISTER(GICD_SETSPI_NSR, 4, VGIC_32_BIT, gic_zero_read,
+	VGIC_REGISTER(GICD_SETSPI_NSR, 4, VGIC_32_BIT, vgic_zero_read,
 	    dist_setclrspi_nsr_write),
-	VGIC_REGISTER(GICD_CLRSPI_NSR, 4, VGIC_32_BIT, gic_zero_read,
+	VGIC_REGISTER(GICD_CLRSPI_NSR, 4, VGIC_32_BIT, vgic_zero_read,
 	    dist_setclrspi_nsr_write),
 	VGIC_REGISTER_RAZ_WI(GICD_SETSPI_SR, 4, VGIC_32_BIT),
 	VGIC_REGISTER_RAZ_WI(GICD_CLRSPI_SR, 4, VGIC_32_BIT),
@@ -320,7 +230,7 @@ static struct vgic_register dist_registers[] = {
 
 	VGIC_REGISTER_RANGE_RAZ_WI(GICD_PIDR4, GICD_PIDR2, 4, VGIC_32_BIT),
 	VGIC_REGISTER(GICD_PIDR2, 4, VGIC_32_BIT, gic_pidr2_read,
-	    gic_ignore_write),
+	    vgic_ignore_write),
 	VGIC_REGISTER_RANGE_RAZ_WI(GICD_PIDR2 + 4, GICD_SIZE, 4, VGIC_32_BIT),
 };
 
@@ -342,11 +252,11 @@ static register_read redist_typer_read;
 
 static struct vgic_register redist_rd_registers[] = {
 	VGIC_REGISTER(GICR_CTLR, 4, VGIC_32_BIT, redist_ctlr_read,
-	    gic_ignore_write),
+	    vgic_ignore_write),
 	VGIC_REGISTER(GICR_IIDR, 4, VGIC_32_BIT, redist_iidr_read,
-	    gic_ignore_write),
+	    vgic_ignore_write),
 	VGIC_REGISTER(GICR_TYPER, 8, VGIC_64_BIT | VGIC_32_BIT,
-	    redist_typer_read, gic_ignore_write),
+	    redist_typer_read, vgic_ignore_write),
 	VGIC_REGISTER_RAZ_WI(GICR_STATUSR, 4, VGIC_32_BIT),
 	VGIC_REGISTER_RAZ_WI(GICR_WAKER, 4, VGIC_32_BIT),
 	VGIC_REGISTER_RAZ_WI(GICR_SETLPIR, 8, VGIC_64_BIT | VGIC_32_BIT),
@@ -360,7 +270,7 @@ static struct vgic_register redist_rd_registers[] = {
 	/* These are identical to the dist registers */
 	VGIC_REGISTER_RANGE_RAZ_WI(GICD_PIDR4, GICD_PIDR2, 4, VGIC_32_BIT),
 	VGIC_REGISTER(GICD_PIDR2, 4, VGIC_32_BIT, gic_pidr2_read,
-	    gic_ignore_write),
+	    vgic_ignore_write),
 	VGIC_REGISTER_RANGE_RAZ_WI(GICD_PIDR2 + 4, GICD_SIZE, 4,
 	    VGIC_32_BIT),
 };
@@ -430,7 +340,7 @@ mpidr_to_vcpu(struct hyp *hyp, uint64_t mpidr)
 	vm = hyp->vm;
 	for (int i = 0; i < vm_get_maxcpus(vm); i++) {
 		hypctx = hyp->ctx[i];
-		if (hypctx != NULL && (hypctx->vmpidr_el2 & GICD_AFF) == mpidr)
+		if (hypctx != NULL && (hypctx_read_sys_reg(hypctx, HOST_VMPIDR_EL2) & GICD_AFF) == mpidr)
 			return (i);
 	}
 	return (-1);
@@ -473,6 +383,9 @@ vgic_v3_cpuinit(device_t dev, struct hypctx *hypctx)
 
 	mtx_init(&vgic_cpu->lr_mtx, "VGICv3 ICH_LR_EL2 lock", NULL, MTX_SPIN);
 
+	vgic_cpu->private_irqs = mallocarray(VGIC_PRV_I_NUM,
+	    sizeof(*vgic_cpu->private_irqs), M_VGIC_V3, M_WAITOK | M_ZERO);
+
 	/* Set the SGI and PPI state */
 	for (irqid = 0; irqid < VGIC_PRV_I_NUM; irqid++) {
 		irq = &vgic_cpu->private_irqs[irqid];
@@ -480,7 +393,7 @@ vgic_v3_cpuinit(device_t dev, struct hypctx *hypctx)
 		mtx_init(&irq->irq_spinmtx, "VGIC IRQ spinlock", NULL,
 		    MTX_SPIN);
 		irq->irq = irqid;
-		irq->mpidr = hypctx->vmpidr_el2 & GICD_AFF;
+		irq->mpidr = hypctx_read_sys_reg(hypctx, HOST_VMPIDR_EL2) & GICD_AFF;
 		irq->target_vcpu = vcpu_vcpuid(hypctx->vcpu);
 		MPASS(irq->target_vcpu >= 0);
 
@@ -502,7 +415,7 @@ vgic_v3_cpuinit(device_t dev, struct hypctx *hypctx)
 	 *
 	 * Maintenance interrupts are disabled.
 	 */
-	hypctx->vgic_v3_regs.ich_hcr_el2 = ICH_HCR_EL2_En;
+	hypctx_write_sys_reg(hypctx, HOST_ICH_HCR_EL2, ICH_HCR_EL2_En);
 
 	/*
 	 * Configure the Interrupt Controller Virtual Machine Control Register.
@@ -517,20 +430,21 @@ vgic_v3_cpuinit(device_t dev, struct hypctx *hypctx)
 	 * ICH_VMCR_EL2_VENG0: virtual Group 0 interrupts enabled.
 	 * ICH_VMCR_EL2_VENG1: virtual Group 1 interrupts enabled.
 	 */
-	hypctx->vgic_v3_regs.ich_vmcr_el2 =
+	hypctx_write_sys_reg(hypctx, HOST_ICH_VMCR_EL2,
 	    (virt_features.min_prio << ICH_VMCR_EL2_VPMR_SHIFT) |
-	    ICH_VMCR_EL2_VBPR1_NO_PREEMPTION | ICH_VMCR_EL2_VBPR0_NO_PREEMPTION;
-	hypctx->vgic_v3_regs.ich_vmcr_el2 &= ~ICH_VMCR_EL2_VEOIM;
-	hypctx->vgic_v3_regs.ich_vmcr_el2 |= ICH_VMCR_EL2_VENG0 |
+		ICH_VMCR_EL2_VBPR1_NO_PREEMPTION |
+			ICH_VMCR_EL2_VBPR0_NO_PREEMPTION);
+	*hypctx_sys_reg(hypctx, HOST_ICH_VMCR_EL2) &= ~ICH_VMCR_EL2_VEOIM;
+	*hypctx_sys_reg(hypctx, HOST_ICH_VMCR_EL2) |= ICH_VMCR_EL2_VENG0 |
 	    ICH_VMCR_EL2_VENG1;
 
-	hypctx->vgic_v3_regs.ich_lr_num = virt_features.ich_lr_num;
-	for (i = 0; i < hypctx->vgic_v3_regs.ich_lr_num; i++)
-		hypctx->vgic_v3_regs.ich_lr_el2[i] = 0UL;
+	hypctx->vgic_v3.ich_lr_num = virt_features.ich_lr_num;
+	for (i = 0; i < hypctx->vgic_v3.ich_lr_num; i++)
+		hypctx_write_sys_reg(hypctx, HOST_ICH_LR_EL2(i), 0UL);
 	vgic_cpu->ich_lr_used = 0;
 	TAILQ_INIT(&vgic_cpu->irq_act_pend);
 
-	hypctx->vgic_v3_regs.ich_apr_num = virt_features.ich_apr_num;
+	hypctx->vgic_v3.ich_apr_num = virt_features.ich_apr_num;
 }
 
 static void
@@ -547,6 +461,7 @@ vgic_v3_cpucleanup(device_t dev, struct hypctx *hypctx)
 	}
 
 	mtx_destroy(&vgic_cpu->lr_mtx);
+	free(hypctx->vgic_cpu->private_irqs, M_VGIC_V3);
 	free(hypctx->vgic_cpu, M_VGIC_V3);
 }
 
@@ -640,21 +555,6 @@ gic_pidr2_read(struct hypctx *hypctx, u_int reg, uint64_t *rval,
 	*rval = GICR_PIDR2_ARCH_GICv3 << GICR_PIDR2_ARCH_SHIFT;
 }
 
-/* Common read-only/write-ignored helpers */
-static void
-gic_zero_read(struct hypctx *hypctx, u_int reg, uint64_t *rval,
-    void *arg)
-{
-	*rval = 0;
-}
-
-static void
-gic_ignore_write(struct hypctx *hypctx, u_int reg, u_int offset, u_int size,
-    uint64_t wval, void *arg)
-{
-	/* Nothing to do */
-}
-
 static uint64_t
 read_enabler(struct hypctx *hypctx, int n)
 {
@@ -671,7 +571,7 @@ read_enabler(struct hypctx *hypctx, int n)
 		if (irq == NULL)
 			continue;
 
-		if (!irq->enabled)
+		if (irq->enabled)
 			ret |= 1u << i;
 		vgic_v3_release_irq(irq);
 	}
@@ -1117,7 +1017,7 @@ dist_icenabler_write(struct hypctx *hypctx, u_int reg, u_int offset, u_int size,
 
 	MPASS(offset == 0);
 	MPASS(size == 4);
-	n = (reg - GICD_ISENABLER(0)) / 4;
+	n = (reg - GICD_ICENABLER(0)) / 4;
 	/* GICD_ICENABLER0 is RAZ/WI so handled separately */
 	MPASS(n > 0);
 	write_enabler(hypctx, n, false, wval);
@@ -1305,67 +1205,6 @@ dist_irouter_write(struct hypctx *hypctx, u_int reg, u_int offset, u_int size,
 	write_route(hypctx, n, wval, offset, size);
 }
 
-static bool
-vgic_register_read(struct hypctx *hypctx, struct vgic_register *reg_list,
-    u_int reg_list_size, u_int reg, u_int size, uint64_t *rval, void *arg)
-{
-	u_int i, offset;
-
-	for (i = 0; i < reg_list_size; i++) {
-		if (reg_list[i].start <= reg && reg_list[i].end >= reg + size) {
-			offset = reg & (reg_list[i].size - 1);
-			reg -= offset;
-			if ((reg_list[i].flags & size) != 0) {
-				reg_list[i].read(hypctx, reg, rval, NULL);
-
-				/* Move the bits into the correct place */
-				*rval >>= (offset * 8);
-				if (size < 8) {
-					*rval &= (1ul << (size * 8)) - 1;
-				}
-			} else {
-				/*
-				 * The access is an invalid size. Section
-				 * 12.1.3 "GIC memory-mapped register access"
-				 * of the GICv3 and GICv4 spec issue H
-				 * (IHI0069) lists the options. For a read
-				 * the controller returns unknown data, in
-				 * this case it is zero.
-				 */
-				*rval = 0;
-			}
-			return (true);
-		}
-	}
-	return (false);
-}
-
-static bool
-vgic_register_write(struct hypctx *hypctx, struct vgic_register *reg_list,
-    u_int reg_list_size, u_int reg, u_int size, uint64_t wval, void *arg)
-{
-	u_int i, offset;
-
-	for (i = 0; i < reg_list_size; i++) {
-		if (reg_list[i].start <= reg && reg_list[i].end >= reg + size) {
-			offset = reg & (reg_list[i].size - 1);
-			reg -= offset;
-			if ((reg_list[i].flags & size) != 0) {
-				reg_list[i].write(hypctx, reg, offset,
-				    size, wval, NULL);
-			} else {
-				/*
-				 * See the comment in vgic_register_read.
-				 * For writes the controller ignores the
-				 * operation.
-				 */
-			}
-			return (true);
-		}
-	}
-	return (false);
-}
-
 static int
 dist_read(struct vcpu *vcpu, uint64_t fault_ipa, uint64_t *rval,
     int size, void *arg)
@@ -1469,7 +1308,7 @@ redist_typer_read(struct hypctx *hypctx, u_int reg, uint64_t *rval, void *arg)
 	if (vcpu_vcpuid(hypctx->vcpu) == (vgic_max_cpu_count(hypctx->hyp) - 1))
 		last_vcpu = true;
 
-	vmpidr_el2 = hypctx->vmpidr_el2;
+	vmpidr_el2 = hypctx_read_sys_reg(hypctx, HOST_VMPIDR_EL2);
 	MPASS(vmpidr_el2 != 0);
 	/*
 	 * Get affinity for the current CPU. The guest CPU affinity is taken
@@ -1786,24 +1625,25 @@ vgic_v3_icc_sgi1r_write(struct vcpu *vcpu, uint64_t rval, void *arg)
 	active_cpus = vm_active_cpus(vm);
 	vcpuid = vcpu_vcpuid(vcpu);
 
-	irqid = ICC_SGI1R_EL1_SGIID_VAL(rval) >> ICC_SGI1R_EL1_SGIID_SHIFT;
-	if ((rval & ICC_SGI1R_EL1_IRM) == 0) {
+	irqid = ICC_SGI1R_INTID_VAL(rval) >> ICC_SGI1R_INTID_SHIFT;
+	if (ICC_SGI1R_IRM_VAL(rval) == 0) {
 		/* Non-zero points at no vcpus */
-		if (ICC_SGI1R_EL1_RS_VAL(rval) != 0)
+		if (ICC_SGI1R_RS_VAL(rval) != 0)
 			return (0);
 
-		aff1 = ICC_SGI1R_EL1_AFF1_VAL(rval) >> ICC_SGI1R_EL1_AFF1_SHIFT;
-		aff2 = ICC_SGI1R_EL1_AFF2_VAL(rval) >> ICC_SGI1R_EL1_AFF2_SHIFT;
-		aff3 = ICC_SGI1R_EL1_AFF3_VAL(rval) >> ICC_SGI1R_EL1_AFF3_SHIFT;
-		mpidr = aff3 << MPIDR_AFF3_SHIFT |
-		    aff2 << MPIDR_AFF2_SHIFT | aff1 << MPIDR_AFF1_SHIFT;
+		aff1 = ICC_SGI1R_Aff1_VAL(rval) >> ICC_SGI1R_Aff1_SHIFT;
+		aff2 = ICC_SGI1R_Aff2_VAL(rval) >> ICC_SGI1R_Aff2_SHIFT;
+		aff3 = ICC_SGI1R_Aff3_VAL(rval) >> ICC_SGI1R_Aff3_SHIFT;
+		mpidr = aff3 << MPIDR_Aff3_SHIFT |
+		    aff2 << MPIDR_Aff2_SHIFT | aff1 << MPIDR_Aff1_SHIFT;
 
-		cpus = ICC_SGI1R_EL1_TL_VAL(rval) >> ICC_SGI1R_EL1_TL_SHIFT;
+		cpus = ICC_SGI1R_TargetList_VAL(rval) >>
+		    ICC_SGI1R_TargetList_SHIFT;
 		cpu_off = 0;
 		while (cpus > 0) {
 			if (cpus & 1) {
 				target_vcpuid = mpidr_to_vcpu(hyp,
-				    mpidr | (cpu_off << MPIDR_AFF0_SHIFT));
+				    mpidr | (cpu_off << MPIDR_Aff0_SHIFT));
 				if (target_vcpuid >= 0 &&
 				    CPU_ISSET(target_vcpuid, &active_cpus)) {
 					INJECT_IRQ(hyp, target_vcpuid, irqid,
@@ -2117,7 +1957,7 @@ vgic_v3_flush_hwstate(device_t dev, struct hypctx *hypctx)
 	 */
 	mtx_lock_spin(&vgic_cpu->lr_mtx);
 
-	hypctx->vgic_v3_regs.ich_hcr_el2 &= ~ICH_HCR_EL2_UIE;
+	*hypctx_sys_reg(hypctx, HOST_ICH_HCR_EL2) &= ~ICH_HCR_EL2_UIE;
 
 	/* Exit early if there are no buffered interrupts */
 	if (TAILQ_EMPTY(&vgic_cpu->irq_act_pend))
@@ -2127,33 +1967,39 @@ vgic_v3_flush_hwstate(device_t dev, struct hypctx *hypctx)
 	    __func__, vgic_cpu->ich_lr_used));
 
 	i = 0;
-	hypctx->vgic_v3_regs.ich_elrsr_el2 =
-	    (1u << hypctx->vgic_v3_regs.ich_lr_num) - 1;
+	hypctx_write_sys_reg(hypctx, HOST_ICH_ELRSR_EL2,
+	    (1u << hypctx->vgic_v3.ich_lr_num) - 1);
 	TAILQ_FOREACH(irq, &vgic_cpu->irq_act_pend, act_pend_list) {
 		/* No free list register, stop searching for IRQs */
-		if (i == hypctx->vgic_v3_regs.ich_lr_num)
+		if (i == hypctx->vgic_v3.ich_lr_num)
 			break;
 
-		if (!irq->enabled)
+		/*
+		 * NB: Disabled active interrupts are kept around for EOI to
+		 * make them inactive, since we don't enable maintenace
+		 * interrupts to intercept EOIs for interrupts not in a list
+		 * register.
+		 */
+		if (!irq->enabled && !irq->active)
 			continue;
 
-		hypctx->vgic_v3_regs.ich_lr_el2[i] = ICH_LR_EL2_GROUP1 |
-		    ((uint64_t)irq->priority << ICH_LR_EL2_PRIO_SHIFT) |
-		    irq->irq;
+		hypctx_write_sys_reg(hypctx, HOST_ICH_LR_EL2(i),
+		    ICH_LR_EL2_GROUP1 |
+			((uint64_t)irq->priority << ICH_LR_EL2_PRIO_SHIFT) |
+				irq->irq);
 
 		if (irq->active) {
-			hypctx->vgic_v3_regs.ich_lr_el2[i] |=
+			*hypctx_sys_reg(hypctx, HOST_ICH_LR_EL2(i)) |=
 			    ICH_LR_EL2_STATE_ACTIVE;
 		}
 
-#ifdef notyet
-		/* TODO: Check why this is needed */
-		if ((irq->config & _MASK) == LEVEL)
-			hypctx->vgic_v3_regs.ich_lr_el2[i] |= ICH_LR_EL2_EOI;
-#endif
+		if ((irq->config & VGIC_CONFIG_MASK) == VGIC_CONFIG_LEVEL) {
+			*hypctx_sys_reg(hypctx,
+			    HOST_ICH_LR_EL2(i)) |= ICH_LR_EL2_EOI;
+		}
 
 		if (!irq->active && vgic_v3_irq_pending(irq)) {
-			hypctx->vgic_v3_regs.ich_lr_el2[i] |=
+			*hypctx_sys_reg(hypctx, HOST_ICH_LR_EL2(i)) |=
 			    ICH_LR_EL2_STATE_PENDING;
 
 			/*
@@ -2195,8 +2041,8 @@ vgic_v3_sync_hwstate(device_t dev, struct hypctx *hypctx)
 	 * access unlocked.
 	 */
 	for (i = 0; i < vgic_cpu->ich_lr_used; i++) {
-		lr = hypctx->vgic_v3_regs.ich_lr_el2[i];
-		hypctx->vgic_v3_regs.ich_lr_el2[i] = 0;
+		lr = hypctx_read_sys_reg(hypctx, HOST_ICH_LR_EL2(i));
+		hypctx_write_sys_reg(hypctx, HOST_ICH_LR_EL2(i), 0);
 
 		irq = vgic_v3_get_irq(hypctx->hyp, vcpu_vcpuid(hypctx->vcpu),
 		    ICH_LR_EL2_VINTID(lr));
@@ -2243,7 +2089,7 @@ vgic_v3_sync_hwstate(device_t dev, struct hypctx *hypctx)
 		vgic_v3_release_irq(irq);
 	}
 
-	hypctx->vgic_v3_regs.ich_hcr_el2 &= ~ICH_HCR_EL2_EOICOUNT_MASK;
+	*hypctx_sys_reg(hypctx, HOST_ICH_HCR_EL2) &= ~ICH_HCR_EL2_EOICOUNT_MASK;
 	vgic_cpu->ich_lr_used = 0;
 }
 

@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-2.0-only OR BSD-3-Clause
  */
 
-/*	$OpenBSD: if_iwxreg.h,v 1.51 2023/03/06 11:18:37 stsp Exp $	*/
+/*	$OpenBSD: if_iwxreg.h,v 1.53 2024/05/08 14:03:54 stsp Exp $	*/
 
 /*-
  * Based on BSD-licensed source modules in the Linux iwlwifi driver,
@@ -1764,7 +1764,7 @@ struct iwx_gen3_bc_tbl_entry {
 #define IWX_DQA_CMD_QUEUE		0
 #define IWX_DQA_AUX_QUEUE		1
 
-#define IWX_DQA_INJECT_MONITOR_QUEUE	2 /* used in monitor mode only */
+#define IWX_DQA_INJECT_MONITOR_QUEUE	1 /* used in monitor mode only */
 #define IWX_DQA_MGMT_QUEUE		1 /* default queue other modes */
 
 /* Reserve 8 DQA Tx queues for QoS data frames. */
@@ -2014,6 +2014,7 @@ struct iwx_tx_queue_cfg_rsp {
 #define IWX_RX_BAID_ALLOCATION_CONFIG_CMD	0x16
 #define IWX_SCD_QUEUE_CONFIG_CMD	0x17
 #define IWX_RX_NO_DATA_NOTIF	0xf5
+#define IWX_THERMAL_DUAL_CHAIN_REQUEST 0xf6
 #define IWX_TLC_MNG_UPDATE_NOTIF 0xf7
 
 /* REGULATORY_AND_NVM group subcommand IDs */
@@ -5176,6 +5177,10 @@ enum {
 #define IWX_RATE_HT_MCS_INDEX(r)	((((r) & IWX_RATE_MCS_NSS_MSK) >> 1) | \
 					 ((r) & IWX_RATE_HT_MCS_CODE_MSK))
 
+#define IWX_RATE_VHT_MCS_CODE(r)	((r) & IWX_RATE_HT_MCS_CODE_MSK)
+#define IWX_RATE_VHT_MCS_NSS(r)		\
+	    ((((r) & IWX_RATE_MCS_NSS_MSK) == 0) >> IWX_RATE_MCS_NSS_POS)
+
 /* Bits 7-5: reserved */
 
 /*
@@ -7897,6 +7902,23 @@ iwx_rx_packet_payload_len(const struct iwx_rx_packet *pkt)
 
 #define IWX_MIN_DBM	-100
 #define IWX_MAX_DBM	-33	/* realistic guess */
+
+/*
+ * NF values for various channel widths at 20C
+ *
+ * 20MHz - -98 dBm
+ * 40MHz - -94 dBm
+ * 80MHz - -92 dBm
+ * 160MHz - -88 dBm
+ * 320MHz - -85 dBm
+ */
+#define IWX_DEFAULT_NF		-100
+/*
+ * Note; RSSI is for net80211, and it's calculated against the noise floor
+ * as a reference.
+ */
+#define IWX_RSSI_MINIMUM	-10
+#define IWX_RSSI_MAXIMUM	60
 
 #define IWX_READ(sc, reg)						\
 	bus_space_read_4((sc)->sc_st, (sc)->sc_sh, (reg))

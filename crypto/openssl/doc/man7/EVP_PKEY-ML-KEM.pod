@@ -53,6 +53,18 @@ Use L<EVP_PKEY_CTX_set_params(3)> after calling L<EVP_PKEY_keygen_init(3)>.
 
 =back
 
+The following key generation parameter can be retrieved with
+L<EVP_PKEY_CTX_get_params(3)> from the OpenSSL FIPS provider:
+
+=over 4
+
+=item "fips-indicator" (B<OSSL_PKEY_PARAM_FIPS_APPROVED_INDICATOR>) <integer>
+
+Returns 1 if the operation is FIPS approved, or 0 otherwise.
+See L<fips_module(7)/FIPS indicators> for more information.
+
+=back
+
 =head2 Common parameters
 
 In addition to the common parameters that all keytypes should support (see
@@ -110,7 +122,7 @@ configuration options programmatically.
 
 =item C<ml-kem.import_pct_type> (B<OSSL_PKEY_PARAM_ML_KEM_IMPORT_PCT_TYPE>) <UTF8 string>
 
-When an B<ML-KEM> key is imported as an explict FIPS 203 B<dk> decapsulation
+When an B<ML-KEM> key is imported as an explicit FIPS 203 B<dk> decapsulation
 key, rather than a seed, a pairwise consistency test (PCT) is optionally
 performed.
 By default, or when this parameter is set explicitly to C<random>, the PCT
@@ -315,7 +327,7 @@ This functionality was added in OpenSSL 3.5.
 
 =head1 COPYRIGHT
 
-Copyright 2024-2025 The OpenSSL Project Authors. All Rights Reserved.
+Copyright 2024-2026 The OpenSSL Project Authors. All Rights Reserved.
 
 Licensed under the Apache License 2.0 (the "License").  You may not use
 this file except in compliance with the License.  You can obtain a copy

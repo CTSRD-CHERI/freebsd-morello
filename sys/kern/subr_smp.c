@@ -50,13 +50,46 @@
 
 #include "opt_sched.h"
 
-#ifdef SMP
 MALLOC_DEFINE(M_TOPO, "toponodes", "SMP topology data");
+
+struct cpu_group *
+smp_topo_alloc(u_int count)
+{
+	static struct cpu_group *group = NULL;
+	static u_int index;
+	u_int curr;
+
+	if (group == NULL) {
+		group = mallocarray((mp_maxid + 1) * MAX_CACHE_LEVELS + 1,
+		    sizeof(*group), M_DEVBUF, M_WAITOK | M_ZERO);
+	}
+	curr = index;
+	index += count;
+	return (&group[curr]);
+}
+
+struct cpu_group *
+smp_topo_none(void)
+{
+	struct cpu_group *top;
+
+	top = smp_topo_alloc(1);
+	top->cg_parent = NULL;
+	top->cg_child = NULL;
+	top->cg_mask = all_cpus;
+	top->cg_count = mp_ncpus;
+	top->cg_children = 0;
+	top->cg_level = CG_SHARE_NONE;
+	top->cg_flags = 0;
+
+	return (top);
+}
+
+#ifdef SMP
 
 volatile cpuset_t stopped_cpus;
 volatile cpuset_t started_cpus;
 volatile cpuset_t suspended_cpus;
-cpuset_t hlt_cpus_mask;
 cpuset_t logical_cpus_mask;
 
 void (*cpustop_restartfunc)(void);
@@ -146,7 +179,7 @@ mp_setmaxid(void *dummy)
 
 	cpusetsizemin = howmany(mp_maxid + 1, NBBY);
 }
-SYSINIT(cpu_mp_setmaxid, SI_SUB_TUNABLES, SI_ORDER_FIRST, mp_setmaxid, NULL);
+SYSINIT(cpu_mp_setmaxid, SI_SUB_FIRST, SI_ORDER_ANY, mp_setmaxid, NULL);
 
 /*
  * Call the MD SMP initialization code.
@@ -242,7 +275,7 @@ generic_stop_cpus(cpuset_t map, u_int type)
 	KASSERT(
 	    type == IPI_STOP || type == IPI_STOP_HARD
 #if X86
-	    || type == IPI_SUSPEND
+	    || type == IPI_SUSPEND || type == IPI_OFF
 #endif
 	    , ("%s: invalid stop type", __func__));
 
@@ -260,7 +293,7 @@ generic_stop_cpus(cpuset_t map, u_int type)
 	 * will be lost, violating FreeBSD's assumption of reliable
 	 * IPI delivery.
 	 */
-	if (type == IPI_SUSPEND)
+	if (type == IPI_SUSPEND || type == IPI_OFF)
 		mtx_lock_spin(&smp_ipi_mtx);
 #endif
 
@@ -280,7 +313,7 @@ generic_stop_cpus(cpuset_t map, u_int type)
 #endif
 
 #if X86
-	if (type == IPI_SUSPEND)
+	if (type == IPI_SUSPEND || type == IPI_OFF)
 		cpus = &suspended_cpus;
 	else
 #endif
@@ -298,7 +331,7 @@ generic_stop_cpus(cpuset_t map, u_int type)
 	}
 
 #if X86
-	if (type == IPI_SUSPEND)
+	if (type == IPI_SUSPEND || type == IPI_OFF)
 		mtx_unlock_spin(&smp_ipi_mtx);
 #endif
 
@@ -326,6 +359,13 @@ suspend_cpus(cpuset_t map)
 {
 
 	return (generic_stop_cpus(map, IPI_SUSPEND));
+}
+
+int
+offline_cpus(cpuset_t map)
+{
+
+	return (generic_stop_cpus(map, IPI_OFF));
 }
 #endif
 
@@ -547,7 +587,7 @@ smp_rendezvous_cpus(cpuset_t map,
 	void (* teardown_func)(void *),
 	void *arg)
 {
-	int curcpumap, i, ncpus = 0;
+	int curcpumap, ncpus = 0;
 
 	/* See comments in the !SMP case. */
 	if (!smp_started) {
@@ -568,10 +608,8 @@ smp_rendezvous_cpus(cpuset_t map,
 	 */
 	MPASS(curthread->td_md.md_spinlock_count == 0);
 
-	CPU_FOREACH(i) {
-		if (CPU_ISSET(i, &map))
-			ncpus++;
-	}
+	CPU_AND(&map, &map, &all_cpus);
+	ncpus = CPU_COUNT(&map);
 	if (ncpus == 0)
 		panic("ncpus is 0 with non-zero map");
 
@@ -615,6 +653,19 @@ smp_rendezvous_cpus(cpuset_t map,
 		cpu_spinwait();
 
 	mtx_unlock_spin(&smp_ipi_mtx);
+}
+
+void
+smp_rendezvous_cpu(u_int cpuid,
+	void (* setup_func)(void *),
+	void (* action_func)(void *),
+	void (* teardown_func)(void *),
+	void *arg)
+{
+	cpuset_t set;
+
+	CPU_SETOF(cpuid, &set);
+	smp_rendezvous_cpus(set, setup_func, action_func, teardown_func, arg);
 }
 
 void
@@ -708,39 +759,6 @@ smp_topo(void)
 		top->cg_parent = NULL;
 	}
 	smp_topo_fill(top);
-	return (top);
-}
-
-struct cpu_group *
-smp_topo_alloc(u_int count)
-{
-	static struct cpu_group *group = NULL;
-	static u_int index;
-	u_int curr;
-
-	if (group == NULL) {
-		group = mallocarray((mp_maxid + 1) * MAX_CACHE_LEVELS + 1,
-		    sizeof(*group), M_DEVBUF, M_WAITOK | M_ZERO);
-	}
-	curr = index;
-	index += count;
-	return (&group[curr]);
-}
-
-struct cpu_group *
-smp_topo_none(void)
-{
-	struct cpu_group *top;
-
-	top = smp_topo_alloc(1);
-	top->cg_parent = NULL;
-	top->cg_child = NULL;
-	top->cg_mask = all_cpus;
-	top->cg_count = mp_ncpus;
-	top->cg_children = 0;
-	top->cg_level = CG_SHARE_NONE;
-	top->cg_flags = 0;
-
 	return (top);
 }
 
@@ -879,6 +897,18 @@ smp_rendezvous(void (*setup_func)(void *),
 
 	smp_rendezvous_cpus(all_cpus, setup_func, action_func, teardown_func,
 	    arg);
+}
+
+struct cpu_group *
+smp_topo(void)
+{
+	static struct cpu_group *top = NULL;
+
+	if (top != NULL)
+		return (top);
+
+	top = smp_topo_none();
+	return (top);
 }
 
 /*

@@ -5,12 +5,14 @@
 SSL_poll,
 SSL_POLL_EVENT_NONE,
 SSL_POLL_EVENT_F,
+SSL_POLL_EVENT_EL,
 SSL_POLL_EVENT_EC,
 SSL_POLL_EVENT_ECD,
 SSL_POLL_EVENT_ER,
 SSL_POLL_EVENT_EW,
 SSL_POLL_EVENT_R,
 SSL_POLL_EVENT_W,
+SSL_POLL_EVENT_IC,
 SSL_POLL_EVENT_ISB,
 SSL_POLL_EVENT_ISU,
 SSL_POLL_EVENT_OSB,
@@ -35,27 +37,29 @@ SSL_POLL_FLAG_NO_HANDLE_EVENTS
  #define SSL_POLL_EVENT_NONE        0
 
  #define SSL_POLL_EVENT_F           /* F   (Failure) */
+ #define SSL_POLL_EVENT_EL          /* EL  (Exception on Listener) */
  #define SSL_POLL_EVENT_EC          /* EC  (Exception on Conn) */
  #define SSL_POLL_EVENT_ECD         /* ECD (Exception on Conn Drained) */
  #define SSL_POLL_EVENT_ER          /* ER  (Exception on Read) */
  #define SSL_POLL_EVENT_EW          /* EW  (Exception on Write) */
  #define SSL_POLL_EVENT_R           /* R   (Readable) */
  #define SSL_POLL_EVENT_W           /* W   (Writable) */
+ #define SSL_POLL_EVENT_IC          /* IC  (Incoming Connection) */
  #define SSL_POLL_EVENT_ISB         /* ISB (Incoming Stream: Bidi) */
  #define SSL_POLL_EVENT_ISU         /* ISU (Incoming Stream: Uni) */
  #define SSL_POLL_EVENT_OSB         /* OSB (Outgoing Stream: Bidi) */
  #define SSL_POLL_EVENT_OSU         /* OSU (Outgoing Stream: Uni) */
 
- #define SSL_POLL_EVENT_RW          /* R   | W         */
- #define SSL_POLL_EVENT_RE          /* R   | ER        */
- #define SSL_POLL_EVENT_WE          /* W   | EW        */
- #define SSL_POLL_EVENT_RWE         /* RE  | WE        */
- #define SSL_POLL_EVENT_E           /* EC  | ER  | EW  */
- #define SSL_POLL_EVENT_IS          /* ISB | ISU       */
- #define SSL_POLL_EVENT_ISE         /* IS  | EC        */
- #define SSL_POLL_EVENT_I           /* IS              */
- #define SSL_POLL_EVENT_OS          /* OSB | OSU       */
- #define SSL_POLL_EVENT_OSE         /* OS  | EC        */
+ #define SSL_POLL_EVENT_RW          /* R   | W               */
+ #define SSL_POLL_EVENT_RE          /* R   | ER              */
+ #define SSL_POLL_EVENT_WE          /* W   | EW              */
+ #define SSL_POLL_EVENT_RWE         /* RE  | WE              */
+ #define SSL_POLL_EVENT_E           /* EL  | EC  | ER  | EW  */
+ #define SSL_POLL_EVENT_IS          /* ISB | ISU             */
+ #define SSL_POLL_EVENT_ISE         /* IS  | EC              */
+ #define SSL_POLL_EVENT_I           /* IS                    */
+ #define SSL_POLL_EVENT_OS          /* OSB | OSU             */
+ #define SSL_POLL_EVENT_OSE         /* OS  | EC              */
 
  typedef struct ssl_poll_item_st {
      BIO_POLL_DESCRIPTOR desc;
@@ -82,7 +86,7 @@ least one of the given resources is ready.
 A call to SSL_poll() specifies an array of B<SSL_POLL_ITEM> structures, each of
 which designates a resource which is being polled for readiness, and a set of
 event flags which indicate the specific readiness events which the caller is
-interested in in relation to the specified resource.
+interested in relation to the specified resource.
 
 The fields of B<SSL_POLL_ITEM> are as follows:
 
@@ -333,6 +337,20 @@ stream SSL objects, are supported.
 
 This limitation may be revised in a future release of OpenSSL.
 
+=head1 THREAD CANCELLATION
+
+A finite I<timeout> limits ordinary waiting by SSL_poll(), but does not make the
+call safe against thread cancellation; see L<openssl-threads(7)>.
+
+Cancellation can prevent SSL_poll() from removing internal wait state. Because
+an I<items> array can span multiple QUIC domains, one interrupted call can leave
+stale state in several domains and cause later calls on those domains, including
+SSL_poll() with a finite timeout, to block indefinitely.
+
+For cooperative cancellation, use a finite timeout and check a cancellation
+condition between calls; see L<openssl-quic-concurrency(7)/THREAD CANCELLATION>
+for the nonblocking alternative.
+
 =head1 RETURN VALUES
 
 SSL_poll() returns 1 on success and 0 on failure.
@@ -394,7 +412,7 @@ guaranteed to be at least one) reflect the cause of the failure of the first
 item in I<items> with B<SSL_POLL_EVENT_F> raised. Note that there may be events
 other than I<SSL_POLL_EVENT_F> output for items which come before the first
 item with B<SSL_POLL_EVENT_F> raised, and additional B<SSL_POLL_EVENT_F>
-events may or may not have been output, both of which which will be reflected in
+events may or may not have been output, both of which will be reflected in
 I<result_count>.
 
 =back
@@ -402,7 +420,9 @@ I<result_count>.
 =head1 SEE ALSO
 
 L<BIO_get_rpoll_descriptor(3)>, L<BIO_get_wpoll_descriptor(3)>,
-L<SSL_get_rpoll_descriptor(3)>, L<SSL_get_wpoll_descriptor(3)>
+L<SSL_get_rpoll_descriptor(3)>, L<SSL_get_wpoll_descriptor(3)>,
+L<openssl-threads(7)>, L<openssl-quic(7)>,
+L<openssl-quic-concurrency(7)>
 
 =head1 HISTORY
 
@@ -417,7 +437,7 @@ event types were not present.
 
 =head1 COPYRIGHT
 
-Copyright 2024-2025 The OpenSSL Project Authors. All Rights Reserved.
+Copyright 2024-2026 The OpenSSL Project Authors. All Rights Reserved.
 
 Licensed under the Apache License 2.0 (the "License").  You may not use
 this file except in compliance with the License.  You can obtain a copy

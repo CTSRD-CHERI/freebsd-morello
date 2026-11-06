@@ -111,7 +111,7 @@ static vop_ioctl_t	ufs_ioctl;
 static vop_link_t	ufs_link;
 static int ufs_makeinode(int mode, struct vnode *, struct vnode **,
     struct componentname *, const char *);
-static vop_mmapped_t	ufs_mmapped;
+static vop_update_atime_t ufs_update_atime;
 static vop_mkdir_t	ufs_mkdir;
 static vop_mknod_t	ufs_mknod;
 static vop_open_t	ufs_open;
@@ -143,7 +143,7 @@ static struct odirtemplate omastertemplate = {
 };
 
 static void
-ufs_itimes_locked(struct vnode *vp)
+ufs_itimes_locked(struct vnode *vp, struct timespec *tsa)
 {
 	struct inode *ip;
 	struct timespec ts;
@@ -156,35 +156,40 @@ ufs_itimes_locked(struct vnode *vp)
 	if ((ip->i_flag & (IN_ACCESS | IN_CHANGE | IN_UPDATE)) == 0)
 		return;
 
-	if ((vp->v_type == VBLK || vp->v_type == VCHR) && !DOINGSOFTDEP(vp))
+	if (VN_ISDEV(vp) && !DOINGSOFTDEP(vp))
 		UFS_INODE_SET_FLAG(ip, IN_LAZYMOD);
 	else if (((vp->v_mount->mnt_kern_flag &
-		    (MNTK_SUSPENDED | MNTK_SUSPEND)) == 0) ||
-		    (ip->i_flag & (IN_CHANGE | IN_UPDATE)))
+	    (MNTK_SUSPENDED | MNTK_SUSPEND)) == 0) ||
+	    (ip->i_flag & (IN_CHANGE | IN_UPDATE)) != 0)
 		UFS_INODE_SET_FLAG(ip, IN_MODIFIED);
-	else if (ip->i_flag & IN_ACCESS)
+	else if ((ip->i_flag & IN_ACCESS) != 0)
 		UFS_INODE_SET_FLAG(ip, IN_LAZYACCESS);
 	vfs_timestamp(&ts);
-	if (ip->i_flag & IN_ACCESS) {
-		DIP_SET(ip, i_atime, ts.tv_sec);
-		DIP_SET(ip, i_atimensec, ts.tv_nsec);
+	if ((ip->i_flag & IN_ACCESS) != 0) {
+		if (tsa != NULL) {
+			DIP_SET(ip, i_atime, tsa->tv_sec);
+			DIP_SET(ip, i_atimensec, tsa->tv_nsec);
+		} else {
+			DIP_SET(ip, i_atime, ts.tv_sec);
+			DIP_SET(ip, i_atimensec, ts.tv_nsec);
+		}
 	}
-	if (ip->i_flag & IN_UPDATE) {
+	if ((ip->i_flag & IN_UPDATE) != 0) {
 		DIP_SET(ip, i_mtime, ts.tv_sec);
 		DIP_SET(ip, i_mtimensec, ts.tv_nsec);
 	}
-	if (ip->i_flag & IN_CHANGE) {
+	if ((ip->i_flag & IN_CHANGE) != 0) {
 		DIP_SET(ip, i_ctime, ts.tv_sec);
 		DIP_SET(ip, i_ctimensec, ts.tv_nsec);
 		DIP_SET(ip, i_modrev, DIP(ip, i_modrev) + 1);
 	}
 
- out:
+out:
 	ip->i_flag &= ~(IN_ACCESS | IN_CHANGE | IN_UPDATE);
 }
 
 void
-ufs_itimes(struct vnode *vp)
+ufs_itimes(struct vnode *vp, struct timespec *tsa)
 {
 	struct inode *ip;
 
@@ -193,31 +198,26 @@ ufs_itimes(struct vnode *vp)
 		return;
 
 	VI_LOCK(vp);
-	ufs_itimes_locked(vp);
+	ufs_itimes_locked(vp, tsa);
 	VI_UNLOCK(vp);
 }
 
-static int
-ufs_sync_nlink1(struct mount *mp)
-{
-	int error;
-
-	error = vfs_busy(mp, 0);
-	if (error == 0) {
-		VFS_SYNC(mp, MNT_WAIT);
-		vfs_unbusy(mp);
-		error = ERELOOKUP;
-	}
-	vfs_rel(mp);
-	return (error);
-}
-
+/*
+ * With soft updates, i_nlink can stay at UFS_LINK_MAX after links were
+ * removed, until the removals are on disk.  Sync the file system and have
+ * the caller restart the operation with ERELOOKUP.
+ *
+ * The caller is between vn_start_write() and vn_finished_write().  That
+ * holds a reference on the mount, and keeps an unmount from getting past
+ * the write suspension in VFS_UNMOUNT(), so the mount does not need to be
+ * referenced or busied here while the vnodes are unlocked.  vfs_busy()
+ * would even deadlock, as it waits for an unmount in progress to finish.
+ */
 static int
 ufs_sync_nlink(struct vnode *vp, struct vnode *vp1)
 {
 	struct inode *ip;
 	struct mount *mp;
-	int error;
 
 	ip = VTOI(vp);
 	if (ip->i_nlink < UFS_LINK_MAX)
@@ -226,13 +226,12 @@ ufs_sync_nlink(struct vnode *vp, struct vnode *vp1)
 		return (EMLINK);
 
 	mp = vp->v_mount;
-	vfs_ref(mp);
 	VOP_UNLOCK(vp);
 	if (vp1 != NULL)
 		VOP_UNLOCK(vp1);
-	error = ufs_sync_nlink1(mp);
+	VFS_SYNC(mp, MNT_WAIT);
 	vn_lock_pair(vp, false, LK_EXCLUSIVE, vp1, false, LK_EXCLUSIVE);
-	return (error);
+	return (ERELOOKUP);
 }
 
 /*
@@ -319,7 +318,7 @@ ufs_open(struct vop_open_args *ap)
 	struct vnode *vp = ap->a_vp;
 	struct inode *ip;
 
-	if (vp->v_type == VCHR || vp->v_type == VBLK)
+	if (VN_ISDEV(vp))
 		return (EOPNOTSUPP);
 
 	ip = VTOI(vp);
@@ -356,7 +355,7 @@ ufs_close(
 {
 	struct vnode *vp = ap->a_vp;
 
-	ufs_itimes(vp);
+	ufs_itimes(vp, NULL);
 	return (0);
 }
 
@@ -523,7 +522,7 @@ ufs_stat(struct vop_stat_args *ap)
 		return (error);
 
 	VI_LOCK(vp);
-	ufs_itimes_locked(vp);
+	ufs_itimes_locked(vp, NULL);
 	if (I_IS_UFS1(ip)) {
 		sb->st_atim.tv_sec = ip->i_din1->di_atime;
 		sb->st_atim.tv_nsec = ip->i_din1->di_atimensec;
@@ -540,7 +539,7 @@ ufs_stat(struct vop_stat_args *ap)
 	sb->st_uid = ip->i_uid;
 	sb->st_gid = ip->i_gid;
 	if (I_IS_UFS1(ip)) {
-		sb->st_rdev = ip->i_din1->di_rdev;
+		sb->st_rdev = VN_ISDEV(vp) ? ip->i_din1->di_rdev : NODEV;
 		sb->st_size = ip->i_din1->di_size;
 		sb->st_mtim.tv_sec = ip->i_din1->di_mtime;
 		sb->st_mtim.tv_nsec = ip->i_din1->di_mtimensec;
@@ -551,7 +550,7 @@ ufs_stat(struct vop_stat_args *ap)
 		sb->st_blocks = dbtob((uint64_t)ip->i_din1->di_blocks) / S_BLKSIZE;
 		sb->st_filerev = ip->i_din1->di_modrev;
 	} else {
-		sb->st_rdev = ip->i_din2->di_rdev;
+		sb->st_rdev = VN_ISDEV(vp) ? ip->i_din2->di_rdev : NODEV;
 		sb->st_size = ip->i_din2->di_size;
 		sb->st_mtim.tv_sec = ip->i_din2->di_mtime;
 		sb->st_mtim.tv_nsec = ip->i_din2->di_mtimensec;
@@ -584,7 +583,7 @@ ufs_getattr(
 	struct vattr *vap = ap->a_vap;
 
 	VI_LOCK(vp);
-	ufs_itimes_locked(vp);
+	ufs_itimes_locked(vp, NULL);
 	if (I_IS_UFS1(ip)) {
 		vap->va_atime.tv_sec = ip->i_din1->di_atime;
 		vap->va_atime.tv_nsec = ip->i_din1->di_atimensec;
@@ -603,7 +602,7 @@ ufs_getattr(
 	vap->va_uid = ip->i_uid;
 	vap->va_gid = ip->i_gid;
 	if (I_IS_UFS1(ip)) {
-		vap->va_rdev = ip->i_din1->di_rdev;
+		vap->va_rdev = VN_ISDEV(vp) ? ip->i_din1->di_rdev : NODEV;
 		vap->va_size = ip->i_din1->di_size;
 		vap->va_mtime.tv_sec = ip->i_din1->di_mtime;
 		vap->va_mtime.tv_nsec = ip->i_din1->di_mtimensec;
@@ -612,7 +611,7 @@ ufs_getattr(
 		vap->va_bytes = dbtob((uint64_t)ip->i_din1->di_blocks);
 		vap->va_filerev = ip->i_din1->di_modrev;
 	} else {
-		vap->va_rdev = ip->i_din2->di_rdev;
+		vap->va_rdev = VN_ISDEV(vp) ? ip->i_din2->di_rdev : NODEV;
 		vap->va_size = ip->i_din2->di_size;
 		vap->va_mtime.tv_sec = ip->i_din2->di_mtime;
 		vap->va_mtime.tv_nsec = ip->i_din2->di_mtimensec;
@@ -662,7 +661,7 @@ ufs_setattr(
 		    SF_NOUNLINK | SF_SNAPSHOT | UF_APPEND | UF_ARCHIVE |
 		    UF_HIDDEN | UF_IMMUTABLE | UF_NODUMP | UF_NOUNLINK |
 		    UF_OFFLINE | UF_OPAQUE | UF_READONLY | UF_REPARSE |
-		    UF_SPARSE | UF_SYSTEM)) != 0)
+		    UF_SPARSE | UF_SYSTEM | UF_NOCACHE)) != 0)
 			return (EOPNOTSUPP);
 		if (vp->v_mount->mnt_flag & MNT_RDONLY)
 			return (EROFS);
@@ -829,9 +828,10 @@ out:
 #endif /* UFS_ACL */
 
 static int
-ufs_mmapped(
-	struct vop_mmapped_args /* {
+ufs_update_atime(
+	struct vop_update_atime_args /* {
 		struct vnode *a_vp;
+		struct timespec *a_ts;
 	} */ *ap)
 {
 	struct vnode *vp;
@@ -842,8 +842,16 @@ ufs_mmapped(
 	ip = VTOI(vp);
 	mp = vp->v_mount;
 
-	if ((mp->mnt_flag & (MNT_NOATIME | MNT_RDONLY)) == 0)
-		UFS_INODE_SET_FLAG_SHARED(ip, IN_ACCESS);
+	if ((mp->mnt_flag & (MNT_NOATIME | MNT_RDONLY)) == 0) {
+		VI_LOCK(vp);
+		if ((ip->i_flag & IN_ACCESS) == 0) {
+			ip->i_flag |= IN_ACCESS;
+			vlazy(vp);
+		}
+		if (ap->a_ts != NULL)
+			ufs_itimes_locked(vp, ap->a_ts);
+		VI_UNLOCK(vp);
+	}
 	/*
 	 * XXXKIB No UFS_UPDATE(ap->a_vp, 0) there.
 	 */
@@ -1255,6 +1263,7 @@ ufs_rename(
 		struct vnode *a_tdvp;
 		struct vnode *a_tvp;
 		struct componentname *a_tcnp;
+		u_int a_flags;
 	} */ *ap)
 {
 	struct vnode *tvp = ap->a_tvp;
@@ -1289,6 +1298,12 @@ ufs_rename(
 	if ((fvp->v_mount != tdvp->v_mount) ||
 	    (tvp && (fvp->v_mount != tvp->v_mount))) {
 		error = EXDEV;
+		mp = NULL;
+		goto releout;
+	}
+
+	if ((ap->a_flags & ~(AT_RENAME_NOREPLACE)) != 0) {
+		error = EOPNOTSUPP;
 		mp = NULL;
 		goto releout;
 	}
@@ -1387,6 +1402,11 @@ relock:
 		}
 	}
 
+	if (tvp != NULL && (ap->a_flags & AT_RENAME_NOREPLACE) != 0) {
+		error = EEXIST;
+		goto unlockout;
+	}
+
 	if (DOINGSUJ(fdvp) &&
 	    (seqc_in_modify(fdvp_s) || !vn_seqc_consistent(fdvp, fdvp_s) ||
 	     seqc_in_modify(fvp_s) || !vn_seqc_consistent(fvp, fvp_s) ||
@@ -1426,7 +1446,6 @@ relock:
 			error = EMLINK;
 			goto unlockout;
 		}
-		vfs_ref(mp);
 		MPASS(!want_seqc_end);
 		VOP_UNLOCK(fdvp);
 		VOP_UNLOCK(fvp);
@@ -1434,7 +1453,9 @@ relock:
 		if (tvp != NULL)
 			vref(tvp);
 		VOP_VPUT_PAIR(tdvp, &tvp, true);
-		error = ufs_sync_nlink1(mp);
+		/* See ufs_sync_nlink(). */
+		VFS_SYNC(mp, MNT_WAIT);
+		error = ERELOOKUP;
 		vrele(fdvp);
 		vrele(fvp);
 		vrele(tdvp);
@@ -1566,14 +1587,15 @@ relock:
 				vn_seqc_write_end(fvp);
 				vn_seqc_write_end(fdvp);
 				want_seqc_end = false;
-				vfs_ref(mp);
 				VOP_UNLOCK(fdvp);
 				VOP_UNLOCK(fvp);
 				vref(tdvp);
 				if (tvp != NULL)
 					vref(tvp);
 				VOP_VPUT_PAIR(tdvp, &tvp, true);
-				error = ufs_sync_nlink1(mp);
+				/* See ufs_sync_nlink(). */
+				VFS_SYNC(mp, MNT_WAIT);
+				error = ERELOOKUP;
 				vrele(fdvp);
 				vrele(fvp);
 				vrele(tdvp);
@@ -1723,9 +1745,7 @@ relock:
 			/* Journal must account for each new link. */
 			softdep_setup_dotdot_link(tdp, fip);
 		SET_I_OFFSET(fip, mastertemplate.dot_reclen);
-		if (ufs_dirrewrite(fip, fdp, newparent, DT_DIR, 0) != 0)
-			ufs_dirbad(fip, mastertemplate.dot_reclen,
-			    "rename: missing .. entry");
+		(void)ufs_dirrewrite(fip, fdp, newparent, DT_DIR, 0);
 		cache_purge(fdvp);
 	}
 	error = ufs_dirremove(fdvp, fip, fcnp->cn_flags, false);
@@ -2592,8 +2612,12 @@ ufs_print(
 
 	printf("\tnlink=%d, effnlink=%d, size=%jd", ip->i_nlink,
 	    ip->i_effnlink, (intmax_t)ip->i_size);
-	if (I_IS_UFS2(ip))
-		printf(", extsize %d", ip->i_din2->di_extsize);
+	if (I_IS_UFS2(ip)) {
+		if (ip->i_din2 == NULL)
+			printf(", dinode=NULL (fields omitted)");
+		else
+			printf(", extsize=%d", ip->i_din2->di_extsize);
+	}
 	printf("\n\tgeneration=%jx, uid=%d, gid=%d, flags=0x%b\n",
 	    (uintmax_t)ip->i_gen, ip->i_uid, ip->i_gid,
 	    (uint32_t)ip->i_flags, PRINT_INODE_FLAGS);
@@ -2990,7 +3014,7 @@ struct vop_vector ufs_vnodeops = {
 	.vop_ioctl =		ufs_ioctl,
 	.vop_link =		ufs_link,
 	.vop_lookup =		vfs_cache_lookup,
-	.vop_mmapped =		ufs_mmapped,
+	.vop_update_atime =	ufs_update_atime,
 	.vop_mkdir =		ufs_mkdir,
 	.vop_mknod =		ufs_mknod,
 	.vop_need_inactive =	ufs_need_inactive,

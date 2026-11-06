@@ -31,7 +31,7 @@
 #include <sys/endian.h>
 #include <stdint.h>
 
-/* Shoud these be elsewhere ? */
+/* Should these be elsewhere ? */
 #define	EFI_VARIABLE_NON_VOLATILE		0x00000001
 #define	EFI_VARIABLE_BOOTSERVICE_ACCESS		0x00000002
 #define	EFI_VARIABLE_RUNTIME_ACCESS		0x00000004
@@ -78,6 +78,16 @@ int efi_set_variable(efi_guid_t guid, const char *name,
     uint8_t *data, size_t data_size, uint32_t attributes);
 int efi_str_to_guid(const char *s, efi_guid_t *guid);
 int efi_variables_supported(void);
+
+/*
+ * different routines to dump data.
+ */
+
+void efi_asciidump(uint8_t *data, size_t datalen, int indent);
+void efi_bindump(uint8_t *data, size_t datalen);
+void efi_print_load_option(uint8_t *, size_t, int, int, int);
+void efi_hexdump(uint8_t *data, size_t datalen, int indent);
+void efi_utf8dump(uint8_t *data, size_t datalen, int indent);
 
 /* FreeBSD extensions */
 struct guid_table

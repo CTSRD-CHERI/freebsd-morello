@@ -50,7 +50,14 @@
 #include <efi.h>
 #include <efilib.h>
 #include <efichar.h>
-#include <efirng.h>
+
+#include <Guid/DebugImageInfoTable.h>
+#include <Guid/DxeServices.h>
+#include <Guid/Mps.h>
+#include <Guid/SmBios.h>
+#include <Protocol/Rng.h>
+#include <Protocol/SimpleNetwork.h>
+#include <Protocol/SimpleTextIn.h>
 
 #include <uuid.h>
 
@@ -69,6 +76,8 @@
 #include "actypes.h"
 #include "actbl.h"
 
+#include <acpi_detect.h>
+
 #include "loader_efi.h"
 
 struct arch_switch archsw = {	/* MI/MD interface boundary */
@@ -83,12 +92,25 @@ struct arch_switch archsw = {	/* MI/MD interface boundary */
 	.arch_zfs_probe = efi_zfs_probe,
 };
 
-EFI_GUID acpi = ACPI_TABLE_GUID;
-EFI_GUID acpi20 = ACPI_20_TABLE_GUID;
+// XXX These are from ???? Maybe ACPI which needs to define them?
+// XXX EDK2 doesn't (or didn't as of Feb 2025)
+#define HOB_LIST_TABLE_GUID \
+    { 0x7739f24c, 0x93d7, 0x11d4, {0x9a, 0x3a, 0x0, 0x90, 0x27, 0x3f, 0xc1, 0x4d} }
+#define LZMA_DECOMPRESSION_GUID \
+	{ 0xee4e5898, 0x3914, 0x4259, {0x9d, 0x6e, 0xdc, 0x7b, 0xd7, 0x94, 0x3, 0xcf} }
+#define ARM_MP_CORE_INFO_TABLE_GUID \
+	{ 0xa4ee0728, 0xe5d7, 0x4ac5, {0xb2, 0x1e, 0x65, 0x8e, 0xd8, 0x57, 0xe8, 0x34} }
+#define ESRT_TABLE_GUID \
+	{ 0xb122a263, 0x3661, 0x4f68, {0x99, 0x29, 0x78, 0xf8, 0xb0, 0xd6, 0x21, 0x80} }
+#define MEMORY_TYPE_INFORMATION_TABLE_GUID \
+    { 0x4c19049f, 0x4137, 0x4dd3, {0x9c, 0x10, 0x8b, 0x97, 0xa8, 0x3f, 0xfd, 0xfa} }
+#define FDT_TABLE_GUID \
+    { 0xb1b621d5, 0xf19c, 0x41a5, {0x83, 0x0b, 0xd9, 0x15, 0x2c, 0x69, 0xaa, 0xe0} }
+
 EFI_GUID devid = DEVICE_PATH_PROTOCOL;
 EFI_GUID imgid = LOADED_IMAGE_PROTOCOL;
 EFI_GUID mps = MPS_TABLE_GUID;
-EFI_GUID netid = EFI_SIMPLE_NETWORK_PROTOCOL;
+EFI_GUID netid = EFI_SIMPLE_NETWORK_PROTOCOL_GUID;
 EFI_GUID smbios = SMBIOS_TABLE_GUID;
 EFI_GUID smbios3 = SMBIOS3_TABLE_GUID;
 EFI_GUID dxe = DXE_SERVICES_TABLE_GUID;
@@ -97,9 +119,10 @@ EFI_GUID lzmadecomp = LZMA_DECOMPRESSION_GUID;
 EFI_GUID mpcore = ARM_MP_CORE_INFO_TABLE_GUID;
 EFI_GUID esrt = ESRT_TABLE_GUID;
 EFI_GUID memtype = MEMORY_TYPE_INFORMATION_TABLE_GUID;
-EFI_GUID debugimg = DEBUG_IMAGE_INFO_TABLE_GUID;
+EFI_GUID debugimg = EFI_DEBUG_IMAGE_INFO_TABLE_GUID;
 EFI_GUID fdtdtb = FDT_TABLE_GUID;
-EFI_GUID inputid = SIMPLE_TEXT_INPUT_PROTOCOL;
+EFI_GUID inputid = EFI_SIMPLE_TEXT_INPUT_PROTOCOL_GUID;
+EFI_GUID rng_guid = EFI_RNG_PROTOCOL_GUID;
 
 /*
  * Number of seconds to wait for a keystroke before exiting with failure
@@ -120,10 +143,15 @@ UINT16 boot_current;
  */
 EFI_LOADED_IMAGE *boot_img;
 
-/*
- * RSDP base table.
- */
-ACPI_TABLE_RSDP *rsdp;
+enum boot_policies {
+	STRICT,
+	RELAXED,
+} boot_policy = STRICT;
+
+const char *policy_map[] = {
+	[STRICT] = "strict",
+	[RELAXED] = "relaxed",
+};
 
 static bool
 has_keyboard(void)
@@ -296,12 +324,10 @@ probe_zfs_currdev(uint64_t guid)
 }
 #endif
 
-#ifdef MD_IMAGE_SIZE
-extern struct devsw md_dev;
-
 static bool
 probe_md_currdev(void)
 {
+#ifdef LOADER_MD_SUPPORT
 	bool rv;
 
 	set_currdev_devsw(&md_dev, 0);
@@ -309,15 +335,28 @@ probe_md_currdev(void)
 	if (!rv)
 		printf("MD not present\n");
 	return (rv);
-}
+#else
+	return (false);
 #endif
+}
 
+/*
+ * Try the passed in partition or entire disk to see if we can find a bootable
+ * partition or zpool.
+ */
 static bool
-try_as_currdev(pdinfo_t *hd, pdinfo_t *pp)
+try_as_currdev(pdinfo_t *pp, bool verbose)
 {
+	if (verbose) {
+		CHAR16 *text = efi_devpath_name(pp->pd_devpath);
+		if (text != NULL) {
+			printf("Trying: %S\n", text);
+			efi_free_devpath_name(text);
+		}
+	}
+#ifdef EFI_ZFS_BOOT
 	uint64_t guid;
 
-#ifdef EFI_ZFS_BOOT
 	/*
 	 * If there's a zpool on this device, try it as a ZFS
 	 * filesystem, which has somewhat different setup than all
@@ -334,6 +373,64 @@ try_as_currdev(pdinfo_t *hd, pdinfo_t *pp)
 	 */
 	set_currdev_pdinfo(pp);
 	return (sanity_check_currdev());
+}
+
+/*
+ * Given a disk, try each of its partitions as the boot device.
+ */
+static int
+try_disk_and_partitions(pdinfo_t *disk, EFI_HANDLE skip_handle)
+{
+	pdinfo_t *pp;
+
+	if (disk == NULL)
+		return (ENOENT);
+
+	if (try_as_currdev(disk, true))
+		return (0);
+
+	STAILQ_FOREACH(pp, &disk->pd_part, pd_link) {
+		if (pp->pd_handle == skip_handle)
+			continue;
+		if (try_as_currdev(pp, true))
+			return (0);
+	}
+	return (ENOENT);
+}
+
+/*
+ * Search the boot device first (i.e. the device we were loaded from and any
+ * sibling partitions).  Per the UEFI specification, filesystems on other
+ * devices must not be preferred until the boot device has been fully
+ * exhausted.
+ */
+static int
+try_boot_device_partitions(void)
+{
+	pdinfo_t *dp;
+	CHAR16 *text;
+
+	dp = efiblk_get_pdinfo_by_handle(boot_img->DeviceHandle);
+	if (dp == NULL)
+		return (ENOENT);
+
+	text = efi_devpath_name(dp->pd_devpath);
+	if (text != NULL) {
+		printf("Trying ESP device: %S\n", text);
+		efi_free_devpath_name(text);
+	}
+
+	/*
+	 * Usually this is the ESP, which holds no root filesystem, and the
+	 * sibling walk below is what finds the root.  But when we have been
+	 * chainloaded (gptboot.efi hands us the partition it selected with
+	 * the GPT bootme attribute), this is the partition we are meant to
+	 * boot from, so it must be tried before its siblings.
+	 */
+	if (try_as_currdev(dp, false))
+		return (0);
+
+	return (try_disk_and_partitions(dp->pd_parent, dp->pd_handle));
 }
 
 /*
@@ -505,13 +602,11 @@ match_boot_info(char *boot_info, size_t bisz)
  * a drop to the OK boot loader prompt is possible.
  */
 static int
-find_currdev(bool do_bootmgr, bool is_last,
-    char *boot_info, size_t boot_info_sz)
+find_currdev(bool do_bootmgr, char *boot_info, size_t boot_info_sz)
 {
-	pdinfo_t *dp, *pp;
+	pdinfo_t *dp;
 	EFI_DEVICE_PATH *devpath, *copy;
 	EFI_HANDLE h;
-	CHAR16 *text;
 	struct devsw *dev;
 	int unit;
 	uint64_t extra;
@@ -545,14 +640,30 @@ find_currdev(bool do_bootmgr, bool is_last,
 		efi_devpath_free(devpath);
 		if (dp == NULL)
 			break;
-		printf("    Setting currdev to UEFI path %s\n",
-		    rootdev);
-		set_currdev_pdinfo(dp);
-		return (0);
+		printf("    Trying uefi_rootdev %s\n", rootdev);
+		/* if just a partition, just try that */
+		h = NULL;
+		if (dp->pd_parent != NULL) {
+			if (try_as_currdev(dp, false))
+				return (0);
+			/* That failed? Try the whole disk, but skip this part */
+			h = dp->pd_handle;
+			dp = dp->pd_parent;
+		}
+		/* otherwise, it's a full disk, so try all its partitions */
+		if (try_disk_and_partitions(dp, h) == 0)
+			return (0);
+		break;
 	} while (0);
 
 	/*
-	 * Third choice: If we can find out image boot_info, and there's
+	 * Third choice: If there is an MD device, try to use that.
+	 */
+	if (probe_md_currdev())
+		return (0);
+
+	/*
+	 * Forth choice: If we can find out image boot_info, and there's
 	 * a follow-on boot image in that boot_info, use that. In this
 	 * case root will be the partition specified in that image and
 	 * we'll load the kernel specified by the file path. Should there
@@ -570,74 +681,53 @@ find_currdev(bool do_bootmgr, bool is_last,
 		} /* Nothing specified, try normal match */
 	}
 
+	/*
+	 * Fifth choice: try all the partitions on the boot device.
+	 */
+	if (try_boot_device_partitions() == 0)
+		return (0);
+
 #ifdef EFI_ZFS_BOOT
 	/*
-	 * Did efi_zfs_probe() detect the boot pool? If so, use the zpool
-	 * it found, if it's sane. ZFS is the only thing that looks for
-	 * disks and pools to boot. This may change in the future, however,
-	 * if we allow specifying which pool to boot from via UEFI variables
-	 * rather than the bootenv stuff that FreeBSD uses today.
+	 * Sixth Choice: Probe the boot disk for ZFS and then probe the non-boot
+	 * disk if we have a relaxed boot poluicy.
 	 */
-	if (pool_guid != 0) {
-		printf("Trying ZFS pool\n");
-		if (probe_zfs_currdev(pool_guid))
-			return (0);
-	}
-#endif /* EFI_ZFS_BOOT */
+	{
+		zfsinfo_list_t *zfsinfo = efizfs_get_zfsinfo_list();
+		zfsinfo_t *zi;
 
-#ifdef MD_IMAGE_SIZE
-	/*
-	 * If there is an embedded MD, try to use that.
-	 */
-	printf("Trying MD\n");
-	if (probe_md_currdev())
-		return (0);
-#endif /* MD_IMAGE_SIZE */
-
-	/*
-	 * Try to find the block device by its handle based on the
-	 * image we're booting. If we can't find a sane partition,
-	 * search all the other partitions of the disk. We do not
-	 * search other disks because it's a violation of the UEFI
-	 * boot protocol to do so. We fail and let UEFI go on to
-	 * the next candidate.
-	 */
-	dp = efiblk_get_pdinfo_by_handle(boot_img->DeviceHandle);
-	if (dp != NULL) {
-		text = efi_devpath_name(dp->pd_devpath);
-		if (text != NULL) {
-			printf("Trying ESP: %S\n", text);
-			efi_free_devpath_name(text);
+		/*
+		 * Try ZFS pool(s) on the boot device not reachable via
+		 * the partition walk above.
+		 */
+		STAILQ_FOREACH(zi, zfsinfo, zi_link) {
+			if (zi->zi_handle != boot_img->DeviceHandle)
+				continue;
+			printf("Trying ZFS pool 0x%jx\n", zi->zi_pool_guid);
+			if (probe_zfs_currdev(zi->zi_pool_guid))
+				return (0);
 		}
-		set_currdev_pdinfo(dp);
-		if (sanity_check_currdev())
-			return (0);
-		if (dp->pd_parent != NULL) {
-			pdinfo_t *espdp = dp;
-			dp = dp->pd_parent;
-			STAILQ_FOREACH(pp, &dp->pd_part, pd_link) {
-				/* Already tried the ESP */
-				if (espdp == pp)
+
+		/*
+		 * With a relaxed policy, try pools on other devices only
+		 * after the boot device has no bootable root.
+		 */
+		if (boot_policy == RELAXED) {
+			STAILQ_FOREACH(zi, zfsinfo, zi_link) {
+				if (zi->zi_handle == boot_img->DeviceHandle)
 					continue;
-				/*
-				 * Roll up the ZFS special case
-				 * for those partitions that have
-				 * zpools on them.
-				 */
-				text = efi_devpath_name(pp->pd_devpath);
-				if (text != NULL) {
-					printf("Trying: %S\n", text);
-					efi_free_devpath_name(text);
-				}
-				if (try_as_currdev(dp, pp))
+				printf("Trying ZFS pool 0x%jx\n",
+				    zi->zi_pool_guid);
+				if (probe_zfs_currdev(zi->zi_pool_guid))
 					return (0);
 			}
 		}
 	}
+#endif /* EFI_ZFS_BOOT */
 
 	/*
-	 * Try the device handle from our loaded image first.  If that
-	 * fails, use the device path from the loaded image and see if
+	 * Seventh choice: Try the device handle from our loaded image first.
+	 * If that fails, use the device path from the loaded image and see if
 	 * any of the nodes in that path match one of the enumerated
 	 * handles. Currently, this handle list is only for netboot.
 	 */
@@ -647,6 +737,12 @@ find_currdev(bool do_bootmgr, bool is_last,
 			return (0);
 	}
 
+	/*
+	 * Eighth choice: look up the device handle... This loops through the
+	 * entries to find the device handle. The network protocols have long
+	 * strings of device nodes in the device path, and this may make
+	 * something work.
+	 */
 	copy = NULL;
 	devpath = efi_lookup_image_devpath(IH);
 	while (devpath != NULL) {
@@ -694,8 +790,10 @@ interactive_interrupt(const char *msg)
 		}
 
 		/* XXX no pause or timeout wait for char */
-		if (ischar())
+		if (ischar()) {
+			(void)getchar();
 			return (true);
+		}
 		now = getsecs();
 	} while (now - then < fail_timeout);
 	return (false);
@@ -850,10 +948,10 @@ acpi_uart_parity(UINT8 p)
 }
 
 /*
- * See if we can find a SPCR ACPI table in the static tables. If so, then it
- * describes the serial console that's been redirected to, so we know that at
- * least there's a serial console. this is most important for embedded systems
- * that don't have traidtional PC serial ports.
+ * See if we can find an enabled SPCR ACPI table in the static tables. If so,
+ * then it describes the serial console that's been redirected to, so we know
+ * that at least there's a serial console. This is most important for embedded
+ * systems that don't have traidtional PC serial ports.
  *
  * All the two letter variables in this function correspond to their usage in
  * the uart(4) console string. We use io == -1 to select between I/O ports and
@@ -864,13 +962,17 @@ static int
 check_acpi_spcr(void)
 {
 	ACPI_TABLE_SPCR *spcr;
-	int br, db, io, rs, rw, sb, xo, pv, pd;
+	int br, db, io, rs, rw, xo, pv, pd;
 	uintmax_t mm;
 	const char *dt, *pa;
 	char *val = NULL;
 
+	/*
+	 * The SPCR is enabled when SerialPort is non-zero.  Address being zero
+	 * should suffice to see if it's disabled.
+	 */
 	spcr = acpi_find_table(ACPI_SIG_SPCR);
-	if (spcr == NULL)
+	if (spcr == NULL || spcr->SerialPort.Address == 0)
 		return (0);
 	dt = acpi_uart_type(spcr->InterfaceType);
 	if (dt == NULL)	{ 	/* Kernel can't use unknown types */
@@ -896,7 +998,6 @@ check_acpi_spcr(void)
 
 	/* Uart settings */
 	pa = acpi_uart_parity(spcr->Parity);
-	sb = spcr->StopBits;
 	db = 8;
 
 	/*
@@ -973,10 +1074,10 @@ parse_uefi_con_out(void)
 		 * If we don't have any Con* variable use both. If we have GOP
 		 * make video primary, otherwise set serial primary. In either
 		 * case, try to use both the 'efi' console which will use the
-		 * GOP, if present and serial. If there's an EFI BIOS that omits
-		 * this, but has a serial port redirect, we'll unavioidably get
-		 * doubled characters, but we'll be right in all the other more
-		 * common cases.
+		 * GOP, if present and serial. If there's a UEFI firmware that
+		 * omit this, but has a serial port redirect, we'll unavoidably
+		 * get doubled characters, but we'll be right in all the other
+		 * more common cases.
 		 */
 		if (efi_has_gop())
 			how |= RB_MULTIPLE;
@@ -1121,45 +1222,14 @@ read_loader_env(const char *name, char *def_fn, bool once)
 		printf("    Reading loader env vars from %s\n", fn);
 		parse_loader_efi_config(boot_img->DeviceHandle, fn);
 	}
+
+	free(freeme);
 }
 
 caddr_t
 ptov(uintptr_t x)
 {
 	return ((caddr_t)x);
-}
-
-static void
-acpi_detect(void)
-{
-	char buf[24];
-	int revision;
-
-	feature_enable(FEATURE_EARLY_ACPI);
-	if ((rsdp = efi_get_table(&acpi20)) == NULL)
-		if ((rsdp = efi_get_table(&acpi)) == NULL)
-			return;
-
-	sprintf(buf, "0x%016"PRIxPTR, (uintptr_t)rsdp);
-	setenv("acpi.rsdp", buf, 1);
-	revision = rsdp->Revision;
-	if (revision == 0)
-		revision = 1;
-	sprintf(buf, "%d", revision);
-	setenv("acpi.revision", buf, 1);
-	strncpy(buf, rsdp->OemId, sizeof(rsdp->OemId));
-	buf[sizeof(rsdp->OemId)] = '\0';
-	setenv("acpi.oem", buf, 1);
-	sprintf(buf, "0x%016x", rsdp->RsdtPhysicalAddress);
-	setenv("acpi.rsdt", buf, 1);
-	if (revision >= 2) {
-		/* XXX extended checksum? */
-		sprintf(buf, "0x%016llx",
-		    (unsigned long long)rsdp->XsdtPhysicalAddress);
-		setenv("acpi.xsdt", buf, 1);
-		sprintf(buf, "%d", rsdp->Length);
-		setenv("acpi.xsdt_length", buf, 1);
-	}
 }
 
 static void
@@ -1197,16 +1267,43 @@ efi_smbios_detect(void)
 		(void)smbios_detect(smbios_v2_ptr);
 }
 
+static void
+set_boot_policy(void)
+{
+	const char *policy;
+
+	if ((policy = getenv("boot_policy")) == NULL)
+		return;
+	for (int i = 0; i < nitems(policy_map); i++) {
+		if (strcmp(policy, policy_map[i]) == 0) {
+			boot_policy = i;
+			return;
+		}
+	}
+	printf("Unknown boot_policy '%s', defaulting to %s\n",
+	    policy, policy_map[boot_policy]);
+}
+
+static bool
+is_efi_netboot(void)
+{
+	EFI_DEVICE_PATH *devpath;
+	uint8_t mac[6];
+
+	devpath = efi_lookup_devpath(boot_img->DeviceHandle);
+	return (efi_devpath_get_mac(devpath, mac));
+}
+
 EFI_STATUS
 main(int argc, CHAR16 *argv[])
 {
 	int howto, i, uhowto;
-	bool has_kbd, is_last;
+	bool has_ipxe, has_kbd;
 	char *s;
 	EFI_DEVICE_PATH *imgpath;
 	CHAR16 *text;
 	EFI_STATUS rv;
-	size_t sz, bosz = 0, bisz = 0;
+	size_t sz, bisz = 0;
 	UINT16 boot_order[100];
 	char boot_info[4096];
 	char buf[32];
@@ -1217,10 +1314,15 @@ main(int argc, CHAR16 *argv[])
 #endif
 
         /* Get our loaded image protocol interface structure. */
-	(void) OpenProtocolByHandle(IH, &imgid, (void **)&boot_img);
+	(void)OpenProtocolByHandle(IH, &imgid, (void **)&boot_img);
 
 	/* Report the RSDP early. */
 	acpi_detect();
+
+#ifdef LOADER_VERIEXEC
+	/* tell boot_setenv to be careful */
+	set_check_restricted(true);
+#endif
 
 	/*
 	 * Chicken-and-egg problem; we want to have console output early, but
@@ -1256,6 +1358,14 @@ main(int argc, CHAR16 *argv[])
 	bcache_init(32768, 512);
 
 	/*
+	 * Scan the command line args for memdisk=<url> and download that image
+	 * to install as a ramdisk. This needs to be done before we scan the
+	 * handles because it installs a handle and creates the right ACPI
+	 * tables for the kernel to find it.
+	 */
+	has_ipxe = maybe_download_ramdisk(argc, argv);
+
+	/*
 	 * Scan the BLOCK IO MEDIA handles then
 	 * march through the device switch probing for things.
 	 */
@@ -1265,14 +1375,37 @@ main(int argc, CHAR16 *argv[])
 		    "failures\n", i);
 	}
 
+	/*
+	 * Scan all the VirtualDisks, passing them along to the FreeBSD kernel.
+	 */
+	efiblk_memdisk_preload();
+
+	/*
+	 * Parse command line arguments before any operation that may configure
+	 * the network so DHCP overrides are available on the first attempt.
+	 */
+	howto = parse_args(argc, argv);
+
+	/*
+	 * We want to initialize after giving loader args a chance to elect a
+	 * different console than what we autodetect, but we need efinet to
+	 * have initialized before netbooting an initmd has any chance of
+	 * working.
+	 */
 	devinit();
+
+	/*
+	 * If we didn't find a ipxe image, and we're netbooting, try to
+	 * download an initmd that the dhcp server tells us about.
+	 */
+	if (!has_ipxe && is_efi_netboot())
+		maybe_download_initmd();
 
 	/*
 	 * Detect console settings two different ways: one via the command
 	 * args (eg -h) or via the UEFI ConOut variable.
 	 */
 	has_kbd = has_keyboard();
-	howto = parse_args(argc, argv);
 	if (!has_kbd && (howto & RB_PROBE))
 		howto |= RB_SERIAL | RB_MULTIPLE;
 	howto &= ~RB_PROBE;
@@ -1294,6 +1427,8 @@ main(int argc, CHAR16 *argv[])
 	 */
 	read_loader_env("LoaderEnv", "/efi/freebsd/loader.env", false);
 	read_loader_env("NextLoaderEnv", NULL, true);
+
+	set_boot_policy();
 
 	/*
 	 * We now have two notions of console. howto should be viewed as
@@ -1327,10 +1462,10 @@ main(int argc, CHAR16 *argv[])
 				setenv("console", "comconsole", 1);
 				break;
 			case VID_SER_BOTH:
-				setenv("console", "efi comconsole", 1);
+				setenv("console", "efi,comconsole", 1);
 				break;
 			case SER_VID_BOTH:
-				setenv("console", "comconsole efi", 1);
+				setenv("console", "comconsole,efi", 1);
 				break;
 				/* case VIDEO_ONLY can't happen -- it's the first if above */
 			}
@@ -1404,17 +1539,13 @@ main(int argc, CHAR16 *argv[])
 				printf(" %04x%s", boot_order[i],
 				    boot_order[i] == boot_current ? "[*]" : "");
 			printf("\n");
-			is_last = boot_order[(sz / sizeof(boot_order[0])) - 1] == boot_current;
-			bosz = sz;
 		} else if (uefi_boot_mgr) {
 			/*
 			 * u-boot doesn't set BootOrder, but otherwise participates in the
 			 * boot manager protocol. So we fake it here and don't consider it
 			 * a failure.
 			 */
-			bosz = sizeof(boot_order[0]);
 			boot_order[0] = boot_current;
-			is_last = true;
 		}
 	}
 
@@ -1463,7 +1594,7 @@ main(int argc, CHAR16 *argv[])
 	 * the boot protocol and also allow an escape hatch for users wishing
 	 * to try something different.
 	 */
-	if (find_currdev(uefi_boot_mgr, is_last, boot_info, bisz) != 0)
+	if (find_currdev(uefi_boot_mgr, boot_info, bisz) != 0)
 		if (uefi_boot_mgr &&
 		    !interactive_interrupt("Failed to find bootable partition"))
 			return (EFI_NOT_FOUND);
@@ -1858,6 +1989,8 @@ command_chain(int argc, char *argv[])
 	EFI_GUID LoadedImageGUID = LOADED_IMAGE_PROTOCOL;
 	EFI_HANDLE loaderhandle;
 	EFI_LOADED_IMAGE *loaded_image;
+	UINTN ExitDataSize;
+	CHAR16 *ExitData = NULL;
 	EFI_STATUS status;
 	struct stat st;
 	struct devdesc *dev;
@@ -1973,9 +2106,16 @@ command_chain(int argc, char *argv[])
 	}
 
 	dev_cleanup();
-	status = BS->StartImage(loaderhandle, NULL, NULL);
+
+	status = BS->StartImage(loaderhandle, &ExitDataSize, &ExitData);
 	if (status != EFI_SUCCESS) {
-		command_errmsg = "StartImage failed";
+		printf("StartImage failed (%lu)", DECODE_ERROR(status));
+		if (ExitData != NULL) {
+			printf(": %S", ExitData);
+			BS->FreePool(ExitData);
+		}
+		putchar('\n');
+		command_errmsg = "";
 		free(loaded_image->LoadOptions);
 		loaded_image->LoadOptions = NULL;
 		status = BS->UnloadImage(loaded_image);

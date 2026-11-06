@@ -40,10 +40,13 @@
 #endif
 
 #include <dev/sound/pcm/sound.h>
-#include <mixer_if.h>
+#include <dev/sound/midi/mpu401.h>
 
-#define DUMMY_NPCHAN	1
-#define DUMMY_NRCHAN	1
+#include <mixer_if.h>
+#include <mpufoi_if.h>
+
+#define DUMMY_NPCHAN	2
+#define DUMMY_NRCHAN	2
 #define DUMMY_NCHAN	(DUMMY_NPCHAN + DUMMY_NRCHAN)
 
 struct dummy_chan {
@@ -64,8 +67,10 @@ struct dummy_softc {
 	int chnum;
 	struct dummy_chan chans[DUMMY_NCHAN];
 	struct callout callout;
-	struct mtx *lock;
+	struct mtx lock;
 	bool stopped;
+	struct mpu401 *mpu;
+	mpu401_intr_t *mpu_intr;
 };
 
 static bool
@@ -74,7 +79,7 @@ dummy_active(struct dummy_softc *sc)
 	struct dummy_chan *ch;
 	int i;
 
-	snd_mtxassert(sc->lock);
+	mtx_assert(&sc->lock, MA_OWNED);
 
 	for (i = 0; i < sc->chnum; i++) {
 		ch = &sc->chans[i];
@@ -93,6 +98,9 @@ dummy_chan_io(void *arg)
 	struct dummy_chan *ch;
 	int i = 0;
 
+	if (sc->mpu_intr)
+		(sc->mpu_intr)(sc->mpu);
+
 	if (sc->stopped)
 		return;
 
@@ -104,13 +112,13 @@ dummy_chan_io(void *arg)
 		ch = &sc->chans[i];
 		if (!ch->run)
 			continue;
-		if (ch->dir == PCMDIR_PLAY)
-			ch->ptr += sndbuf_getblksz(ch->buf);
-		else
+		if (ch->dir == PCMDIR_REC)
 			sndbuf_fillsilence(ch->buf);
-		snd_mtxunlock(sc->lock);
+		ch->ptr += ch->buf->blksz;
+		ch->ptr %= ch->buf->bufsize;
+		mtx_unlock(&sc->lock);
 		chn_intr(ch->chan);
-		snd_mtxlock(sc->lock);
+		mtx_lock(&sc->lock);
 	}
 	if (!sc->stopped)
 		callout_schedule(&sc->callout, 1);
@@ -122,9 +130,8 @@ dummy_chan_free(kobj_t obj, void *data)
 	struct dummy_chan *ch =data;
 	uint8_t *buf;
 
-	buf = sndbuf_getbuf(ch->buf);
-	if (buf != NULL)
-		free(buf, M_DEVBUF);
+	buf = ch->buf->buf;
+	free(buf, M_DEVBUF);
 
 	return (0);
 }
@@ -140,7 +147,7 @@ dummy_chan_init(kobj_t obj, void *devinfo, struct snd_dbuf *b,
 
 	sc = devinfo;
 
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 
 	ch = &sc->chans[sc->chnum++];
 	ch->sc = sc;
@@ -149,7 +156,7 @@ dummy_chan_init(kobj_t obj, void *devinfo, struct snd_dbuf *b,
 	ch->buf = b;
 	ch->caps = &sc->caps;
 
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 
 	bufsz = pcm_getbuffersize(sc->dev, 2048, 2048, 65536);
 	buf = malloc(bufsz, M_DEVBUF, M_WAITOK | M_ZERO);
@@ -189,7 +196,7 @@ dummy_chan_setblocksize(kobj_t obj, void *data, uint32_t blocksize)
 {
 	struct dummy_chan *ch = data;
 
-	return (sndbuf_getblksz(ch->buf));
+	return (ch->buf->blksz);
 }
 
 static int
@@ -198,10 +205,10 @@ dummy_chan_trigger(kobj_t obj, void *data, int go)
 	struct dummy_chan *ch = data;
 	struct dummy_softc *sc = ch->sc;
 
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 
 	if (sc->stopped) {
-		snd_mtxunlock(sc->lock);
+		mtx_unlock(&sc->lock);
 		return (0);
 	}
 
@@ -221,7 +228,7 @@ dummy_chan_trigger(kobj_t obj, void *data, int go)
 		break;
 	}
 
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 
 	return (0);
 }
@@ -293,6 +300,39 @@ static kobj_method_t dummy_mixer_methods[] = {
 
 MIXER_DECLARE(dummy_mixer);
 
+static uint8_t
+dummy_mpu_read(struct mpu401 *arg, void *sc, int reg)
+{
+	return (0);
+}
+
+static void
+dummy_mpu_write(struct mpu401 *arg, void *sc, int reg, unsigned char b)
+{
+}
+
+static int
+dummy_mpu_uninit(struct mpu401 *arg, void *cookie)
+{
+	struct dummy_softc *sc = cookie;
+
+	mtx_lock(&sc->lock);
+	sc->mpu_intr = NULL;
+	sc->mpu = NULL;
+	mtx_unlock(&sc->lock);
+
+	return (0);
+}
+
+static kobj_method_t dummy_mpu_methods[] = {
+	KOBJMETHOD(mpufoi_read,		dummy_mpu_read),
+	KOBJMETHOD(mpufoi_write,	dummy_mpu_write),
+	KOBJMETHOD(mpufoi_uninit,	dummy_mpu_uninit),
+	KOBJMETHOD_END
+};
+
+static DEFINE_CLASS(dummy_mpu, dummy_mpu_methods, 0);
+
 static void
 dummy_identify(driver_t *driver, device_t parent)
 {
@@ -319,8 +359,9 @@ dummy_attach(device_t dev)
 
 	sc = device_get_softc(dev);
 	sc->dev = dev;
-	sc->lock = snd_mtxcreate(device_get_nameunit(dev), "snd_dummy softc");
-	callout_init_mtx(&sc->callout, sc->lock, 0);
+	mtx_init(&sc->lock, device_get_nameunit(dev), "snd_dummy softc",
+	    MTX_DEF);
+	callout_init_mtx(&sc->callout, &sc->lock, 0);
 
 	sc->cap_fmts[0] = SND_FORMAT(AFMT_S32_LE, 2, 0);
 	sc->cap_fmts[1] = SND_FORMAT(AFMT_S24_LE, 2, 0);
@@ -335,6 +376,7 @@ dummy_attach(device_t dev)
 
 	pcm_setflags(dev, pcm_getflags(dev) | SD_F_MPSAFE);
 	pcm_init(dev, sc);
+	mixer_init(dev, &dummy_mixer_class, sc);
 	for (i = 0; i < DUMMY_NPCHAN; i++)
 		pcm_addchan(dev, PCMDIR_PLAY, &dummy_chan_class, sc);
 	for (i = 0; i < DUMMY_NRCHAN; i++)
@@ -344,7 +386,17 @@ dummy_attach(device_t dev)
 	    device_get_nameunit(device_get_parent(dev)));
 	if (pcm_register(dev, status))
 		return (ENXIO);
-	mixer_init(dev, &dummy_mixer_class, sc);
+
+	/*
+	 * Create an alias so that tests do not need to guess which one is the
+	 * dummy device if there are more devices present in the system.
+	 */
+	make_dev_alias(sc->info.dsp_dev, "dsp.dummy");
+
+	sc->mpu = mpu401_init(&dummy_mpu_class, sc, dummy_chan_io,
+	    &sc->mpu_intr);
+	if (sc->mpu == NULL)
+		return (ENXIO);
 
 	return (0);
 }
@@ -355,12 +407,13 @@ dummy_detach(device_t dev)
 	struct dummy_softc *sc = device_get_softc(dev);
 	int err;
 
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	sc->stopped = true;
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 	callout_drain(&sc->callout);
 	err = pcm_unregister(dev);
-	snd_mtxfree(sc->lock);
+	mpu401_uninit(sc->mpu);
+	mtx_destroy(&sc->lock);
 
 	return (err);
 }
@@ -381,5 +434,5 @@ static driver_t dummy_driver = {
 };
 
 DRIVER_MODULE(snd_dummy, nexus, dummy_driver, 0, 0);
-MODULE_DEPEND(snd_dummy, sound, SOUND_MINVER, SOUND_PREFVER, SOUND_MAXVER);
+MODULE_DEPEND(snd_dummy, sound, 1, 1, 1);
 MODULE_VERSION(snd_dummy, 1);

@@ -260,7 +260,10 @@ genoffset_test.o: $S/kern/genoffset.c offset.inc
 assym.inc: $S/kern/genassym.sh genassym.o genoffset_test.o
 	NM='${NM}' NMFLAGS='${NMFLAGS}' sh $S/kern/genassym.sh genassym.o > ${.TARGET}
 
-genassym.o: $S/$M/$M/genassym.c  offset.inc
+# vnode_if.h added for the sake of i386 only to fix commit 72ab129799a2 ("x86:
+# remove sys/mount.h from genassym.c"). Can be removed as soon as i386 kernels
+# are dropped, or if the <sys/mount.h> -> <sys/vnode.h> dependency vanishes.
+genassym.o: $S/$M/$M/genassym.c offset.inc vnode_if.h
 	${CC} -c ${NOSAN_CFLAGS:N-flto*:N-fno-common} \
 	    -fcommon $S/$M/$M/genassym.c
 
@@ -372,6 +375,19 @@ _ILINKS+= x86
 _ILINKS+= i386
 .endif
 
+.if ${MK_REPRODUCIBLE_PATHS} != "no"
+PREFIX_SYSDIR=/usr/src/sys
+PREFIX_OBJDIR=/usr/obj/usr/src/${MACHINE}.${MACHINE_CPUARCH}/sys/${KERN_IDENT}
+CFLAGS+= -ffile-prefix-map=${SYSDIR}=${PREFIX_SYSDIR}
+CFLAGS+= -ffile-prefix-map=${.OBJDIR}=${PREFIX_OBJDIR}
+.if defined(SYSROOT)
+CFLAGS+= -ffile-prefix-map=${SYSROOT}=/sysroot
+.endif
+.else
+PREFIX_SYSDIR=${SYSDIR}
+PREFIX_OBJDIR=${.OBJDIR}
+.endif
+
 # Ensure that the link exists without depending on it when it exists.
 # Ensure that debug info references the path in the source tree.
 .for _link in ${_ILINKS}
@@ -379,11 +395,19 @@ _ILINKS+= i386
 ${SRCS} ${DEPENDOBJS}: ${_link}
 .endif
 .if ${_link} == "machine"
-CFLAGS+= -fdebug-prefix-map=./machine=${SYSDIR}/${MACHINE}/include
+CFLAGS+= -fdebug-prefix-map=./machine=${PREFIX_SYSDIR}/${MACHINE}/include
 .else
-CFLAGS+= -fdebug-prefix-map=./${_link}=${SYSDIR}/${_link}/include
+CFLAGS+= -fdebug-prefix-map=./${_link}=${PREFIX_SYSDIR}/${_link}/include
 .endif
 .endfor
+
+# Install GDB plugins that are useful for kernel debugging.  See the
+# README in sys/tools/gdb for more information.
+GDB_FILES= acttrace.py \
+	   freebsd.py \
+	   pcpu.py \
+	   selftest.py \
+	   vnet.py
 
 ${_ILINKS}:
 	@case ${.TARGET} in \
@@ -434,6 +458,13 @@ kernel-install: .PHONY
 .if defined(DEBUG) && !defined(INSTALL_NODEBUG) && ${MK_KERNEL_SYMBOLS} != "no"
 	mkdir -p ${DESTDIR}${KERN_DEBUGDIR}${KODIR}
 	${INSTALL} -p -m ${KMODMODE} -o ${KMODOWN} -g ${KMODGRP} ${KERNEL_KO}.debug ${DESTDIR}${KERN_DEBUGDIR}${KODIR}/
+	${INSTALL} -m ${KMODMODE} -o ${KMODOWN} -g ${KMODGRP} \
+	    $S/tools/kernel-gdb.py ${DESTDIR}${KERN_DEBUGDIR}${KODIR}/${KERNEL_KO}-gdb.py
+	${INSTALL} -d -o ${KMODOWN} -g ${KMODGRP} ${DESTDIR}${KERN_DEBUGDIR}${KODIR}/gdb
+.for file in ${GDB_FILES}
+	${INSTALL} -m ${KMODMODE} -o ${KMODOWN} -g ${KMODGRP} \
+	    $S/tools/gdb/${file} ${DESTDIR}${KERN_DEBUGDIR}${KODIR}/gdb/${file}
+.endfor
 .endif
 .if defined(KERNEL_EXTRA_INSTALL)
 	${INSTALL} -p -m ${KMODMODE} -o ${KMODOWN} -g ${KMODGRP} ${KERNEL_EXTRA_INSTALL} ${DESTDIR}${KODIR}/
@@ -454,7 +485,7 @@ config.o env.o hints.o vers.o vnode_if.o:
 
 NEWVERS_ENV+= MAKE="${MAKE}"
 .if ${MK_REPRODUCIBLE_BUILD} != "no"
-NEWVERS_ARGS+= -R
+NEWVERS_ARGS+= -R -d ${PREFIX_OBJDIR}
 .endif
 vers.c: .NOMETA_CMP $S/conf/newvers.sh $S/sys/param.h ${SYSTEM_DEP:Nvers.*}
 	${NEWVERS_ENV} sh $S/conf/newvers.sh ${NEWVERS_ARGS} ${KERN_IDENT}

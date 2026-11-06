@@ -180,6 +180,7 @@ struct iichid_softc {
 	int			sampling_rate_slow;	/* iicbus lock */
 	int			sampling_rate_fast;
 	int			sampling_hysteresis;
+	sbintime_t		next_sample;		/* iicbus lock */
 	int			missing_samples;	/* iicbus lock */
 	int			dup_samples;		/* iicbus lock */
 	iichid_size_t		dup_size;		/* iicbus lock */
@@ -271,6 +272,8 @@ static int
 iichid_cmd_read(struct iichid_softc* sc, void *buf, iichid_size_t maxlen,
     iichid_size_t *actual_len)
 {
+	int error;
+
 	/*
 	 * 6.1.3 - Retrieval of Input Reports
 	 * DEVICE returns the length (2 Bytes) and the entire Input Report.
@@ -280,7 +283,10 @@ iichid_cmd_read(struct iichid_softc* sc, void *buf, iichid_size_t maxlen,
 	struct iic_msg msgs[] = {
 	    { sc->addr, IIC_M_RD, maxlen, buf },
 	};
-	int error;
+
+	if (!sc->reset_acked) {
+		msgs[0].len = 2;
+	}
 
 	error = iicbus_transfer(sc->dev, msgs, nitems(msgs));
 	if (error != 0)
@@ -522,6 +528,7 @@ iichid_sampling_task(void *context, int pending)
 {
 	struct iichid_softc *sc;
 	device_t parent;
+	sbintime_t now, period;
 	iichid_size_t actual;
 	bool bus_requested;
 	int error, rate;
@@ -540,7 +547,7 @@ iichid_sampling_task(void *context, int pending)
 	error = iichid_cmd_read(sc, sc->intr_buf, sc->intr_bufsize, &actual);
 	if (error == 0) {
 		if (actual > 0) {
-			sc->intr_handler(sc->intr_ctx, sc->intr_buf + 2, actual);
+			sc->intr_handler(sc->intr_ctx, sc->intr_buf + 2, actual - 2);
 			sc->missing_samples = 0;
 			if (sc->dup_size != actual ||
 			    memcmp(sc->dup_buf, sc->intr_buf, actual) != 0) {
@@ -564,8 +571,21 @@ rearm:
 			rate = sc->sampling_rate_slow;
 		else
 			rate = sc->sampling_rate_fast;
+		period = SBT_1S / MAX(rate, 1);
+		/*
+		 * Schedule against an absolute deadline advanced by one
+		 * period per sample, so that neither the time spent in the
+		 * I2C transaction and handler dispatch nor the taskqueue
+		 * wakeup latency stretches the sampling period. If the
+		 * deadline has already passed then only advance the sample
+		 * by one period rather than bursting polls to catch up.
+		 */
+		now = sbinuptime();
+		sc->next_sample += period;
+		if (sc->next_sample <= now)
+			sc->next_sample = now + period;
 		taskqueue_enqueue_timeout_sbt(sc->taskqueue, &sc->sampling_task,
-		    SBT_1S / MAX(rate, 1), 0, C_PREL(2));
+		    sc->next_sample, 0, C_ABSOLUTE);
 	}
 out:
 	if (bus_requested)
@@ -607,7 +627,7 @@ iichid_intr(void *context)
 		if (sc->power_on && sc->open) {
 			if (actual != 0)
 				sc->intr_handler(sc->intr_ctx, sc->intr_buf + 2,
-				    actual);
+				    actual - 2);
 			else
 				DPRINTF(sc, "no data received\n");
 		}
@@ -741,6 +761,7 @@ iichid_reset_callout(struct iichid_softc *sc)
 	sc->missing_samples = sc->sampling_hysteresis;
 	sc->dup_samples = 0;
 	sc->dup_size = 0;
+	sc->next_sample = sbinuptime();
 	taskqueue_enqueue_timeout(sc->taskqueue, &sc->sampling_task, 0);
 
 	return (0);
@@ -816,12 +837,13 @@ iichid_intr_setup(device_t dev, device_t child __unused, hid_intr_t intr,
 
 	sc = device_get_softc(dev);
 	/*
-	 * Do not rely just on wMaxInputLength, as some devices (which?)
-	 * may set it to a wrong length.  Also find the longest input report
-	 * in report descriptor, and add two for the length field.
+	 * Start with wMaxInputLength to follow HID-over-I2C specs. Than if
+	 * semi-HID device like ietp(4) requested changing of input buffer
+	 * size with report descriptor overloading, find the longest input
+	 * report in the descriptor, and add two for the length field.
 	 */
-	rdesc->rdsize = 2 +
-	    MAX(rdesc->isize, le16toh(sc->desc.wMaxInputLength));
+	rdesc->rdsize = rdesc->rdsize == 0 ?
+	    le16toh(sc->desc.wMaxInputLength) - 2 : rdesc->isize;
 	/* Write and get/set_report sizes are limited by I2C-HID protocol. */
 	rdesc->grsize = rdesc->srsize = IICHID_SIZE_MAX;
 	rdesc->wrsize = IICHID_SIZE_MAX;
@@ -831,7 +853,7 @@ iichid_intr_setup(device_t dev, device_t child __unused, hid_intr_t intr,
 
 	sc->intr_handler = intr;
 	sc->intr_ctx = context;
-	sc->intr_bufsize = rdesc->rdsize;
+	sc->intr_bufsize = rdesc->rdsize + 2;
 	sc->intr_buf = realloc(sc->intr_buf, sc->intr_bufsize,
 	    M_DEVBUF, M_WAITOK | M_ZERO);
 #ifdef IICHID_SAMPLING
@@ -861,7 +883,8 @@ iichid_intr_start(device_t dev, device_t child __unused)
 
 	sc = device_get_softc(dev);
 	DPRINTF(sc, "iichid device open\n");
-	iichid_set_power_state(sc, IICHID_PS_ON, IICHID_PS_NULL);
+	if (!sc->open)
+		iichid_set_power_state(sc, IICHID_PS_ON, IICHID_PS_NULL);
 
 	return (0);
 }
@@ -1092,7 +1115,8 @@ iichid_probe(device_t dev)
 	}
 
 	if (le16toh(sc->desc.wHIDDescLength) != 30 ||
-	    le16toh(sc->desc.bcdVersion) != 0x100) {
+	    le16toh(sc->desc.bcdVersion) != 0x100 ||
+	    le16toh(sc->desc.wMaxInputLength) < 2) {
 		DPRINTF(sc, "HID descriptor is broken\n");
 		return (ENXIO);
 	}
@@ -1155,15 +1179,15 @@ iichid_attach(device_t dev)
 	}
 
 	if (sc->irq_res == NULL || error != 0) {
+		device_printf(sc->dev, "Interrupt setup failed\n");
+		if (sc->irq_res != NULL)
+			bus_release_resource(dev, SYS_RES_IRQ, sc->irq_rid,
+			    sc->irq_res);
 #ifdef IICHID_SAMPLING
 		device_printf(sc->dev,
 		    "Using sampling mode\n");
 		sc->sampling_rate_slow = IICHID_SAMPLING_RATE_SLOW;
 #else
-		device_printf(sc->dev, "Interrupt setup failed\n");
-		if (sc->irq_res != NULL)
-			bus_release_resource(dev, SYS_RES_IRQ, sc->irq_rid,
-			    sc->irq_res);
 		iichid_detach(dev);
 		error = ENXIO;
 		goto done;

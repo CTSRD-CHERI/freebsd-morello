@@ -212,13 +212,14 @@ bulk_body()
 
 	# pfsync interface
 	jexec one ifconfig ${epair_sync}a 192.0.2.1/24 up
+	jexec one ifconfig ${epair_sync}a mtu 9000
 	jexec one ifconfig ${epair_one}a 198.51.100.1/24 up
 	jexec one ifconfig pfsync0 \
 		syncdev ${epair_sync}a \
-		maxupd 1\
-		up
+		up mtu 9000
 	jexec two ifconfig ${epair_two}a 198.51.100.2/24 up
 	jexec two ifconfig ${epair_sync}b 192.0.2.2/24 up
+	jexec two ifconfig ${epair_sync}b mtu 9000
 
 	# Enable pf
 	jexec one pfctl -e
@@ -232,7 +233,11 @@ bulk_body()
 
 	ifconfig ${epair_one}b 198.51.100.254/24 up
 
-	# Create state prior to setting up pfsync
+	# Create states prior to setting up pfsync
+	${common_dir}/pft_synflood.py \
+		--sendif ${epair_one}b \
+		--to 198.51.100.1 \
+		--count 500
 	ping -c 1 -S 198.51.100.254 198.51.100.1
 
 	# Wait before setting up pfsync on two, so we don't accidentally catch
@@ -921,6 +926,8 @@ rtable_cleanup()
 
 route_to_common_head()
 {
+	# TODO: Extend setup_router_server_nat64 to create a 2nd router
+
 	pfsync_version=$1
 	shift
 
@@ -937,11 +944,16 @@ route_to_common_head()
 
 	# pfsync interface
 	jexec one ifconfig ${epair_sync}a 192.0.2.1/24 up
-	jexec one ifconfig ${epair_one}a 198.51.100.1/24 up
+	jexec one ifconfig ${epair_one}a 198.51.100.1/28 up
+	jexec one ifconfig ${epair_one}a inet6 2001:db8:4211::1/64 no_dad
+	jexec one ifconfig ${epair_one}a name inif
 	jexec one ifconfig ${epair_out_one}a 203.0.113.1/24 up
+	jexec one ifconfig ${epair_out_one}a inet6 2001:db8:4200::1/64 no_dad
 	jexec one ifconfig ${epair_out_one}a name outif
 	jexec one sysctl net.inet.ip.forwarding=1
-	jexec one arp -s 203.0.113.254 00:01:02:03:04:05
+	jexec one sysctl net.inet6.ip6.forwarding=1
+	jexec one arp -s 203.0.113.254 00:01:02:00:00:04
+	jexec one ndp -s 2001:db8:4200::fe 00:01:02:00:00:06
 	jexec one ifconfig pfsync0 \
 		syncdev ${epair_sync}a \
 		maxupd 1 \
@@ -949,20 +961,30 @@ route_to_common_head()
 		up
 
 	jexec two ifconfig ${epair_sync}b 192.0.2.2/24 up
-	jexec two ifconfig ${epair_two}a 198.51.100.2/24 up
-	jexec two ifconfig ${epair_out_two}a 203.0.113.2/24 up
+	jexec two ifconfig ${epair_two}a 198.51.100.17/28 up
+	jexec two ifconfig ${epair_two}a inet6 2001:db8:4212::1/64 no_dad
+	jexec two ifconfig ${epair_two}a name inif
+	jexec two ifconfig ${epair_out_two}a 203.0.113.1/24 up
+	jexec two ifconfig ${epair_out_two}a inet6 2001:db8:4200::2/64 no_dad
 	jexec two ifconfig ${epair_out_two}a name outif
 	jexec two sysctl net.inet.ip.forwarding=1
-	jexec two arp -s 203.0.113.254 00:01:02:03:04:05
+	jexec two sysctl net.inet6.ip6.forwarding=1
+	jexec two arp -s 203.0.113.254 00:01:02:00:00:04
+	jexec two ndp -s 2001:db8:4200::fe 00:01:02:00:00:06
 	jexec two ifconfig pfsync0 \
 		syncdev ${epair_sync}b \
 		maxupd 1 \
 		version $pfsync_version \
 		up
 
-	ifconfig ${epair_one}b 198.51.100.254/24 up
-	ifconfig ${epair_two}b 198.51.100.253/24 up
+	ifconfig ${epair_one}b 198.51.100.2/28 up
+	ifconfig ${epair_one}b inet6 2001:db8:4211::2/64 no_dad
+	ifconfig ${epair_two}b 198.51.100.18/28 up
+	ifconfig ${epair_two}b inet6 2001:db8:4212::2/64 no_dad
+	# Target is behind router "one"
 	route add -net 203.0.113.0/24 198.51.100.1
+	route add -inet6 -net 64:ff9b::/96 2001:db8:4211::1
+
 	ifconfig ${epair_two}b up
 	ifconfig ${epair_out_one}b up
 	ifconfig ${epair_out_two}b up
@@ -1206,6 +1228,749 @@ route_to_1400_bad_ifname_cleanup()
 	pfsynct_cleanup
 }
 
+atf_test_case "af_to_in_floating" "cleanup"
+af_to_in_floating_head()
+{
+	atf_set descr 'Test syncing of states created by inbound af-to rules with floating states'
+	atf_set require.user root
+	atf_set require.progs python3 scapy
+}
+
+af_to_in_floating_body()
+{
+	route_to_common_head 1500
+
+	jexec one pfctl -e
+	pft_set_rules one \
+		"set state-policy floating" \
+		"set skip on ${epair_sync}a" \
+		"block" \
+		"pass inet6 proto icmp6 icmp6-type { neighbrsol, neighbradv } keep state (no-sync)" \
+		"pass in on inif to 64:ff9b::/96 af-to inet from (outif) keep state"
+
+	jexec two pfctl -e
+	pft_set_rules two \
+		"set skip on ${epair_sync}b" \
+		"block" \
+		"pass inet6 proto icmp6 icmp6-type { neighbrsol, neighbradv } keep state (no-sync)"
+
+	# ptf_ping can't deal with nat64, this test will fail but generate states
+	atf_check -s exit:1 env PYTHONPATH=${common_dir} \
+		${common_dir}/pft_ping.py \
+		--sendif ${epair_one}b \
+		--fromaddr 2001:db8:4201::fe \
+		--to 64:ff9b::203.0.113.254 \
+		--recvif ${epair_out_one}b
+
+	# Allow time for sync
+	sleep 2
+
+	states_one=$(mktemp)
+	states_two=$(mktemp)
+	jexec one pfctl -qvvss | normalize_pfctl_s > $states_one
+	jexec two pfctl -qvvss | normalize_pfctl_s > $states_two
+
+	# Sanity check
+	grep -qE 'all ipv6-icmp 203.0.113.1 \(2001:db8:4201::fe\) -> 203.0.113.254:8 \(64:ff9b::cb00:71fe) .* rule 3 .* origif: inif' $states_one ||
+		atf_fail "State missing on router one"
+
+	grep -qE 'all ipv6-icmp 203.0.113.1 \(2001:db8:4201::fe\) -> 203.0.113.254:8 \(64:ff9b::cb00:71fe) .* origif: inif' $states_two ||
+		atf_fail "State missing on router two"
+}
+
+af_to_in_floating_cleanup()
+{
+	pfsynct_cleanup
+}
+
+atf_test_case "af_to_in_if_bound" "cleanup"
+af_to_in_if_bound_head()
+{
+	atf_set descr 'Test syncing of states created by inbound af-to rules with if-bound states'
+	atf_set require.user root
+	atf_set require.progs python3 scapy
+}
+
+af_to_in_if_bound_body()
+{
+	route_to_common_head 1500
+
+	jexec one pfctl -e
+	pft_set_rules one \
+		"set state-policy if-bound" \
+		"set skip on ${epair_sync}a" \
+		"block" \
+		"pass inet6 proto icmp6 icmp6-type { neighbrsol, neighbradv } keep state (no-sync)" \
+		"pass in on inif to 64:ff9b::/96 af-to inet from (outif) keep state"
+
+	jexec two pfctl -e
+	pft_set_rules two \
+		"set skip on ${epair_sync}b" \
+		"block" \
+		"pass inet6 proto icmp6 icmp6-type { neighbrsol, neighbradv } keep state (no-sync)"
+
+	# ptf_ping can't deal with nat64, this test will fail but generate states
+	atf_check -s exit:1 env PYTHONPATH=${common_dir} \
+		${common_dir}/pft_ping.py \
+		--sendif ${epair_one}b \
+		--fromaddr 2001:db8:4201::fe \
+		--to 64:ff9b::203.0.113.254 \
+		--recvif ${epair_out_one}b
+
+	# Allow time for sync
+	sleep 2
+
+	states_one=$(mktemp)
+	states_two=$(mktemp)
+	jexec one pfctl -qvvss | normalize_pfctl_s > $states_one
+	jexec two pfctl -qvvss | normalize_pfctl_s > $states_two
+
+	# Sanity check
+	grep -qE 'outif ipv6-icmp 203.0.113.1 \(2001:db8:4201::fe\) -> 203.0.113.254:8 \(64:ff9b::cb00:71fe) .* rule 3 .* origif: inif' $states_one ||
+		atf_fail "State missing on router one"
+
+	grep -qE 'outif ipv6-icmp 203.0.113.1 \(2001:db8:4201::fe\) -> 203.0.113.254:8 \(64:ff9b::cb00:71fe) .* origif: inif' $states_two ||
+		atf_fail "State missing on router two"
+}
+
+af_to_in_if_bound_cleanup()
+{
+	pfsynct_cleanup
+}
+
+atf_test_case "af_to_out_if_bound" "cleanup"
+af_to_out_if_bound_head()
+{
+	atf_set descr 'Test syncing of states created by outbound af-to rules with if-bound states'
+	atf_set require.user root
+	atf_set require.progs python3 scapy
+}
+
+af_to_out_if_bound_body()
+{
+	route_to_common_head 1500
+
+	jexec one route add -inet6 -net 64:ff9b::/96 -iface outif
+	jexec one sysctl net.inet6.ip6.forwarding=1
+
+	jexec one pfctl -e
+	pft_set_rules one \
+		"set state-policy if-bound" \
+		"set skip on ${epair_sync}a" \
+		"block" \
+		"pass inet6 proto icmp6 icmp6-type { neighbrsol, neighbradv } keep state (no-sync)" \
+		"pass in  on inif  to 64:ff9b::/96 keep state" \
+		"pass out on outif to 64:ff9b::/96 af-to inet from (outif) keep state"
+
+	jexec two pfctl -e
+	pft_set_rules two \
+		"set skip on ${epair_sync}b" \
+		"block" \
+		"pass inet6 proto icmp6 icmp6-type { neighbrsol, neighbradv } keep state (no-sync)"
+
+	# ptf_ping can't deal with nat64, this test will fail but generate states
+	atf_check -s exit:1 env PYTHONPATH=${common_dir} \
+		${common_dir}/pft_ping.py \
+		--sendif ${epair_one}b \
+		--fromaddr 2001:db8:4201::fe \
+		--to 64:ff9b::203.0.113.254 \
+		--recvif ${epair_out_one}b
+
+	# Allow time for sync
+	sleep 2
+
+	states_one=$(mktemp)
+	states_two=$(mktemp)
+	jexec one pfctl -qvvss | normalize_pfctl_s > $states_one
+	jexec two pfctl -qvvss | normalize_pfctl_s > $states_two
+
+	# Sanity check
+	# st->orig_kif is the same as st->kif, so st->orig_kif is not printed.
+	for state_regexp in \
+		"inif ipv6-icmp 64:ff9b::cb00:71fe\[128\] <- 2001:db8:4201::fe .* rule 3 .* creatorid: [0-9a-f]+" \
+		"outif icmp 203.0.113.1 \(64:ff9b::cb00:71fe\[8\]\) -> 203.0.113.254:8 \(2001:db8:4201::fe\) .* rule 4 .* creatorid: [0-9a-f]+" \
+	; do
+		grep -qE "${state_regexp}" $states_one || atf_fail "State not found for '${state_regexp}'"
+	done
+
+	for state_regexp in \
+		"inif ipv6-icmp 64:ff9b::cb00:71fe\[128\] <- 2001:db8:4201::fe .* creatorid: [0-9a-f]+" \
+		"outif icmp 203.0.113.1 \(64:ff9b::cb00:71fe\[8\]\) -> 203.0.113.254:8 \(2001:db8:4201::fe\) .* creatorid: [0-9a-f]+" \
+	; do
+		grep -qE "${state_regexp}" $states_two || atf_fail "State not found for '${state_regexp}'"
+	done
+}
+
+af_to_out_if_bound_cleanup()
+{
+	pfsynct_cleanup
+}
+
+atf_test_case "tag" "cleanup"
+tag_head()
+{
+	atf_set descr 'Test if the pf tag is synced'
+	atf_set require.user root
+	atf_set require.progs python3 scapy
+}
+
+tag_body()
+{
+	route_to_common_head 1500
+
+	jexec one pfctl -e
+	pft_set_rules one \
+		"set skip on ${epair_sync}a" \
+		"block" \
+		"pass inet6 proto icmp6 icmp6-type { neighbrsol, neighbradv } keep state (no-sync)" \
+		"pass in  on inif  inet proto udp tag sometag keep state" \
+		"pass out on outif tagged sometag keep state (no-sync)"
+
+	jexec two pfctl -e
+	pft_set_rules two \
+		"set debug loud" \
+		"set skip on ${epair_sync}b" \
+		"block" \
+		"pass inet6 proto icmp6 icmp6-type { neighbrsol, neighbradv } keep state (no-sync)" \
+		"block tagged othertag" \
+		"pass out on outif tagged sometag keep state (no-sync)"
+
+	atf_check -s exit:0 env PYTHONPATH=${common_dir} \
+		${common_dir}/pft_ping.py \
+		--ping-type=udp \
+		--sendif ${epair_one}b \
+		--fromaddr 198.51.100.254 \
+		--to 203.0.113.254 \
+		--recvif ${epair_out_one}b
+
+	# Allow time for sync
+	sleep 2
+
+	# Force the next request to go through the 2nd router
+	route change -net 203.0.113.0/24 198.51.100.17
+
+	atf_check -s exit:0 env PYTHONPATH=${common_dir} \
+		${common_dir}/pft_ping.py \
+		--ping-type=udp \
+		--sendif ${epair_two}b \
+		--fromaddr 198.51.100.254 \
+		--to 203.0.113.254 \
+		--recvif ${epair_out_two}b
+}
+
+tag_cleanup()
+{
+	pfsynct_cleanup
+}
+
+atf_test_case "altq_queues" "cleanup"
+altq_queues_head()
+{
+	atf_set descr 'Test if the altq queues are synced'
+	atf_set require.user root
+	atf_set require.progs python3 scapy
+}
+
+altq_queues_body()
+{
+	route_to_common_head 1500
+	altq_init
+	is_altq_supported hfsc
+
+	jexec one pfctl -e
+	pft_set_rules one \
+		"set skip on ${epair_sync}a" \
+		"altq on outif bandwidth 30000b hfsc queue { default other1 other2 }" \
+		"queue default hfsc(linkshare 10000b default)" \
+		"queue other1  hfsc(linkshare 10000b)" \
+		"queue other2  hfsc(linkshare 10000b)" \
+		"block" \
+		"pass inet6 proto icmp6 icmp6-type { neighbrsol, neighbradv } keep state (no-sync)" \
+		"pass in  on inif  inet proto udp queue other1 keep state" \
+		"pass out on outif inet proto udp keep state"
+
+	jexec two pfctl -e
+	pft_set_rules two \
+		"set debug loud" \
+		"set skip on ${epair_sync}b" \
+		"altq on outif bandwidth 30000b hfsc queue { default other2 other1 }" \
+		"queue default hfsc(linkshare 10000b default)" \
+		"queue other2  hfsc(linkshare 10000b)" \
+		"queue other1  hfsc(linkshare 10000b)" \
+		"block" \
+		"pass inet6 proto icmp6 icmp6-type { neighbrsol, neighbradv } keep state (no-sync)" \
+		"pass out on outif inet proto udp keep state"
+
+	atf_check -s exit:0 env PYTHONPATH=${common_dir} \
+		${common_dir}/pft_ping.py \
+		--ping-type=udp \
+		--sendif ${epair_one}b \
+		--fromaddr 198.51.100.254 \
+		--to 203.0.113.254 \
+		--recvif ${epair_out_one}b
+
+	queues_one=$(mktemp)
+	jexec one pfctl -qvsq | normalize_pfctl_s > $queues_one
+	echo " === queues one === "
+	cat $queues_one
+	grep -qE 'queue other1 on outif .* pkts: 1 ' $queues_one || atf_fail 'Packets not sent through queue "other1"'
+
+	# Allow time for sync
+	sleep 2
+
+	# Force the next request to go through the 2nd router
+	route change -net 203.0.113.0/24 198.51.100.17
+
+	# Send a packet through router "two". It lacks the inbound rule
+	# but the inbound state should have been pfsynced from router "one"
+	# including altq queuing information. However the queues are created
+	# on router "two" in different order and we only sync queue index,
+	# so the packet ends up in a different queue. One must have identical
+	# queue set on both routers!
+	atf_check -s exit:0 env PYTHONPATH=${common_dir} \
+		${common_dir}/pft_ping.py \
+		--ping-type=udp \
+		--sendif ${epair_two}b \
+		--fromaddr 198.51.100.254 \
+		--to 203.0.113.254 \
+		--recvif ${epair_out_two}b
+
+	queues_two=$(mktemp)
+	jexec two pfctl -qvsq | normalize_pfctl_s > $queues_two
+	echo " === queues two === "
+	cat $queues_two
+	grep -qE 'queue other2 on outif .* pkts: 1 ' $queues_two || atf_fail 'Packets not sent through queue "other2"'
+}
+
+altq_queues_cleanup()
+{
+	# Interface detaching seems badly broken in altq. If interfaces are
+	# destroyed when shutting down the vnet and then pf is unloaded, it will
+	# cause a kernel crash. Work around the issue by first flushing the
+	# pf rulesets
+	jexec one pfctl -F all
+	jexec two pfctl -F all
+	pfsynct_cleanup
+}
+
+atf_test_case "rt_af" "cleanup"
+rt_af_head()
+{
+	atf_set descr 'Test if the rt_af is synced'
+	atf_set require.user root
+	atf_set require.progs python3 scapy
+}
+
+rt_af_body()
+{
+	route_to_common_head 1500
+
+	jexec one pfctl -e
+	pft_set_rules one \
+		"set skip on ${epair_sync}a" \
+		"block" \
+		"pass inet6 proto icmp6 icmp6-type { neighbrsol, neighbradv } keep state (no-sync)" \
+		"pass in on inif \
+			route-to (outif 203.0.113.254) prefer-ipv6-nexthop \
+			inet proto udp \
+			to 203.0.113.241 \
+			keep state" \
+		"pass in on inif \
+			route-to (outif 2001:db8:4200::fe) prefer-ipv6-nexthop \
+			inet proto udp \
+			to 203.0.113.242 \
+			keep state" \
+		"pass in on inif \
+			route-to (outif 2001:db8:4200::fe) prefer-ipv6-nexthop \
+			inet6 proto udp \
+			to 2001:db8:4200::f3 \
+			keep state" \
+		"pass out on outif inet  proto udp keep state (no-sync)" \
+		"pass out on outif inet6 proto udp keep state (no-sync)"
+
+	jexec two pfctl -e
+	pft_set_rules two \
+		"set debug loud" \
+		"set skip on ${epair_sync}b" \
+		"block" \
+		"pass inet6 proto icmp6 icmp6-type { neighbrsol, neighbradv } keep state (no-sync)" \
+
+	# IPv4 packet over IPv4 gateway
+	atf_check -s exit:0 env PYTHONPATH=${common_dir} \
+		${common_dir}/pft_ping.py \
+		--ping-type=udp \
+		--sendif ${epair_one}b \
+		--fromaddr 198.51.100.254 \
+		--to 203.0.113.241 \
+		--recvif ${epair_out_one}b
+
+	# FIXME: Routing IPv4 packets over IPv6 gateways with gateway added
+	# with `ndp -s` causes the static NDP entry to become expired.
+	# Pfsync tests don't use "servers" which can reply to ARP and NDP,
+	# but such static entry for gateway and only check if a stateless
+	# ICMP or UDP packet is forward through.
+	#
+	# IPv4 packert over IPv6 gateway
+	#atf_check -s exit:0 env PYTHONPATH=${common_dir} \
+	#	${common_dir}/pft_ping.py \
+	#	--ping-type=udp \
+	#	--sendif ${epair_one}b \
+	#	--fromaddr 198.51.100.254 \
+	#	--to 203.0.113.242 \
+	#	--recvif ${epair_out_one}b
+
+	# IPv6 packet over IPv6 gateway
+	atf_check -s exit:0 env PYTHONPATH=${common_dir} \
+		${common_dir}/pft_ping.py \
+		--ping-type=udp \
+		--sendif ${epair_one}b \
+		--fromaddr 2001:db8:4211::fe \
+		--to 2001:db8:4200::f3 \
+		--recvif ${epair_out_one}b
+
+	sleep 5 # Wait for pfsync
+
+	states_one=$(mktemp)
+	states_two=$(mktemp)
+	jexec one pfctl -qvvss | normalize_pfctl_s > $states_one
+	jexec two pfctl -qvvss | normalize_pfctl_s > $states_two
+
+	echo " === states one === "
+	cat $states_one
+	echo " === states two === "
+	cat $states_two
+
+	for state_regexp in \
+		"all udp 203.0.113.241:9 <- 198.51.100.254 .* route-to: 203.0.113.254@outif origif: inif" \
+		"all udp 2001:db8:4200::f3\[9\] <- 2001:db8:4211::fe .* route-to: 2001:db8:4200::fe@outif origif: inif" \
+	; do
+		grep -qE "${state_regexp}" $states_two || atf_fail "State not found for '${state_regexp}' on router two"
+	done
+}
+
+rt_af_cleanup()
+{
+	jexec one pfctl -qvvsr
+	jexec one pfctl -qvvss
+	jexec one arp -an
+	jexec one ndp -an
+	pfsynct_cleanup
+}
+
+atf_test_case "flush_by_intf" "cleanup"
+flush_by_intf_head()
+{
+	atf_set descr 'Test flushing states by interface'
+	atf_set require.user root
+}
+
+flush_by_intf_body()
+{
+	pfsynct_init
+
+	epair_sync=$(vnet_mkepair)
+	epair_one=$(vnet_mkepair)
+	epair_two=$(vnet_mkepair)
+
+	vnet_mkjail one ${epair_one}a ${epair_sync}a
+	vnet_mkjail two ${epair_two}a ${epair_sync}b
+
+	# pfsync interface
+	jexec one ifconfig ${epair_sync}a 192.0.2.1/24 up
+	jexec one ifconfig ${epair_one}a name epair_foo
+	jexec one ifconfig epair_foo 198.51.100.1/24 up
+	jexec one ifconfig pfsync0 \
+		syncdev ${epair_sync}a \
+		maxupd 1 \
+		up
+	jexec two ifconfig ${epair_sync}b 192.0.2.2/24 up
+	jexec two ifconfig ${epair_two}a name epair_foo
+	jexec two ifconfig epair_foo 198.51.100.2/24 up
+	jexec two ifconfig pfsync0 \
+		syncdev ${epair_sync}b \
+		maxupd 1 \
+		up
+
+	jexec one pfctl -e
+	pft_set_rules one \
+		"set state-policy if-bound" \
+		"set skip on ${epair_sync}a" \
+		"pass out keep state"
+	jexec two pfctl -e
+	pft_set_rules two \
+		"set state-policy if-bound" \
+		"set skip on ${epair_sync}b" \
+		"pass out keep state"
+
+	ifconfig ${epair_one}b 198.51.100.254/24 up
+
+	ping -c 1 -S 198.51.100.254 198.51.100.1
+
+	# Give pfsync time to do its thing
+	sleep 2
+
+	if ! jexec two pfctl -s states | grep icmp | grep 198.51.100.1 | \
+	    grep 198.51.100.254 ; then
+		atf_fail "state not found on synced host"
+	fi
+
+	# Now flush states in one, with an interface specified
+	# (Note the interface must exist on both hosts for the bug to manifest)
+	jexec one pfctl -i lo0 -Fs
+
+	sleep 2
+
+	if ! jexec two pfctl -s states | grep icmp | grep 198.51.100.1 | \
+	    grep 198.51.100.254 ; then
+		atf_fail "state was removed on synced host!"
+	fi
+
+	# Now flush on the interface the state is actually on, this should get passed to
+	# the peer.
+	jexec one pfctl -i epair_foo -Fs
+
+	sleep 2
+
+	if jexec two pfctl -s states | grep icmp | grep 198.51.100.1 | \
+	    grep 198.51.100.254 ; then
+		atf_fail "state was not removed on synced host!"
+	fi
+}
+
+flush_by_intf_cleanup()
+{
+	pfsynct_cleanup
+}
+
+# The state key zones of all vnets, by sysctl name.
+key_zones()
+{
+	sysctl -N vm.uma | \
+	    sed -n 's/^vm\.uma\.\(pf_state_keys[_0-9]*\)\.size$/\1/p'
+}
+
+# Count of the states in jail $1 from source ports 40000-40031 whose output
+# line matches $2.
+port_states()
+{
+	jexec $1 pfctl -ss | grep '198.51.100.254:400[0-3][0-9]' | \
+	    grep -c -- "$2"
+}
+
+# Wait up to 10 seconds for "eval $1" to print a number of at least $2.
+wait_for()
+{
+	for i in $(seq 1 20); do
+		[ "$(eval "$1")" -ge "$2" ] && return 0
+		sleep 0.5
+	done
+	atf_fail "Timed out waiting for '$1' to reach $2 (is $(eval "$1"))"
+}
+
+# Send one UDP packet to 198.51.100.1:$1 from each of the source ports
+# 40000-40031.
+send_flows()
+{
+	python3 -c '
+import socket, sys
+for sport in range(40000, 40032):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(("198.51.100.254", sport))
+    s.sendto(b"x", ("198.51.100.1", int(sys.argv[1])))
+    s.close()
+' $1
+}
+
+# Number of state records jail $1 has received over pfsync.
+state_records()
+{
+	jexec $1 netstat -s -p pfsync | awk '$2 == "state" &&
+	    $3 ~ /^(insert|update)s?$/ && $4 == "received" { n += $1 }
+	    END { print n + 0 }'
+}
+
+atf_test_case "stack_key_collision" "cleanup"
+stack_key_collision_head()
+{
+	atf_set descr 'Failing to import a state must not leak its keys'
+	atf_set require.user root
+	atf_set require.progs python3
+	# key_zones() would see the zones of vnets other tests create.
+	atf_set is.exclusive true
+}
+
+stack_key_collision_body()
+{
+	pfsynct_init
+
+	epair_sync=$(vnet_mkepair)
+	epair_one=$(vnet_mkepair)
+	epair_two=$(vnet_mkepair)
+
+	vnet_mkjail one ${epair_one}a ${epair_sync}a
+	# Each vnet gets its own state key zone: find two's.
+	zones=$(key_zones)
+	vnet_mkjail two ${epair_two}a ${epair_sync}b
+	zone=$(key_zones | grep -vx "${zones}")
+	if [ -z "${zone}" ] || [ $(echo "${zone}" | wc -l) -ne 1 ]; then
+		atf_fail "No unique state key zone for jail two: '${zone}'"
+	fi
+
+	jexec one ifconfig ${epair_sync}a 192.0.2.1/24 up
+	jexec one ifconfig ${epair_one}a 198.51.100.1/24 up
+	jexec one ifconfig pfsync0 \
+		syncdev ${epair_sync}a \
+		up
+	jexec two ifconfig ${epair_two}a 198.51.100.2/24 up
+	jexec two ifconfig ${epair_sync}b 192.0.2.2/24 up
+
+	rdr="rdr on ${epair_one}a inet proto udp to port 9999"
+	jexec one pfctl -e
+	pft_set_rules one \
+		"set skip on ${epair_sync}a" \
+		"${rdr} -> 198.51.100.1 port 7" \
+		"pass keep state"
+	jexec two pfctl -e
+	pft_set_rules two \
+		"set skip on { ${epair_sync}b ${epair_two}a }" \
+		"pass keep state"
+
+	ifconfig ${epair_one}b 198.51.100.254/24 up
+	# Resolve one's address before sending more than ARP holds.
+	atf_check -s exit:0 -o ignore ping -c 1 198.51.100.1
+
+	# Plain states to port 7, which two gets in a bulk update.
+	send_flows 7
+	wait_for "port_states one ." 32
+	jexec two ifconfig pfsync0 \
+		syncdev ${epair_sync}b \
+		up
+	wait_for "port_states two ." 32
+
+	# two stops listening and keeps them; one forgets them.
+	jexec two ifconfig pfsync0 -syncdev down
+	jexec one pfctl -F states
+
+	# Redirected states whose stack keys are the plain states' keys.
+	send_flows 9999
+	wait_for "port_states one 9999" 32
+
+	# two gets them in a second bulk update and cannot import any of
+	# them: each one's stack key collides with a plain state.  Wait for
+	# the 32 state records themselves: the bulk update's end mark can
+	# arrive before some of them.
+	before=$(state_records two)
+	jexec two ifconfig pfsync0 \
+		syncdev ${epair_sync}b \
+		up
+	wait_for "echo \$((\$(state_records two) - ${before}))" 32
+	if [ "$(port_states two 9999)" -ne 0 ]; then
+		atf_fail "two imported a colliding state"
+	fi
+
+	# With every state gone, so must be every state key.
+	jexec two ifconfig pfsync0 -syncdev down
+	jexec two pfctl -F states
+	keys=$(sysctl -n vm.uma.${zone}.stats.current)
+	if [ "${keys}" -ne 0 ]; then
+		atf_fail "${keys} state keys left on two without states"
+	fi
+}
+
+stack_key_collision_cleanup()
+{
+	pfsynct_cleanup
+}
+
+atf_test_case "expire_underflow" "cleanup"
+expire_underflow_head()
+{
+	atf_set descr 'pfsync test for expiration underflow'
+	atf_set require.user root
+}
+
+expire_underflow_body()
+{
+	pfsynct_init
+
+	epair_sync=$(vnet_mkepair)
+	epair_one=$(vnet_mkepair)
+	epair_two=$(vnet_mkepair)
+
+	vnet_mkjail one ${epair_one}a ${epair_sync}a
+	vnet_mkjail two ${epair_two}a ${epair_sync}b
+
+	# pfsync interface
+	jexec one ifconfig ${epair_sync}a 192.0.2.1/24 up
+	jexec one ifconfig ${epair_one}a 198.51.100.1/24 up
+	jexec one ifconfig pfsync0 \
+		syncdev ${epair_sync}a \
+		maxupd 1 \
+		up
+	jexec two ifconfig ${epair_two}a 198.51.100.2/24 up
+
+	# Enable pf!
+	jexec one pfctl -e
+	pft_set_rules one \
+		"set timeout tcp.closed 5000" \
+		"set skip on ${epair_sync}a" \
+		"pass out keep state"
+	jexec two pfctl -e
+	pft_set_rules two \
+		"set timeout tcp.closed 5" \
+		"set skip on ${epair_sync}b" \
+		"pass out keep state (tcp.closed 5)"
+
+	hostid_one=$(jexec one pfctl -si -v | awk '/Hostid:/ { gsub(/0x/, "", $2); printf($2); }')
+
+	ifconfig ${epair_one}b 198.51.100.254/24 up
+	/usr/sbin/inetd -p ${PWD}/inetd.pid \
+	    $(atf_get_srcdir)/echo_inetd.conf
+
+	echo one | jexec one nc -N 198.51.100.254 7
+
+	sleep 15
+
+	# Allow for a bulk update
+	jexec two ifconfig ${epair_sync}b 192.0.2.2/24 up
+	jexec two ifconfig pfsync0 \
+		syncdev ${epair_sync}b \
+		maxupd 1 \
+		up
+
+	# Give pfsync time to do its thing
+	sleep 2
+
+	echo "One"
+	jexec one pfctl -s states -vv
+	echo "Two"
+	jexec two pfctl -s states -vv
+
+	if ! jexec two pfctl -s states | grep tcp | grep 198.51.100.1 | \
+	    grep 198.51.100.254 ; then
+		atf_fail "state not found on synced host"
+	fi
+
+	if ! jexec two pfctl -sc | grep ""${hostid_one}"";
+	then
+		jexec two pfctl -sc
+		atf_fail "HostID for host one not found on two"
+	fi
+
+	sleep 10
+
+	jexec two pfctl -s states -vv
+	if jexec two pfctl -s states | grep tcp | grep 198.51.100.1 | \
+	    grep 198.51.100.254 ; then
+		atf_fail "state failed to expire on two"
+	fi
+}
+
+expire_underflow_cleanup()
+{
+	pfsynct_cleanup
+}
+
 atf_init_test_cases()
 {
 	atf_add_test_case "basic"
@@ -1224,4 +1989,13 @@ atf_init_test_cases()
 	atf_add_test_case "route_to_1301_bad_rpool"
 	atf_add_test_case "route_to_1400_bad_ruleset"
 	atf_add_test_case "route_to_1400_bad_ifname"
+	atf_add_test_case "af_to_in_floating"
+	atf_add_test_case "af_to_in_if_bound"
+	atf_add_test_case "af_to_out_if_bound"
+	atf_add_test_case "tag"
+	atf_add_test_case "altq_queues"
+	atf_add_test_case "rt_af"
+	atf_add_test_case "flush_by_intf"
+	atf_add_test_case "stack_key_collision"
+	atf_add_test_case "expire_underflow"
 }

@@ -29,12 +29,10 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/cdefs.h>
 #include "opt_bootp.h"
 #include "opt_inet.h"
 #include "opt_ipstealth.h"
 #include "opt_ipsec.h"
-#include "opt_route.h"
 #include "opt_rss.h"
 #include "opt_sctp.h"
 
@@ -54,6 +52,7 @@
 #include <sys/sdt.h>
 #include <sys/syslog.h>
 #include <sys/sysctl.h>
+#include <sys/hash.h>
 
 #include <net/if.h>
 #include <net/if_types.h>
@@ -83,6 +82,7 @@
 #include <machine/in_cksum.h>
 #include <netinet/ip_carp.h>
 #include <netinet/in_rss.h>
+#include <netinet/ip_mroute.h>
 #ifdef SCTP
 #include <netinet/sctp_var.h>
 #endif
@@ -175,9 +175,6 @@ ipproto_ctlinput_t	*ip_ctlprotox[IPPROTO_MAX] = {
 VNET_DEFINE(struct in_ifaddrhead, in_ifaddrhead);  /* first inet address */
 VNET_DEFINE(struct in_ifaddrhashhead *, in_ifaddrhashtbl); /* inet addr hash table  */
 VNET_DEFINE(u_long, in_ifaddrhmask);		/* mask for hash table */
-
-/* Make sure it is safe to use hashinit(9) on CK_LIST. */
-CTASSERT(sizeof(struct in_ifaddrhashhead) == sizeof(LIST_HEAD(, in_addr)));
 
 #ifdef IPCTL_DEFMTU
 SYSCTL_INT(_net_inet_ip, IPCTL_DEFMTU, mtu, CTLFLAG_RW,
@@ -310,24 +307,32 @@ SYSCTL_PROC(_net_inet_ip, IPCTL_INTRDQDROPS, intr_direct_queue_drops,
 static void
 ip_vnet_init(void *arg __unused)
 {
-	struct pfil_head_args args;
-
 	CK_STAILQ_INIT(&V_in_ifaddrhead);
-	V_in_ifaddrhashtbl = hashinit(INADDR_NHASH, M_IFADDR, &V_in_ifaddrhmask);
+
+	struct hashalloc_args ha = {
+		.size = INADDR_NHASH,
+		.mtype = M_IFADDR,
+		.mflags = M_WAITOK,
+		.head = HASH_HEAD_CK_LIST,
+	};
+	V_in_ifaddrhashtbl = hashalloc(&ha);
+	V_in_ifaddrhmask = ha.size - 1;
 
 	/* Initialize IP reassembly queue. */
 	ipreass_vnet_init();
 
 	/* Initialize packet filter hooks. */
-	args.pa_version = PFIL_VERSION;
-	args.pa_flags = PFIL_IN | PFIL_OUT;
-	args.pa_type = PFIL_TYPE_IP4;
-	args.pa_headname = PFIL_INET_NAME;
-	V_inet_pfil_head = pfil_head_register(&args);
+	struct pfil_head_args pa = {
+		.pa_version = PFIL_VERSION,
+		.pa_flags = PFIL_IN | PFIL_OUT,
+		.pa_type = PFIL_TYPE_IP4,
+		.pa_headname = PFIL_INET_NAME,
+	};
+	V_inet_pfil_head = pfil_head_register(&pa);
 
-	args.pa_flags = PFIL_OUT;
-	args.pa_headname = PFIL_INET_LOCAL_NAME;
-	V_inet_local_pfil_head = pfil_head_register(&args);
+	pa.pa_flags = PFIL_OUT;
+	pa.pa_headname = PFIL_INET_LOCAL_NAME;
+	V_inet_local_pfil_head = pfil_head_register(&pa);
 
 	if (hhook_head_register(HHOOK_TYPE_IPSEC_IN, AF_INET,
 	    &V_ipsec_hhh_in[HHOOK_IPSEC_INET],
@@ -353,6 +358,7 @@ VNET_SYSINIT(ip_vnet_init, SI_SUB_PROTO_DOMAIN, SI_ORDER_FOURTH,
 static void
 ip_init(const void *unused __unused)
 {
+	struct ifnet *ifp;
 
 	ipreass_init();
 
@@ -377,6 +383,14 @@ ip_init(const void *unused __unused)
 #ifdef	RSS
 	netisr_register(&ip_direct_nh);
 #endif
+	/*
+	 * XXXGL: we use SYSINIT() here, but go over V_ifnet.  It was the same
+	 * way before dom_ifattach removal.  This worked because when any
+	 * non-default vnet is created, there are no interfaces inside.
+	 * Eventually this needs to be fixed.
+	 */
+	CK_STAILQ_FOREACH(ifp, &V_ifnet, if_link)
+		in_ifattach(NULL, ifp);
 }
 SYSINIT(ip_init, SI_SUB_PROTO_DOMAIN, SI_ORDER_THIRD, ip_init, NULL);
 
@@ -415,7 +429,12 @@ ip_destroy(void *unused __unused)
 	ipreass_destroy();
 
 	/* Cleanup in_ifaddr hash table; should be empty. */
-	hashdestroy(V_in_ifaddrhashtbl, M_IFADDR, V_in_ifaddrhmask);
+	struct hashalloc_args ha = {
+		.mtype = M_IFADDR,
+		.head = HASH_HEAD_CK_LIST,
+		.size = V_in_ifaddrhmask + 1,
+	};
+	hashfree(V_in_ifaddrhashtbl, &ha);
 }
 
 VNET_SYSUNINIT(ip, SI_SUB_PROTO_DOMAIN, SI_ORDER_THIRD, ip_destroy, NULL);
@@ -482,12 +501,9 @@ ip_input(struct mbuf *m)
 	if (__predict_false(m->m_pkthdr.len < sizeof(struct ip)))
 		goto tooshort;
 
-	if (m->m_len < sizeof(struct ip)) {
-		m = m_pullup(m, sizeof(struct ip));
-		if (__predict_false(m == NULL)) {
-			IPSTAT_INC(ips_toosmall);
-			return;
-		}
+	if ((m = m_pullup(m, sizeof(struct ip))) == NULL) {
+		IPSTAT_INC(ips_toosmall);
+		return;
 	}
 	ip = mtod(m, struct ip *);
 
@@ -501,14 +517,11 @@ ip_input(struct mbuf *m)
 		IPSTAT_INC(ips_badhlen);
 		goto bad;
 	}
-	if (hlen > m->m_len) {
-		m = m_pullup(m, hlen);
-		if (__predict_false(m == NULL)) {
-			IPSTAT_INC(ips_badhlen);
-			return;
-		}
-		ip = mtod(m, struct ip *);
+	if ((m = m_pullup(m, hlen)) == NULL) {
+		IPSTAT_INC(ips_badhlen);
+		return;
 	}
+	ip = mtod(m, struct ip *);
 
 	IP_PROBE(receive, NULL, NULL, ip, m->m_pkthdr.rcvif, ip, NULL);
 
@@ -524,6 +537,12 @@ ip_input(struct mbuf *m)
 
 	if (m->m_pkthdr.csum_flags & CSUM_IP_CHECKED) {
 		sum = !(m->m_pkthdr.csum_flags & CSUM_IP_VALID);
+	} else if (m->m_pkthdr.csum_flags & CSUM_IP) {
+		/*
+		 * Packet from local host that offloaded checksum computation.
+		 * Checksum not required since the packet wasn't on the wire.
+		 */
+		sum = 0;
 	} else {
 		if (hlen == sizeof(struct ip)) {
 			sum = in_cksum_hdr(ip);
@@ -757,7 +776,8 @@ passin:
 		 * RFC 3927 2.7: Do not forward multicast packets from
 		 * IN_LINKLOCAL.
 		 */
-		if (V_ip_mrouter && !IN_LINKLOCAL(ntohl(ip->ip_src.s_addr))) {
+		if (V_ip_mrouting_enabled &&
+		    !IN_LINKLOCAL(ntohl(ip->ip_src.s_addr))) {
 			/*
 			 * If we are acting as a multicast router, all
 			 * incoming multicast packets are passed to the
@@ -991,7 +1011,7 @@ ip_forward(struct mbuf *m, int srcrt)
 	if (mcopy != NULL) {
 		mcopy->m_len = min(ntohs(ip->ip_len), M_TRAILINGSPACE(mcopy));
 		mcopy->m_pkthdr.len = mcopy->m_len;
-		m_copydata(m, 0, mcopy->m_len, mtod(mcopy, caddr_t));
+		m_copydata(m, 0, mcopy->m_len, mtod(mcopy, void *));
 	}
 #ifdef IPSTEALTH
 	if (V_ipstealth == 0)
@@ -1156,7 +1176,7 @@ ip_savecontrol(struct inpcb *inp, struct mbuf **mp, struct ip *ip,
 		} else {
 			microtime(&tv);
 		}
-		*mp = sbcreatecontrol((caddr_t)&tv, sizeof(tv), SCM_TIMESTAMP,
+		*mp = sbcreatecontrol(&tv, sizeof(tv), SCM_TIMESTAMP,
 		    SOL_SOCKET, M_NOWAIT);
 		if (*mp != NULL) {
 			mp = &(*mp)->m_next;

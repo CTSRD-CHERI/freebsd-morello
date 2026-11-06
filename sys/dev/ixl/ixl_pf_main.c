@@ -50,6 +50,7 @@ static u_int	ixl_add_maddr(void *, struct sockaddr_dl *, u_int);
 static u_int	ixl_match_maddr(void *, struct sockaddr_dl *, u_int);
 static char *	ixl_switch_element_string(struct sbuf *, u8, u16);
 static enum ixl_fw_mode ixl_get_fw_mode(struct ixl_pf *);
+static void	ixl_print_nvm_cmd(device_t, int, struct i40e_nvm_access *);
 
 /* Sysctls */
 static int	ixl_sysctl_set_advertise(SYSCTL_HANDLER_ARGS);
@@ -494,7 +495,7 @@ ixl_set_initial_advertised_speeds(struct ixl_pf *pf)
 int
 ixl_teardown_hw_structs(struct ixl_pf *pf)
 {
-	enum i40e_status_code status = 0;
+	enum i40e_status_code error, status = I40E_SUCCESS;
 	struct i40e_hw *hw = &pf->hw;
 	device_t dev = pf->dev;
 
@@ -505,20 +506,21 @@ ixl_teardown_hw_structs(struct ixl_pf *pf)
 			device_printf(dev,
 			    "init: LAN HMC shutdown failure; status %s\n",
 			    i40e_stat_str(hw, status));
-			goto err_out;
 		}
 	}
 
 	/* Shutdown admin queue */
 	ixl_disable_intr0(hw);
-	status = i40e_shutdown_adminq(hw);
-	if (status)
+	error = i40e_shutdown_adminq(hw);
+	if (error) {
 		device_printf(dev,
 		    "init: Admin Queue shutdown failure; status %s\n",
-		    i40e_stat_str(hw, status));
+		    i40e_stat_str(hw, error));
+		if (status == I40E_SUCCESS)
+			status = error;
+	}
 
 	ixl_pf_qmgr_release(&pf->qmgr, &pf->qtag);
-err_out:
 	return (status);
 }
 
@@ -593,24 +595,29 @@ ixl_add_maddr(void *arg, struct sockaddr_dl *sdl, u_int cnt)
  *	Routines for multicast and vlan filter management.
  *
  *********************************************************************/
+
+/**
+ * ixl_add_multi - Add multicast filters to the hardware
+ * @vsi: The VSI structure
+ *
+ * In case number of multicast filters in the IFP exceeds 127 entries,
+ * multicast promiscuous mode will be enabled and the filters will be removed
+ * from the hardware
+ */
 void
 ixl_add_multi(struct ixl_vsi *vsi)
 {
 	if_t			ifp = vsi->ifp;
-	struct i40e_hw		*hw = vsi->hw;
 	int			mcnt = 0;
 	struct ixl_add_maddr_arg cb_arg;
 
 	IOCTL_DEBUGOUT("ixl_add_multi: begin");
 
-	mcnt = if_llmaddr_count(ifp);
-	if (__predict_false(mcnt >= MAX_MULTICAST_ADDR)) {
-		i40e_aq_set_vsi_multicast_promiscuous(hw,
-		    vsi->seid, TRUE, NULL);
-		/* delete all existing MC filters */
-		ixl_del_multi(vsi, true);
-		return;
-	}
+	/*
+	 * There is no need to check if the number of multicast addresses
+	 * exceeds the MAX_MULTICAST_ADDR threshold and set promiscuous mode
+	 * here, as all callers already handle this case.
+	 */
 
 	cb_arg.vsi = vsi;
 	LIST_INIT(&cb_arg.to_add);
@@ -633,30 +640,103 @@ ixl_match_maddr(void *arg, struct sockaddr_dl *sdl, u_int cnt)
 		return (0);
 }
 
+/**
+ * ixl_dis_multi_promisc - Disable multicast promiscuous mode
+ * @vsi: The VSI structure
+ * @vsi_mcnt: Number of multicast filters in the VSI
+ *
+ * Disable multicast promiscuous mode based on number of entries in the IFP
+ * and the VSI, then re-add multicast filters.
+ *
+ */
+static void
+ixl_dis_multi_promisc(struct ixl_vsi *vsi, int vsi_mcnt)
+{
+	struct ifnet		*ifp = vsi->ifp;
+	struct i40e_hw		*hw = vsi->hw;
+	int			ifp_mcnt = 0;
+	enum i40e_status_code	status;
+
+	/*
+	 * Check if multicast promiscuous mode was actually enabled.
+	 * If promiscuous mode was not enabled, don't attempt to disable it.
+	 * Also, don't disable if IFF_PROMISC or IFF_ALLMULTI is set.
+	 */
+	if (!(vsi->flags & IXL_FLAGS_MC_PROMISC) ||
+	    (if_getflags(ifp) & (IFF_PROMISC | IFF_ALLMULTI)))
+		return;
+
+	ifp_mcnt = if_llmaddr_count(ifp);
+	/*
+	 * Equal lists or empty ifp list mean the list has not been changed
+	 * and in such case avoid disabling multicast promiscuous mode as it
+	 * was not previously enabled. Case where multicast promiscuous mode has
+	 * been enabled is when vsi_mcnt == 0 && ifp_mcnt > 0.
+	 */
+	if (ifp_mcnt == vsi_mcnt || ifp_mcnt == 0 ||
+	    ifp_mcnt >= MAX_MULTICAST_ADDR)
+		return;
+
+	status = i40e_aq_set_vsi_multicast_promiscuous(hw, vsi->seid,
+	    FALSE, NULL);
+	if (status != I40E_SUCCESS) {
+		if_printf(ifp, "Failed to disable multicast promiscuous "
+		    "mode, status: %s\n", i40e_stat_str(hw, status));
+
+		return;
+	}
+
+	/* Clear the flag since promiscuous mode is now disabled */
+	vsi->flags &= ~IXL_FLAGS_MC_PROMISC;
+	if_printf(ifp, "Disabled multicast promiscuous mode\n");
+
+	ixl_add_multi(vsi);
+}
+
+/**
+ * ixl_del_multi - Delete multicast filters from the hardware
+ * @vsi: The VSI structure
+ * @all: Bool to determine if all the multicast filters should be removed
+ *
+ * In case number of multicast filters in the IFP drops to 127 entries,
+ * multicast promiscuous mode will be disabled and the filters will be reapplied
+ * to the hardware.
+ */
 void
 ixl_del_multi(struct ixl_vsi *vsi, bool all)
 {
-	struct ixl_ftl_head	to_del;
+	int			to_del_cnt = 0, vsi_mcnt = 0;
 	if_t			ifp = vsi->ifp;
 	struct ixl_mac_filter	*f, *fn;
-	int			mcnt = 0;
+	struct ixl_ftl_head	to_del;
 
 	IOCTL_DEBUGOUT("ixl_del_multi: begin");
 
 	LIST_INIT(&to_del);
 	/* Search for removed multicast addresses */
 	LIST_FOREACH_SAFE(f, &vsi->ftl, ftle, fn) {
-		if ((f->flags & IXL_FILTER_MC) == 0 ||
-		    (!all && (if_foreach_llmaddr(ifp, ixl_match_maddr, f) == 0)))
+		if ((f->flags & IXL_FILTER_MC) == 0)
+			continue;
+
+		/* Count all the multicast filters in the VSI for comparison */
+		vsi_mcnt++;
+
+		if (!all && if_foreach_llmaddr(ifp, ixl_match_maddr, f) != 0)
 			continue;
 
 		LIST_REMOVE(f, ftle);
 		LIST_INSERT_HEAD(&to_del, f, ftle);
-		mcnt++;
+		to_del_cnt++;
 	}
 
-	if (mcnt > 0)
-		ixl_del_hw_filters(vsi, &to_del, mcnt);
+	if (to_del_cnt > 0) {
+		ixl_del_hw_filters(vsi, &to_del, to_del_cnt);
+		return;
+	}
+
+	ixl_dis_multi_promisc(vsi, vsi_mcnt);
+
+	IOCTL_DEBUGOUT("ixl_del_multi: end");
 }
 
 void
@@ -1020,15 +1100,11 @@ ixl_set_rss_key(struct ixl_pf *pf)
 	struct i40e_hw *hw = &pf->hw;
 	struct ixl_vsi *vsi = &pf->vsi;
 	device_t	dev = pf->dev;
-	u32 rss_seed[IXL_RSS_KEY_SIZE_REG];
+	u32 rss_seed[IXL_RSS_KEY_SIZE_REG] = {0};
 	enum i40e_status_code status;
 
-#ifdef RSS
-        /* Fetch the configured RSS key */
-        rss_getkey((uint8_t *) &rss_seed);
-#else
-	ixl_get_default_rss_key(rss_seed);
-#endif
+	/* Fetch the configured RSS key */
+	rss_getkey((uint8_t *) &rss_seed);
 	/* Fill out hash function seed */
 	if (hw->mac.type == I40E_MAC_X722) {
 		struct i40e_aqc_get_set_rss_key_data key_data;
@@ -1054,7 +1130,6 @@ ixl_set_rss_pctypes(struct ixl_pf *pf)
 	struct i40e_hw *hw = &pf->hw;
 	u64		set_hena = 0, hena;
 
-#ifdef RSS
 	u32		rss_hash_config;
 
 	rss_hash_config = rss_gethashconfig();
@@ -1072,12 +1147,6 @@ ixl_set_rss_pctypes(struct ixl_pf *pf)
                 set_hena |= ((u64)1 << I40E_FILTER_PCTYPE_NONF_IPV6_TCP);
         if (rss_hash_config & RSS_HASHTYPE_RSS_UDP_IPV6)
                 set_hena |= ((u64)1 << I40E_FILTER_PCTYPE_NONF_IPV6_UDP);
-#else
-	if (hw->mac.type == I40E_MAC_X722)
-		set_hena = IXL_DEFAULT_RSS_HENA_X722;
-	else
-		set_hena = IXL_DEFAULT_RSS_HENA_XL710;
-#endif
 	hena = (u64)i40e_read_rx_ctl(hw, I40E_PFQF_HENA(0)) |
 	    ((u64)i40e_read_rx_ctl(hw, I40E_PFQF_HENA(1)) << 32);
 	hena |= set_hena;
@@ -1456,12 +1525,13 @@ ixl_add_hw_filters(struct ixl_vsi *vsi, struct ixl_ftl_head *to_add, int cnt)
 		bcopy(f->macaddr, b->mac_addr, ETHER_ADDR_LEN);
 		if (f->vlan == IXL_VLAN_ANY) {
 			b->vlan_tag = 0;
-			b->flags = I40E_AQC_MACVLAN_ADD_IGNORE_VLAN;
+			b->flags =
+			    htole16(I40E_AQC_MACVLAN_ADD_IGNORE_VLAN);
 		} else {
-			b->vlan_tag = f->vlan;
+			b->vlan_tag = htole16(f->vlan);
 			b->flags = 0;
 		}
-		b->flags |= I40E_AQC_MACVLAN_ADD_PERFECT_MATCH;
+		b->flags |= htole16(I40E_AQC_MACVLAN_ADD_PERFECT_MATCH);
 		/* Some FW versions do not set match method
 		 * when adding filters fails. Initialize it with
 		 * expected error value to allow detection which
@@ -1554,7 +1624,7 @@ ixl_del_hw_filters(struct ixl_vsi *vsi, struct ixl_ftl_head *to_del, int cnt)
 			e->vlan_tag = 0;
 			e->flags |= I40E_AQC_MACVLAN_DEL_IGNORE_VLAN;
 		} else {
-			e->vlan_tag = f->vlan;
+			e->vlan_tag = htole16(f->vlan);
 		}
 
 		ixl_dbg_filter(pf, "DEL: " MAC_FORMAT "\n",
@@ -1586,7 +1656,7 @@ ixl_del_hw_filters(struct ixl_vsi *vsi, struct ixl_ftl_head *to_del, int cnt)
 			device_printf(dev,
 			    "%s Filter does not exist " MAC_FORMAT " VTAG: %d\n",
 			    __func__, MAC_FORMAT_ARGS(d[i].mac_addr),
-			    d[i].vlan_tag);
+			    le16toh(d[i].vlan_tag));
 		}
 	}
 
@@ -1775,12 +1845,8 @@ ixl_handle_tx_mdd_event(struct ixl_pf *pf)
 	struct i40e_hw *hw = &pf->hw;
 	device_t dev = pf->dev;
 	struct ixl_vf *vf;
-	bool mdd_detected = false;
-	bool pf_mdd_detected = false;
-	bool vf_mdd_detected = false;
 	u16 vf_num, queue;
 	u8 pf_num, event;
-	u8 pf_mdet_num, vp_mdet_num;
 	u32 reg;
 
 	/* find what triggered the MDD event */
@@ -1794,18 +1860,20 @@ ixl_handle_tx_mdd_event(struct ixl_pf *pf)
 		    I40E_GL_MDET_TX_EVENT_SHIFT;
 		queue = (reg & I40E_GL_MDET_TX_QUEUE_MASK) >>
 		    I40E_GL_MDET_TX_QUEUE_SHIFT;
+		if (queue >= hw->func_caps.base_queue)
+			queue -= hw->func_caps.base_queue;
+		device_printf(dev,
+		    "last TX malicious-driver cause %#x on queue %u, "
+		    "PF %#x, VF %#x\n", event, queue, pf_num, vf_num);
 		wr32(hw, I40E_GL_MDET_TX, 0xffffffff);
-		mdd_detected = true;
 	}
-
-	if (!mdd_detected)
-		return;
 
 	reg = rd32(hw, I40E_PF_MDET_TX);
 	if (reg & I40E_PF_MDET_TX_VALID_MASK) {
 		wr32(hw, I40E_PF_MDET_TX, 0xFFFF);
-		pf_mdet_num = hw->pf_id;
-		pf_mdd_detected = true;
+		device_printf(dev,
+		    "TX malicious-driver issue detected on PF-%u\n",
+		    hw->pf_id);
 	}
 
 	/* Check if MDD was caused by a VF */
@@ -1814,32 +1882,16 @@ ixl_handle_tx_mdd_event(struct ixl_pf *pf)
 		reg = rd32(hw, I40E_VP_MDET_TX(i));
 		if (reg & I40E_VP_MDET_TX_VALID_MASK) {
 			wr32(hw, I40E_VP_MDET_TX(i), 0xFFFF);
-			vp_mdet_num = i;
-			vf->num_mdd_events++;
-			vf_mdd_detected = true;
+			if (!(vf->vf_flags & VF_FLAG_ENABLED))
+				continue;
+			vf->mdd_tx_events++;
+			vf->mdd_event_pending = true;
+			if (!vf->mdd_blocked) {
+				vf->mdd_blocked = true;
+				vf->mdd_reset_pending = true;
+			}
 		}
 	}
-
-	/* Print out an error message */
-	if (vf_mdd_detected && pf_mdd_detected)
-		device_printf(dev,
-		    "Malicious Driver Detection event %d"
-		    " on TX queue %d, pf number %d (PF-%d), vf number %d (VF-%d)\n",
-		    event, queue, pf_num, pf_mdet_num, vf_num, vp_mdet_num);
-	else if (vf_mdd_detected && !pf_mdd_detected)
-		device_printf(dev,
-		    "Malicious Driver Detection event %d"
-		    " on TX queue %d, pf number %d, vf number %d (VF-%d)\n",
-		    event, queue, pf_num, vf_num, vp_mdet_num);
-	else if (!vf_mdd_detected && pf_mdd_detected)
-		device_printf(dev,
-		    "Malicious Driver Detection event %d"
-		    " on TX queue %d, pf number %d (PF-%d)\n",
-		    event, queue, pf_num, pf_mdet_num);
-	/* Theoretically shouldn't happen */
-	else
-		device_printf(dev,
-		    "TX Malicious Driver Detection event (unknown)\n");
 }
 
 static void
@@ -1848,12 +1900,8 @@ ixl_handle_rx_mdd_event(struct ixl_pf *pf)
 	struct i40e_hw *hw = &pf->hw;
 	device_t dev = pf->dev;
 	struct ixl_vf *vf;
-	bool mdd_detected = false;
-	bool pf_mdd_detected = false;
-	bool vf_mdd_detected = false;
 	u16 queue;
 	u8 pf_num, event;
-	u8 pf_mdet_num, vp_mdet_num;
 	u32 reg;
 
 	/*
@@ -1868,18 +1916,20 @@ ixl_handle_rx_mdd_event(struct ixl_pf *pf)
 		    I40E_GL_MDET_RX_EVENT_SHIFT;
 		queue = (reg & I40E_GL_MDET_RX_QUEUE_MASK) >>
 		    I40E_GL_MDET_RX_QUEUE_SHIFT;
+		if (queue >= hw->func_caps.base_queue)
+			queue -= hw->func_caps.base_queue;
+		device_printf(dev,
+		    "last RX malicious-driver cause %#x on queue %u, "
+		    "function %#x\n", event, queue, pf_num);
 		wr32(hw, I40E_GL_MDET_RX, 0xffffffff);
-		mdd_detected = true;
 	}
-
-	if (!mdd_detected)
-		return;
 
 	reg = rd32(hw, I40E_PF_MDET_RX);
 	if (reg & I40E_PF_MDET_RX_VALID_MASK) {
 		wr32(hw, I40E_PF_MDET_RX, 0xFFFF);
-		pf_mdet_num = hw->pf_id;
-		pf_mdd_detected = true;
+		device_printf(dev,
+		    "RX malicious-driver issue detected on PF-%u\n",
+		    hw->pf_id);
 	}
 
 	/* Check if MDD was caused by a VF */
@@ -1888,32 +1938,16 @@ ixl_handle_rx_mdd_event(struct ixl_pf *pf)
 		reg = rd32(hw, I40E_VP_MDET_RX(i));
 		if (reg & I40E_VP_MDET_RX_VALID_MASK) {
 			wr32(hw, I40E_VP_MDET_RX(i), 0xFFFF);
-			vp_mdet_num = i;
-			vf->num_mdd_events++;
-			vf_mdd_detected = true;
+			if (!(vf->vf_flags & VF_FLAG_ENABLED))
+				continue;
+			vf->mdd_rx_events++;
+			vf->mdd_event_pending = true;
+			if (!vf->mdd_blocked) {
+				vf->mdd_blocked = true;
+				vf->mdd_reset_pending = true;
+			}
 		}
 	}
-
-	/* Print out an error message */
-	if (vf_mdd_detected && pf_mdd_detected)
-		device_printf(dev,
-		    "Malicious Driver Detection event %d"
-		    " on RX queue %d, pf number %d (PF-%d), (VF-%d)\n",
-		    event, queue, pf_num, pf_mdet_num, vp_mdet_num);
-	else if (vf_mdd_detected && !pf_mdd_detected)
-		device_printf(dev,
-		    "Malicious Driver Detection event %d"
-		    " on RX queue %d, pf number %d, (VF-%d)\n",
-		    event, queue, pf_num, vp_mdet_num);
-	else if (!vf_mdd_detected && pf_mdd_detected)
-		device_printf(dev,
-		    "Malicious Driver Detection event %d"
-		    " on RX queue %d, pf number %d (PF-%d)\n",
-		    event, queue, pf_num, pf_mdet_num);
-	/* Theoretically shouldn't happen */
-	else
-		device_printf(dev,
-		    "RX Malicious Driver Detection event (unknown)\n");
 }
 
 /**
@@ -1926,6 +1960,10 @@ void
 ixl_handle_mdd_event(struct ixl_pf *pf)
 {
 	struct i40e_hw *hw = &pf->hw;
+	struct ixl_vf *vf;
+	static const struct timeval log_interval = { 2, 0 };
+	bool reset;
+	int i;
 	u32 reg;
 
 	/*
@@ -1934,6 +1972,34 @@ ixl_handle_mdd_event(struct ixl_pf *pf)
 	 */
 	ixl_handle_tx_mdd_event(pf);
 	ixl_handle_rx_mdd_event(pf);
+	for (i = 0; i < pf->num_vfs; i++) {
+		vf = &pf->vfs[i];
+		if (!vf->mdd_event_pending)
+			continue;
+		vf->mdd_event_pending = false;
+		reset = vf->mdd_reset_pending;
+		vf->mdd_reset_pending = false;
+		if (ratecheck(&vf->last_mdd_log, &log_interval)) {
+			device_printf(pf->dev,
+			    "malicious-driver event from VF-%d "
+			    "(tx %ju, rx %ju); %s\n", i,
+			    (uintmax_t)vf->mdd_tx_events,
+			    (uintmax_t)vf->mdd_rx_events,
+			    pf->mdd_auto_reset_vf && reset ?
+			    "resetting VF" : "VF remains blocked");
+		}
+#ifdef PCI_IOV
+		if (pf->mdd_auto_reset_vf && reset) {
+			int error;
+
+			error = ixl_reset_vf_on_mdd(pf, i);
+			if (error != 0)
+				device_printf(pf->dev,
+				    "failed to reset MDD-blocked VF-%d: %d\n",
+				    i, error);
+		}
+#endif
+	}
 
 	ixl_clear_state(&pf->state, IXL_STATE_MDD_PENDING);
 
@@ -1990,7 +2056,7 @@ void
 ixl_handle_empr_reset(struct ixl_pf *pf)
 {
 	struct ixl_vsi	*vsi = &pf->vsi;
-	bool is_up = !!(if_getdrvflags(vsi->ifp) & IFF_DRV_RUNNING);
+	bool is_up = iflib_is_running(vsi->ctx);
 
 	ixl_prepare_for_reset(pf, is_up);
 	/*
@@ -2214,7 +2280,7 @@ ixl_update_eth_stats(struct ixl_vsi *vsi)
 	struct i40e_hw *hw = &pf->hw;
 	struct i40e_eth_stats *es;
 	struct i40e_eth_stats *oes;
-	u16 stat_idx = vsi->info.stat_counter_idx;
+	u16 stat_idx = le16toh(vsi->info.stat_counter_idx);
 
 	es = &vsi->eth_stats;
 	oes = &vsi->eth_stats_offsets;
@@ -3058,8 +3124,8 @@ ixl_sysctl_show_fw(SYSCTL_HANDLER_ARGS)
 	return (0);
 }
 
-void
-ixl_print_nvm_cmd(device_t dev, struct i40e_nvm_access *nvma)
+static void
+ixl_print_nvm_cmd(device_t dev, int apiver, struct i40e_nvm_access *nvma)
 {
 	u8 nvma_ptr = nvma->config & 0xFF;
 	u8 nvma_flags = (nvma->config & 0xF00) >> 8;
@@ -3069,7 +3135,7 @@ ixl_print_nvm_cmd(device_t dev, struct i40e_nvm_access *nvma)
 	case I40E_NVM_READ:
 		if (nvma_ptr == 0xF && nvma_flags == 0xF &&
 		    nvma->offset == 0 && nvma->data_size == 1) {
-			device_printf(dev, "NVMUPD: Get Driver Status Command\n");
+			device_printf(dev, "NVMUPD: API: v%d Get Driver Status Command\n", apiver);
 			return;
 		}
 		cmd_str = "READ ";
@@ -3078,12 +3144,12 @@ ixl_print_nvm_cmd(device_t dev, struct i40e_nvm_access *nvma)
 		cmd_str = "WRITE";
 		break;
 	default:
-		device_printf(dev, "NVMUPD: unknown command: 0x%08x\n", nvma->command);
+		device_printf(dev, "NVMUPD: API: v%d unknown command: 0x%08x\n", apiver, nvma->command);
 		return;
 	}
 	device_printf(dev,
-	    "NVMUPD: cmd: %s ptr: 0x%02x flags: 0x%01x offset: 0x%08x data_s: 0x%08x\n",
-	    cmd_str, nvma_ptr, nvma_flags, nvma->offset, nvma->data_size);
+	    "NVMUPD: API: v%d cmd: %s ptr: 0x%02x flags: 0x%01x offset: 0x%08x data_s: 0x%08x\n",
+	    apiver, cmd_str, nvma_ptr, nvma_flags, nvma->offset, nvma->data_size);
 }
 
 int
@@ -3094,7 +3160,7 @@ ixl_handle_nvmupd_cmd(struct ixl_pf *pf, struct ifdrv *ifd)
 	device_t dev = pf->dev;
 	enum i40e_status_code status = 0;
 	size_t nvma_size, ifd_len, exp_len;
-	int err, perrno;
+	int err, perrno, apiver;
 
 	DEBUGFUNC("ixl_handle_nvmupd_cmd");
 
@@ -3110,20 +3176,26 @@ ixl_handle_nvmupd_cmd(struct ixl_pf *pf, struct ifdrv *ifd)
 		    __func__, ifd_len, nvma_size);
 		device_printf(dev, "%s: data pointer: %p\n", __func__,
 		    ifd->ifd_data);
-		return (EINVAL);
+		err = EINVAL;
+		goto out;
 	}
+
+	if (ifd->ifd_cmd == I40E_NVM_ACCESS &&
+	    !ixl_testandset_state(&pf->state, IXL_STATE_NVMUPD_API_WARNED))
+		device_printf(dev,
+		    "Using deprecated tools API, please update the tool\n");
 
 	nvma = malloc(ifd_len, M_IXL, M_WAITOK);
 	err = copyin(ifd->ifd_data, nvma, ifd_len);
 	if (err) {
 		device_printf(dev, "%s: Cannot get request from user space\n",
 		    __func__);
-		free(nvma, M_IXL);
-		return (err);
+		goto out_free;
 	}
 
+	apiver = ifd->ifd_cmd == I40E_NVM_ACCESS2 ? 2 : 1;
 	if (pf->dbg_mask & IXL_DBG_NVMUPD)
-		ixl_print_nvm_cmd(dev, nvma);
+		ixl_print_nvm_cmd(dev, apiver, nvma);
 
 	if (IXL_PF_IS_RESETTING(pf)) {
 		int count = 0;
@@ -3138,16 +3210,16 @@ ixl_handle_nvmupd_cmd(struct ixl_pf *pf, struct ifdrv *ifd)
 		device_printf(dev,
 		    "%s: timeout waiting for EMP reset to finish\n",
 		    __func__);
-		free(nvma, M_IXL);
-		return (-EBUSY);
+		perrno = -EBUSY;
+		goto out_sanitize;
 	}
 
 	if (nvma->data_size < 1 || nvma->data_size > 4096) {
 		device_printf(dev,
 		    "%s: invalid request, data size not in supported range\n",
 		    __func__);
-		free(nvma, M_IXL);
-		return (EINVAL);
+		err = EINVAL;
+		goto out_free;
 	}
 
 	/*
@@ -3165,8 +3237,7 @@ ixl_handle_nvmupd_cmd(struct ixl_pf *pf, struct ifdrv *ifd)
 		if (err) {
 			device_printf(dev, "%s: Cannot get request from user space\n",
 					__func__);
-			free(nvma, M_IXL);
-			return (err);
+			goto out_free;
 		}
 	}
 
@@ -3175,27 +3246,37 @@ ixl_handle_nvmupd_cmd(struct ixl_pf *pf, struct ifdrv *ifd)
 	status = i40e_nvmupd_command(hw, nvma, nvma->data, &perrno);
 	// IXL_PF_UNLOCK(pf);
 
+	/* Let the nvmupdate report errors, show them only when debug is enabled */
+	if (status != 0 && (pf->dbg_mask & IXL_DBG_NVMUPD) != 0)
+		device_printf(dev, "i40e_nvmupd_command API: v%d status %s, perrno %d\n",
+		    apiver, i40e_stat_str(hw, status), perrno);
+
 	err = copyout(nvma, ifd->ifd_data, ifd_len);
-	free(nvma, M_IXL);
 	if (err) {
 		device_printf(dev, "%s: Cannot return data to user space\n",
 				__func__);
-		return (err);
+		goto out_free;
 	}
 
-	/* Let the nvmupdate report errors, show them only when debug is enabled */
-	if (status != 0 && (pf->dbg_mask & IXL_DBG_NVMUPD) != 0)
-		device_printf(dev, "i40e_nvmupd_command status %s, perrno %d\n",
-		    i40e_stat_str(hw, status), perrno);
+out_sanitize:
+	if (ifd->ifd_cmd == I40E_NVM_ACCESS2) {
+		err = -perrno;
+		goto out_free;
+	}
 
 	/*
 	 * -EPERM is actually ERESTART, which the kernel interprets as it needing
 	 * to run this ioctl again. So use -EACCES for -EPERM instead.
 	 */
 	if (perrno == -EPERM)
-		return (-EACCES);
+		err = -EACCES;
 	else
-		return (perrno);
+		err = perrno;
+
+out_free:
+	free(nvma, M_IXL);
+out:
+	return (err);
 }
 
 int
@@ -3483,7 +3564,7 @@ ixl_sysctl_phy_abilities(SYSCTL_HANDLER_ARGS)
 	if (abilities.phy_type != 0) {
 		sbuf_printf(buf, "<");
 		for (int i = 0; i < 32; i++)
-			if ((1 << i) & abilities.phy_type)
+			if ((1U << i) & abilities.phy_type)
 				sbuf_printf(buf, "%s,", ixl_phy_type_string(i, false));
 		sbuf_printf(buf, ">");
 	}

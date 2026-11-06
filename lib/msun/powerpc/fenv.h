@@ -37,20 +37,10 @@
 #endif
 
 typedef	__uint32_t	fenv_t;
+typedef	__uint32_t	femode_t;
 typedef	__uint32_t	fexcept_t;
 
 /* Exception flags */
-#ifdef __SPE__
-#define FE_OVERFLOW	0x00000100
-#define FE_UNDERFLOW	0x00000200
-#define FE_DIVBYZERO	0x00000400
-#define FE_INVALID	0x00000800
-#define FE_INEXACT	0x00001000
-
-#define	FE_ALL_INVALID	FE_INVALID
-
-#define	_FPUSW_SHIFT	6
-#else
 #define	FE_INEXACT	0x02000000
 #define	FE_DIVBYZERO	0x04000000
 #define	FE_UNDERFLOW	0x08000000
@@ -78,7 +68,6 @@ typedef	__uint32_t	fexcept_t;
 			 FE_VXSNAN | FE_INVALID)
 
 #define	_FPUSW_SHIFT	22
-#endif
 #define	FE_ALL_EXCEPT	(FE_DIVBYZERO | FE_INEXACT | \
 			 FE_ALL_INVALID | FE_OVERFLOW | FE_UNDERFLOW)
 
@@ -96,22 +85,19 @@ __BEGIN_DECLS
 extern const fenv_t	__fe_dfl_env;
 #define	FE_DFL_ENV	(&__fe_dfl_env)
 
+/* Default floating-point control modes */
+extern const femode_t	__fe_dfl_mode;
+#define	FE_DFL_MODE	(&__fe_dfl_mode)
+
 /* We need to be able to map status flag positions to mask flag positions */
 #define	_ENABLE_MASK	((FE_DIVBYZERO | FE_INEXACT | FE_INVALID | \
 			 FE_OVERFLOW | FE_UNDERFLOW) >> _FPUSW_SHIFT)
 
 #ifndef _SOFT_FLOAT
-#ifdef __SPE__
-#define	__mffs(__env) \
-	__asm __volatile("mfspr %0, 512" : "=r" ((__env)->__bits.__reg))
-#define	__mtfsf(__env) \
-	__asm __volatile("mtspr 512,%0;isync" :: "r" ((__env).__bits.__reg))
-#else
 #define	__mffs(__env) \
 	__asm __volatile("mffs %0" : "=f" ((__env)->__d))
 #define	__mtfsf(__env) \
 	__asm __volatile("mtfsf 255,%0" :: "f" ((__env).__d))
-#endif
 #else
 #define	__mffs(__env)
 #define	__mtfsf(__env)
@@ -130,8 +116,46 @@ union __fpscr {
 	} __bits;
 };
 
+int feclearexcept(int);
+int fegetexceptflag(fexcept_t *, int);
+int fesetexceptflag(const fexcept_t *, int);
+int feraiseexcept(int);
+int fetestexcept(int);
+int fegetround(void);
+int fesetround(int);
+int fegetmode(femode_t *);
+int fesetmode(const femode_t *);
+int fegetenv(fenv_t *);
+int feholdexcept(fenv_t *);
+int fesetenv(const fenv_t *);
+int feupdateenv(const fenv_t *);
+
+/*
+ * C permits a standard library function to also be exposed as a function-like
+ * macro (C23 7.1.4), and msun uses that here to inline the fast path.  C++
+ * forbids it: <cfenv> imports these names into namespace std (using
+ * ::feclearexcept; etc.), so std::feclearexcept() and friends must denote the
+ * actual functions.  Expose the inlining macros to C only; C++ uses the real
+ * extern functions (defined in the matching lib/msun/<arch>/fenv.c).
+ */
+#ifndef __cplusplus
+#define	feclearexcept(a)	__feclearexcept_int(a)
+#define	fegetexceptflag(e, a)	__fegetexceptflag_int(e, a)
+#define	fesetexceptflag(e, a)	__fesetexceptflag_int(e, a)
+#define	feraiseexcept(a)	__feraiseexcept_int(a)
+#define	fetestexcept(a)		__fetestexcept_int(a)
+#define	fegetround()		__fegetround_int()
+#define	fesetround(a)		__fesetround_int(a)
+#define	fegetmode(m)		__fegetmode_int(m)
+#define	fesetmode(m)		__fesetmode_int(m)
+#define	fegetenv(e)		__fegetenv_int(e)
+#define	feholdexcept(e)		__feholdexcept_int(e)
+#define	fesetenv(e)		__fesetenv_int(e)
+#define	feupdateenv(e)		__feupdateenv_int(e)
+#endif /* !__cplusplus */
+
 __fenv_static inline int
-feclearexcept(int __excepts)
+__feclearexcept_int(int __excepts)
 {
 	union __fpscr __r;
 
@@ -144,7 +168,7 @@ feclearexcept(int __excepts)
 }
 
 __fenv_static inline int
-fegetexceptflag(fexcept_t *__flagp, int __excepts)
+__fegetexceptflag_int(fexcept_t *__flagp, int __excepts)
 {
 	union __fpscr __r;
 
@@ -154,7 +178,7 @@ fegetexceptflag(fexcept_t *__flagp, int __excepts)
 }
 
 __fenv_static inline int
-fesetexceptflag(const fexcept_t *__flagp, int __excepts)
+__fesetexceptflag_int(const fexcept_t *__flagp, int __excepts)
 {
 	union __fpscr __r;
 
@@ -167,11 +191,8 @@ fesetexceptflag(const fexcept_t *__flagp, int __excepts)
 	return (0);
 }
 
-#ifdef __SPE__
-extern int	feraiseexcept(int __excepts);
-#else
 __fenv_static inline int
-feraiseexcept(int __excepts)
+__feraiseexcept_int(int __excepts)
 {
 	union __fpscr __r;
 
@@ -182,10 +203,9 @@ feraiseexcept(int __excepts)
 	__mtfsf(__r);
 	return (0);
 }
-#endif
 
 __fenv_static inline int
-fetestexcept(int __excepts)
+__fetestexcept_int(int __excepts)
 {
 	union __fpscr __r;
 
@@ -194,7 +214,7 @@ fetestexcept(int __excepts)
 }
 
 __fenv_static inline int
-fegetround(void)
+__fegetround_int(void)
 {
 	union __fpscr __r;
 
@@ -203,7 +223,7 @@ fegetround(void)
 }
 
 __fenv_static inline int
-fesetround(int __round)
+__fesetround_int(int __round)
 {
 	union __fpscr __r;
 
@@ -217,7 +237,29 @@ fesetround(int __round)
 }
 
 __fenv_static inline int
-fegetenv(fenv_t *__envp)
+__fegetmode_int(femode_t *__modep)
+{
+	union __fpscr __r;
+
+	__mffs(&__r);
+	*__modep = __r.__bits.__reg & ~FE_ALL_EXCEPT;
+	return (0);
+}
+
+__fenv_static inline int
+__fesetmode_int(const femode_t *__modep)
+{
+	union __fpscr __r;
+
+	__mffs(&__r);
+	__r.__bits.__reg &= FE_ALL_EXCEPT;
+	__r.__bits.__reg |= *__modep & ~FE_ALL_EXCEPT;
+	__mtfsf(__r);
+	return (0);
+}
+
+__fenv_static inline int
+__fegetenv_int(fenv_t *__envp)
 {
 	union __fpscr __r;
 
@@ -227,7 +269,7 @@ fegetenv(fenv_t *__envp)
 }
 
 __fenv_static inline int
-feholdexcept(fenv_t *__envp)
+__feholdexcept_int(fenv_t *__envp)
 {
 	union __fpscr __r;
 
@@ -239,7 +281,7 @@ feholdexcept(fenv_t *__envp)
 }
 
 __fenv_static inline int
-fesetenv(const fenv_t *__envp)
+__fesetenv_int(const fenv_t *__envp)
 {
 	union __fpscr __r;
 
@@ -249,7 +291,7 @@ fesetenv(const fenv_t *__envp)
 }
 
 __fenv_static inline int
-feupdateenv(const fenv_t *__envp)
+__feupdateenv_int(const fenv_t *__envp)
 {
 	union __fpscr __r;
 
@@ -262,8 +304,16 @@ feupdateenv(const fenv_t *__envp)
 
 #if __BSD_VISIBLE
 
+int feenableexcept(int);
+int fedisableexcept(int);
+
+#ifndef __cplusplus	/* see the note above; C++ uses the real functions */
+#define	feenableexcept(a)	__feenableexcept_int(a)
+#define	fedisableexcept(a)	__fedisableexcept_int(a)
+#endif
+
 __fenv_static inline int
-feenableexcept(int __mask)
+__feenableexcept_int(int __mask)
 {
 	union __fpscr __r;
 	fenv_t __oldmask;
@@ -276,7 +326,7 @@ feenableexcept(int __mask)
 }
 
 __fenv_static inline int
-fedisableexcept(int __mask)
+__fedisableexcept_int(int __mask)
 {
 	union __fpscr __r;
 	fenv_t __oldmask;

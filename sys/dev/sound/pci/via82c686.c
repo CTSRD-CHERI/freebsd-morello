@@ -52,8 +52,8 @@
 
 /* we rely on this struct being packed to 64 bits */
 struct via_dma_op {
-        u_int32_t ptr;
-        u_int32_t flags;
+        uint32_t ptr;
+        uint32_t flags;
 #define VIA_DMAOP_EOL         0x80000000
 #define VIA_DMAOP_FLAG        0x40000000
 #define VIA_DMAOP_STOP        0x20000000
@@ -89,11 +89,11 @@ struct via_info {
 
 	struct via_chinfo pch, rch;
 	struct via_dma_op *sgd_table;
-	u_int16_t codec_caps;
-	struct mtx *lock;
+	uint16_t codec_caps;
+	struct mtx lock;
 };
 
-static u_int32_t via_fmt[] = {
+static uint32_t via_fmt[] = {
 	SND_FORMAT(AFMT_U8, 1, 0),
 	SND_FORMAT(AFMT_U8, 2, 0),
 	SND_FORMAT(AFMT_S16_LE, 1, 0),
@@ -103,7 +103,7 @@ static u_int32_t via_fmt[] = {
 static struct pcmchan_caps via_vracaps = {4000, 48000, via_fmt, 0};
 static struct pcmchan_caps via_caps = {48000, 48000, via_fmt, 0};
 
-static __inline u_int32_t
+static __inline uint32_t
 via_rd(struct via_info *via, int regno, int size)
 {
 
@@ -120,7 +120,7 @@ via_rd(struct via_info *via, int regno, int size)
 }
 
 static __inline void
-via_wr(struct via_info *via, int regno, u_int32_t data, int size)
+via_wr(struct via_info *via, int regno, uint32_t data, int size)
 {
 
 	switch (size) {
@@ -174,7 +174,7 @@ via_waitvalid_codec(struct via_info *via)
 }
 
 static int
-via_write_codec(kobj_t obj, void *addr, int reg, u_int32_t val)
+via_write_codec(kobj_t obj, void *addr, int reg, uint32_t val)
 {
 	struct via_info *via = addr;
 
@@ -205,8 +205,8 @@ via_read_codec(kobj_t obj, void *addr, int reg)
 }
 
 static kobj_method_t via_ac97_methods[] = {
-    	KOBJMETHOD(ac97_read,		via_read_codec),
-    	KOBJMETHOD(ac97_write,		via_write_codec),
+	KOBJMETHOD(ac97_read,		via_read_codec),
+	KOBJMETHOD(ac97_write,		via_write_codec),
 	KOBJMETHOD_END
 };
 AC97_DECLARE(via_ac97);
@@ -216,7 +216,7 @@ AC97_DECLARE(via_ac97);
 static int
 via_buildsgdt(struct via_chinfo *ch)
 {
-	u_int32_t phys_addr, flag;
+	uint32_t phys_addr, flag;
 	int i, segs, seg_size;
 
 	/*
@@ -226,8 +226,8 @@ via_buildsgdt(struct via_chinfo *ch)
 	 *  is feeding.
 	 */
 	seg_size = ch->blksz;
-	segs = sndbuf_getsize(ch->buffer) / seg_size;
-	phys_addr = sndbuf_getbufaddr(ch->buffer);
+	segs = ch->buffer->bufsize / seg_size;
+	phys_addr = ch->buffer->buf_addr;
 
 	for (i = 0; i < segs; i++) {
 		flag = (i == segs - 1)? VIA_DMAOP_EOL : VIA_DMAOP_FLAG;
@@ -245,7 +245,7 @@ viachan_init(kobj_t obj, void *devinfo, struct snd_dbuf *b, struct pcm_channel *
 	struct via_info *via = devinfo;
 	struct via_chinfo *ch;
 
-	snd_mtxlock(via->lock);
+	mtx_lock(&via->lock);
 	if (dir == PCMDIR_PLAY) {
 		ch = &via->pch;
 		ch->base = VIA_PLAY_DMAOPS_BASE;
@@ -268,7 +268,7 @@ viachan_init(kobj_t obj, void *devinfo, struct snd_dbuf *b, struct pcm_channel *
 	ch->channel = c;
 	ch->buffer = b;
 	ch->dir = dir;
-	snd_mtxunlock(via->lock);
+	mtx_unlock(&via->lock);
 
 	if (sndbuf_alloc(ch->buffer, via->parent_dmat, 0, via->bufsz) != 0)
 		return NULL;
@@ -277,7 +277,7 @@ viachan_init(kobj_t obj, void *devinfo, struct snd_dbuf *b, struct pcm_channel *
 }
 
 static int
-viachan_setformat(kobj_t obj, void *data, u_int32_t format)
+viachan_setformat(kobj_t obj, void *data, uint32_t format)
 {
 	struct via_chinfo *ch = data;
 	struct via_info *via = ch->parent;
@@ -290,18 +290,18 @@ viachan_setformat(kobj_t obj, void *data, u_int32_t format)
 		mode_set |= VIA_RPMODE_16BIT;
 
 	DEB(printf("set format: dir = %d, format=%x\n", ch->dir, format));
-	snd_mtxlock(via->lock);
+	mtx_lock(&via->lock);
 	mode = via_rd(via, ch->mode, 1);
 	mode &= ~(VIA_RPMODE_16BIT | VIA_RPMODE_STEREO);
 	mode |= mode_set;
 	via_wr(via, ch->mode, mode, 1);
-	snd_mtxunlock(via->lock);
+	mtx_unlock(&via->lock);
 
 	return 0;
 }
 
-static u_int32_t
-viachan_setspeed(kobj_t obj, void *data, u_int32_t speed)
+static uint32_t
+viachan_setspeed(kobj_t obj, void *data, uint32_t speed)
 {
 	struct via_chinfo *ch = data;
 	struct via_info *via = ch->parent;
@@ -323,13 +323,14 @@ viachan_setspeed(kobj_t obj, void *data, u_int32_t speed)
 		return 48000;
 }
 
-static u_int32_t
-viachan_setblocksize(kobj_t obj, void *data, u_int32_t blocksize)
+static uint32_t
+viachan_setblocksize(kobj_t obj, void *data, uint32_t blocksize)
 {
 	struct via_chinfo *ch = data;
 
+	if (sndbuf_resize(ch->buffer, SEGS_PER_CHAN, blocksize) != 0)
+		return 0;
 	ch->blksz = blocksize;
-	sndbuf_resize(ch->buffer, SEGS_PER_CHAN, ch->blksz);
 
 	return ch->blksz;
 }
@@ -346,34 +347,34 @@ viachan_trigger(kobj_t obj, void *data, int go)
 
 	DEB(printf("ado located at va=%p pa=%x\n", ch->sgd_table, sgd_addr));
 
-	snd_mtxlock(via->lock);
+	mtx_lock(&via->lock);
 	if (go == PCMTRIG_START) {
 		via_buildsgdt(ch);
 		via_wr(via, ch->base, sgd_addr, 4);
 		via_wr(via, ch->ctrl, VIA_RPCTRL_START, 1);
 	} else
 		via_wr(via, ch->ctrl, VIA_RPCTRL_TERMINATE, 1);
-	snd_mtxunlock(via->lock);
+	mtx_unlock(&via->lock);
 
 	DEB(printf("viachan_trigger: go=%d\n", go));
 	return 0;
 }
 
-static u_int32_t
+static uint32_t
 viachan_getptr(kobj_t obj, void *data)
 {
 	struct via_chinfo *ch = data;
 	struct via_info *via = ch->parent;
 	bus_addr_t sgd_addr = ch->sgd_addr;
-	u_int32_t ptr, base, base1, len, seg;
+	uint32_t ptr, base, base1, len, seg;
 
-	snd_mtxlock(via->lock);
+	mtx_lock(&via->lock);
 	base1 = via_rd(via, ch->base, 4);
 	len = via_rd(via, ch->count, 4);
 	base = via_rd(via, ch->base, 4);
-	if (base != base1) 	/* Avoid race hazard */
+	if (base != base1)	/* Avoid race hazard */
 		len = via_rd(via, ch->count, 4);
-	snd_mtxunlock(via->lock);
+	mtx_unlock(&via->lock);
 
 	DEB(printf("viachan_getptr: len / base = %x / %x\n", len, base));
 
@@ -385,7 +386,7 @@ viachan_getptr(kobj_t obj, void *data)
 		seg = SEGS_PER_CHAN;
 
 	/* Now work out offset: seg less count */
-	ptr = (seg * sndbuf_getsize(ch->buffer) / SEGS_PER_CHAN) - len;
+	ptr = (seg * ch->buffer->bufsize / SEGS_PER_CHAN) - len;
 	if (ch->dir == PCMDIR_REC) {
 		/* DMA appears to operate on memory 'lines' of 32 bytes	*/
 		/* so don't return any part line - it isn't in RAM yet	*/
@@ -406,13 +407,13 @@ viachan_getcaps(kobj_t obj, void *data)
 }
 
 static kobj_method_t viachan_methods[] = {
-    	KOBJMETHOD(channel_init,		viachan_init),
-    	KOBJMETHOD(channel_setformat,		viachan_setformat),
-    	KOBJMETHOD(channel_setspeed,		viachan_setspeed),
-    	KOBJMETHOD(channel_setblocksize,	viachan_setblocksize),
-    	KOBJMETHOD(channel_trigger,		viachan_trigger),
-    	KOBJMETHOD(channel_getptr,		viachan_getptr),
-    	KOBJMETHOD(channel_getcaps,		viachan_getcaps),
+	KOBJMETHOD(channel_init,		viachan_init),
+	KOBJMETHOD(channel_setformat,		viachan_setformat),
+	KOBJMETHOD(channel_setspeed,		viachan_setspeed),
+	KOBJMETHOD(channel_setblocksize,	viachan_setblocksize),
+	KOBJMETHOD(channel_trigger,		viachan_trigger),
+	KOBJMETHOD(channel_getptr,		viachan_getptr),
+	KOBJMETHOD(channel_getcaps,		viachan_getcaps),
 	KOBJMETHOD_END
 };
 CHANNEL_DECLARE(viachan);
@@ -426,22 +427,22 @@ via_intr(void *p)
 
 	/* DEB(printf("viachan_intr\n")); */
 	/* Read channel */
-	snd_mtxlock(via->lock);
+	mtx_lock(&via->lock);
 	if (via_rd(via, VIA_PLAY_STAT, 1) & VIA_RPSTAT_INTR) {
 		via_wr(via, VIA_PLAY_STAT, VIA_RPSTAT_INTR, 1);
-		snd_mtxunlock(via->lock);
+		mtx_unlock(&via->lock);
 		chn_intr(via->pch.channel);
-		snd_mtxlock(via->lock);
+		mtx_lock(&via->lock);
 	}
 
 	/* Write channel */
 	if (via_rd(via, VIA_RECORD_STAT, 1) & VIA_RPSTAT_INTR) {
 		via_wr(via, VIA_RECORD_STAT, VIA_RPSTAT_INTR, 1);
-		snd_mtxunlock(via->lock);
+		mtx_unlock(&via->lock);
 		chn_intr(via->rch.channel);
 		return;
 	}
-	snd_mtxunlock(via->lock);
+	mtx_unlock(&via->lock);
 }
 
 /*
@@ -469,11 +470,11 @@ via_attach(device_t dev)
 {
 	struct via_info *via = NULL;
 	char status[SND_STATUSLEN];
-	u_int32_t data, cnt;
+	uint32_t data, cnt;
 
 	via = malloc(sizeof(*via), M_DEVBUF, M_WAITOK | M_ZERO);
-	via->lock = snd_mtxcreate(device_get_nameunit(dev),
-	    "snd_via82c686 softc");
+	mtx_init(&via->lock, device_get_nameunit(dev), "snd_via82c686 softc",
+	    MTX_DEF);
 
 	pci_enable_busmaster(dev);
 
@@ -498,12 +499,12 @@ via_attach(device_t dev)
 	}
 
 	/* Power everything up */
-	pci_write_config(dev, VIA_ACLINKCTRL, VIA_ACLINK_DESIRED, 1);	
+	pci_write_config(dev, VIA_ACLINKCTRL, VIA_ACLINK_DESIRED, 1);
 
 	/* Wait for codec to become ready (largest reported delay here 310ms) */
 	for (cnt = 0; cnt < 2000; cnt++) {
 		data = pci_read_config(dev, VIA_AC97STATUS, 1);
-		if (data & VIA_AC97STATUS_RDY) 
+		if (data & VIA_AC97STATUS_RDY)
 			break;
 		DELAY(5000);
 	}
@@ -535,11 +536,12 @@ via_attach(device_t dev)
 	if (!via->codec)
 		goto bad;
 
+	pcm_init(dev, via);
 	if (mixer_init(dev, ac97_getmixerclass(), via->codec))
 		goto bad;
 
 	via->codec_caps = ac97_getextcaps(via->codec);
-	ac97_setextmode(via->codec, 
+	ac97_setextmode(via->codec,
 			via->codec_caps & (AC97_EXTCAP_VRA | AC97_EXTCAP_VRM));
 
 	/* DMA tag for buffers */
@@ -585,7 +587,6 @@ via_attach(device_t dev)
 		 device_get_nameunit(device_get_parent(dev)));
 
 	/* Register */
-	pcm_init(dev, via);
 	pcm_addchan(dev, PCMDIR_PLAY, &viachan_class, via);
 	pcm_addchan(dev, PCMDIR_REC, &viachan_class, via);
 	if (pcm_register(dev, status))
@@ -600,8 +601,8 @@ bad:
 	if (via->sgd_addr) bus_dmamap_unload(via->sgd_dmat, via->sgd_dmamap);
 	if (via->sgd_table) bus_dmamem_free(via->sgd_dmat, via->sgd_table, via->sgd_dmamap);
 	if (via->sgd_dmat) bus_dma_tag_destroy(via->sgd_dmat);
-	if (via->lock) snd_mtxfree(via->lock);
-	if (via) free(via, M_DEVBUF);
+	mtx_destroy(&via->lock);
+	free(via, M_DEVBUF);
 	return ENXIO;
 }
 
@@ -623,7 +624,7 @@ via_detach(device_t dev)
 	bus_dmamap_unload(via->sgd_dmat, via->sgd_dmamap);
 	bus_dmamem_free(via->sgd_dmat, via->sgd_table, via->sgd_dmamap);
 	bus_dma_tag_destroy(via->sgd_dmat);
-	snd_mtxfree(via->lock);
+	mtx_destroy(&via->lock);
 	free(via, M_DEVBUF);
 	return 0;
 }
@@ -642,5 +643,5 @@ static driver_t via_driver = {
 };
 
 DRIVER_MODULE(snd_via82c686, pci, via_driver, 0, 0);
-MODULE_DEPEND(snd_via82c686, sound, SOUND_MINVER, SOUND_PREFVER, SOUND_MAXVER);
+MODULE_DEPEND(snd_via82c686, sound, 1, 1, 1);
 MODULE_VERSION(snd_via82c686, 1);

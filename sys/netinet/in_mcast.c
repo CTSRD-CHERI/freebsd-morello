@@ -66,6 +66,7 @@
 #include <net/if_private.h>
 #include <netinet/ip_var.h>
 #include <netinet/igmp_var.h>
+#include <netinet/ip_mroute.h>
 
 #ifndef KTR_IGMPV3
 #define KTR_IGMPV3 KTR_INET
@@ -157,11 +158,6 @@ static void inm_release(struct in_multi *);
 static struct ip_moptions *
 		inp_findmoptions(struct inpcb *);
 static int	inp_get_source_filters(struct inpcb *, struct sockopt *);
-static int	inp_join_group(struct inpcb *, struct sockopt *);
-static int	inp_leave_group(struct inpcb *, struct sockopt *);
-static struct ifnet *
-		inp_lookup_mcast_ifp(const struct inpcb *,
-		    const struct sockaddr_in *, const struct in_addr);
 static int	inp_block_unblock_source(struct inpcb *, struct sockopt *);
 static int	inp_set_multicast_if(struct inpcb *, struct sockopt *);
 static int	inp_set_source_filters(struct inpcb *, struct sockopt *);
@@ -503,7 +499,7 @@ in_getmulti(struct ifnet *ifp, const struct in_addr *group,
 
 	IN_MULTI_LOCK_ASSERT();
 
-	ii = (struct in_ifinfo *)ifp->if_afdata[AF_INET];
+	ii = (struct in_ifinfo *)ifp->if_inet;
 	IN_MULTI_LIST_LOCK();
 	inm = inm_lookup(ifp, *group);
 	if (inm != NULL) {
@@ -1022,6 +1018,7 @@ inm_merge(struct in_multi *inm, /*const*/ struct in_mfilter *imf)
 	 * Maintain a count of source filters whose state was
 	 * actually modified by this operation.
 	 */
+	nims = NULL;
 	RB_FOREACH(ims, ip_msource_tree, &imf->imf_sources) {
 		lims = (struct in_msource *)ims;
 		if (lims->imsl_st[0] == imf->imf_st[0]) nsrc0++;
@@ -1770,7 +1767,7 @@ inp_getmoptions(struct inpcb *inp, struct sockopt *sopt)
 
 				mreqn.imr_ifindex = ifp->if_index;
 				NET_EPOCH_ENTER(et);
-				IFP_TO_IA(ifp, ia);
+				ia = in_ifprimaryaddr(ifp);
 				if (ia != NULL)
 					mreqn.imr_address =
 					    IA_SIN(ia)->sin_addr;
@@ -1832,75 +1829,61 @@ inp_getmoptions(struct inpcb *inp, struct sockopt *sopt)
 }
 
 /*
- * Look up the ifnet to use for a multicast group membership,
- * given the IPv4 address of an interface, and the IPv4 group address.
+ * Look up the ifnet to join a multicast group membership via legacy
+ * IP_ADD_MEMBERSHIP or via more modern MCAST_JOIN_GROUP.
  *
- * This routine exists to support legacy multicast applications
- * which do not understand that multicast memberships are scoped to
- * specific physical links in the networking stack, or which need
- * to join link-scope groups before IPv4 addresses are configured.
- *
- * Use this socket's current FIB number for any required FIB lookup.
- * If ina is INADDR_ANY, look up the group address in the unicast FIB,
- * and use its ifp; usually, this points to the default next-hop.
- *
- * If the FIB lookup fails, attempt to use the first non-loopback
- * interface with multicast capability in the system as a
- * last resort. The legacy IPv4 ASM API requires that we do
- * this in order to allow groups to be joined when the routing
- * table has not yet been populated during boot.
- *
- * Returns NULL if no ifp could be found, otherwise return referenced ifp.
- *
- * FUTURE: Implement IPv4 source-address selection.
+ * If the interface index was specified explicitly, just use it.  If the
+ * address was specified (legacy), try to find matching interface.  Else
+ * (index == 0 && no address) do a route lookup.  If that fails for a modern
+ * MCAST_JOIN_GROUP return failure, for legacy IP_ADD_MEMBERSHIP find first
+ * multicast capable interface.
  */
 static struct ifnet *
-inp_lookup_mcast_ifp(const struct inpcb *inp,
-    const struct sockaddr_in *gsin, const struct in_addr ina)
+inp_lookup_mcast_ifp(const struct inpcb *inp, const struct in_addr maddr,
+const struct in_addr *ina, const u_int index)
 {
 	struct ifnet *ifp;
 	struct nhop_object *nh;
 
 	NET_EPOCH_ASSERT();
-	KASSERT(inp != NULL, ("%s: inp must not be NULL", __func__));
-	KASSERT(gsin->sin_family == AF_INET, ("%s: not AF_INET", __func__));
-	KASSERT(IN_MULTICAST(ntohl(gsin->sin_addr.s_addr)),
-	    ("%s: not multicast", __func__));
 
-	ifp = NULL;
-	if (!in_nullhost(ina)) {
-		INADDR_TO_IFP(ina, ifp);
+	if (index != 0)
+		return (ifnet_byindex_ref(index));
+
+	if (ina != NULL && !in_nullhost(*ina)) {
+		INADDR_TO_IFP(*ina, ifp);
 		if (ifp != NULL)
 			if_ref(ifp);
-	} else {
-		nh = fib4_lookup(inp->inp_inc.inc_fibnum, gsin->sin_addr, 0, NHR_NONE, 0);
-		if (nh != NULL) {
-			ifp = nh->nh_ifp;
-			if_ref(ifp);
-		} else {
-			struct in_ifaddr *ia;
-			struct ifnet *mifp;
+		return (ifp);
+	}
 
-			mifp = NULL;
-			CK_STAILQ_FOREACH(ia, &V_in_ifaddrhead, ia_link) {
-				mifp = ia->ia_ifp;
-				if (!(mifp->if_flags & IFF_LOOPBACK) &&
-				     (mifp->if_flags & IFF_MULTICAST)) {
-					ifp = mifp;
-					if_ref(ifp);
-					break;
-				}
+	nh = fib4_lookup(inp->inp_inc.inc_fibnum, maddr, 0, NHR_NONE, 0);
+	if (nh != NULL) {
+		ifp = nh->nh_ifp;
+		if_ref(ifp);
+		return (ifp);
+	}
+
+	if (ina != NULL) {
+		struct in_ifaddr *ia;
+
+		CK_STAILQ_FOREACH(ia, &V_in_ifaddrhead, ia_link) {
+			if (!(ia->ia_ifp->if_flags & IFF_LOOPBACK) &&
+			     (ia->ia_ifp->if_flags & IFF_MULTICAST)) {
+				ifp = ia->ia_ifp;
+				if_ref(ifp);
+				return (ifp);
 			}
 		}
 	}
 
-	return (ifp);
+	return (NULL);
 }
 
 /*
  * Join an IPv4 multicast group, possibly with a source.
  */
-static int
+int
 inp_join_group(struct inpcb *inp, struct sockopt *sopt)
 {
 	struct group_source_req		 gsr;
@@ -1926,13 +1909,13 @@ inp_join_group(struct inpcb *inp, struct sockopt *sopt)
 	switch (sopt->sopt_name) {
 	case IP_ADD_MEMBERSHIP: {
 		struct ip_mreqn mreqn;
+		bool mreq;
 
-		if (sopt->sopt_valsize == sizeof(struct ip_mreqn))
-			error = sooptcopyin(sopt, &mreqn,
-			    sizeof(struct ip_mreqn), sizeof(struct ip_mreqn));
-		else
-			error = sooptcopyin(sopt, &mreqn,
-			    sizeof(struct ip_mreq), sizeof(struct ip_mreq));
+		mreq = (sopt->sopt_valsize != sizeof(struct ip_mreqn));
+
+		error = sooptcopyin(sopt, &mreqn,
+		    mreq ? sizeof(struct ip_mreq) : sizeof(struct ip_mreqn),
+		    mreq ? sizeof(struct ip_mreq) : sizeof(struct ip_mreqn));
 		if (error)
 			return (error);
 
@@ -1943,12 +1926,9 @@ inp_join_group(struct inpcb *inp, struct sockopt *sopt)
 			return (EINVAL);
 
 		NET_EPOCH_ENTER(et);
-		if (sopt->sopt_valsize == sizeof(struct ip_mreqn) &&
-		    mreqn.imr_ifindex != 0)
-			ifp = ifnet_byindex_ref(mreqn.imr_ifindex);
-		else
-			ifp = inp_lookup_mcast_ifp(inp, &gsa->sin,
-			    mreqn.imr_address);
+		ifp = inp_lookup_mcast_ifp(inp, mreqn.imr_multiaddr,
+		    mreq ? &mreqn.imr_address : NULL,
+		    mreq ? 0 : mreqn.imr_ifindex);
 		NET_EPOCH_EXIT(et);
 		break;
 	}
@@ -1971,8 +1951,8 @@ inp_join_group(struct inpcb *inp, struct sockopt *sopt)
 		ssa->sin.sin_addr = mreqs.imr_sourceaddr;
 
 		NET_EPOCH_ENTER(et);
-		ifp = inp_lookup_mcast_ifp(inp, &gsa->sin,
-		    mreqs.imr_interface);
+		ifp = inp_lookup_mcast_ifp(inp, mreqs.imr_multiaddr,
+		    &mreqs.imr_interface, 0);
 		NET_EPOCH_EXIT(et);
 		CTR3(KTR_IGMPV3, "%s: imr_interface = 0x%08x, ifp = %p",
 		    __func__, ntohl(mreqs.imr_interface.s_addr), ifp);
@@ -2013,7 +1993,8 @@ inp_join_group(struct inpcb *inp, struct sockopt *sopt)
 			return (EINVAL);
 
 		NET_EPOCH_ENTER(et);
-		ifp = ifnet_byindex_ref(gsr.gsr_interface);
+		ifp = inp_lookup_mcast_ifp(inp, gsa->sin.sin_addr, NULL,
+		    gsr.gsr_interface);
 		NET_EPOCH_EXIT(et);
 		if (ifp == NULL)
 			return (EADDRNOTAVAIL);
@@ -2226,7 +2207,7 @@ out_inp_unlocked:
 /*
  * Leave an IPv4 multicast group on an inpcb, possibly with a source.
  */
-static int
+int
 inp_leave_group(struct inpcb *inp, struct sockopt *sopt)
 {
 	struct epoch_tracker		 et;
@@ -2523,6 +2504,7 @@ inp_set_source_filters(struct inpcb *inp, struct sockopt *sopt)
 {
 	struct epoch_tracker	 et;
 	struct __msfilterreq	 msfr;
+	struct sockaddr_storage	*kss;
 	sockunion_t		*gsa;
 	struct ifnet		*ifp;
 	struct in_mfilter	*imf;
@@ -2534,9 +2516,6 @@ inp_set_source_filters(struct inpcb *inp, struct sockopt *sopt)
 	    sizeof(struct __msfilterreq));
 	if (error)
 		return (error);
-
-	if (msfr.msfr_nsrcs > in_mcast_maxsocksrc)
-		return (ENOBUFS);
 
 	if ((msfr.msfr_fmode != MCAST_EXCLUDE &&
 	     msfr.msfr_fmode != MCAST_INCLUDE))
@@ -2550,13 +2529,24 @@ inp_set_source_filters(struct inpcb *inp, struct sockopt *sopt)
 	if (!IN_MULTICAST(ntohl(gsa->sin.sin_addr.s_addr)))
 		return (EINVAL);
 
+	if (msfr.msfr_nsrcs > in_mcast_maxsocksrc)
+		return (ENOBUFS);
+	kss = mallocarray(msfr.msfr_nsrcs, sizeof(struct sockaddr_storage),
+	    M_TEMP, M_WAITOK);
+	error = copyin(msfr.msfr_srcs, kss,
+	    sizeof(struct sockaddr_storage) * msfr.msfr_nsrcs);
+	if (error)
+		goto out_inp_unlocked;
+
 	gsa->sin.sin_port = 0;	/* ignore port */
 
 	NET_EPOCH_ENTER(et);
 	ifp = ifnet_byindex(msfr.msfr_ifindex);
 	NET_EPOCH_EXIT(et);	/* XXXGL: unsafe ifp */
-	if (ifp == NULL)
-		return (EADDRNOTAVAIL);
+	if (ifp == NULL) {
+		error = EADDRNOTAVAIL;
+		goto out_inp_unlocked;
+	}
 
 	IN_MULTI_LOCK();
 
@@ -2588,23 +2578,8 @@ inp_set_source_filters(struct inpcb *inp, struct sockopt *sopt)
 	if (msfr.msfr_nsrcs > 0) {
 		struct in_msource	*lims;
 		struct sockaddr_in	*psin;
-		struct sockaddr_storage	*kss, *pkss;
+		struct sockaddr_storage	*pkss;
 		int			 i;
-
-		INP_WUNLOCK(inp);
-
-		CTR2(KTR_IGMPV3, "%s: loading %lu source list entries",
-		    __func__, (unsigned long)msfr.msfr_nsrcs);
-		kss = malloc(sizeof(struct sockaddr_storage) * msfr.msfr_nsrcs,
-		    M_TEMP, M_WAITOK);
-		error = copyin(msfr.msfr_srcs, kss,
-		    sizeof(struct sockaddr_storage) * msfr.msfr_nsrcs);
-		if (error) {
-			free(kss, M_TEMP);
-			return (error);
-		}
-
-		INP_WLOCK(inp);
 
 		/*
 		 * Mark all source filters as UNDEFINED at t1.
@@ -2640,7 +2615,6 @@ inp_set_source_filters(struct inpcb *inp, struct sockopt *sopt)
 				break;
 			lims->imsl_st[1] = imf->imf_st[1];
 		}
-		free(kss, M_TEMP);
 	}
 
 	if (error)
@@ -2677,6 +2651,8 @@ out_imf_rollback:
 out_inp_locked:
 	INP_WUNLOCK(inp);
 	IN_MULTI_UNLOCK();
+out_inp_unlocked:
+	free(kss, M_TEMP);
 	return (error);
 }
 
@@ -2720,7 +2696,8 @@ inp_setmoptions(struct inpcb *inp, struct sockopt *sopt)
 		error = sooptcopyin(sopt, &vifi, sizeof(int), sizeof(int));
 		if (error)
 			break;
-		if (!legal_vif_num(vifi) && (vifi != -1)) {
+		if (!legal_vif_num(inp->inp_socket->so_fibnum, vifi) &&
+		    vifi != -1) {
 			error = EINVAL;
 			break;
 		}
@@ -2869,6 +2846,11 @@ sysctl_ip_mcast_filters(SYSCTL_HANDLER_ARGS)
 		return (EINVAL);
 	}
 
+	retval = sysctl_wire_old_buffer(req,
+	    sizeof(uint32_t) + (in_mcast_maxgrpsrc * sizeof(struct in_addr)));
+	if (retval)
+		return (retval);
+
 	ifindex = name[0];
 	NET_EPOCH_ENTER(et);
 	ifp = ifnet_byindex(ifindex);
@@ -2877,13 +2859,6 @@ sysctl_ip_mcast_filters(SYSCTL_HANDLER_ARGS)
 		CTR2(KTR_IGMPV3, "%s: no ifp for ifindex %u",
 		    __func__, ifindex);
 		return (ENOENT);
-	}
-
-	retval = sysctl_wire_old_buffer(req,
-	    sizeof(uint32_t) + (in_mcast_maxgrpsrc * sizeof(struct in_addr)));
-	if (retval) {
-		NET_EPOCH_EXIT(et);
-		return (retval);
 	}
 
 	IN_MULTI_LIST_LOCK();

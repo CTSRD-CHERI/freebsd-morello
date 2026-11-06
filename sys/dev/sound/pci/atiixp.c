@@ -129,7 +129,7 @@ struct atiixp_info {
 	uint32_t blkcnt;
 	int registered_channels;
 
-	struct mtx *lock;
+	struct mtx lock;
 	struct callout poll_timer;
 	int poll_ticks, polling;
 };
@@ -139,9 +139,9 @@ struct atiixp_info {
 #define atiixp_wr(_sc, _reg, _val)	\
 		bus_space_write_4((_sc)->st, (_sc)->sh, _reg, _val)
 
-#define atiixp_lock(_sc)	snd_mtxlock((_sc)->lock)
-#define atiixp_unlock(_sc)	snd_mtxunlock((_sc)->lock)
-#define atiixp_assert(_sc)	snd_mtxassert((_sc)->lock)
+#define atiixp_lock(_sc)	mtx_lock(&(_sc)->lock)
+#define atiixp_unlock(_sc)	mtx_unlock(&(_sc)->lock)
+#define atiixp_assert(_sc)	mtx_assert(&(_sc)->lock, MA_OWNED)
 
 static uint32_t atiixp_fmt_32bit[] = {
 	SND_FORMAT(AFMT_S16_LE, 2, 0),
@@ -532,11 +532,12 @@ atiixp_chan_setfragments(kobj_t obj, void *data,
 {
 	struct atiixp_chinfo *ch = data;
 	struct atiixp_info *sc = ch->parent;
+	int error;
 
 	blksz &= ATI_IXP_BLK_ALIGN;
 
-	if (blksz > (sndbuf_getmaxsize(ch->buffer) / ATI_IXP_DMA_CHSEGS_MIN))
-		blksz = sndbuf_getmaxsize(ch->buffer) / ATI_IXP_DMA_CHSEGS_MIN;
+	if (blksz > (ch->buffer->maxsize / ATI_IXP_DMA_CHSEGS_MIN))
+		blksz = ch->buffer->maxsize / ATI_IXP_DMA_CHSEGS_MIN;
 	if (blksz < ATI_IXP_BLK_MIN)
 		blksz = ATI_IXP_BLK_MIN;
 	if (blkcnt > ATI_IXP_DMA_CHSEGS_MAX)
@@ -544,7 +545,7 @@ atiixp_chan_setfragments(kobj_t obj, void *data,
 	if (blkcnt < ATI_IXP_DMA_CHSEGS_MIN)
 		blkcnt = ATI_IXP_DMA_CHSEGS_MIN;
 
-	while ((blksz * blkcnt) > sndbuf_getmaxsize(ch->buffer)) {
+	while ((blksz * blkcnt) > ch->buffer->maxsize) {
 		if ((blkcnt >> 1) >= ATI_IXP_DMA_CHSEGS_MIN)
 			blkcnt >>= 1;
 		else if ((blksz >> 1) >= ATI_IXP_BLK_MIN)
@@ -553,14 +554,16 @@ atiixp_chan_setfragments(kobj_t obj, void *data,
 			break;
 	}
 
-	if ((sndbuf_getblksz(ch->buffer) != blksz ||
-	    sndbuf_getblkcnt(ch->buffer) != blkcnt) &&
-	    sndbuf_resize(ch->buffer, blkcnt, blksz) != 0)
+	if ((ch->buffer->blksz != blksz ||
+	    ch->buffer->blkcnt != blkcnt) &&
+	    (error = sndbuf_resize(ch->buffer, blkcnt, blksz)) != 0) {
 		device_printf(sc->dev, "%s: failed blksz=%u blkcnt=%u\n",
 		    __func__, blksz, blkcnt);
+		return (error);
+	}
 
-	ch->blksz = sndbuf_getblksz(ch->buffer);
-	ch->blkcnt = sndbuf_getblkcnt(ch->buffer);
+	ch->blksz = ch->buffer->blksz;
+	ch->blkcnt = ch->buffer->blkcnt;
 
 	return (0);
 }
@@ -571,7 +574,8 @@ atiixp_chan_setblocksize(kobj_t obj, void *data, uint32_t blksz)
 	struct atiixp_chinfo *ch = data;
 	struct atiixp_info *sc = ch->parent;
 
-	atiixp_chan_setfragments(obj, data, blksz, sc->blkcnt);
+	if (atiixp_chan_setfragments(obj, data, blksz, sc->blkcnt) != 0)
+		return (0);
 
 	return (ch->blksz);
 }
@@ -583,7 +587,7 @@ atiixp_buildsgdt(struct atiixp_chinfo *ch)
 	uint32_t addr, blksz, blkcnt;
 	int i;
 
-	addr = sndbuf_getbufaddr(ch->buffer);
+	addr = ch->buffer->buf_addr;
 
 	if (sc->polling != 0) {
 		blksz = ch->blksz * ch->blkcnt;
@@ -610,7 +614,7 @@ atiixp_dmapos(struct atiixp_chinfo *ch)
 	volatile uint32_t ptr;
 
 	reg = ch->dt_cur_bit;
-	addr = sndbuf_getbufaddr(ch->buffer);
+	addr = ch->buffer->buf_addr;
 	sz = ch->blkcnt * ch->blksz;
 	retry = ATI_IXP_DMA_RETRY_MAX;
 
@@ -739,8 +743,7 @@ atiixp_chan_trigger(kobj_t obj, void *data, int go)
 			ch->ptr = 0;
 			ch->prevptr = 0;
 			pollticks = ((uint64_t)hz * ch->blksz) /
-			    ((uint64_t)sndbuf_getalign(ch->buffer) *
-			    sndbuf_getspd(ch->buffer));
+			    ((uint64_t)ch->buffer->align * ch->buffer->spd);
 			pollticks >>= 2;
 			if (pollticks > hz)
 				pollticks = hz;
@@ -748,7 +751,7 @@ atiixp_chan_trigger(kobj_t obj, void *data, int go)
 				pollticks = 1;
 			if (atiixp_chan_active(sc) == 0 ||
 			    pollticks < sc->poll_ticks) {
-			    	if (bootverbose) {
+				if (bootverbose) {
 					if (atiixp_chan_active(sc) == 0)
 						device_printf(sc->dev,
 						    "%s: pollticks=%d\n",
@@ -781,8 +784,8 @@ atiixp_chan_trigger(kobj_t obj, void *data, int go)
 				else
 					ch = &sc->rch;
 				pollticks = ((uint64_t)hz * ch->blksz) /
-				    ((uint64_t)sndbuf_getalign(ch->buffer) *
-				    sndbuf_getspd(ch->buffer));
+				    ((uint64_t)ch->buffer->align *
+				    ch->buffer->spd);
 				pollticks >>= 2;
 				if (pollticks > hz)
 					pollticks = hz;
@@ -805,7 +808,6 @@ atiixp_chan_trigger(kobj_t obj, void *data, int go)
 	default:
 		atiixp_unlock(sc);
 		return (0);
-		break;
 	}
 
 	/* Update bus busy status */
@@ -1020,7 +1022,7 @@ atiixp_chip_post_init(void *arg)
 	if (sc->codec_not_ready_bits == 0) {
 		/* wait for the interrupts to happen */
 		do {
-			msleep(sc, sc->lock, PWAIT, "ixpslp", max(hz / 10, 1));
+			msleep(sc, &sc->lock, PWAIT, "ixpslp", max(hz / 10, 1));
 			if (sc->codec_not_ready_bits != 0)
 				break;
 		} while (--timeout);
@@ -1082,9 +1084,9 @@ atiixp_chip_post_init(void *arg)
 		break;
 	}
 
-	mixer_init(sc->dev, ac97_getmixerclass(), sc->codec);
-
 	pcm_init(sc->dev, sc);
+
+	mixer_init(sc->dev, ac97_getmixerclass(), sc->codec);
 
 	for (i = 0; i < ATI_IXP_NPCHAN; i++)
 		pcm_addchan(sc->dev, PCMDIR_PLAY, &atiixp_chan_class, sc);
@@ -1158,10 +1160,7 @@ atiixp_release_resource(struct atiixp_info *sc)
 		bus_dma_tag_destroy(sc->sgd_dmat);
 		sc->sgd_dmat = NULL;
 	}
-	if (sc->lock) {
-		snd_mtxfree(sc->lock);
-		sc->lock = NULL;
-	}
+	mtx_destroy(&sc->lock);
 	free(sc, M_DEVBUF);
 }
 
@@ -1191,7 +1190,8 @@ atiixp_pci_attach(device_t dev)
 	int i;
 
 	sc = malloc(sizeof(*sc), M_DEVBUF, M_WAITOK | M_ZERO);
-	sc->lock = snd_mtxcreate(device_get_nameunit(dev), "snd_atiixp softc");
+	mtx_init(&sc->lock, device_get_nameunit(dev), "snd_atiixp softc",
+	    MTX_DEF);
 	sc->dev = dev;
 
 	callout_init(&sc->poll_timer, 1);
@@ -1406,7 +1406,7 @@ static device_method_t atiixp_methods[] = {
 	DEVMETHOD(device_detach,	atiixp_pci_detach),
 	DEVMETHOD(device_suspend,	atiixp_pci_suspend),
 	DEVMETHOD(device_resume,	atiixp_pci_resume),
-	{ 0, 0 }
+	DEVMETHOD_END
 };
 
 static driver_t atiixp_driver = {
@@ -1416,5 +1416,5 @@ static driver_t atiixp_driver = {
 };
 
 DRIVER_MODULE(snd_atiixp, pci, atiixp_driver, 0, 0);
-MODULE_DEPEND(snd_atiixp, sound, SOUND_MINVER, SOUND_PREFVER, SOUND_MAXVER);
+MODULE_DEPEND(snd_atiixp, sound, 1, 1, 1);
 MODULE_VERSION(snd_atiixp, 1);

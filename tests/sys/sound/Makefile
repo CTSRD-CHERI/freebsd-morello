@@ -2,7 +2,9 @@ PACKAGE=	tests
 
 TESTSDIR=	${TESTSBASE}/sys/sound
 
+ATF_TESTS_C+=	mmap
 ATF_TESTS_C+=	pcm_read_write
+ATF_TESTS_C+=	polling
 ATF_TESTS_C+=	sndstat
 
 CFLAGS+=	-I${SRCTOP}/sys

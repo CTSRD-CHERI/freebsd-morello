@@ -34,6 +34,8 @@
 #include "ixl.h"
 #include "ixl_pf.h"
 
+#include <net/if_vf_status.h>
+
 #ifdef IXL_IW
 #include "ixl_iw.h"
 #include "ixl_iw_int.h"
@@ -54,6 +56,20 @@
     __XSTRING(IXL_DRIVER_VERSION_MAJOR) "."		\
     __XSTRING(IXL_DRIVER_VERSION_MINOR) "."		\
     __XSTRING(IXL_DRIVER_VERSION_BUILD) "-k"
+
+/* Version 1 driver.ixl extension schema; documented in ixl(4). */
+#define	IXL_VF_STATUS_NAMESPACE		"driver.ixl"
+#define	IXL_VF_STATUS_VERSION		1
+#define	IXL_VF_STATUS_MDD_BLOCKED	"mdd-blocked"
+#define	IXL_VF_STATUS_MDD_TX_EVENTS	"mdd-tx-events"
+#define	IXL_VF_STATUS_MDD_RX_EVENTS	"mdd-rx-events"
+
+enum ixl_vf_status_field {
+	IXL_VF_STATUS_FIELD_MDD_BLOCKED,
+	IXL_VF_STATUS_FIELD_MDD_TX_EVENTS,
+	IXL_VF_STATUS_FIELD_MDD_RX_EVENTS,
+	IXL_VF_STATUS_NUM_FIELDS
+};
 
 /*********************************************************************
  *  PCI Device ID Table
@@ -122,6 +138,9 @@ static uint64_t	 ixl_if_get_counter(if_ctx_t ctx, ift_counter cnt);
 static int	 ixl_if_i2c_req(if_ctx_t ctx, struct ifi2creq *req);
 static int	 ixl_if_priv_ioctl(if_ctx_t ctx, u_long command, caddr_t data);
 static bool	 ixl_if_needs_restart(if_ctx_t ctx, enum iflib_restart_event event);
+static void	 ixl_if_led_func(if_ctx_t ctx, int onoff);
+static int	 ixl_if_vf_status(if_ctx_t ctx,
+		     struct if_vf_status **statusp);
 #ifdef PCI_IOV
 static void	 ixl_if_vflr_handle(if_ctx_t ctx);
 #endif
@@ -143,6 +162,8 @@ static device_method_t ixl_methods[] = {
 	DEVMETHOD(device_attach, iflib_device_attach),
 	DEVMETHOD(device_detach, iflib_device_detach),
 	DEVMETHOD(device_shutdown, iflib_device_shutdown),
+	DEVMETHOD(device_suspend, iflib_device_suspend),
+	DEVMETHOD(device_resume, iflib_device_resume),
 #ifdef PCI_IOV
 	DEVMETHOD(pci_iov_init, iflib_device_iov_init),
 	DEVMETHOD(pci_iov_uninit, iflib_device_iov_uninit),
@@ -193,13 +214,14 @@ static device_method_t ixl_if_methods[] = {
 	DEVMETHOD(ifdi_i2c_req, ixl_if_i2c_req),
 	DEVMETHOD(ifdi_priv_ioctl, ixl_if_priv_ioctl),
 	DEVMETHOD(ifdi_needs_restart, ixl_if_needs_restart),
+	DEVMETHOD(ifdi_led_func, ixl_if_led_func),
+	DEVMETHOD(ifdi_vf_status, ixl_if_vf_status),
 #ifdef PCI_IOV
 	DEVMETHOD(ifdi_iov_init, ixl_if_iov_init),
 	DEVMETHOD(ifdi_iov_uninit, ixl_if_iov_uninit),
 	DEVMETHOD(ifdi_iov_vf_add, ixl_if_iov_vf_add),
 	DEVMETHOD(ifdi_vflr_handle, ixl_if_vflr_handle),
 #endif
-	// ifdi_led_func
 	// ifdi_debug
 	DEVMETHOD_END
 };
@@ -250,6 +272,12 @@ TUNABLE_INT("hw.ixl.enable_vf_loopback",
 SYSCTL_INT(_hw_ixl, OID_AUTO, enable_vf_loopback, CTLFLAG_RDTUN,
     &ixl_enable_vf_loopback, 0,
     IXL_SYSCTL_HELP_VF_LOOPBACK);
+
+static int ixl_mdd_auto_reset_vf;
+TUNABLE_INT("hw.ixl.mdd_auto_reset_vf", &ixl_mdd_auto_reset_vf);
+SYSCTL_INT(_hw_ixl, OID_AUTO, mdd_auto_reset_vf, CTLFLAG_RDTUN,
+    &ixl_mdd_auto_reset_vf, 0,
+    "Automatically reset VFs blocked by malicious-driver detection");
 
 /*
  * Different method for processing TX descriptor
@@ -340,7 +368,8 @@ static struct if_shared_ctx ixl_sctx_init = {
 	.isc_vendor_info = ixl_vendor_info_array,
 	.isc_driver_version = IXL_DRIVER_VERSION_STRING,
 	.isc_driver = &ixl_if_driver,
-	.isc_flags = IFLIB_NEED_SCRATCH | IFLIB_NEED_ZERO_CSUM | IFLIB_TSO_INIT_IP | IFLIB_ADMIN_ALWAYS_RUN,
+	.isc_flags = IFLIB_NEED_SCRATCH | IFLIB_NEED_ZERO_CSUM |
+		IFLIB_TSO_INIT_IP | IFLIB_ADMIN_ALWAYS_RUN | IFLIB_SPARSE_TX,
 
 	.isc_nrxd_min = {IXL_MIN_RING},
 	.isc_ntxd_min = {IXL_MIN_RING},
@@ -356,7 +385,6 @@ ixl_register(device_t dev)
 {
 	return (&ixl_sctx_init);
 }
-
 static int
 ixl_allocate_pci_resources(struct ixl_pf *pf)
 {
@@ -788,6 +816,7 @@ ixl_if_attach_post(if_ctx_t ctx)
 	ixl_pf_reset_stats(pf);
 	ixl_update_stats_counters(pf);
 	ixl_add_hw_stats(pf);
+	ixl_vsi_reset_stats(vsi);
 
 	/*
 	 * Driver may have been reloaded. Ensure that the link state
@@ -934,15 +963,9 @@ ixl_if_suspend(if_ctx_t ctx)
 static int
 ixl_if_resume(if_ctx_t ctx)
 {
-	if_t ifp = iflib_get_ifp(ctx);
-
 	INIT_DEBUGOUT("ixl_if_resume: begin");
 
 	/* Read & clear wake-up registers */
-
-	/* Required after D3->D0 transition */
-	if (if_getflags(ifp) & IFF_UP)
-		ixl_if_init(ctx);
 
 	return (0);
 }
@@ -959,7 +982,7 @@ ixl_if_init(if_ctx_t ctx)
 	int		ret;
 
 	if (IXL_PF_IN_RECOVERY_MODE(pf))
-		return;
+		goto fail;
 	/*
 	 * If the aq is dead here, it probably means something outside of the driver
 	 * did something to the adapter, like a PF reset.
@@ -967,23 +990,25 @@ ixl_if_init(if_ctx_t ctx)
 	 */
 	if (!i40e_check_asq_alive(&pf->hw)) {
 		device_printf(dev, "Admin Queue is down; resetting...\n");
-		ixl_teardown_hw_structs(pf);
-		ixl_rebuild_hw_structs_after_reset(pf, false);
+		(void)ixl_teardown_hw_structs(pf);
+		ret = ixl_rebuild_hw_structs_after_reset(pf, false);
+		if (ret != 0)
+			goto fail;
 	}
 
 	/* Get the latest mac address... User might use a LAA */
 	bcopy(if_getlladdr(vsi->ifp), tmpaddr, ETH_ALEN);
 	if (!ixl_ether_is_equal(hw->mac.addr, tmpaddr) &&
 	    (i40e_validate_mac_addr(tmpaddr) == I40E_SUCCESS)) {
-		ixl_del_all_vlan_filters(vsi, hw->mac.addr);
-		bcopy(tmpaddr, hw->mac.addr, ETH_ALEN);
 		ret = i40e_aq_mac_address_write(hw,
 		    I40E_AQC_WRITE_TYPE_LAA_ONLY,
-		    hw->mac.addr, NULL);
+		    tmpaddr, NULL);
 		if (ret) {
 			device_printf(dev, "LLA address change failed!!\n");
-			return;
+			goto fail;
 		}
+		ixl_del_all_vlan_filters(vsi, hw->mac.addr);
+		bcopy(tmpaddr, hw->mac.addr, ETH_ALEN);
 		/*
 		 * New filters are configured by ixl_reconfigure_filters
 		 * at the end of ixl_init_locked.
@@ -995,7 +1020,7 @@ ixl_if_init(if_ctx_t ctx)
 	/* Prepare the VSI: rings, hmc contexts, etc... */
 	if (ixl_initialize_vsi(vsi)) {
 		device_printf(dev, "initialize vsi failed!!\n");
-		return;
+		goto fail;
 	}
 
 	ixl_set_link(pf, true);
@@ -1018,7 +1043,12 @@ ixl_if_init(if_ctx_t ctx)
 	else
 		ixl_init_tx_rsqs(vsi);
 
-	ixl_enable_rings(vsi);
+	ret = ixl_enable_rings(vsi);
+	if (ret != 0) {
+		device_printf(dev, "enable rings failed: %d\n", ret);
+		ixl_disable_rings(pf, vsi, &pf->qtag);
+		goto fail;
+	}
 
 	i40e_aq_set_default_vsi(hw, vsi->seid, NULL);
 
@@ -1036,6 +1066,10 @@ ixl_if_init(if_ctx_t ctx)
 			    "initialize iwarp failed, code %d\n", ret);
 	}
 #endif
+	return;
+
+fail:
+	iflib_init_failed(ctx);
 }
 
 void
@@ -1047,6 +1081,7 @@ ixl_if_stop(if_ctx_t ctx)
 
 	INIT_DEBUGOUT("ixl_if_stop: begin\n");
 
+	ixl_led_restore(pf);
 	if (IXL_PF_IN_RECOVERY_MODE(pf))
 		return;
 
@@ -1067,6 +1102,80 @@ ixl_if_stop(if_ctx_t ctx)
 	if ((if_getflags(ifp) & IFF_UP) == 0 &&
 	    !ixl_test_state(&pf->state, IXL_STATE_LINK_ACTIVE_ON_DOWN))
 		ixl_set_link(pf, false);
+}
+
+#define IXL_PHY_DEBUG_ALL					\
+	(I40E_AQ_PHY_DEBUG_DISABLE_LINK_FW |			\
+	 I40E_AQ_PHY_DEBUG_DISABLE_ALL_LINK_FW)
+
+static bool
+ixl_phy_controls_leds(const struct i40e_hw *hw)
+{
+
+	/* These external 10GBASE-T PHYs own the identification LED. */
+	return (hw->device_id == I40E_DEV_ID_10G_BASE_T ||
+	    hw->device_id == I40E_DEV_ID_10G_BASE_T4);
+}
+
+static void
+ixl_if_led_func(if_ctx_t ctx, int onoff)
+{
+	struct ixl_pf *pf;
+	struct i40e_hw *hw;
+	enum i40e_status_code status;
+	u16 phy_status;
+
+	pf = iflib_get_softc(ctx);
+	hw = &pf->hw;
+	if (!onoff) {
+		ixl_led_restore(pf);
+		return;
+	}
+	if (pf->led_active)
+		return;
+
+	pf->led_phy_controlled = ixl_phy_controls_leds(hw);
+	if (!pf->led_phy_controlled) {
+		pf->led_status = i40e_led_get(hw);
+		pf->led_active = true;
+		i40e_led_set(hw, 0xf, false);
+		return;
+	}
+
+	if ((hw->flags & I40E_HW_FLAG_AQ_PHY_ACCESS_CAPABLE) == 0)
+		(void)i40e_aq_set_phy_debug(hw, IXL_PHY_DEBUG_ALL, NULL);
+	pf->led_phy_addr = I40E_PHY_LED_PROV_REG_1;
+	status = i40e_led_get_phy(hw, &pf->led_phy_addr, &phy_status);
+	if (status != I40E_SUCCESS) {
+		if ((hw->flags & I40E_HW_FLAG_AQ_PHY_ACCESS_CAPABLE) == 0)
+			(void)i40e_aq_set_phy_debug(hw, 0, NULL);
+		return;
+	}
+	pf->led_status = phy_status;
+	pf->led_active = true;
+	status = i40e_led_set_phy(hw, true, pf->led_phy_addr, 0);
+	if (status != I40E_SUCCESS)
+		ixl_led_restore(pf);
+}
+
+void
+ixl_led_restore(struct ixl_pf *pf)
+{
+	struct i40e_hw *hw;
+
+	if (!pf->led_active)
+		return;
+
+	hw = &pf->hw;
+	if (pf->led_phy_controlled) {
+		(void)i40e_led_set_phy(hw, false, pf->led_phy_addr,
+		    pf->led_status | I40E_PHY_LED_MODE_ORIG);
+		if ((hw->flags & I40E_HW_FLAG_AQ_PHY_ACCESS_CAPABLE) == 0)
+			(void)i40e_aq_set_phy_debug(hw, 0, NULL);
+	} else {
+		i40e_led_set(hw, pf->led_status, false);
+	}
+	pf->led_active = false;
 }
 
 static int
@@ -1151,13 +1260,20 @@ ixl_if_enable_intr(if_ctx_t ctx)
 	struct ixl_pf *pf = iflib_get_softc(ctx);
 	struct ixl_vsi *vsi = &pf->vsi;
 	struct i40e_hw		*hw = vsi->hw;
-	struct ixl_rx_queue	*que = vsi->rx_queues;
+	struct ixl_rx_queue	*rx_que = vsi->rx_queues;
 
 	ixl_enable_intr0(hw);
 	/* Enable queue interrupts */
-	for (int i = 0; i < vsi->num_rx_queues; i++, que++)
-		/* TODO: Queue index parameter is probably wrong */
-		ixl_enable_queue(hw, que->rxr.me);
+	if (vsi->shared->isc_intr == IFLIB_INTR_MSIX) {
+		for (int i = 0; i < vsi->num_rx_queues; i++, rx_que++)
+			ixl_enable_queue(hw, rx_que->rxr.me);
+	} else {
+		/*
+		 * Set PFINT_LNKLST0 FIRSTQ_INDX to 0x0 to enable
+		 * triggering interrupts by queues.
+		 */
+		wr32(hw, I40E_PFINT_LNKLST0, 0x0);
+	}
 }
 
 /*
@@ -1175,11 +1291,13 @@ ixl_if_disable_intr(if_ctx_t ctx)
 
 	if (vsi->shared->isc_intr == IFLIB_INTR_MSIX) {
 		for (int i = 0; i < vsi->num_rx_queues; i++, rx_que++)
-			ixl_disable_queue(hw, rx_que->msix - 1);
+			ixl_disable_queue(hw, rx_que->rxr.me);
 	} else {
-		// Set PFINT_LNKLST0 FIRSTQ_INDX to 0x7FF
-		// stops queues from triggering interrupts
-		wr32(hw, I40E_PFINT_LNKLST0, 0x7FF);
+		/*
+		 * Set PFINT_LNKLST0 FIRSTQ_INDX to End of List (0x7FF)
+		 * to stop queues from triggering interrupts.
+		 */
+		wr32(hw, I40E_PFINT_LNKLST0, IXL_QUEUE_EOL);
 	}
 }
 
@@ -1366,9 +1484,10 @@ ixl_handle_lan_overflow_event(struct ixl_pf *pf, struct i40e_arq_event_info *e)
 	device_t dev = pf->dev;
 	u32 rxq_idx, qtx_ctl;
 
-	rxq_idx = (e->desc.params.external.param0 & I40E_PRTDCB_RUPTQ_RXQNUM_MASK) >>
+	rxq_idx = (le32toh(e->desc.params.external.param0) &
+	    I40E_PRTDCB_RUPTQ_RXQNUM_MASK) >>
 	    I40E_PRTDCB_RUPTQ_RXQNUM_SHIFT;
-	qtx_ctl = e->desc.params.external.param1;
+	qtx_ctl = le32toh(e->desc.params.external.param1);
 
 	device_printf(dev, "LAN overflow event: global rxq_idx %d\n", rxq_idx);
 	device_printf(dev, "LAN overflow event: QTX_CTL 0x%08x\n", qtx_ctl);
@@ -1471,17 +1590,33 @@ ixl_if_multi_set(if_ctx_t ctx)
 	struct ixl_pf *pf = iflib_get_softc(ctx);
 	struct ixl_vsi *vsi = &pf->vsi;
 	struct i40e_hw *hw = vsi->hw;
+	enum i40e_status_code status;
 	int mcnt;
+	if_t ifp = iflib_get_ifp(ctx);
 
 	IOCTL_DEBUGOUT("ixl_if_multi_set: begin");
 
 	/* Delete filters for removed multicast addresses */
 	ixl_del_multi(vsi, false);
 
-	mcnt = min(if_llmaddr_count(iflib_get_ifp(ctx)), MAX_MULTICAST_ADDR);
+	mcnt = min(if_llmaddr_count(ifp), MAX_MULTICAST_ADDR);
 	if (__predict_false(mcnt == MAX_MULTICAST_ADDR)) {
-		i40e_aq_set_vsi_multicast_promiscuous(hw,
+		/* Check if promisc mode is already enabled, if yes return */
+		if (vsi->flags & IXL_FLAGS_MC_PROMISC)
+			return;
+
+		status = i40e_aq_set_vsi_multicast_promiscuous(hw,
 		    vsi->seid, TRUE, NULL);
+		if (status != I40E_SUCCESS)
+			if_printf(ifp, "Failed to enable multicast promiscuous "
+			    "mode, status: %s\n", i40e_stat_str(hw, status));
+		else {
+			if_printf(ifp, "Enabled multicast promiscuous mode\n");
+
+			/* Set the flag to track promiscuous mode */
+			vsi->flags |= IXL_FLAGS_MC_PROMISC;
+		}
+		/* Delete all existing MC filters */
 		ixl_del_multi(vsi, true);
 		return;
 	}
@@ -1684,6 +1819,13 @@ ixl_if_promisc_set(if_ctx_t ctx, int flags)
 		return (err);
 	err = i40e_aq_set_vsi_multicast_promiscuous(hw,
 	    vsi->seid, multi, NULL);
+
+	/* Update the multicast promiscuous flag based on the new state */
+	if (multi)
+		vsi->flags |= IXL_FLAGS_MC_PROMISC;
+	else
+		vsi->flags &= ~IXL_FLAGS_MC_PROMISC;
+
 	return (err);
 }
 
@@ -1776,7 +1918,7 @@ ixl_if_get_counter(if_ctx_t ctx, ift_counter cnt)
 	case IFCOUNTER_OPACKETS:
 		return (vsi->opackets);
 	case IFCOUNTER_OERRORS:
-		return (vsi->oerrors);
+		return (if_get_counter_default(ifp, cnt) + vsi->oerrors);
 	case IFCOUNTER_COLLISIONS:
 		/* Collisions are by standard impossible in 40G/10G Ethernet */
 		return (0);
@@ -1791,7 +1933,7 @@ ixl_if_get_counter(if_ctx_t ctx, ift_counter cnt)
 	case IFCOUNTER_IQDROPS:
 		return (vsi->iqdrops);
 	case IFCOUNTER_OQDROPS:
-		return (vsi->oqdrops);
+		return (if_get_counter_default(ifp, cnt) + vsi->oqdrops);
 	case IFCOUNTER_NOPROTO:
 		return (vsi->noproto);
 	default:
@@ -1842,7 +1984,8 @@ ixl_if_priv_ioctl(if_ctx_t ctx, u_long command, caddr_t data)
 	case SIOCGDRVSPEC:
 	case SIOCSDRVSPEC:
 		/* NVM update command */
-		if (ifd->ifd_cmd == I40E_NVM_ACCESS) {
+		if (ifd->ifd_cmd == I40E_NVM_ACCESS ||
+		    ifd->ifd_cmd == I40E_NVM_ACCESS2) {
 			error = priv_check(curthread, PRIV_DRIVER);
 			if (error)
 				break;
@@ -1876,6 +2019,92 @@ ixl_if_needs_restart(if_ctx_t ctx __unused, enum iflib_restart_event event)
 	}
 }
 
+static int
+ixl_if_vf_status(if_ctx_t ctx, struct if_vf_status **statusp)
+{
+	struct ixl_pf *pf;
+	struct if_vf_extension *extension;
+	struct if_vf_info *info;
+	struct if_vf_status *status;
+	struct ixl_vf *vf;
+
+	pf = iflib_get_softc(ctx);
+	if (!pf->iov_attached)
+		return (EOPNOTSUPP);
+
+	status = if_vf_status_alloc(pf->num_vfs);
+	if (status == NULL)
+		return (ENOMEM);
+	for (int i = 0; i < pf->num_vfs; i++) {
+		vf = &pf->vfs[i];
+		info = &status->vfs[i];
+		info->fields = IFVF_F_CONFIGURED | IFVF_F_INITIALIZED |
+		    IFVF_F_VLAN_MODE | IFVF_F_VLAN_COUNT |
+		    IFVF_F_NUM_TX_QUEUES | IFVF_F_NUM_RX_QUEUES |
+		    IFVF_F_ALLOW_SET_MAC |
+		    IFVF_F_ALLOW_SET_VLAN | IFVF_F_MAC_ANTI_SPOOF |
+		    IFVF_F_ALLOW_PROMISC | IFVF_F_TRAFFIC_ALLOWED |
+		    IFVF_F_FAULT_BLOCKED;
+		info->index = i;
+		info->configured = (vf->vf_flags & VF_FLAG_ENABLED) != 0;
+		info->initialized = (vf->vf_flags & VF_FLAG_INITIALIZED) != 0;
+		if (info->initialized) {
+			snprintf(info->api_version, sizeof(info->api_version),
+			    "%u.%u", vf->version.major, vf->version.minor);
+			info->fields |= IFVF_F_API_VERSION;
+		}
+		if (!ETHER_IS_ZERO(vf->mac)) {
+			memcpy(info->mac, vf->mac, sizeof(info->mac));
+			info->fields |= IFVF_F_MAC;
+		}
+		if (vf->default_vlan == 0) {
+			info->vlan_mode = IFVF_VLAN_TRUNK;
+			info->vlan_count = vf->vsi.num_vlans;
+			info->vlan_limit = IXL_VF_MAX_VLAN_FILTERS;
+			info->fields |= IFVF_F_VLAN_LIMIT;
+		} else {
+			info->vlan_mode = IFVF_VLAN_ACCESS;
+			info->vlan = vf->default_vlan;
+			info->vlan_pcp = 0;
+			info->vlan_proto = ETHERTYPE_VLAN;
+			info->vlan_count = 1;
+			info->fields |= IFVF_F_VLAN | IFVF_F_VLAN_PCP |
+			    IFVF_F_VLAN_PROTO;
+		}
+		info->tx_queue_count = vf->qtag.num_active;
+		info->rx_queue_count = vf->qtag.num_active;
+		info->allow_set_mac =
+		    (vf->vf_flags & VF_FLAG_SET_MAC_CAP) != 0;
+		info->allow_set_vlan =
+		    (vf->vf_flags & VF_FLAG_VLAN_CAP) != 0;
+		info->mac_anti_spoof =
+		    (vf->vf_flags & VF_FLAG_MAC_ANTI_SPOOF) != 0;
+		info->allow_promisc =
+		    (vf->vf_flags & VF_FLAG_PROMISC_CAP) != 0;
+		info->traffic_allowed = info->configured && !vf->mdd_blocked;
+		info->fault_blocked = vf->mdd_blocked;
+
+		extension = if_vf_status_add_extension(info,
+		    IXL_VF_STATUS_NAMESPACE, IXL_VF_STATUS_VERSION,
+		    IXL_VF_STATUS_NUM_FIELDS);
+		if (extension == NULL) {
+			if_vf_status_free(status);
+			return (ENOMEM);
+		}
+		if_vf_extension_set_bool(extension,
+		    IXL_VF_STATUS_FIELD_MDD_BLOCKED,
+		    IXL_VF_STATUS_MDD_BLOCKED, vf->mdd_blocked);
+		if_vf_extension_set_number(extension,
+		    IXL_VF_STATUS_FIELD_MDD_TX_EVENTS,
+		    IXL_VF_STATUS_MDD_TX_EVENTS, vf->mdd_tx_events);
+		if_vf_extension_set_number(extension,
+		    IXL_VF_STATUS_FIELD_MDD_RX_EVENTS,
+		    IXL_VF_STATUS_MDD_RX_EVENTS, vf->mdd_rx_events);
+	}
+	*statusp = status;
+	return (0);
+}
+
 /*
  * Sanity check and save off tunable values.
  */
@@ -1895,6 +2124,7 @@ ixl_save_pf_tunables(struct ixl_pf *pf)
 	pf->hw.debug_mask = ixl_shared_debug_mask;
 	pf->vsi.enable_head_writeback = !!(ixl_enable_head_writeback);
 	pf->enable_vf_loopback = !!(ixl_enable_vf_loopback);
+	pf->mdd_auto_reset_vf = !!(ixl_mdd_auto_reset_vf);
 #if 0
 	pf->dynamic_rx_itr = ixl_dynamic_rx_itr;
 	pf->dynamic_tx_itr = ixl_dynamic_tx_itr;
@@ -1944,4 +2174,3 @@ ixl_save_pf_tunables(struct ixl_pf *pf)
 			pf->fc = ixl_flow_control;
 	}
 }
-

@@ -863,11 +863,8 @@ mountmsdosfs(struct vnode *odevvp, struct mount *mp)
 error_exit:
 	if (bp != NULL)
 		brelse(bp);
-	if (cp != NULL) {
-		g_topology_lock();
-		g_vfs_close(cp);
-		g_topology_unlock();
-	}
+	if (cp != NULL)
+		g_vfs_close_unlocked(cp);
 	if (pmp != NULL) {
 		lockdestroy(&pmp->pm_fatlock);
 		free(pmp->pm_inusemap, M_MSDOSFSFAT);
@@ -1184,7 +1181,7 @@ msdosfs_fhtovp(struct mount *mp, struct fid *fhp, int flags, struct vnode **vpp)
 	error = deget(pmp, defhp->defid_dirclust, defhp->defid_dirofs,
 	    LK_EXCLUSIVE, &dep);
 	if (error) {
-		*vpp = NULLVP;
+		*vpp = NULL;
 		return (error);
 	}
 	*vpp = DETOV(dep);

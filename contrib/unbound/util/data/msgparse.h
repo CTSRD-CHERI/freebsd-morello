@@ -98,6 +98,31 @@ extern time_t SERVE_EXPIRED_REPLY_TTL;
 /** If we serve the original TTL or decrementing TTLs */
 extern int SERVE_ORIGINAL_TTL;
 
+/** calculate the prefetch TTL as 90% of original. Calculation
+ * without numerical overflow (uin32_t) */
+#define PREFETCH_TTL_CALC(ttl) ((ttl) - (ttl)/10)
+
+/*  caclulate the TTL used for expired answers to somewhat make sense wrt the
+ *  original TTL; don't reply with higher TTL than the original */
+#ifdef UNBOUND_DEBUG
+time_t debug_expired_reply_ttl_calc(time_t ttl, time_t ttl_add);
+#define EXPIRED_REPLY_TTL_CALC(ttl, ttl_add)		\
+    debug_expired_reply_ttl_calc(ttl, ttl_add)
+#else
+#define EXPIRED_REPLY_TTL_CALC(ttl, ttl_add)		\
+	(SERVE_EXPIRED_REPLY_TTL < (ttl) - (ttl_add) ?	\
+	SERVE_EXPIRED_REPLY_TTL : (ttl) - (ttl_add))
+#endif
+
+/** Update the reply_info TTL from an RRSet's TTL, essentially keeping the TTL
+ *  sane with all the (progressively added) rrsets to the message */
+#define UPDATE_TTL_FROM_RRSET(ttl, rrsetttl) \
+	((ttl) = ((ttl) < (rrsetttl)) ? (ttl) : (rrsetttl))
+
+/** Check if TTL is expired. 0 TTL is considered expired.
+ *  Used mainly to identify parts of the code that do this comparison. */
+#define TTL_IS_EXPIRED(ttl, now) ((ttl) <= (now))
+
 /**
  * Data stored in scratch pad memory during parsing.
  * Stores the data that will enter into the msgreply and packet result.
@@ -308,16 +333,16 @@ int parse_extract_edns_from_response_msg(struct msg_parse* msg,
 /**
  * Skip RRs from packet
  * @param pkt: the packet. position at start must be right after the query
- *	section. At end, right after EDNS data or no movement if failed.
+ *	section. At end, right after EDNS data or partial movement if failed.
  * @param num: Limit of the number of records we want to parse.
- * @return: 0 on success, 1 on failure.
+ * @return: 1 on success, 0 on failure.
  */
 int skip_pkt_rrs(struct sldns_buffer* pkt, int num);
 
 /**
  * If EDNS data follows a query section, extract it and initialize edns struct.
  * @param pkt: the packet. position at start must be right after the query
- *	section. At end, right after EDNS data or no movement if failed.
+ *	section. At end, right after EDNS data or partial movement if failed.
  * @param edns: the edns data allocated by the caller. Does not have to be
  *	initialised.
  * @param cfg: the configuration (with nsid value etc.)

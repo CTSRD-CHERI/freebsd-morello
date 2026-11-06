@@ -282,7 +282,9 @@ int tslog_init(void);
 int tslog_publish(void);
 
 vm_offset_t build_font_module(vm_offset_t);
-vm_offset_t build_splash_module(vm_offset_t);
+#define SPLASH_STARTUP	1
+#define SPLASH_SHUTDOWN 2
+vm_offset_t build_splash_module(vm_offset_t, int);
 
 /* MI module loaders */
 #ifdef __elfN
@@ -378,5 +380,12 @@ int setprint_delay(struct env_var *ev, int flags, const void *value);
 int gen_setcurrdev(struct env_var *ev, int flags, const void *value);
 int mount_currdev(struct env_var *, int, const void *);
 void set_currdev(const char *devname);
+
+/* md.c */
+#define MD_FLAG_KERNEL	0x01
+
+extern struct devsw md_dev;
+int md_register(void *image, size_t size, unsigned int flags);
+void md_export_to_kernel(uint64_t start, uint64_t len);
 
 #endif /* !_BOOTSTRAP_H_ */

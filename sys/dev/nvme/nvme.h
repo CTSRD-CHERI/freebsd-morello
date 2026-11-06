@@ -29,15 +29,14 @@
 #ifndef __NVME_H__
 #define __NVME_H__
 
-#ifdef _KERNEL
-#include <sys/types.h>
-#endif
-
 #include <sys/param.h>
-#include <sys/endian.h>
-#ifndef _KERNEL
+#ifdef _KERNEL
+#include <sys/systm.h>
+#include <sys/disk.h>
+#else
 #include <stdbool.h>
 #endif
+#include <sys/endian.h>
 
 struct sbuf;
 
@@ -104,6 +103,11 @@ struct sbuf;
 #define NVME_CAP_HI_REG_CSS_MASK			(0xff)
 #define NVME_CAP_HI_REG_CSS_NVM_SHIFT			(5)
 #define NVME_CAP_HI_REG_CSS_NVM_MASK			(0x1)
+
+/* CAP.CSS command set support flags */
+#define NVME_CAP_CSS_NVM				(0x01)
+#define NVME_CAP_CSS_IOCSS				(0x40)
+#define NVME_CAP_CSS_NOIOCSS				(0x80)
 #define NVME_CAP_HI_REG_BPS_SHIFT			(13)
 #define NVME_CAP_HI_REG_BPS_MASK			(0x1)
 #define NVME_CAP_HI_REG_CPS_SHIFT			(14)
@@ -153,6 +157,10 @@ struct sbuf;
 #define NVME_CC_REG_EN_MASK				(0x1)
 #define NVME_CC_REG_CSS_SHIFT				(4)
 #define NVME_CC_REG_CSS_MASK				(0x7)
+/* CC.CSS values */
+#define NVME_CC_CSS_NVM					(0x0)
+#define NVME_CC_CSS_IOCSS				(0x6)
+#define NVME_CC_CSS_ADMIN				(0x7)
 #define NVME_CC_REG_MPS_SHIFT				(7)
 #define NVME_CC_REG_MPS_MASK				(0xF)
 #define NVME_CC_REG_AMS_SHIFT				(11)
@@ -235,6 +243,31 @@ enum nvme_psdt {
 #define	NVME_CMD_PSDT_SHIFT				(6)
 #define	NVME_CMD_PSDT_MASK				(0x3)
 
+/* Create I/O Submission Queue, cdw11 */
+#define NVME_CREATE_IO_SQ_PC				(0x1)
+#define NVME_CREATE_IO_SQ_QPRIO_SHIFT			(1)
+#define NVME_CREATE_IO_SQ_QPRIO_MASK			(0x3)
+
+/* Create I/O Completion Queue, cdw11 */
+#define NVME_CREATE_IO_CQ_PC				(0x1)
+#define NVME_CREATE_IO_CQ_IEN				(0x2)
+
+/* Queue priority classes, used with weighted round robin arbitration. */
+#define NVME_QPRIO_URGENT				(0)
+#define NVME_QPRIO_HIGH					(1)
+#define NVME_QPRIO_MEDIUM				(2)
+#define NVME_QPRIO_LOW					(3)
+
+/* Arbitration feature, cdw11 */
+#define NVME_ARB_AB_SHIFT				(0)
+#define NVME_ARB_AB_MASK				(0x7)
+#define NVME_ARB_AB_NO_LIMIT				(0x7)
+#define NVME_ARB_LPW_SHIFT				(8)
+#define NVME_ARB_LPW_MASK				(0xFF)
+#define NVME_ARB_MPW_SHIFT				(16)
+#define NVME_ARB_MPW_MASK				(0xFF)
+#define NVME_ARB_HPW_SHIFT				(24)
+#define NVME_ARB_HPW_MASK				(0xFF)
 
 #define NVME_STATUS_P_SHIFT				(0)
 #define NVME_STATUS_P_MASK				(0x1)
@@ -355,6 +388,31 @@ enum nvme_psdt {
 /* supports UUID List */
 #define NVME_CTRLR_DATA_CTRATT_UUID_LIST_SHIFT		(9)
 #define NVME_CTRLR_DATA_CTRATT_UUID_LIST_MASK		(0x1)
+
+/** BPCAP - boot partition capabilities */
+/* RPMB boot partition write protection support */
+#define NVME_CTRLR_DATA_BPCAP_RPMBBPWPS_SHIFT		(0)
+#define NVME_CTRLR_DATA_BPCAP_RPMBBPWPS_MASK		(0x3)
+/* supports Set Features boot partition write protection */
+#define NVME_CTRLR_DATA_BPCAP_SFBPWPS_SHIFT		(2)
+#define NVME_CTRLR_DATA_BPCAP_SFBPWPS_MASK		(0x1)
+
+#define NVME_CTRLR_DATA_BPCAP_RPMBBPWPS_UNSPEC		(0x0)
+#define NVME_CTRLR_DATA_BPCAP_RPMBBPWPS_NO		(0x1)
+#define NVME_CTRLR_DATA_BPCAP_RPMBBPWPS_YES		(0x2)
+
+/** CHSI - CXL HDM support information */
+/* supports CXL host managed device memory */
+#define NVME_CTRLR_DATA_CHSI_CHS_SHIFT			(0)
+#define NVME_CTRLR_DATA_CHSI_CHS_MASK			(0x1)
+
+/** PLSI - power loss signaling information */
+/* supports power loss signaling with emergency power fail */
+#define NVME_CTRLR_DATA_PLSI_PLSEPF_SHIFT		(0)
+#define NVME_CTRLR_DATA_PLSI_PLSEPF_MASK		(0x1)
+/* supports power loss signaling with forced quiescence */
+#define NVME_CTRLR_DATA_PLSI_PLSFQ_SHIFT		(1)
+#define NVME_CTRLR_DATA_PLSI_PLSFQ_MASK			(0x1)
 
 /** OACS - optional admin command support */
 /* supports security send/receive commands */
@@ -546,6 +604,11 @@ enum nvme_psdt {
 #define NVME_NS_DATA_FLBAS_FORMAT_MASK			(0xF)
 #define NVME_NS_DATA_FLBAS_EXTENDED_SHIFT		(4)
 #define NVME_NS_DATA_FLBAS_EXTENDED_MASK		(0x1)
+#define NVME_NS_DATA_FLBAS_FORMAT_MSB_SHIFT		(5)
+#define NVME_NS_DATA_FLBAS_FORMAT_MSB_MASK		(0x3)
+/* FIDXL width, and the format count below which FIDXU is reserved. */
+#define NVME_NS_DATA_FLBAS_FIDXL_BITS			(4)
+#define NVME_NS_DATA_LBAF_BASE_COUNT			(16)
 
 /** metadata capabilities */
 /* metadata can be transferred as part of data prp list */
@@ -1123,6 +1186,25 @@ enum nvme_activate_action {
 	NVME_AA_ACTIVATE			= 0x2,
 };
 
+/* Timestamp - Data Structure for Set Features / Get Features */
+struct nvme_timestamp_data {
+	uint8_t		tstmp[6];	/* milliseconds since 1970-01-01 UTC */
+	uint8_t		tstmps;		/* attributes, get features only */
+	uint8_t		rsvd7;
+} __packed;
+
+_Static_assert(sizeof(struct nvme_timestamp_data) == 8,
+    "bad size for nvme_timestamp_data");
+
+/** Timestamp attributes */
+#define NVME_TIMESTAMP_TSTMPS_SYNCH_SHIFT		(0)
+#define NVME_TIMESTAMP_TSTMPS_SYNCH_MASK		(0x1)
+#define NVME_TIMESTAMP_TSTMPS_ORIGIN_SHIFT		(1)
+#define NVME_TIMESTAMP_TSTMPS_ORIGIN_MASK		(0x7)
+
+#define NVME_TIMESTAMP_ORIGIN_RESET			(0x0)
+#define NVME_TIMESTAMP_ORIGIN_SET_FEATURES		(0x1)
+
 struct nvme_power_state {
 	/** Maximum Power */
 	uint16_t	mp;			/* Maximum Power */
@@ -1203,7 +1285,19 @@ struct nvme_controller_data {
 	/** Read Recovery Levels Supported */
 	uint16_t		rrls;
 
-	uint8_t			reserved1[9];
+	/** Boot Partition Capabilities */
+	uint8_t			bpcap;
+
+	/** CXL HDM Support Information */
+	uint8_t			chsi;
+
+	/** NVM Subsystem Shutdown Latency */
+	uint32_t		nssl;
+
+	uint8_t			reserved1[2];
+
+	/** Power Loss Signaling Information */
+	uint8_t			plsi;
 
 	/** Controller Type */
 	uint8_t			cntrltype;
@@ -1507,9 +1601,7 @@ struct nvme_namespace_data {
 	uint8_t			eui64[8];
 
 	/** lba format support */
-	uint32_t		lbaf[16];
-
-	uint8_t			reserved7[192];
+	uint32_t		lbaf[64];
 
 	uint8_t			vendor_specific[3712];
 } __packed __aligned(4);
@@ -1542,8 +1634,7 @@ enum nvme_log_page {
 	/* 0xC0-0xFF - vendor specific */
 
 	/*
-	 * The following are Intel Specific log pages, but they seem
-	 * to be widely implemented.
+	 * The following are Intel Specific log pages for older models.
 	 */
 	INTEL_LOG_READ_LAT_LOG		= 0xc1,
 	INTEL_LOG_WRITE_LAT_LOG		= 0xc2,
@@ -1552,7 +1643,7 @@ enum nvme_log_page {
 	INTEL_LOG_DRIVE_MKT_NAME	= 0xdd,
 
 	/*
-	 * HGST log page, with lots ofs sub pages.
+	 * HGST log page, with lots of sub pages.
 	 */
 	HGST_INFO_LOG			= 0xc1,
 };
@@ -1912,26 +2003,21 @@ void	nvme_sc_sbuf(const struct nvme_completion *cpl, struct sbuf *sbuf);
 void	nvme_strvis(uint8_t *dst, const uint8_t *src, int dstlen, int srclen);
 
 #ifdef _KERNEL
-
 struct bio;
 struct thread;
 
 struct nvme_namespace;
 struct nvme_controller;
-struct nvme_consumer;
 struct nvme_passthru_cmd;
 
 typedef void (*nvme_cb_fn_t)(void *, const struct nvme_completion *);
 
-typedef void *(*nvme_cons_ns_fn_t)(struct nvme_namespace *, void *);
-typedef void *(*nvme_cons_ctrlr_fn_t)(struct nvme_controller *);
-typedef void (*nvme_cons_async_fn_t)(void *, const struct nvme_completion *,
-				     uint32_t, void *, uint32_t);
-typedef void (*nvme_cons_fail_fn_t)(void *);
-
 enum nvme_namespace_flags {
-	NVME_NS_DEALLOCATE_SUPPORTED	= 0x1,
-	NVME_NS_FLUSH_SUPPORTED		= 0x2,
+	NVME_NS_DEALLOCATE_SUPPORTED	= 0x01,
+	NVME_NS_FLUSH_SUPPORTED		= 0x02,
+	NVME_NS_ALIVE			= 0x04,
+	NVME_NS_DELTA			= 0x08,
+	NVME_NS_GONE			= 0x10,
 };
 
 int	nvme_ctrlr_passthrough_cmd(struct nvme_controller *ctrlr,
@@ -1979,13 +2065,6 @@ int	nvme_ns_cmd_flush(struct nvme_namespace *ns, nvme_cb_fn_t cb_fn,
 int	nvme_ns_dump(struct nvme_namespace *ns, void *virt, off_t offset,
 		     size_t len);
 
-/* Registration functions */
-struct nvme_consumer *	nvme_register_consumer(nvme_cons_ns_fn_t    ns_fn,
-					       nvme_cons_ctrlr_fn_t ctrlr_fn,
-					       nvme_cons_async_fn_t async_fn,
-					       nvme_cons_fail_fn_t  fail_fn);
-void		nvme_unregister_consumer(struct nvme_consumer *consumer);
-
 /* Controller helper functions */
 device_t	nvme_ctrlr_get_device(struct nvme_controller *ctrlr);
 const struct nvme_controller_data *
@@ -1995,6 +2074,24 @@ nvme_ctrlr_has_dataset_mgmt(const struct nvme_controller_data *cd)
 {
 	/* Assumes cd was byte swapped by nvme_controller_data_swapbytes() */
 	return (NVMEV(NVME_CTRLR_DATA_ONCS_DSM, cd->oncs) != 0);
+}
+
+/*
+ * Copy the NVME device's serial number to the provided buffer, which must be
+ * at least DISK_IDENT_SIZE bytes large.
+ */
+static inline void
+nvme_cdata_get_disk_ident(const struct nvme_controller_data *cdata, uint8_t *sn)
+{
+	_Static_assert(NVME_SERIAL_NUMBER_LENGTH < DISK_IDENT_SIZE,
+		"NVME serial number too big for disk ident");
+
+	memcpy(sn, cdata->sn, NVME_SERIAL_NUMBER_LENGTH);
+	sn[NVME_SERIAL_NUMBER_LENGTH] = '\0';
+	for (int i = 0; sn[i] != '\0'; i++) {
+		if (sn[i] < 0x20 || sn[i] >= 0x80)
+			sn[i] = ' ';
+	}
 }
 
 /* Namespace helper functions */
@@ -2067,6 +2164,19 @@ extern int nvme_use_nvd;
 
 #endif /* _KERNEL */
 
+static inline uint8_t
+nvme_ns_data_format_index(const struct nvme_namespace_data *nsdata)
+{
+	uint8_t fmt;
+
+	fmt = NVMEV(NVME_NS_DATA_FLBAS_FORMAT, nsdata->flbas);
+	/* FIDXU is valid only above the base count; NLBAF is 0's based. */
+	if (nsdata->nlbaf + 1 > NVME_NS_DATA_LBAF_BASE_COUNT)
+		fmt |= NVMEV(NVME_NS_DATA_FLBAS_FORMAT_MSB, nsdata->flbas) <<
+		    NVME_NS_DATA_FLBAS_FIDXL_BITS;
+	return (fmt);
+}
+
 /* Endianess conversion functions for NVMe structs */
 static inline
 void	nvme_completion_swapbytes(struct nvme_completion *s __unused)
@@ -2110,6 +2220,7 @@ void	nvme_controller_data_swapbytes(struct nvme_controller_data *s __unused)
 	s->oaes = le32toh(s->oaes);
 	s->ctratt = le32toh(s->ctratt);
 	s->rrls = le16toh(s->rrls);
+	s->nssl = le32toh(s->nssl);
 	s->crdt1 = le16toh(s->crdt1);
 	s->crdt2 = le16toh(s->crdt2);
 	s->crdt3 = le16toh(s->crdt3);
@@ -2155,8 +2266,6 @@ static inline
 void	nvme_namespace_data_swapbytes(struct nvme_namespace_data *s __unused)
 {
 #if _BYTE_ORDER != _LITTLE_ENDIAN
-	int i;
-
 	s->nsze = le64toh(s->nsze);
 	s->ncap = le64toh(s->ncap);
 	s->nuse = le64toh(s->nuse);
@@ -2175,7 +2284,7 @@ void	nvme_namespace_data_swapbytes(struct nvme_namespace_data *s __unused)
 	s->anagrpid = le32toh(s->anagrpid);
 	s->nvmsetid = le16toh(s->nvmsetid);
 	s->endgid = le16toh(s->endgid);
-	for (i = 0; i < 16; i++)
+	for (unsigned int i = 0; i < nitems(s->lbaf); i++)
 		s->lbaf[i] = le32toh(s->lbaf[i]);
 #endif
 }

@@ -46,7 +46,7 @@ struct vtnet_statistics {
 	uint64_t	rx_csum_bad_ethtype;
 	uint64_t	rx_csum_bad_ipproto;
 	uint64_t	rx_csum_bad_offset;
-	uint64_t	rx_csum_bad_proto;
+	uint64_t	rx_csum_inaccessible_ipproto;
 	uint64_t	tx_csum_unknown_ethtype;
 	uint64_t	tx_csum_proto_mismatch;
 	uint64_t	tx_tso_not_tcp;
@@ -183,6 +183,7 @@ struct vtnet_softc {
 	uint64_t		 vtnet_negotiated_features;
 	struct vtnet_statistics	 vtnet_stats;
 	struct callout		 vtnet_tick_ch;
+	struct task		 vtnet_announce_task;
 	struct ifmedia		 vtnet_media;
 	eventhandler_tag	 vtnet_vlan_attach;
 	eventhandler_tag	 vtnet_vlan_detach;
@@ -190,7 +191,24 @@ struct vtnet_softc {
 	struct mtx		 vtnet_mtx;
 	char			 vtnet_mtx_name[16];
 	uint8_t			 vtnet_hwaddr[ETHER_ADDR_LEN];
+
+	bus_dma_tag_t		 vtnet_rx_dmat;
+	struct mtx		 vtnet_rx_mtx;
+
+	bus_dma_tag_t		 vtnet_tx_dmat;
+	struct mtx		 vtnet_tx_mtx;
+
+	bus_dma_tag_t		 vtnet_hdr_dmat;
+	struct mtx		 vtnet_hdr_mtx;
+
+	bus_dma_tag_t		 vtnet_ack_dmat;
+	struct mtx		 vtnet_ack_mtx;
 };
+/* vtnet flag descriptions for use with printf(9) %b identifier. */
+#define VTNET_FLAGS_BITS \
+    "\20\1MODERN\2MAC\3CTRL_VQ\4CTRL_RX\5CTRL_MAC\6VLAN_FILTER\7TSO_ECN" \
+    "\10MRG_RXBUFS\11LRO_NOMRG\12MQ\13INDIRECT\14EVENT_IDX\15SUSPENDED" \
+    "\16FIXUP_NEEDS_CSUM\17SW_LRO"
 
 static bool
 vtnet_modern(struct vtnet_softc *sc)
@@ -268,6 +286,10 @@ struct vtnet_tx_header {
 	} vth_uhdr;
 
 	struct mbuf *vth_mbuf;
+
+	bus_dmamap_t dmap;
+
+	bus_dmamap_t hdr_dmap;
 };
 
 /*
@@ -315,8 +337,10 @@ CTASSERT(sizeof(struct vtnet_mac_filter) <= PAGE_SIZE);
      VIRTIO_NET_F_MTU			| \
      VIRTIO_NET_F_CTRL_VQ		| \
      VIRTIO_NET_F_CTRL_RX		| \
+     VIRTIO_NET_F_CTRL_RX_EXTRA		| \
      VIRTIO_NET_F_CTRL_MAC_ADDR		| \
      VIRTIO_NET_F_CTRL_VLAN		| \
+     VIRTIO_NET_F_GUEST_ANNOUNCE	| \
      VIRTIO_NET_F_CSUM			| \
      VIRTIO_NET_F_HOST_TSO4		| \
      VIRTIO_NET_F_HOST_TSO6		| \
@@ -347,6 +371,22 @@ CTASSERT(sizeof(struct vtnet_mac_filter) <= PAGE_SIZE);
  */
 #define VTNET_LRO_FEATURES (VIRTIO_NET_F_GUEST_TSO4 | \
     VIRTIO_NET_F_GUEST_TSO6 | VIRTIO_NET_F_GUEST_ECN)
+
+/*
+ * Union of the offload-related features offered by the driver.  As per spec,
+ * a device is permitted to reject an otherwise valid subset of its offered
+ * features by failing FEATURES_OK (v1.3 §2.2.2).  Offloads are where this
+ * happens in practice, so feature negotiation retries without this entire
+ * group when the device rejects the first feature set.
+ *
+ * Must cover every offload-related bit in VTNET_COMMON_FEATURES.
+ */
+#define VTNET_OFFLOAD_FEATURES \
+    (VIRTIO_NET_F_CSUM			| \
+     VIRTIO_NET_F_GUEST_CSUM		| \
+     VIRTIO_NET_F_CTRL_GUEST_OFFLOADS	| \
+     VTNET_TSO_FEATURES			| \
+     VTNET_LRO_FEATURES)
 
 #define VTNET_MIN_MTU		68
 #define VTNET_MAX_MTU		65536

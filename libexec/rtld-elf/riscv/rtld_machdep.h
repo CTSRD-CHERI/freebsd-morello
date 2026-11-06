@@ -44,6 +44,9 @@ struct Struct_Obj_Entry;
 
 #define	MD_OBJ_ENTRY
 
+#define	MD_OBJ_ENTRY_INIT(obj)
+#define	MD_OBJ_ENTRY_FINI(obj)
+
 uint64_t set_gp(struct Struct_Obj_Entry *obj);
 
 /* Return the address of the .dynamic section in the dynamic linker. */
@@ -59,6 +62,8 @@ uint64_t set_gp(struct Struct_Obj_Entry *obj);
 
 /* No architecture specific notes */
 #define	arch_digest_note(obj, note)	false
+
+#define	arch_fix_auxv(a, ai)		do {} while (0)
 
 Elf_Addr reloc_jmpslot(Elf_Addr *where, Elf_Addr target,
     const struct Struct_Obj_Entry *defobj, const struct Struct_Obj_Entry *obj,

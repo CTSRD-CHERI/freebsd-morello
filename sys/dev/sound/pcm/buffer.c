@@ -5,6 +5,10 @@
  * Portions Copyright (c) Ryan Beasley <ryan.beasley@gmail.com> - GSoC 2006
  * Copyright (c) 1999 Cameron Grant <cg@FreeBSD.org>
  * All rights reserved.
+ * Copyright (c) 2025 The FreeBSD Foundation
+ *
+ * Portions of this software were developed by Christos Margiolis
+ * <christos@FreeBSD.org> under sponsorship from the FreeBSD Foundation.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -32,6 +36,7 @@
 #include "opt_snd.h"
 #endif
 
+#include <sys/refcount.h>
 #include <dev/sound/pcm/sound.h>
 
 #include "feeder_if.h"
@@ -41,14 +46,17 @@
 #include "snd_fxdiv_gen.h"
 
 struct snd_dbuf *
-sndbuf_create(device_t dev, char *drv, char *desc, struct pcm_channel *channel)
+sndbuf_create(struct pcm_channel *channel, uint32_t fmt, uint32_t spd,
+    const char *desc)
 {
 	struct snd_dbuf *b;
 
 	b = malloc(sizeof(*b), M_DEVBUF, M_WAITOK | M_ZERO);
-	snprintf(b->name, SNDBUF_NAMELEN, "%s:%s", drv, desc);
-	b->dev = dev;
+	refcount_init(&b->refcount, 1);
+	snprintf(b->name, SNDBUF_NAMELEN, "%s:%s", channel->name, desc);
 	b->channel = channel;
+	sndbuf_setfmt(b, fmt);
+	sndbuf_setspd(b, spd);
 
 	return b;
 }
@@ -56,14 +64,48 @@ sndbuf_create(device_t dev, char *drv, char *desc, struct pcm_channel *channel)
 void
 sndbuf_destroy(struct snd_dbuf *b)
 {
-	sndbuf_free(b);
-	free(b, M_DEVBUF);
+	b->flags |= SNDBUF_F_DETACHED;
+	sndbuf_rele(b);
 }
 
-bus_addr_t
-sndbuf_getbufaddr(struct snd_dbuf *buf)
+void
+sndbuf_ref(struct snd_dbuf *b)
 {
-	return (buf->buf_addr);
+	unsigned int count __diagused;
+
+	CHN_LOCK(b->channel);
+	count = refcount_acquire(&b->refcount);
+	KASSERT(count > 0, ("sndbuf %p refcount 0", b));
+	CHN_UNLOCK(b->channel);
+}
+
+void
+sndbuf_rele(struct snd_dbuf *b)
+{
+	if (refcount_release(&b->refcount)) {
+		sndbuf_free(b);
+		KASSERT(refcount_load(&b->refcount) == 0,
+		    ("sndbuf %p still referenced", b));
+		free(b, M_DEVBUF);
+	}
+}
+
+static bool
+sndbuf_busy(struct snd_dbuf *b)
+{
+	CHN_LOCKASSERT(b->channel);
+
+	return (refcount_load(&b->refcount) > 1 ||
+	    (b->flags & SNDBUF_F_DETACHED) != 0 ||
+	    /*
+	     * XXX-MJ CHN_F_MMAP is not reliable, but for software buffers the
+	     * refcount accurately reflects whether the buffer is mapped.
+	     * Ensure that there is no in-flight DMA transfer by checking
+	     * CHN_F_TRIGGERED.  This should really be checked at a higher
+	     * layer, but this is tricky since chn_resizebuf() and
+	     * sndbuf_resize() drop and reacquire the channel lock.
+	     */
+	    (b->channel->flags & (CHN_F_MMAP | CHN_F_TRIGGERED)) != 0);
 }
 
 static void
@@ -72,9 +114,10 @@ sndbuf_setmap(void *arg, bus_dma_segment_t *segs, int nseg, int error)
 	struct snd_dbuf *b = (struct snd_dbuf *)arg;
 
 	if (snd_verbose > 3) {
-		device_printf(b->dev, "sndbuf_setmap %lx, %lx; ",
-		    (u_long)segs[0].ds_addr, (u_long)segs[0].ds_len);
-		printf("%p -> %lx\n", b->buf, (u_long)segs[0].ds_addr);
+		printf("sndbuf_setmap %lx, %lx; ",
+		    (unsigned long)segs[0].ds_addr,
+		    (unsigned long)segs[0].ds_len);
+		printf("%p -> %lx\n", b->buf, (unsigned long)segs[0].ds_addr);
 	}
 	if (error == 0)
 		b->buf_addr = segs[0].ds_addr;
@@ -132,11 +175,8 @@ sndbuf_setup(struct snd_dbuf *b, void *buf, unsigned int size)
 void
 sndbuf_free(struct snd_dbuf *b)
 {
-	if (b->tmpbuf)
-		free(b->tmpbuf, M_DEVBUF);
-
-	if (b->shadbuf)
-		free(b->shadbuf, M_DEVBUF);
+	free(b->tmpbuf, M_DEVBUF);
+	free(b->shadbuf, M_DEVBUF);
 
 	if (b->buf) {
 		if (b->flags & SNDBUF_F_MANAGED) {
@@ -147,7 +187,7 @@ sndbuf_free(struct snd_dbuf *b)
 		} else
 			free(b->buf, M_DEVBUF);
 	}
-	seldrain(sndbuf_getsel(b));
+	seldrain(&b->sel);
 
 	b->tmpbuf = NULL;
 	b->shadbuf = NULL;
@@ -163,7 +203,7 @@ int
 sndbuf_resize(struct snd_dbuf *b, unsigned int blkcnt, unsigned int blksz)
 {
 	unsigned int bufsize, allocsize;
-	u_int8_t *tmpbuf;
+	uint8_t *tmpbuf;
 
 	CHN_LOCK(b->channel);
 	if (b->maxsize == 0)
@@ -183,16 +223,24 @@ sndbuf_resize(struct snd_dbuf *b, unsigned int blkcnt, unsigned int blksz)
 
 	if (bufsize > b->allocsize ||
 	    bufsize < (b->allocsize >> SNDBUF_CACHE_SHIFT)) {
+		if (sndbuf_busy(b)) {
+			CHN_UNLOCK(b->channel);
+			return (EBUSY);
+		}
 		allocsize = round_page(bufsize);
 		CHN_UNLOCK(b->channel);
 		tmpbuf = malloc(allocsize, M_DEVBUF, M_WAITOK);
 		CHN_LOCK(b->channel);
+		if (sndbuf_busy(b)) {
+			CHN_UNLOCK(b->channel);
+			free(tmpbuf, M_DEVBUF);
+			return (EBUSY);
+		}
 		if (snd_verbose > 3)
 			printf("%s(): b=%p %p -> %p [%d -> %d : %d]\n",
 			    __func__, b, b->tmpbuf, tmpbuf,
 			    b->allocsize, allocsize, bufsize);
-		if (b->tmpbuf != NULL)
-			free(b->tmpbuf, M_DEVBUF);
+		free(b->tmpbuf, M_DEVBUF);
 		b->tmpbuf = tmpbuf;
 		b->allocsize = allocsize;
 	} else if (snd_verbose > 3)
@@ -213,29 +261,36 @@ int
 sndbuf_remalloc(struct snd_dbuf *b, unsigned int blkcnt, unsigned int blksz)
 {
         unsigned int bufsize, allocsize;
-	u_int8_t *buf, *tmpbuf, *shadbuf;
+	uint8_t *buf, *tmpbuf, *shadbuf;
 
 	if (blkcnt < 2 || blksz < 16)
 		return EINVAL;
+
+	CHN_LOCKASSERT(b->channel);
 
 	bufsize = blksz * blkcnt;
 
 	if (bufsize > b->allocsize ||
 	    bufsize < (b->allocsize >> SNDBUF_CACHE_SHIFT)) {
+		if (sndbuf_busy(b))
+			return (EBUSY);
 		allocsize = round_page(bufsize);
 		CHN_UNLOCK(b->channel);
 		buf = malloc(allocsize, M_DEVBUF, M_WAITOK);
 		tmpbuf = malloc(allocsize, M_DEVBUF, M_WAITOK);
 		shadbuf = malloc(allocsize, M_DEVBUF, M_WAITOK);
 		CHN_LOCK(b->channel);
-		if (b->buf != NULL)
-			free(b->buf, M_DEVBUF);
+		if (sndbuf_busy(b)) {
+			free(buf, M_DEVBUF);
+			free(tmpbuf, M_DEVBUF);
+			free(shadbuf, M_DEVBUF);
+			return (EBUSY);
+		}
+		free(b->buf, M_DEVBUF);
 		b->buf = buf;
-		if (b->tmpbuf != NULL)
-			free(b->tmpbuf, M_DEVBUF);
+		free(b->tmpbuf, M_DEVBUF);
 		b->tmpbuf = tmpbuf;
-		if (b->shadbuf != NULL)
-			free(b->shadbuf, M_DEVBUF);
+		free(b->shadbuf, M_DEVBUF);
 		b->shadbuf = shadbuf;
 		if (snd_verbose > 3)
 			printf("%s(): b=%p %d -> %d [%d]\n",
@@ -269,7 +324,7 @@ void
 sndbuf_clear(struct snd_dbuf *b, unsigned int length)
 {
 	int i;
-	u_char data, *p;
+	uint8_t data, *p;
 
 	if (length == 0)
 		return;
@@ -277,16 +332,10 @@ sndbuf_clear(struct snd_dbuf *b, unsigned int length)
 		length = b->bufsize;
 
 	data = sndbuf_zerodata(b->fmt);
-
 	i = sndbuf_getfreeptr(b);
-	p = sndbuf_getbuf(b);
-	while (length > 0) {
-		p[i] = data;
-		length--;
-		i++;
-		if (i >= b->bufsize)
-			i = 0;
-	}
+	p = b->buf;
+	for  (; length > 0; length--, i++)
+		p[i % b->bufsize] = data;
 }
 
 /**
@@ -298,16 +347,16 @@ void
 sndbuf_fillsilence(struct snd_dbuf *b)
 {
 	if (b->bufsize > 0)
-		memset(sndbuf_getbuf(b), sndbuf_zerodata(b->fmt), b->bufsize);
+		memset(b->buf, sndbuf_zerodata(b->fmt), b->bufsize);
 	b->rp = 0;
 	b->rl = b->bufsize;
 }
 
 void
-sndbuf_fillsilence_rl(struct snd_dbuf *b, u_int rl)
+sndbuf_fillsilence_rl(struct snd_dbuf *b, unsigned int rl)
 {
 	if (b->bufsize > 0)
-		memset(sndbuf_getbuf(b), sndbuf_zerodata(b->fmt), b->bufsize);
+		memset(b->buf, sndbuf_zerodata(b->fmt), b->bufsize);
 	b->rp = 0;
 	b->rl = min(b->bufsize, rl);
 }
@@ -344,25 +393,13 @@ sndbuf_reset(struct snd_dbuf *b)
 	sndbuf_clearshadow(b);
 }
 
-u_int32_t
-sndbuf_getfmt(struct snd_dbuf *b)
-{
-	return b->fmt;
-}
-
 int
-sndbuf_setfmt(struct snd_dbuf *b, u_int32_t fmt)
+sndbuf_setfmt(struct snd_dbuf *b, uint32_t fmt)
 {
 	b->fmt = fmt;
 	b->bps = AFMT_BPS(b->fmt);
 	b->align = AFMT_ALIGN(b->fmt);
 	return 0;
-}
-
-unsigned int
-sndbuf_getspd(struct snd_dbuf *b)
-{
-	return b->spd;
 }
 
 void
@@ -371,72 +408,12 @@ sndbuf_setspd(struct snd_dbuf *b, unsigned int spd)
 	b->spd = spd;
 }
 
-unsigned int
-sndbuf_getalign(struct snd_dbuf *b)
-{
-	return (b->align);
-}
-
-unsigned int
-sndbuf_getblkcnt(struct snd_dbuf *b)
-{
-	return b->blkcnt;
-}
-
-void
-sndbuf_setblkcnt(struct snd_dbuf *b, unsigned int blkcnt)
-{
-	b->blkcnt = blkcnt;
-}
-
-unsigned int
-sndbuf_getblksz(struct snd_dbuf *b)
-{
-	return b->blksz;
-}
-
-void
-sndbuf_setblksz(struct snd_dbuf *b, unsigned int blksz)
-{
-	b->blksz = blksz;
-}
-
-unsigned int
-sndbuf_getbps(struct snd_dbuf *b)
-{
-	return b->bps;
-}
-
-void *
-sndbuf_getbuf(struct snd_dbuf *b)
-{
-	return b->buf;
-}
-
 void *
 sndbuf_getbufofs(struct snd_dbuf *b, unsigned int ofs)
 {
 	KASSERT(ofs < b->bufsize, ("%s: ofs invalid %d", __func__, ofs));
 
 	return b->buf + ofs;
-}
-
-unsigned int
-sndbuf_getsize(struct snd_dbuf *b)
-{
-	return b->bufsize;
-}
-
-unsigned int
-sndbuf_getmaxsize(struct snd_dbuf *b)
-{
-	return b->maxsize;
-}
-
-unsigned int
-sndbuf_getallocsize(struct snd_dbuf *b)
-{
-	return b->allocsize;
 }
 
 unsigned int
@@ -451,35 +428,10 @@ sndbuf_setrun(struct snd_dbuf *b, int go)
 	b->dl = go? b->blksz : 0;
 }
 
-struct selinfo *
-sndbuf_getsel(struct snd_dbuf *b)
-{
-	return &b->sel;
-}
-
-/************************************************************/
-unsigned int
-sndbuf_getxrun(struct snd_dbuf *b)
-{
-	return b->xrun;
-}
-
 void
 sndbuf_setxrun(struct snd_dbuf *b, unsigned int xrun)
 {
 	b->xrun = xrun;
-}
-
-unsigned int
-sndbuf_gethwptr(struct snd_dbuf *b)
-{
-	return b->hp;
-}
-
-void
-sndbuf_sethwptr(struct snd_dbuf *b, unsigned int ptr)
-{
-	b->hp = ptr;
 }
 
 unsigned int
@@ -515,34 +467,10 @@ sndbuf_getfreeptr(struct snd_dbuf *b)
 	return (b->rp + b->rl) % b->bufsize;
 }
 
-u_int64_t
+uint64_t
 sndbuf_getblocks(struct snd_dbuf *b)
 {
 	return b->total / b->blksz;
-}
-
-u_int64_t
-sndbuf_getprevblocks(struct snd_dbuf *b)
-{
-	return b->prev_total / b->blksz;
-}
-
-u_int64_t
-sndbuf_gettotal(struct snd_dbuf *b)
-{
-	return b->total;
-}
-
-u_int64_t
-sndbuf_getprevtotal(struct snd_dbuf *b)
-{
-	return b->prev_total;
-}
-
-void
-sndbuf_updateprevtotal(struct snd_dbuf *b)
-{
-	b->prev_total = b->total;
 }
 
 unsigned int
@@ -551,12 +479,11 @@ sndbuf_xbytes(unsigned int v, struct snd_dbuf *from, struct snd_dbuf *to)
 	if (from == NULL || to == NULL || v == 0)
 		return 0;
 
-	return snd_xbytes(v, sndbuf_getalign(from) * sndbuf_getspd(from),
-	    sndbuf_getalign(to) * sndbuf_getspd(to));
+	return snd_xbytes(v, from->align * from->spd, to->align * to->spd);
 }
 
-u_int8_t
-sndbuf_zerodata(u_int32_t fmt)
+uint8_t
+sndbuf_zerodata(uint32_t fmt)
 {
 	if (fmt & (AFMT_SIGNED | AFMT_PASSTHROUGH))
 		return (0x00);
@@ -583,7 +510,7 @@ sndbuf_zerodata(u_int32_t fmt)
  * @retval 0	Unconditional
  */
 int
-sndbuf_acquire(struct snd_dbuf *b, u_int8_t *from, unsigned int count)
+sndbuf_acquire(struct snd_dbuf *b, uint8_t *from, unsigned int count)
 {
 	int l;
 
@@ -592,7 +519,7 @@ sndbuf_acquire(struct snd_dbuf *b, u_int8_t *from, unsigned int count)
 	b->total += count;
 	if (from != NULL) {
 		while (count > 0) {
-			l = min(count, sndbuf_getsize(b) - sndbuf_getfreeptr(b));
+			l = min(count, b->bufsize - sndbuf_getfreeptr(b));
 			bcopy(from, sndbuf_getbufofs(b, sndbuf_getfreeptr(b)), l);
 			from += l;
 			b->rl += l;
@@ -609,7 +536,7 @@ sndbuf_acquire(struct snd_dbuf *b, u_int8_t *from, unsigned int count)
  * @brief Dispose samples from channel buffer, increasing size of ready area
  *
  * This function discards samples from the supplied buffer by advancing the
- * ready area start pointer and decrementing the ready area length.  If 
+ * ready area start pointer and decrementing the ready area length.  If
  * @c to is not NULL, then the discard samples will be copied to the location
  * it points to.
  *
@@ -620,7 +547,7 @@ sndbuf_acquire(struct snd_dbuf *b, u_int8_t *from, unsigned int count)
  * @returns 0 unconditionally
  */
 int
-sndbuf_dispose(struct snd_dbuf *b, u_int8_t *to, unsigned int count)
+sndbuf_dispose(struct snd_dbuf *b, uint8_t *to, unsigned int count)
 {
 	int l;
 
@@ -628,7 +555,7 @@ sndbuf_dispose(struct snd_dbuf *b, u_int8_t *to, unsigned int count)
 	KASSERT((b->rl >= 0) && (b->rl <= b->bufsize), ("%s: b->rl invalid %d", __func__, b->rl));
 	if (to != NULL) {
 		while (count > 0) {
-			l = min(count, sndbuf_getsize(b) - sndbuf_getreadyptr(b));
+			l = min(count, b->bufsize - sndbuf_getreadyptr(b));
 			bcopy(sndbuf_getbufofs(b, sndbuf_getreadyptr(b)), to, l);
 			to += l;
 			b->rl -= l;
@@ -644,36 +571,18 @@ sndbuf_dispose(struct snd_dbuf *b, u_int8_t *to, unsigned int count)
 	return 0;
 }
 
-#ifdef SND_DIAGNOSTIC
-static uint32_t snd_feeder_maxfeed = 0;
-SYSCTL_UINT(_hw_snd, OID_AUTO, feeder_maxfeed, CTLFLAG_RD,
-    &snd_feeder_maxfeed, 0, "maximum feeder count request");
-
-static uint32_t snd_feeder_maxcycle = 0;
-SYSCTL_UINT(_hw_snd, OID_AUTO, feeder_maxcycle, CTLFLAG_RD,
-    &snd_feeder_maxcycle, 0, "maximum feeder cycle");
-#endif
-
 /* count is number of bytes we want added to destination buffer */
 int
 sndbuf_feed(struct snd_dbuf *from, struct snd_dbuf *to, struct pcm_channel *channel, struct pcm_feeder *feeder, unsigned int count)
 {
 	unsigned int cnt, maxfeed;
-#ifdef SND_DIAGNOSTIC
-	unsigned int cycle;
-
-	if (count > snd_feeder_maxfeed)
-		snd_feeder_maxfeed = count;
-
-	cycle = 0;
-#endif
 
 	KASSERT(count > 0, ("can't feed 0 bytes"));
 
 	if (sndbuf_getfree(to) < count)
 		return (EINVAL);
 
-	maxfeed = SND_FXROUND(SND_FXDIV_MAX, sndbuf_getalign(to));
+	maxfeed = SND_FXROUND(SND_FXDIV_MAX, to->align);
 
 	do {
 		cnt = FEEDER_FEED(feeder, channel, to->tmpbuf,
@@ -682,51 +591,9 @@ sndbuf_feed(struct snd_dbuf *from, struct snd_dbuf *to, struct pcm_channel *chan
 			break;
 		sndbuf_acquire(to, to->tmpbuf, cnt);
 		count -= cnt;
-#ifdef SND_DIAGNOSTIC
-		cycle++;
-#endif
 	} while (count != 0);
 
-#ifdef SND_DIAGNOSTIC
-	if (cycle > snd_feeder_maxcycle)
-		snd_feeder_maxcycle = cycle;
-#endif
-
 	return (0);
-}
-
-/************************************************************/
-
-void
-sndbuf_dump(struct snd_dbuf *b, char *s, u_int32_t what)
-{
-	printf("%s: [", s);
-	if (what & 0x01)
-		printf(" bufsize: %d, maxsize: %d", b->bufsize, b->maxsize);
-	if (what & 0x02)
-		printf(" dl: %d, rp: %d, rl: %d, hp: %d", b->dl, b->rp, b->rl, b->hp);
-	if (what & 0x04)
-		printf(" total: %ju, prev_total: %ju, xrun: %d", (uintmax_t)b->total, (uintmax_t)b->prev_total, b->xrun);
-   	if (what & 0x08)
-		printf(" fmt: 0x%x, spd: %d", b->fmt, b->spd);
-	if (what & 0x10)
-		printf(" blksz: %d, blkcnt: %d, flags: 0x%x", b->blksz, b->blkcnt, b->flags);
-	printf(" ]\n");
-}
-
-/************************************************************/
-u_int32_t
-sndbuf_getflags(struct snd_dbuf *b)
-{
-	return b->flags;
-}
-
-void
-sndbuf_setflags(struct snd_dbuf *b, u_int32_t flags, int on)
-{
-	b->flags &= ~flags;
-	if (on)
-		b->flags |= flags;
 }
 
 /**
@@ -761,7 +628,7 @@ sndbuf_clearshadow(struct snd_dbuf *b)
 void
 sndbuf_getpeaks(struct snd_dbuf *b, int *lp, int *rp)
 {
-	u_int32_t lpeak, rpeak;
+	uint32_t lpeak, rpeak;
 
 	lpeak = 0;
 	rpeak = 0;

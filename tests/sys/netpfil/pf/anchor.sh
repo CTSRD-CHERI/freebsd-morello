@@ -123,6 +123,51 @@ nested_anchor_cleanup()
 	pft_cleanup
 }
 
+atf_test_case "deeply_nested" "cleanup"
+deeply_nested_head()
+{
+	atf_set descr 'Test setting and retrieving deeply nested anchors'
+	atf_set require.user root
+}
+
+deeply_nested_body()
+{
+	pft_init
+
+	epair=$(vnet_mkepair)
+	vnet_mkjail alcatraz ${epair}a
+
+	pft_set_rules alcatraz \
+		"anchor \"foo\" { \n\
+			anchor \"bar\" { \n\
+				anchor \"foobar\" { \n\
+					pass on ${epair}a \n\
+				} \n\
+				anchor \"quux\" { \n\
+					pass on ${epair}a \n\
+				} \n\
+			} \n\
+			anchor \"baz\" { \n\
+				pass on ${epair}a \n\
+			} \n\
+			anchor \"qux\" { \n\
+				pass on ${epair}a \n\
+			} \n\
+		}"
+
+	atf_check -s exit:0 -o \
+	    inline:"  foo\n  foo/bar\n  foo/bar/foobar\n  foo/bar/quux\n  foo/baz\n  foo/qux\n" \
+	    jexec alcatraz pfctl -sA
+
+	atf_check -s exit:0 -o inline:"  foo/bar/foobar\n  foo/bar/quux\n" \
+	    jexec alcatraz pfctl -a foo/bar -sA
+}
+
+deeply_nested_cleanup()
+{
+	pft_cleanup
+}
+
 atf_test_case "wildcard" "cleanup"
 wildcard_head()
 {
@@ -307,8 +352,20 @@ counter_body()
 	# Generate traffic
 	atf_check -s exit:0 -o ignore ping -c 1 192.0.2.1
 	atf_check -s exit:0 -e ignore \
-	    -o match:'[ Evaluations: 1         Packets: 2         Bytes: 168         States: 1     ]' \
+	    -o match:'\[ Evaluations: 1         Packets: 2         Bytes: 168         States: 1     \]' \
 	    jexec alcatraz pfctl -sr -vv
+
+	# Zero counters outside of the anchor
+	jexec alcatraz pfctl -sr -vv -z
+	atf_check -s exit:0 -e ignore \
+	    -o match:'\[ Evaluations: 1         Packets: 2         Bytes: 168         States: 1     \]' \
+	    jexec alcatraz pfctl -sr -vv -a "foo"
+
+	# Zero the anchor's counters
+	jexec alcatraz pfctl -sr -vv -z -a "foo"
+	atf_check -s exit:0 -e ignore \
+	    -o match:'\[ Evaluations: 0         Packets: 0         Bytes: 0           States: 1     \]' \
+	    jexec alcatraz pfctl -sr -vv -a "foo"
 }
 
 counter_cleanup()
@@ -493,11 +550,41 @@ recursive_flush_cleanup()
 	pft_cleanup
 }
 
+atf_test_case "show_recursive" "cleanup"
+show_recursive_head()
+{
+	atf_set descr 'Test showing anchors recursively. PR 297839'
+	atf_set require.user root
+}
+
+show_recursive_body()
+{
+	pft_init
+
+	vnet_mkjail alcatraz
+
+	pft_set_rules alcatraz \
+	    "pass in no state" \
+	    "pass out no state" \
+	    "anchor \"test/*\""
+
+	echo 'pass in' | jexec alcatraz pfctl -a test/testing -f -
+
+	atf_check -o match:"pass in" \
+	    jexec alcatraz pfctl -a 'test/*' -sr
+}
+
+show_recursive_cleanup()
+{
+	pft_cleanup
+}
+
 atf_init_test_cases()
 {
 	atf_add_test_case "pr183198"
 	atf_add_test_case "pr279225"
 	atf_add_test_case "nested_anchor"
+	atf_add_test_case "deeply_nested"
 	atf_add_test_case "wildcard"
 	atf_add_test_case "nested_label"
 	atf_add_test_case "quick"
@@ -507,4 +594,5 @@ atf_init_test_cases()
 	atf_add_test_case "include"
 	atf_add_test_case "quick"
 	atf_add_test_case "recursive_flush"
+	atf_add_test_case "show_recursive"
 }

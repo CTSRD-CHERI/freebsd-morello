@@ -54,7 +54,7 @@ static device_method_t uart_fdt_methods[] = {
 	DEVMETHOD(device_probe,		uart_fdt_probe),
 	DEVMETHOD(device_attach,	uart_bus_attach),
 	DEVMETHOD(device_detach,	uart_bus_detach),
-	{ 0, 0 }
+	DEVMETHOD_END
 };
 
 static driver_t uart_fdt_driver = {
@@ -237,6 +237,12 @@ uart_cpu_fdt_probe(struct uart_class **classp, bus_space_tag_t *bst,
 		if (uart_fdt_get_clock(node, &clk) != 0)
 			clk = 0;
 	}
+
+	/*
+	 * Grab the default rclk from the uart class.
+	 */
+	if (clk == 0)
+		clk = class->uc_rclk;
 
 	/*
 	 * Retrieve serial attributes.

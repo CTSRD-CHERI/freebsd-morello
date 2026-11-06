@@ -186,8 +186,10 @@ struct kinfo_proc {
 	 * front of ki_sparestrings, and ints from the end of ki_spareints.
 	 * That way the spare room from both arrays will remain contiguous.
 	 */
-	char	ki_sparestrings[46];	/* spare string space */
+	char	ki_sparestrings[38];	/* spare string space */
 	int	ki_spareints[KI_NSPARE_INT];	/* spare room for growth */
+	pid_t	ki_reaper;		/* pid of reaper process */
+	pid_t	ki_reapsubtree;		/* reaper subtree id */
 	uint64_t ki_tdev;		/* controlling tty dev */
 	int	ki_oncpu;		/* Which cpu we are on */
 	int	ki_lastcpu;		/* Last cpu we were on */
@@ -196,8 +198,8 @@ struct kinfo_proc {
 	int	ki_fibnum;		/* Default FIB number */
 	u_int	ki_cr_flags;		/* Credential flags */
 	int	ki_jid;			/* Process jail ID */
-	int	ki_numthreads;		/* XXXKSE number of threads in total */
-	lwpid_t	ki_tid;			/* XXXKSE thread id */
+	int	ki_numthreads;		/* number of threads in total */
+	lwpid_t	ki_tid;			/* thread id */
 	struct	priority ki_pri;	/* process priority */
 	struct	rusage ki_rusage;	/* process rusage statistics */
 	/* XXX - most fields in ki_rusage_ch are not (yet) filled in */
@@ -216,7 +218,7 @@ struct kinfo_proc {
 	void	*ki_spareptrs[KI_NSPARE_PTR];	/* spare room for growth */
 	long	ki_sparelongs[KI_NSPARE_LONG];	/* spare room for growth */
 	long	ki_sflag;		/* PS_* flags */
-	long	ki_tdflags;		/* XXXKSE kthread flag */
+	long	ki_tdflags;		/* kthread flag */
 };
 void fill_kinfo_proc(struct proc *, struct kinfo_proc *);
 /* XXX - the following two defines are temporary */
@@ -266,6 +268,8 @@ struct user {
 #define	KF_TYPE_EVENTFD	13
 #define	KF_TYPE_TIMERFD	14
 #define	KF_TYPE_INOTIFY	15
+#define	KF_TYPE_JAILDESC	16
+#define	KF_TYPE_NTSYNC	17
 #define	KF_TYPE_UNKNOWN	255
 
 #define	KF_VTYPE_VNON	0
@@ -285,6 +289,11 @@ struct user {
 #define	KF_FD_TYPE_TRACE	-4	/* Ktrace vnode */
 #define	KF_FD_TYPE_TEXT	-5	/* Text vnode */
 #define	KF_FD_TYPE_CTTY	-6	/* Controlling terminal */
+
+#define	KF_NTSYNC_TYPE_DEV	1	/* Not reported, reserved */
+#define	KF_NTSYNC_TYPE_SEM	2
+#define	KF_NTSYNC_TYPE_MUTEX	3
+#define	KF_NTSYNC_TYPE_EVENT	4
 
 #define	KF_FLAG_READ		0x00000001
 #define	KF_FLAG_WRITE		0x00000002
@@ -453,6 +462,9 @@ struct kinfo_file {
 				uint64_t	kf_timerfd_addr;
 			} kf_timerfd;
 			struct {
+				int32_t		kf_jid;
+			} kf_jail;
+			struct {
 				uint64_t	kf_kqueue_addr;
 				int32_t		kf_kqueue_count;
 				int32_t		kf_kqueue_state;
@@ -461,6 +473,24 @@ struct kinfo_file {
 				uint64_t	kf_inotify_npending;
 				uint64_t	kf_inotify_nbpending;
 			} kf_inotify;
+			struct {
+				uint32_t	kf_ntsync_type;
+				uint64_t	kf_ntsync_dev;
+				union {
+					struct {
+						uint32_t count;
+						uint32_t max;
+					} kf_ntsync_sem;
+					struct{
+						uint32_t owner;
+						uint32_t count;
+					} kf_ntsync_mutex;
+					struct {
+						uint32_t signaled;
+						uint32_t manual;
+					} kf_ntsync_event;
+				} kf_ntsync_un;
+			} kf_ntsync;
 		} kf_un;
 	};
 	uint16_t	kf_status;		/* Status flags. */
@@ -613,7 +643,8 @@ struct kinfo_vmobject {
 	} kvo_type_spec;			/* Type-specific union */
 	uint64_t kvo_me;			/* Uniq handle for anon obj */
 	uint64_t kvo_laundry;			/* Number of laundry pages. */
-	uint64_t _kvo_qspare[5];
+	uint64_t kvo_wired;			/* Number of wired pages. */
+	uint64_t _kvo_qspare[4];
 	uint32_t kvo_swapped;			/* Number of swapped pages */
 	uint32_t kvo_flags;
 	uint32_t _kvo_ispare[6];

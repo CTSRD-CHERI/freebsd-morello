@@ -39,6 +39,7 @@
 #include <dev/pci/pcireg.h>
 
 #include <assert.h>
+#include <stdbool.h>
 
 #include "pci_irq.h"
 
@@ -99,6 +100,7 @@ struct pcibar {
 	uint64_t		size;
 	uint64_t		addr;
 	uint8_t			lobits;
+	bool			registered;	/* io region is registered */
 };
 
 #define PI_NAMESZ	40
@@ -136,6 +138,7 @@ struct pci_devinst {
 		struct pci_irq	irq;
 		pthread_mutex_t	lock;
 	} pi_lintr;
+	pthread_mutex_t	pi_cfg_lock;
 
 	struct {
 		int		enabled;
@@ -230,9 +233,9 @@ void	pci_walk_lintr(int bus, pci_lintr_cb cb, void *arg);
 
 int	init_pci(struct vmctx *ctx);
 void	pci_callback(void);
-uint32_t pci_config_read_reg(const struct pcisel *host_sel, nvlist_t *nvl,
+uint32_t pci_config_read_reg(const struct pci_conf *host_conf, nvlist_t *nvl,
 	    uint32_t reg, uint8_t size, uint32_t def);
-int	pci_emul_alloc_bar(struct pci_devinst *pdi, int idx,
+void	pci_emul_alloc_bar(struct pci_devinst *pdi, int idx,
 	    enum pcibar_type type, uint64_t size);
 int 	pci_emul_alloc_rom(struct pci_devinst *const pdi, const uint64_t size,
     	    void **const addr);
@@ -265,6 +268,7 @@ int	pci_bus_configured(int bus);
 #ifdef BHYVE_SNAPSHOT
 struct pci_devinst *pci_next(const struct pci_devinst *cursor);
 int	pci_snapshot(struct vm_snapshot_meta *meta);
+void	pci_restore_prepare(void);
 int	pci_pause(struct pci_devinst *pdi);
 int	pci_resume(struct pci_devinst *pdi);
 #endif

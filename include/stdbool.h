@@ -29,12 +29,12 @@
 #ifndef __bool_true_false_are_defined
 #define	__bool_true_false_are_defined	1
 
-#ifndef __cplusplus
+#if (__STDC_VERSION__ < 202311L) && !defined(__cplusplus)
 
 #define	false	0
 #define	true	1
 
 #define	bool	_Bool
 
-#endif /* !__cplusplus */
+#endif /* (__STDC_VERSION__ < 202311L) && !defined(__cplusplus) */
 #endif /* __bool_true_false_are_defined */

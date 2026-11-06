@@ -26,9 +26,11 @@
  * SUCH DAMAGE.
  */
 
+#define	EXTERR_CATEGORY	EXTERR_CAT_GEOMVFS
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/bio.h>
+#include <sys/exterrvar.h>
 #include <sys/kernel.h>
 #include <sys/lock.h>
 #include <sys/malloc.h>
@@ -153,13 +155,16 @@ g_vfs_done(struct bio *bip)
 			g_print_bio("g_vfs_done():", bip, "error = %d%s",
 			    bip->bio_error,
 			    bip->bio_error != ENXIO ? "" :
-			    " supressing further ENXIO");
+			    " suppressing further ENXIO");
 		}
 	}
-	bp->b_error = bip->bio_error;
 	bp->b_ioflags = bip->bio_flags;
 	if (bip->bio_error)
 		bp->b_ioflags |= BIO_ERROR;
+	if ((bp->b_ioflags & BIO_EXTERR) != 0)
+		bp->b_exterr = bip->bio_exterr;
+	else
+		bp->b_error = bip->bio_error;
 	bp->b_resid = bp->b_bcount - bip->bio_completed;
 	g_destroy_bio(bip);
 
@@ -195,6 +200,8 @@ g_vfs_strategy(struct bufobj *bo, struct buf *bp)
 		mtx_unlock(&sc->sc_mtx);
 		bp->b_error = ENXIO;
 		bp->b_ioflags |= BIO_ERROR;
+		EXTERROR_KE(&bp->b_exterr, ENXIO,
+		    "orphaned or enxio active");
 		bufdone(bp);
 		return;
 	}
@@ -330,4 +337,17 @@ g_vfs_close(struct g_consumer *cp)
 		g_wither_geom_close(gp, ENXIO);
 	KASSERT(sc->sc_event == NULL, ("g_vfs %p event is non-NULL", sc));
 	g_free(sc);
+}
+
+void
+g_vfs_close_unlocked(struct g_consumer *cp)
+{
+	struct vnode *vp;
+
+	vp = cp->private;
+	vn_lock(vp, LK_EXCLUSIVE | LK_RETRY);
+	g_topology_lock();
+	g_vfs_close(cp);
+	g_topology_unlock();
+	VOP_UNLOCK(vp);
 }

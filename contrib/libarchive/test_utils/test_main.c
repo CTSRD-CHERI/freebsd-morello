@@ -84,6 +84,24 @@
 #if HAVE_MEMBERSHIP_H
 #include <membership.h>
 #endif
+#if !defined(_WIN32) || defined(__CYGWIN__)
+# if HAVE_POSIX_SPAWN
+#  if HAVE_SYS_WAIT_H
+#   include <sys/wait.h>
+#  endif
+#  if HAVE_SPAWN_H
+#   include <spawn.h>
+#  endif
+extern char **environ;
+#  define USE_POSIX_SPAWN 1
+# endif
+#endif
+#if !defined(_WIN32)
+# if HAVE_PWD_H && HAVE_GETEUID && HAVE_GETEGID
+#  include <pwd.h>
+#  define RUN_TEST_UNPRIV 1
+# endif
+#endif
 
 #ifndef nitems
 #define nitems(arr) (sizeof(arr) / sizeof((arr)[0]))
@@ -135,9 +153,6 @@
 #if !defined(__BORLANDC__)
 #define getcwd _getcwd
 #endif
-#define lstat stat
-/*#define lstat _stat64*/
-/*#define stat _stat64*/
 #define rmdir _rmdir
 #if !defined(__BORLANDC__)
 #define strdup _strdup
@@ -165,6 +180,14 @@ const char *testprogfile;
 /* Name of exe to use in printf-formatted command strings. */
 /* On Windows, this includes leading/trailing quotes. */
 const char *testprog;
+#endif
+
+#ifdef RUN_TEST_UNPRIV
+/* Unprivileged user to run as */
+static const char *tuser = "nobody";
+/* Original and test credentials */
+static uid_t ouid, tuid;
+static uid_t ogid, tgid;
 #endif
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
@@ -332,10 +355,28 @@ my_GetFileInformationByName(const char *path, BY_HANDLE_FILE_INFORMATION *bhfi)
 {
 	HANDLE h;
 	int r;
+	const char *p;
+	char *s, *pn;
+
+	/* Replace slashes with backslashes in path */
+	pn = malloc(strlen(path) + 1);
+	if (pn == NULL) {
+		return (0);
+	}
+
+	for (p = path, s = pn; *p != '\0'; p++, s++) {
+		if (*p == '/')
+			*s = '\\';
+		else
+			*s = *p;
+	}
+	*s = '\0';
 
 	memset(bhfi, 0, sizeof(*bhfi));
-	h = CreateFileA(path, FILE_READ_ATTRIBUTES, 0, NULL,
-		OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+	h = CreateFileA(pn, FILE_READ_ATTRIBUTES, 0, NULL,
+		OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS |
+		    FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+	free(pn);
 	if (h == INVALID_HANDLE_VALUE)
 		return (0);
 	r = GetFileInformationByHandle(h, bhfi);
@@ -620,6 +661,22 @@ assertion_chmod(const char *file, int line, const char *pathname, int mode)
 
 }
 
+/* change file/directory ownership and errors if it fails */
+int
+assertion_chown(const char *file, int line, const char *pathname, int user,
+    int group)
+{
+	assertion_count(file, line);
+#ifdef HAVE_CHOWN
+	if (chown(pathname, (uid_t)user, (gid_t)group) == 0)
+		return (1);
+#endif
+	failure_start(file, line, "chown(\"%s\", %d, %d)", pathname,
+	    user, group);
+	failure_finish(NULL);
+	return (0);
+}
+
 /* Verify two integers are equal. */
 int
 assertion_equal_int(const char *file, int line,
@@ -883,10 +940,12 @@ assertion_equal_wstring(const char *file, int line,
 /*
  * Pretty standard hexdump routine.  As a bonus, if ref != NULL, then
  * any bytes in p that differ from ref will be highlighted with '_'
- * before and after the hex value.
+ * before and after the hex value.  Bytes of p beyond the ref_len bytes
+ * of ref count as different.
  */
 static void
-hexdump(const char *p, const char *ref, size_t l, size_t offset)
+hexdump(const char *p, size_t len, const char *ref, size_t ref_len,
+    size_t offset)
 {
 	size_t i, j;
 	char sep;
@@ -895,14 +954,16 @@ hexdump(const char *p, const char *ref, size_t l, size_t offset)
 		logprintf("(null)\n");
 		return;
 	}
-	for(i=0; i < l; i+=16) {
+	for(i=0; i < len; i+=16) {
 		logprintf("%04x", (unsigned)(i + offset));
 		sep = ' ';
-		for (j = 0; j < 16 && i + j < l; j++) {
-			if (ref != NULL && p[i + j] != ref[i + j])
+		for (j = 0; j < 16 && i + j < len; j++) {
+			if (ref != NULL &&
+			    (i + j >= ref_len || p[i + j] != ref[i + j]))
 				sep = '_';
 			logprintf("%c%02x", sep, 0xff & (unsigned int)p[i+j]);
-			if (ref != NULL && p[i + j] == ref[i + j])
+			if (ref != NULL &&
+			    i + j < ref_len && p[i + j] == ref[i + j])
 				sep = ' ';
 		}
 		for (; j < 16; j++) {
@@ -910,7 +971,7 @@ hexdump(const char *p, const char *ref, size_t l, size_t offset)
 			sep = ' ';
 		}
 		logprintf("%c", sep);
-		for (j=0; j < 16 && i + j < l; j++) {
+		for (j=0; j < 16 && i + j < len; j++) {
 			int c = p[i + j];
 			if (c >= ' ' && c <= 126)
 				logprintf("%c", c);
@@ -952,9 +1013,9 @@ assertion_equal_mem(const char *file, int line,
 		offset += 16;
 	}
 	logprintf("      Dump of %s\n", e1);
-	hexdump(v1, v2, l < 128 ? l : 128, offset);
+	hexdump(v1, l < 128 ? l : 128, v2, l, offset);
 	logprintf("      Dump of %s\n", e2);
-	hexdump(v2, v1, l < 128 ? l : 128, offset);
+	hexdump(v2, l < 128 ? l : 128, v1, l, offset);
 	logprintf("\n");
 	failure_finish(extra);
 	return (0);
@@ -1017,7 +1078,7 @@ assertion_empty_file(const char *filename, int line, const char *f1)
 		s = ((off_t)sizeof(buff) < st.st_size) ?
 		    (ssize_t)sizeof(buff) : (ssize_t)st.st_size;
 		s = fread(buff, 1, s, f);
-		hexdump(buff, NULL, s, 0);
+		hexdump(buff, s, NULL, 0, 0);
 		fclose(f);
 	}
 	failure_finish(NULL);
@@ -1149,10 +1210,10 @@ assertion_file_contents(const char *filename, int line, const void *buff, int s,
 	failure_start(filename, line, "File contents don't match");
 	logprintf("  file=\"%s\"\n", fn);
 	if (n > 0)
-		hexdump(contents, buff, n > 512 ? 512 : n, 0);
+		hexdump(contents, n > 512 ? 512 : n, buff, s, 0);
 	else {
 		logprintf("  File empty, contents should be:\n");
-		hexdump(buff, NULL, s > 512 ? 512 : s, 0);
+		hexdump(buff, s > 512 ? 512 : s, NULL, 0, 0);
 	}
 	failure_finish(NULL);
 	free(contents);
@@ -1206,12 +1267,12 @@ assertion_text_file_contents(const char *filename, int line, const char *buff, c
 	failure_start(filename, line, "Contents don't match");
 	logprintf("  file=\"%s\"\n", fn);
 	if (n > 0) {
-		hexdump(contents, buff, n, 0);
+		hexdump(contents, n, buff, s, 0);
 		logprintf("  expected\n");
-		hexdump(buff, contents, s, 0);
+		hexdump(buff, s, contents, n, 0);
 	} else {
 		logprintf("  File empty, contents should be:\n");
-		hexdump(buff, NULL, s, 0);
+		hexdump(buff, s, NULL, 0, 0);
 	}
 	failure_finish(NULL);
 	free(contents);
@@ -1466,7 +1527,8 @@ assertion_file_time(const char *file, int line,
 	 * a directory file. If not, CreateFile() will fail when
 	 * the pathname is a directory. */
 	h = CreateFileA(pathname, FILE_READ_ATTRIBUTES, 0, NULL,
-	    OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+	    OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS |
+	        FILE_FLAG_OPEN_REPARSE_POINT, NULL);
 	if (h == INVALID_HANDLE_VALUE) {
 		failure_start(file, line, "Can't access %s\n", pathname);
 		failure_finish(NULL);
@@ -1691,13 +1753,28 @@ assertion_file_size(const char *file, int line, const char *pathname, long size)
 int
 assertion_is_dir(const char *file, int line, const char *pathname, int mode)
 {
-	struct stat st;
 	int r;
 
-#if defined(_WIN32) && !defined(__CYGWIN__)
-	(void)mode; /* UNUSED */
-#endif
 	assertion_count(file, line);
+
+#if defined(_WIN32) && !defined(__CYGWIN__)
+	BY_HANDLE_FILE_INFORMATION st;
+	(void)mode; /* UNUSED */
+	r = my_GetFileInformationByName(pathname, &st);
+	if (r == 0) {
+		failure_start(file, line, "Dir should exist: %s", pathname);
+		failure_finish(NULL);
+		return (0);
+	}
+	if ((st.dwFileAttributes &
+	    (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) !=
+	    FILE_ATTRIBUTE_DIRECTORY) {
+		failure_start(file, line, "%s is not a dir", pathname);
+		failure_finish(NULL);
+		return (0);
+	}
+#else
+	struct stat st;
 	r = lstat(pathname, &st);
 	if (r != 0) {
 		failure_start(file, line, "Dir should exist: %s", pathname);
@@ -1709,7 +1786,6 @@ assertion_is_dir(const char *file, int line, const char *pathname, int mode)
 		failure_finish(NULL);
 		return (0);
 	}
-#if !defined(_WIN32) || defined(__CYGWIN__)
 	/* Windows doesn't handle permissions the same way as POSIX,
 	 * so just ignore the mode tests. */
 	/* TODO: Can we do better here? */
@@ -1729,20 +1805,35 @@ assertion_is_dir(const char *file, int line, const char *pathname, int mode)
 int
 assertion_is_reg(const char *file, int line, const char *pathname, int mode)
 {
-	struct stat st;
 	int r;
 
-#if defined(_WIN32) && !defined(__CYGWIN__)
-	(void)mode; /* UNUSED */
-#endif
 	assertion_count(file, line);
+
+#if defined(_WIN32) && !defined(__CYGWIN__)
+	BY_HANDLE_FILE_INFORMATION st;
+	(void)mode; /* UNUSED */
+	r = my_GetFileInformationByName(pathname, &st);
+	if (r == 0) {
+		failure_start(file, line, "File should exist: %s", pathname);
+		failure_finish(NULL);
+		return (0);
+	}
+	if ((st.dwFileAttributes &
+	    (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) !=
+	    0) {
+		failure_start(file, line, "%s is not a regular file", pathname);
+		failure_finish(NULL);
+		return (0);
+	}
+#else
+	struct stat st;
 	r = lstat(pathname, &st);
 	if (r != 0 || !S_ISREG(st.st_mode)) {
 		failure_start(file, line, "File should exist: %s", pathname);
 		failure_finish(NULL);
 		return (0);
 	}
-#if !defined(_WIN32) || defined(__CYGWIN__)
+
 	/* Windows doesn't handle permissions the same way as POSIX,
 	 * so just ignore the mode tests. */
 	/* TODO: Can we do better here? */
@@ -2118,7 +2209,7 @@ assertion_utimes(const char *file, int line, const char *pathname,
 	assertion_count(file, line);
 	h = CreateFileA(pathname,GENERIC_READ | GENERIC_WRITE,
 		    FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
-		    FILE_FLAG_BACKUP_SEMANTICS, NULL);
+		    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
 	if (h == INVALID_HANDLE_VALUE) {
 		failure_start(file, line, "Can't access %s\n", pathname);
 		failure_finish(NULL);
@@ -2523,167 +2614,77 @@ static const char *redirectArgs = ">NUL 2>NUL"; /* Win32 cmd.exe */
 #else
 static const char *redirectArgs = ">/dev/null 2>/dev/null"; /* POSIX 'sh' */
 #endif
+
+/*
+ * Can this platform run the specified command?
+ */
+int
+canRunCommand(const char *cmd, int *tested)
+{
+  int value = tested ? *tested : 0;
+  if (!value) {
+    value = systemf("%s %s", cmd, redirectArgs) ? -1 : +1;
+    if (tested)
+      *tested = value;
+  }
+  return (value > 0);
+}
+
+#define CAN_RUN_FUNC(Program, Command) \
+    int can##Program(void) { \
+            static int tested = 0; \
+            return canRunCommand((Command), &tested); \
+    }
+
 /*
  * Can this platform run the bzip2 program?
  */
-int
-canBzip2(void)
-{
-	static int tested = 0, value = 0;
-	if (!tested) {
-		tested = 1;
-		if (systemf("bzip2 --help %s", redirectArgs) == 0)
-			value = 1;
-	}
-	return (value);
-}
+CAN_RUN_FUNC(Bzip2, "bzip2 --help")
 
 /*
  * Can this platform run the grzip program?
  */
-int
-canGrzip(void)
-{
-	static int tested = 0, value = 0;
-	if (!tested) {
-		tested = 1;
-		if (systemf("grzip -V %s", redirectArgs) == 0)
-			value = 1;
-	}
-	return (value);
-}
+CAN_RUN_FUNC(Grzip, "grzip -V")
 
 /*
  * Can this platform run the gzip program?
  */
-int
-canGzip(void)
-{
-	static int tested = 0, value = 0;
-	if (!tested) {
-		tested = 1;
-		if (systemf("gzip --help %s", redirectArgs) == 0)
-			value = 1;
-	}
-	return (value);
-}
+CAN_RUN_FUNC(Gzip, "gzip --help")
 
 /*
  * Can this platform run the lrzip program?
  */
-int
-canRunCommand(const char *cmd)
-{
-  static int tested = 0, value = 0;
-  if (!tested) {
-    tested = 1;
-    if (systemf("%s %s", cmd, redirectArgs) == 0)
-      value = 1;
-  }
-  return (value);
-}
-
-int
-canLrzip(void)
-{
-	static int tested = 0, value = 0;
-	if (!tested) {
-		tested = 1;
-		if (systemf("lrzip -V %s", redirectArgs) == 0)
-			value = 1;
-	}
-	return (value);
-}
+CAN_RUN_FUNC(Lrzip, "lrzip -V")
 
 /*
  * Can this platform run the lz4 program?
  */
-int
-canLz4(void)
-{
-	static int tested = 0, value = 0;
-	if (!tested) {
-		tested = 1;
-		if (systemf("lz4 --help %s", redirectArgs) == 0)
-			value = 1;
-	}
-	return (value);
-}
+CAN_RUN_FUNC(Lz4, "lz4 --help")
 
 /*
  * Can this platform run the zstd program?
  */
-int
-canZstd(void)
-{
-	static int tested = 0, value = 0;
-	if (!tested) {
-		tested = 1;
-		if (systemf("zstd --help %s", redirectArgs) == 0)
-			value = 1;
-	}
-	return (value);
-}
+CAN_RUN_FUNC(Zstd, "zstd --help")
 
 /*
  * Can this platform run the lzip program?
  */
-int
-canLzip(void)
-{
-	static int tested = 0, value = 0;
-	if (!tested) {
-		tested = 1;
-		if (systemf("lzip --help %s", redirectArgs) == 0)
-			value = 1;
-	}
-	return (value);
-}
+CAN_RUN_FUNC(Lzip, "lzip --help")
 
 /*
  * Can this platform run the lzma program?
  */
-int
-canLzma(void)
-{
-	static int tested = 0, value = 0;
-	if (!tested) {
-		tested = 1;
-		if (systemf("lzma --help %s", redirectArgs) == 0)
-			value = 1;
-	}
-	return (value);
-}
+CAN_RUN_FUNC(Lzma, "lzma --help")
 
 /*
  * Can this platform run the lzop program?
  */
-int
-canLzop(void)
-{
-	static int tested = 0, value = 0;
-	if (!tested) {
-		tested = 1;
-		if (systemf("lzop --help %s", redirectArgs) == 0)
-			value = 1;
-	}
-	return (value);
-}
+CAN_RUN_FUNC(Lzop, "lzop --help")
 
 /*
  * Can this platform run the xz program?
  */
-int
-canXz(void)
-{
-	static int tested = 0, value = 0;
-	if (!tested) {
-		tested = 1;
-		if (systemf("xz --help %s", redirectArgs) == 0)
-			value = 1;
-	}
-	return (value);
-}
+CAN_RUN_FUNC(Xz, "xz --help")
 
 /*
  * Can this filesystem handle nodump flags.
@@ -3099,15 +3100,58 @@ int
 systemf(const char *fmt, ...)
 {
 	char buff[8192];
+#if USE_POSIX_SPAWN
+	char *argv[] = { "/bin/sh", "-c", buff, NULL };
+	pid_t pid;
+#endif
 	va_list ap;
+	size_t off = 0, avail = sizeof(buff);
 	int r;
 
+#if defined(_WIN32) && !defined(__CYGWIN__)
+	/* system() on Windows runs its arguments through CMD.EXE, which has
+	 * notoriously unfriendly quoting rules. The current best documented way around
+	 * them is to wrap your *entire commandline* in sacrificial quotes.
+	 *
+	 * See CMD.EXE /? for more information. Excerpted here:
+	 * | Otherwise, old behavior is to see if the first character is
+	 * | a quote character and if so, strip the leading character and
+	 * | remove the last quote character on the command line, preserving
+	 * | any text after the last quote character.
+	 *
+	 * Since these tests often make use of systemf() with quoted arguments inside
+	 * the commandline, wrap every formatted commandline in quotes.
+	 */
+	avail -= 2;
+	off++;
+	buff[0] = '"';
+#endif
+
 	va_start(ap, fmt);
-	vsnprintf(buff, sizeof(buff), fmt, ap);
+	r = vsnprintf(buff + off, avail, fmt, ap);
+	va_end(ap);
+
+	if (r < 0 || (size_t)r >= avail) {
+		return (-1);
+	}
+
+#if defined(_WIN32) && !defined(__CYGWIN__)
+	buff[off + r] = '"';
+	buff[off + r + 1] = '\0';
+#endif
+
 	if (verbosity > VERBOSITY_FULL)
 		logprintf("Cmd: %s\n", buff);
+#if USE_POSIX_SPAWN
+	if ((r = posix_spawn(&pid, *argv, NULL, NULL, argv, environ)) == 0) {
+		while (waitpid(pid, &r, 0) == -1) {
+			if (errno != EINTR)
+				return (-1);
+		}
+	}
+#else
 	r = system(buff);
-	va_end(ap);
+#endif
 	return (r);
 }
 
@@ -3271,28 +3315,6 @@ copy_reference_file(const char *name)
 	}
 	fclose(out);
 	fclose(in);
-}
-
-int
-is_LargeInode(const char *file)
-{
-#if defined(_WIN32) && !defined(__CYGWIN__)
-	BY_HANDLE_FILE_INFORMATION bhfi;
-	int r;
-
-	r = my_GetFileInformationByName(file, &bhfi);
-	if (r != 0)
-		return (0);
-	return (bhfi.nFileIndexHigh & 0x0000FFFFUL);
-#else
-	struct stat st;
-	int64_t ino;
-
-	if (stat(file, &st) < 0)
-		return (0);
-	ino = (int64_t)st.st_ino;
-	return (ino > 0xffffffff);
-#endif
 }
 
 void
@@ -3577,6 +3599,29 @@ set_environment(const char *key, const char *value)
 #endif
 }
 
+int
+setCheckedLocale(const char *locale, const char *mbc, wchar_t expected_wc)
+{
+#ifdef HAVE_MBRTOWC
+	mbstate_t state;
+	size_t len;
+	wchar_t wc;
+#endif
+
+	if (setlocale(LC_ALL, locale) == NULL)
+		return (0);
+
+#ifdef HAVE_MBRTOWC
+	memset(&state, 0, sizeof(state));
+	len = strlen(mbc);
+	if (mbrtowc(&wc, mbc, len, &state) != len ||
+	    wc != expected_wc)
+		return (0);
+#endif
+
+	return (1);
+}
+
 /*
  * Enforce C locale for (sub)processes.
  */
@@ -3675,8 +3720,11 @@ test_run(int i, const char *tmpdir)
 		exit(1);
 	}
 	testworkdir = workdir;
-	if (!assertMakeDir(testworkdir, 0755)
-	    || !assertChdir(testworkdir)) {
+	if (!assertMakeDir(testworkdir, 0755) ||
+#ifdef RUN_TEST_UNPRIV
+	    (tuser != NULL && !assertChown(testworkdir, tuid, tgid)) ||
+#endif
+	    !assertChdir(testworkdir)) {
 		fprintf(stderr,
 		    "ERROR: Can't chdir to work dir %s\n", testworkdir);
 		exit(1);
@@ -3685,10 +3733,28 @@ test_run(int i, const char *tmpdir)
 	set_c_locale();
 	/* Record the umask before we run the test. */
 	umask(oldumask = umask(0));
+#ifdef RUN_TEST_UNPRIV
+	/*
+	 * Temporarily drop privileges.
+	 */
+	if (tuser != NULL) {
+		(void)setegid(tuid);
+		(void)seteuid(tuid);
+	}
+#endif
 	/*
 	 * Run the actual test.
 	 */
 	(*tests[i].func)();
+#ifdef RUN_TEST_UNPRIV
+	/*
+	 * Restore original credentials.
+	 */
+	if (tuser != NULL) {
+		(void)seteuid(ouid);
+		(void)setegid(ogid);
+	}
+#endif
 	/*
 	 * Clean up and report afterwards.
 	 */
@@ -3746,18 +3812,28 @@ test_run(int i, const char *tmpdir)
  */
 
 static void
-usage(const char *program)
+list_tests(void)
 {
 	static const int limit = nitems(tests);
 	int i;
 
+	for (i = 0; i < limit; i++)
+		printf("  %d: %s\n", i, tests[i].name);
+}
+
+static void
+usage(const char *program)
+{
+
 	printf("Usage: %s [options] <test> <test> ...\n", program);
 	printf("Default is to run all tests.\n");
-	printf("Otherwise, specify the numbers of the tests you wish to run.\n");
+	printf("Otherwise, specify tests by name or number.\n");
 	printf("Options:\n");
 	printf("  -d  Dump core after any failure, for debugging.\n");
 	printf("  -k  Keep all temp files.\n");
 	printf("      Default: temp files for successful tests deleted.\n");
+	printf("  -l  List available tests and exit, ignoring all other.\n");
+	printf("      options and arguments.\n");
 #ifdef PROGRAM
 	printf("  -p <path>  Path to executable to be tested.\n");
 	printf("      Default: path taken from " ENVBASE " environment variable.\n");
@@ -3769,8 +3845,7 @@ usage(const char *program)
 	printf("  -u  Keep running specified tests until one fails.\n");
 	printf("  -v  Verbose.\n");
 	printf("Available tests:\n");
-	for (i = 0; i < limit; i++)
-		printf("  %d: %s\n", i, tests[i].name);
+	list_tests();
 	exit(1);
 }
 
@@ -4005,6 +4080,9 @@ main(int argc, char **argv)
 #endif
 	char *pwd, *testprogdir, *tmp2 = NULL, *vlevel = NULL;
 	char tmpdir_timestamp[32];
+#ifdef RUN_TEST_UNPRIV
+	struct passwd *pw;
+#endif
 
 	(void)argc; /* UNUSED */
 
@@ -4144,6 +4222,10 @@ main(int argc, char **argv)
 			case 'k':
 				keep_temp_files = 1;
 				break;
+			case 'l':
+				list_tests();
+				exit(0);
+				break;
 			case 'p':
 #ifdef PROGRAM
 				testprogfile = option_arg;
@@ -4162,6 +4244,11 @@ main(int argc, char **argv)
 			case 's':
 				fail_if_tests_skipped = 1;
 				break;
+#ifdef RUN_TEST_UNPRIV
+			case 'U':
+				tuser = optarg;
+				break;
+#endif
 			case 'u':
 				until_failure++;
 				break;
@@ -4184,6 +4271,9 @@ main(int argc, char **argv)
 	if (testprogfile == NULL)
 	{
 		tmp2_len = strlen(testprogdir) + 1 + strlen(PROGRAM) + 1;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+		tmp2_len += 4;
+#endif
 		if ((tmp2 = malloc(tmp2_len)) == NULL)
 		{
 			fprintf(stderr, "ERROR: Out of memory.");
@@ -4192,6 +4282,9 @@ main(int argc, char **argv)
 		strncpy(tmp2, testprogdir, tmp2_len);
 		strncat(tmp2, "/", tmp2_len);
 		strncat(tmp2, PROGRAM, tmp2_len);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+		strncat(tmp2, ".exe", tmp2_len);
+#endif
 		testprogfile = tmp2;
 	}
 
@@ -4237,6 +4330,28 @@ main(int argc, char **argv)
 		sigemptyset(&sa.sa_mask);
 		sa.sa_flags = 0;
 		sigaction(SIGPIPE, &sa, NULL);
+	}
+#endif
+
+#ifdef RUN_TEST_UNPRIV
+	/*
+	 * Check if we are root, and get user to run as.
+	 */
+	ouid = getuid();
+	ogid = getgid();
+	if (ouid == 0) {
+		if ((pw = getpwnam(tuser)) == NULL) {
+			fprintf(stderr, "ERROR: Unknown user %s\n", tuser);
+			exit(1);
+		}
+		tuid = pw->pw_uid;
+		tgid = pw->pw_gid;
+		printf("Will switch to user %s (uid %d gid %d)\n", tuser,
+		    tuid, tgid);
+	} else {
+		tuser = NULL;
+		tuid = ouid;
+		tgid = ogid;
 	}
 #endif
 

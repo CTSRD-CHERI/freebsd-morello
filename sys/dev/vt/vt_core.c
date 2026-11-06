@@ -40,6 +40,7 @@
 #include <sys/kbio.h>
 #include <sys/kdb.h>
 #include <sys/kernel.h>
+#include <sys/limits.h>
 #include <sys/linker.h>
 #include <sys/lock.h>
 #include <sys/malloc.h>
@@ -60,6 +61,7 @@
 #if defined(__i386__) || defined(__amd64__)
 #include <machine/psl.h>
 #include <machine/frame.h>
+#include <machine/md_var.h>
 #endif
 
 static int vtterm_cngrab_noswitch(struct vt_device *, struct vt_window *);
@@ -195,8 +197,8 @@ static void vt_update_static(void *);
 #ifndef SC_NO_CUTPASTE
 static void vt_mouse_paste(void);
 #endif
-static void vt_suspend_handler(void *priv);
-static void vt_resume_handler(void *priv);
+static void vt_suspend_handler(void *priv, enum power_stype stype);
+static void vt_resume_handler(void *priv, enum power_stype stype);
 
 SET_DECLARE(vt_drv_set, struct vt_driver);
 
@@ -804,11 +806,11 @@ vt_machine_kbdevent(struct vt_device *vd, int c)
 		return (1);
 	case SPCLKEY | STBY: /* XXX Not present in kbdcontrol parser. */
 		/* Put machine into Stand-By mode. */
-		power_pm_suspend(POWER_SLEEP_STATE_STANDBY);
+		(void)power_pm_suspend(POWER_TRANSITION_STANDBY);
 		return (1);
 	case SPCLKEY | SUSP: /* kbdmap(5) keyword `susp`. */
 		/* Suspend machine. */
-		power_pm_suspend(POWER_SLEEP_STATE_SUSPEND);
+		(void)power_pm_suspend(POWER_TRANSITION_SUSPEND);
 		return (1);
 	}
 
@@ -876,7 +878,9 @@ vt_processkey(keyboard_t *kbd, struct vt_device *vd, int c)
 {
 	struct vt_window *vw = vd->vd_curwindow;
 
+#ifdef RANDOM_ENABLE_KBD
 	random_harvest_queue(&c, sizeof(c), RANDOM_KEYBOARD);
+#endif
 #if VT_ALT_TO_ESC_HACK
 	if (c & RELKEY) {
 		switch (c & ~RELKEY) {
@@ -950,6 +954,9 @@ vt_processkey(keyboard_t *kbd, struct vt_device *vd, int c)
 			VT_UNLOCK(vd);
 			break;
 		}
+		case BKEY | BTAB: /* Back tab (usually, shift+tab). */
+			terminal_input_special(vw->vw_terminal, TKEY_BTAB);
+			break;
 		case FKEY | F(1):  case FKEY | F(2):  case FKEY | F(3):
 		case FKEY | F(4):  case FKEY | F(5):  case FKEY | F(6):
 		case FKEY | F(7):  case FKEY | F(8):  case FKEY | F(9):
@@ -1192,6 +1199,10 @@ vtterm_fill(struct terminal *tm, const term_rect_t *r, term_char_t c)
 {
 	struct vt_window *vw = tm->tm_softc;
 
+#ifndef SC_NO_CUTPASTE
+        vtbuf_unmark_on_cross(&vw->vw_buf, r->tr_begin.tp_row,
+            r->tr_end.tp_row);
+#endif
 	vtbuf_fill(&vw->vw_buf, r, c);
 }
 
@@ -1491,7 +1502,7 @@ vt_flush(struct vt_device *vd)
 	if (vw == NULL)
 		return (0);
 
-	if (vd->vd_flags & VDF_SPLASH || vw->vw_flags & VWF_BUSY)
+	if (vw->vw_flags & VWF_BUSY)
 		return (0);
 
 	vf = vw->vw_font;
@@ -1501,6 +1512,13 @@ vt_flush(struct vt_device *vd)
 	VT_FLUSH_LOCK(vd);
 
 	vtbuf_lock(&vw->vw_buf);
+
+	if (vd->vd_flags & VDF_SPLASH) {
+		vtbuf_unlock(&vw->vw_buf);
+		VT_FLUSH_UNLOCK(vd);
+		return (0);
+	}
+
 	inside_vt_flush = true;
 
 #ifndef SC_NO_CUTPASTE
@@ -1679,26 +1697,44 @@ vtterm_splash(struct vt_device *vd)
 	uintptr_t image;
 	vt_axis_t top, left;
 
-	si = MD_FETCH(preload_kmdp, MODINFOMD_SPLASH, struct splash_info *);
-	if (!(vd->vd_flags & VDF_TEXTMODE) && (boothowto & RB_MUTE)) {
-		if (si == NULL) {
-			top = (vd->vd_height - vt_logo_height) / 2;
-			left = (vd->vd_width - vt_logo_width) / 2;
-			vd->vd_driver->vd_bitblt_bmp(vd, vd->vd_curwindow,
-			    vt_logo_image, NULL, vt_logo_width, vt_logo_height,
-			    left, top, TC_WHITE, TC_BLACK);
-		} else {
-			if (si->si_depth != 4)
-				return;
-			image = (uintptr_t)si + sizeof(struct splash_info);
-			image = roundup2(image, 8);
-			top = (vd->vd_height - si->si_height) / 2;
-			left = (vd->vd_width - si->si_width) / 2;
-			vd->vd_driver->vd_bitblt_argb(vd, vd->vd_curwindow,
-			    (unsigned char *)image, si->si_width, si->si_height,
-			    left, top);
-		}
-		vd->vd_flags |= VDF_SPLASH;
+	if (KERNEL_PANICKED())
+		return;
+
+	if ((vd->vd_flags & VDF_TEXTMODE) != 0 || (boothowto & RB_MUTE) == 0)
+		return;
+
+	si = MD_FETCH(preload_kmdp, rebooting == 1 ? MODINFOMD_SHTDWNSPLASH :
+	    MODINFOMD_SPLASH, struct splash_info *);
+	/* Quit before taking the lock if the backend lacks something. */
+	if (si == NULL) {
+		if (vd->vd_driver->vd_bitblt_bmp == NULL)
+			return;
+	} else if (vd->vd_driver->vd_bitblt_argb == NULL || si->si_depth != 4)
+		return;
+	if (rebooting == 1 && vd->vd_driver->vd_blank == NULL)
+		return;
+
+	vtbuf_lock(&vd->vd_curwindow->vw_buf);
+	vd->vd_flags |= VDF_SPLASH;
+	vtbuf_unlock(&vd->vd_curwindow->vw_buf);
+
+	if (rebooting == 1)
+		vd->vd_driver->vd_blank(vd, TC_BLACK);
+
+	if (si == NULL) {
+		top = (vd->vd_height - vt_logo_height) / 2;
+		left = (vd->vd_width - vt_logo_width) / 2;
+		vd->vd_driver->vd_bitblt_bmp(vd,
+		    vd->vd_curwindow, vt_logo_image, NULL, vt_logo_width,
+		    vt_logo_height, left, top, TC_WHITE, TC_BLACK);
+	} else {
+		image = (uintptr_t)si + sizeof(struct splash_info);
+		image = roundup2(image, 8);
+		top = (vd->vd_height - si->si_height) / 2;
+		left = (vd->vd_width - si->si_width) / 2;
+		vd->vd_driver->vd_bitblt_argb(vd, vd->vd_curwindow,
+		    (unsigned char *)image, si->si_width, si->si_height,
+		    left, top);
 	}
 }
 #endif
@@ -1826,6 +1862,15 @@ vt_init_font_static(void)
 	if (font != NULL)
 		vt_font_assigned = font;
 }
+
+#ifdef DEV_SPLASH
+static int
+vt_shutdown_splash(struct vt_window *vw)
+{
+	vtterm_splash(vw->vw_device);
+	return (0);
+}
+#endif
 
 static void
 vtterm_cnprobe(struct terminal *tm, struct consdev *cp)
@@ -1961,6 +2006,9 @@ vtterm_cngetc(struct terminal *tm)
 				vw->vw_flags &= ~VWF_SCROLL;
 				VTBUF_SLCK_DISABLE(&vw->vw_buf);
 			}
+			break;
+		case SPCLKEY | BTAB: /* Back tab (usually, shift+tab). */
+			vw->vw_kbdsq = "\x1b[Z";
 			break;
 		/* XXX: KDB can handle history. */
 		case SPCLKEY | FKEY | F(50): /* Arrow up. */
@@ -2431,9 +2479,7 @@ vt_mouse_event(int type, int x, int y, int event, int cnt, int mlevel)
 		default:
 			vt_mouse_paste();
 			/* clear paste buffer selection after paste */
-			vtbuf_set_mark(&vw->vw_buf, VTB_MARK_START,
-			    vd->vd_mx / vf->vf_width,
-			    vd->vd_my / vf->vf_height);
+                        vtbuf_unmark(&vw->vw_buf);
 			break;
 		}
 		return; /* Done */
@@ -2766,8 +2812,9 @@ skip_thunk:
 		/* XXX */
 		return (0);
 	case CONS_HISTORY:
-		if (*(int *)data < 0)
-			return EINVAL;
+		if (*(int *)data < 0 ||
+		    *(int *)data > UINT_MAX / USHRT_MAX / sizeof(term_char_t))
+			return (EINVAL);
 		if (*(int *)data != vw->vw_buf.vb_history_size)
 			vtbuf_sethistory_size(&vw->vw_buf, *(int *)data);
 		return (0);
@@ -2885,9 +2932,31 @@ skip_thunk:
 		switch (*(int *)data) {
 		case KD_TEXT:
 		case KD_TEXT1:
-		case KD_PIXEL:
+		case KD_PIXEL: {
+			bool restore = false;
+			VT_LOCK(vd);
+			if ((vw->vw_flags & VWF_GRAPHICS) &&
+			    vw == vd->vd_curwindow) {
+				/*
+				 * When leaving graphics mode on the currently
+				 * active window, reprogram the display
+				 * controller back to text mode immediately.
+				 * Without this, the CRTC retains the graphical
+				 * state and the console stays invisible until
+				 * the next VT switch.
+				 */
+				restore = true;
+				vd->vd_flags |= VDF_INVALID;
+			}
 			vw->vw_flags &= ~VWF_GRAPHICS;
+			VT_UNLOCK(vd);
+			if (restore) {
+				if (vd->vd_driver->vd_postswitch)
+					vd->vd_driver->vd_postswitch(vd);
+				vt_resume_flush_timer(vw, 0);
+			}
 			break;
+		}
 		case KD_GRAPHICS:
 			vw->vw_flags |= VWF_GRAPHICS;
 			break;
@@ -2903,6 +2972,8 @@ skip_thunk:
 #if defined(__i386__)
 		td->td_frame->tf_eflags |= PSL_IOPL;
 #elif defined(__amd64__)
+		if (fred)
+			return (EINVAL);
 		td->td_frame->tf_rflags |= PSL_IOPL;
 #endif
 		return (0);
@@ -3044,9 +3115,9 @@ skip_thunk:
 				DPRINTF(5, "reset WAIT_ACQ, ");
 			return (0);
 		} else if (mode->mode == VT_PROCESS) {
-			if (!ISSIGVALID(mode->relsig) ||
-			    !ISSIGVALID(mode->acqsig) ||
-			    !ISSIGVALID(mode->frsig)) {
+			if (!(_SIG_VALID(mode->relsig) &&
+			    _SIG_VALID(mode->acqsig) &&
+			    (mode->frsig == 0 || _SIG_VALID(mode->frsig)))) {
 				DPRINTF(5, "error EINVAL\n");
 				return (EINVAL);
 			}
@@ -3169,6 +3240,10 @@ vt_upgrade(struct vt_device *vd)
 				/* For existing console window. */
 				EVENTHANDLER_REGISTER(shutdown_pre_sync,
 				    vt_window_switch, vw, SHUTDOWN_PRI_DEFAULT);
+#ifdef DEV_SPLASH
+				EVENTHANDLER_REGISTER(shutdown_pre_sync,
+				    vt_shutdown_splash, vw, SHUTDOWN_PRI_DEFAULT + 1);
+#endif
 			}
 		}
 	}
@@ -3330,7 +3405,7 @@ vt_replace_backend(const struct vt_driver *drv, void *softc)
 }
 
 static void
-vt_suspend_handler(void *priv)
+vt_suspend_handler(void *priv, enum power_stype stype)
 {
 	struct vt_device *vd;
 
@@ -3341,7 +3416,7 @@ vt_suspend_handler(void *priv)
 }
 
 static void
-vt_resume_handler(void *priv)
+vt_resume_handler(void *priv, enum power_stype stype)
 {
 	struct vt_device *vd;
 

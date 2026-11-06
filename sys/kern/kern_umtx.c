@@ -113,7 +113,7 @@
 			  (td)->td_user_pri <= PRI_MAX_TIMESHARE) ?\
 			 PRI_MAX_TIMESHARE : (td)->td_user_pri)
 
-#define	GOLDEN_RATIO_PRIME	2654404609U
+#define	GOLDEN_RATIO_32		1640531527U
 #ifndef	UMTX_CHAINS
 #define	UMTX_CHAINS		512
 #endif
@@ -180,7 +180,7 @@ static void umtxq_hash(struct umtx_key *key);
 static int do_unlock_pp(struct thread *td, struct umutex *m, uint32_t flags,
     bool rb);
 static void umtx_thread_cleanup(struct thread *td);
-SYSINIT(umtx, SI_SUB_EVENTHANDLER+1, SI_ORDER_MIDDLE, umtxq_sysinit, NULL);
+SYSINIT(umtx, SI_SUB_EVENTHANDLER, SI_ORDER_LAST, umtxq_sysinit, NULL);
 
 #define umtxq_signal(key, nwake)	umtxq_signal_queue((key), (nwake), UMTX_SHARED_QUEUE)
 
@@ -380,7 +380,7 @@ umtxq_hash(struct umtx_key *key)
 	unsigned n;
 
 	n = (uintptr_t)key->info.both.a + key->info.both.b;
-	key->hash = ((n * GOLDEN_RATIO_PRIME) >> UMTX_SHIFTS) % UMTX_CHAINS;
+	key->hash = ((n * GOLDEN_RATIO_32) >> UMTX_SHIFTS) % UMTX_CHAINS;
 }
 
 struct umtxq_chain *
@@ -1423,19 +1423,23 @@ do_lock_normal(struct thread *td, struct umutex *m, uint32_t flags,
 			}
 
 			/*
-			 * If no one owns it but it is contested try
-			 * to acquire it.
+			 * If no one owns it, but it is contested or
+			 * the CAS above failed spuriously (possible
+			 * on ll/sc architectures), try to acquire it.
+			 * Sleeping would be forever in the spurious
+			 * case: no owner exists to wake us.
 			 */
 			MPASS(rv == 1);
-			if (owner == UMUTEX_CONTESTED) {
-				rv = casueword32(&m->m_owner,
-				    UMUTEX_CONTESTED, &owner,
-				    id | UMUTEX_CONTESTED);
+			if (owner == UMUTEX_CONTESTED ||
+			    owner == UMUTEX_UNOWNED) {
+				rv = casueword32(&m->m_owner, owner,
+				    &owner, id | UMUTEX_CONTESTED);
 				/* The address was invalid. */
 				if (rv == -1)
 					return (EFAULT);
 				if (rv == 0) {
-					MPASS(owner == UMUTEX_CONTESTED);
+					MPASS(owner == UMUTEX_CONTESTED ||
+					    owner == UMUTEX_UNOWNED);
 					return (0);
 				}
 				if (rv == 1) {
@@ -1451,7 +1455,7 @@ do_lock_normal(struct thread *td, struct umutex *m, uint32_t flags,
 				continue;
 			}
 
-			/* rv == 1 but not contested, likely store failure */
+			/* rv == 1 with a real owner, fall through to sleep. */
 			rv = thread_check_susp(td, false);
 			if (rv != 0)
 				return (rv);
@@ -2028,7 +2032,7 @@ int
 umtxq_sleep_pi(struct umtx_q *uq, struct umtx_pi *pi, uint32_t owner,
     const char *wmesg, struct umtx_abs_timeout *timo, bool shared)
 {
-	struct thread *td, *td1;
+	struct thread *td;
 	struct umtx_q *uq1;
 	int error, pri;
 #ifdef INVARIANTS
@@ -2044,13 +2048,22 @@ umtxq_sleep_pi(struct umtx_q *uq, struct umtx_pi *pi, uint32_t owner,
 	umtxq_insert(uq);
 	mtx_lock(&umtx_lock);
 	if (pi->pi_owner == NULL) {
+		struct thread *ownertd;
+
 		mtx_unlock(&umtx_lock);
-		td1 = tdfind(owner, shared ? -1 : td->td_proc->p_pid);
+		ownertd = tdfind(owner, shared ? -1 : td->td_proc->p_pid);
 		mtx_lock(&umtx_lock);
-		if (td1 != NULL) {
-			if (pi->pi_owner == NULL)
-				umtx_pi_setowner(pi, td1);
-			PROC_UNLOCK(td1->td_proc);
+		if (ownertd != NULL) {
+			/*
+			 * An exiting thread that has already called
+			 * umtx_thread_exit() must not be made the owner of a
+			 * shared mutex.
+			 */
+			if ((ownertd->td_proc->p_flag & P_WEXIT) == 0 &&
+			    (ownertd->td_dbgflags & TDB_EXIT) == 0 &&
+			    pi->pi_owner == NULL)
+				umtx_pi_setowner(pi, ownertd);
+			PROC_UNLOCK(ownertd->td_proc);
 		}
 	}
 
@@ -2934,11 +2947,10 @@ do_unlock_umutex(struct thread *td, struct umutex *m, bool rb)
 
 static int
 do_cv_wait(struct thread *td, struct ucond *cv, struct umutex *m,
-    struct timespec *timeout, u_long wflags)
+    struct umtx_abs_timeout *timo, u_long wflags)
 {
-	struct umtx_abs_timeout timo;
 	struct umtx_q *uq;
-	uint32_t flags, clockid, hasw;
+	uint32_t flags, hasw;
 	int error;
 
 	uq = td->td_umtxq;
@@ -2948,23 +2960,6 @@ do_cv_wait(struct thread *td, struct ucond *cv, struct umutex *m,
 	error = umtx_key_get(cv, TYPE_CV, GET_SHARE(flags), &uq->uq_key);
 	if (error != 0)
 		return (error);
-
-	if ((wflags & CVWAIT_CLOCKID) != 0) {
-		error = fueword32(&cv->c_clockid, &clockid);
-		if (error == -1) {
-			umtx_key_release(&uq->uq_key);
-			return (EFAULT);
-		}
-		if ((clockid < CLOCK_REALTIME ||
-		    clockid >= CLOCK_THREAD_CPUTIME_ID) &&
-		    clockid != CLOCK_TAI) {
-			/* hmm, only HW clock id will work. */
-			umtx_key_release(&uq->uq_key);
-			return (EINVAL);
-		}
-	} else {
-		clockid = CLOCK_REALTIME;
-	}
 
 	umtxq_lock(&uq->uq_key);
 	umtxq_busy(&uq->uq_key);
@@ -2990,15 +2985,9 @@ do_cv_wait(struct thread *td, struct ucond *cv, struct umutex *m,
 
 	error = do_unlock_umutex(td, m, false);
 
-	if (timeout != NULL)
-		umtx_abs_timeout_init(&timo, clockid,
-		    (wflags & CVWAIT_ABSTIME) != 0, timeout);
-
 	umtxq_lock(&uq->uq_key);
-	if (error == 0) {
-		error = umtxq_sleep(uq, "ucond", timeout == NULL ?
-		    NULL : &timo);
-	}
+	if (error == 0)
+		error = umtxq_sleep(uq, "ucond", timo);
 
 	if ((uq->uq_flags & UQF_UMTXQ) == 0)
 		error = 0;
@@ -4138,19 +4127,63 @@ static int
 __umtx_op_cv_wait(struct thread *td, struct _umtx_op_args *uap,
     const struct umtx_copyops *ops)
 {
+	struct umtx_abs_timeout *timop, timo;
 	struct timespec *ts, timeout;
+	struct _umtx_time umtime;
+	struct ucond *cv;
+	u_long wflags;
+	uint32_t clockid;
 	int error;
 
-	/* Allow a null timespec (wait forever). */
-	if (uap->uaddr2 == NULL)
-		ts = NULL;
-	else {
-		error = ops->copyin_timeout(uap->uaddr2, &timeout);
+	cv = uap->obj;
+	wflags = uap->val;
+	if ((wflags & ~(CVWAIT_CHECK_UNPARKING | CVWAIT_ABSTIME |
+	    CVWAIT_CLOCKID | CVWAIT_UMTX_TIME)) != 0 ||
+	    ((wflags & (CVWAIT_ABSTIME | CVWAIT_CLOCKID)) != 0 &&
+	    (wflags & CVWAIT_UMTX_TIME) != 0))
+		return (EINVAL);
+
+	if ((wflags & CVWAIT_UMTX_TIME) == 0) {
+		/* Allow a null timespec (wait forever). */
+		if (uap->uaddr2 == NULL) {
+			ts = NULL;
+		} else {
+			error = ops->copyin_timeout(uap->uaddr2, &timeout);
+			if (error != 0)
+				return (error);
+			ts = &timeout;
+		}
+		if ((wflags & CVWAIT_CLOCKID) != 0) {
+			error = fueword32(&cv->c_clockid, &clockid);
+			if (error == -1)
+				return (EFAULT);
+		} else {
+			clockid = CLOCK_REALTIME;
+		}
+		if (ts != NULL) {
+			umtx_abs_timeout_init(&timo, clockid,
+			    (wflags & CVWAIT_ABSTIME) != 0, ts);
+			timop = &timo;
+		} else {
+			timop = NULL;
+		}
+	} else {
+		if (uap->uaddr2 == NULL)
+			return (EINVAL);
+		error = ops->copyin_umtx_time(uap->uaddr2, ops->umtx_time_sz,
+		    &umtime);
 		if (error != 0)
 			return (error);
-		ts = &timeout;
+		timop = &timo;
+		umtx_abs_timeout_init2(timop, &umtime);
 	}
-	return (do_cv_wait(td, uap->obj, uap->uaddr1, ts, uap->val));
+	/* only HW clock id will work. */
+	if (timop != NULL && (timop->clockid < CLOCK_REALTIME ||
+	    timop->clockid >= CLOCK_THREAD_CPUTIME_ID) &&
+	    timop->clockid != CLOCK_TAI)
+		return (EINVAL);
+
+	return (do_cv_wait(td, cv, uap->uaddr1, timop, wflags));
 }
 
 static int
@@ -4624,17 +4657,12 @@ umtx_shm(struct thread *td, void *addr, u_int flags)
 	if ((flags & UMTX_SHM_DESTROY) != 0) {
 		umtx_shm_unref_reg(reg, true);
 	} else {
-#if 0
-#ifdef MAC
-		error = mac_posixshm_check_open(td->td_ucred,
-		    reg->ushm_obj, FFLAGS(O_RDWR));
-		if (error == 0)
-#endif
-			error = shm_access(reg->ushm_obj, td->td_ucred,
-			    FFLAGS(O_RDWR));
-		if (error == 0)
-#endif
-			error = falloc_caps(td, &fp, &fd, O_CLOEXEC, NULL);
+		/*
+		 * The current vmspace has the mapping, so it can be
+		 * converted into shm filedescriptor for current
+		 * thread.
+		 */
+		error = falloc_caps(td, &fp, &fd, O_CLOEXEC, NULL);
 		if (error == 0) {
 			shm_hold(reg->ushm_obj);
 			finit(fp, FFLAGS(O_RDWR), DTYPE_SHM, reg->ushm_obj,

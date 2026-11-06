@@ -632,7 +632,7 @@ mmcprobe_start(struct cam_periph *periph, union ccb *start_ccb)
 		if (host_caps & MMC_CAP_SIGNALING_180)
 			softc->flags |= PROBE_FLAG_HOST_CAN_DO_18V;
 		uint32_t hv = mmc_highest_voltage(softc->host_ocr);
-		CAM_DEBUG(start_ccb->ccb_h.path, CAM_DEBUG_PROBE, ("reseting the bus\n"));
+		CAM_DEBUG(start_ccb->ccb_h.path, CAM_DEBUG_PROBE, ("resetting the bus\n"));
 		init_standard_ccb(start_ccb, XPT_MMC_SET_TRAN_SETTINGS);
 		cts->ios.vdd = hv;
 		cts->ios.bus_mode = opendrain;
@@ -842,12 +842,26 @@ mmcprobe_done(struct cam_periph *periph, union ccb *done_ccb)
 	case PROBE_RESET_BUS:
 	{
 		CAM_DEBUG(done_ccb->ccb_h.path, CAM_DEBUG_PROBE, ("done with PROBE_RESET_BUS\n"));
+		/*
+		 * Let the supplies settle after the card is powered up before
+		 * the clock is started, like mmc_power_up() does in the mmc(4)
+		 * stack.  This is a busy wait because it runs from the xpt done
+		 * thread, where sleeping is not allowed.
+		 */
+		DELAY(1000);
 		PROBE_SET_ACTION(softc, PROBE_SET_ID_FREQ);
 		break;
 	}
 	case PROBE_SET_ID_FREQ:
 	{
 		CAM_DEBUG(done_ccb->ccb_h.path, CAM_DEBUG_PROBE, ("done with PROBE_SET_ID_FREQ\n"));
+		/*
+		 * The card needs at least 74 clock cycles, or 1 ms, with the
+		 * clock running before it can take the first command.  Wait for
+		 * the same time as mmc_power_up() in the mmc(4) stack.  Some
+		 * cards (e.g. Broadcom SDIO Wi-Fi) are not detected without it.
+		 */
+		DELAY(2000);
 		PROBE_SET_ACTION(softc, PROBE_SET_CS);
 		break;
 	}

@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 #include <sys/zfs_context.h>
@@ -42,7 +32,8 @@ vdev_label_write_pad2(vdev_t *vd, const char *buf, size_t size)
 	spa_t *spa = vd->vdev_spa;
 	zio_t *zio;
 	abd_t *pad2;
-	int flags = ZIO_FLAG_CONFIG_WRITER | ZIO_FLAG_CANFAIL;
+	int flags = ZIO_FLAG_CONFIG_WRITER | ZIO_FLAG_CANFAIL |
+	    ZIO_FLAG_TRYHARD;
 	int error;
 
 	if (size > VDEV_PAD_SIZE)
@@ -59,16 +50,11 @@ vdev_label_write_pad2(vdev_t *vd, const char *buf, size_t size)
 	abd_copy_from_buf(pad2, buf, size);
 	abd_zero_off(pad2, size, VDEV_PAD_SIZE - size);
 
-retry:
 	zio = zio_root(spa, NULL, NULL, flags);
 	vdev_label_write(zio, vd, 0, pad2,
 	    offsetof(vdev_label_t, vl_be),
 	    VDEV_PAD_SIZE, NULL, NULL, flags);
 	error = zio_wait(zio);
-	if (error != 0 && !(flags & ZIO_FLAG_TRYHARD)) {
-		flags |= ZIO_FLAG_TRYHARD;
-		goto retry;
-	}
 
 	abd_free(pad2);
 	return (error);

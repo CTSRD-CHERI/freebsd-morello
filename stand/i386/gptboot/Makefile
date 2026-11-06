@@ -28,13 +28,14 @@ CFLAGS+=-DBOOTPROG=\"gptboot\" \
 	-I${LDRSRC} \
 	-I${BOOTSRC}/i386/common \
 	-I${BOOTSRC}/i386/boot2 \
-	-DHAVE_MEMCPY -I${SRCTOP}/sys/contrib/zlib \
+	${ZLIB_CFLAGS} \
 	-Wall -Waggregate-return -Wbad-function-cast -Wno-cast-align \
 	-Wmissing-declarations -Wmissing-prototypes -Wnested-externs \
 	-Wpointer-arith -Wshadow -Wstrict-prototypes -Wwrite-strings \
 	-Wno-pointer-sign
 
-CFLAGS.gcc+=	--param max-inline-insns-single=100
+CFLAGS.gcc+=	--param max-inline-insns-single=100 \
+		--param min-pagesize=1024
 
 LD_FLAGS+=${LD_FLAGS_BIN}
 

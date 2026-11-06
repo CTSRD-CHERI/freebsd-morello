@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: MIT
  *
  * Copyright (c) 2023, Rob Norris <robn@despairlabs.com>
+ * Copyright (c) 2026, TrueNAS.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to
@@ -23,9 +24,9 @@
  */
 
 /*
- * This program is to test the availability and behaviour of copy_file_range,
- * FICLONE, FICLONERANGE and FIDEDUPERANGE in the Linux kernel. It should
- * compile and run even if these features aren't exposed through the libc.
+ * This program is to test the availability and behaviour of various data
+ * cloning system calls. It should compile and run even if these features
+ * aren't exposed through the libc.
  */
 
 #include <sys/ioctl.h>
@@ -40,6 +41,12 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
+
+#if defined(__linux__)
+/*
+ * Not all Linux libc implementations define or expose copy_file_range(),
+ * for these we fall back to the syscall directly.
+ */
 
 #ifndef __NR_copy_file_range
 #if defined(__x86_64__)
@@ -59,16 +66,17 @@
 #endif
 #endif /* __NR_copy_file_range */
 
-#ifdef __FreeBSD__
-#define	loff_t	off_t
+#if defined(_GNU_SOURCE)
+_Static_assert(sizeof (loff_t) == sizeof (off_t),
+	"loff_t and off_t must be the same size");
 #endif
 
 ssize_t
-copy_file_range(int, loff_t *, int, loff_t *, size_t, unsigned int)
+copy_file_range(int, off_t *, int, off_t *, size_t, unsigned int)
     __attribute__((weak));
 
 static inline ssize_t
-cf_copy_file_range(int sfd, loff_t *soff, int dfd, loff_t *doff,
+cf_copy_file_range(int sfd, off_t *soff, int dfd, off_t *doff,
     size_t len, unsigned int flags)
 {
 	if (copy_file_range)
@@ -76,6 +84,21 @@ cf_copy_file_range(int sfd, loff_t *soff, int dfd, loff_t *doff,
 	return (
 	    syscall(__NR_copy_file_range, sfd, soff, dfd, doff, len, flags));
 }
+
+#else
+/* Other platforms, let the linker sort it out. */
+static inline ssize_t
+cf_copy_file_range(int sfd, off_t *soff, int dfd, off_t *doff,
+    size_t len, unsigned int flags)
+{
+	return (copy_file_range(sfd, soff, dfd, doff, len, flags));
+}
+#endif
+
+/*
+ * Like above, not all libcs define the types we need for the ioctl-based
+ * clone calls, so define any that are missing directly.
+ */
 
 /* Define missing FICLONE */
 #ifdef FICLONE
@@ -124,6 +147,14 @@ typedef struct {
 #define	CF_FIDEDUPERANGE		_IOWR(0x94, 54, cf_file_dedupe_range_t)
 #define	CF_FILE_DEDUPE_RANGE_SAME	(0)
 #define	CF_FILE_DEDUPE_RANGE_DIFFERS	(1)
+
+/* Define missing COPY_FILE_RANGE_CLONE flag. */
+#ifdef	COPY_FILE_RANGE_CLONE
+#define	CF_COPY_FILE_RANGE_CLONE	COPY_FILE_RANGE_CLONE
+#else
+#define	CF_COPY_FILE_RANGE_CLONE	(0x00800000)
+#endif
+
 #endif
 
 typedef enum {
@@ -131,6 +162,7 @@ typedef enum {
 	CF_MODE_CLONE,
 	CF_MODE_CLONERANGE,
 	CF_MODE_COPYFILERANGE,
+	CF_MODE_COPYFILERANGE_CLONE,
 	CF_MODE_DEDUPERANGE,
 } cf_mode_t;
 
@@ -145,15 +177,19 @@ usage(void)
 	    "    clonefile -r <src> <dst> <soff> <doff> <len>\n"
 	    "  copy_file_range:\n"
 	    "    clonefile -f <src> <dst> [<soff> <doff> <len | \"all\">]\n"
+	    "  copy_file_range(CLONE):\n"
+	    "    clonefile -F <src> <dst> [<soff> <doff> <len | \"all\">]\n"
 	    "  FIDEDUPERANGE:\n"
 	    "    clonefile -d <src> <dst> <soff> <doff> <len>\n");
 	return (1);
 }
 
 int do_clone(int sfd, int dfd);
-int do_clonerange(int sfd, int dfd, loff_t soff, loff_t doff, size_t len);
-int do_copyfilerange(int sfd, int dfd, loff_t soff, loff_t doff, size_t len);
-int do_deduperange(int sfd, int dfd, loff_t soff, loff_t doff, size_t len);
+int do_clonerange(int sfd, int dfd, off_t soff, off_t doff, size_t len);
+int do_copyfilerange(int sfd, int dfd, off_t soff, off_t doff, size_t len);
+int do_copyfilerange_clone(int sfd, int dfd, off_t soff, off_t doff,
+    size_t len);
+int do_deduperange(int sfd, int dfd, off_t soff, off_t doff, size_t len);
 
 int quiet = 0;
 
@@ -163,7 +199,7 @@ main(int argc, char **argv)
 	cf_mode_t mode = CF_MODE_NONE;
 
 	int c;
-	while ((c = getopt(argc, argv, "crfdq")) != -1) {
+	while ((c = getopt(argc, argv, "crfFdq")) != -1) {
 		switch (c) {
 			case 'c':
 				mode = CF_MODE_CLONE;
@@ -173,6 +209,9 @@ main(int argc, char **argv)
 				break;
 			case 'f':
 				mode = CF_MODE_COPYFILERANGE;
+				break;
+			case 'F':
+				mode = CF_MODE_COPYFILERANGE_CLONE;
 				break;
 			case 'd':
 				mode = CF_MODE_DEDUPERANGE;
@@ -196,6 +235,7 @@ main(int argc, char **argv)
 				return (usage());
 			break;
 		case CF_MODE_COPYFILERANGE:
+		case CF_MODE_COPYFILERANGE_CLONE:
 			if ((argc-optind) != 2 && (argc-optind) != 5)
 				return (usage());
 			break;
@@ -203,7 +243,7 @@ main(int argc, char **argv)
 			abort();
 	}
 
-	loff_t soff = 0, doff = 0;
+	off_t soff = 0, doff = 0;
 	size_t len = SSIZE_MAX;
 	unsigned long long len2;
 	if ((argc-optind) == 5) {
@@ -258,6 +298,9 @@ main(int argc, char **argv)
 		case CF_MODE_COPYFILERANGE:
 			err = do_copyfilerange(sfd, dfd, soff, doff, len);
 			break;
+		case CF_MODE_COPYFILERANGE_CLONE:
+			err = do_copyfilerange_clone(sfd, dfd, soff, doff, len);
+			break;
 		case CF_MODE_DEDUPERANGE:
 			err = do_deduperange(sfd, dfd, soff, doff, len);
 			break;
@@ -295,7 +338,7 @@ do_clone(int sfd, int dfd)
 }
 
 int
-do_clonerange(int sfd, int dfd, loff_t soff, loff_t doff, size_t len)
+do_clonerange(int sfd, int dfd, off_t soff, off_t doff, size_t len)
 {
 	if (!quiet)
 		fprintf(stderr, "using FICLONERANGE\n");
@@ -313,14 +356,15 @@ do_clonerange(int sfd, int dfd, loff_t soff, loff_t doff, size_t len)
 	return (0);
 }
 
-int
-do_copyfilerange(int sfd, int dfd, loff_t soff, loff_t doff, size_t len)
+static int
+_do_copyfilerange_impl(int sfd, int dfd, off_t soff, off_t doff, size_t len,
+    unsigned int flags, const char *name)
 {
 	if (!quiet)
-		fprintf(stderr, "using copy_file_range\n");
-	ssize_t copied = cf_copy_file_range(sfd, &soff, dfd, &doff, len, 0);
+		fprintf(stderr, "using %s\n", name);
+	ssize_t copied = cf_copy_file_range(sfd, &soff, dfd, &doff, len, flags);
 	if (copied < 0) {
-		fprintf(stderr, "copy_file_range: %s\n", strerror(errno));
+		fprintf(stderr, "%s: %s\n", name, strerror(errno));
 		return (1);
 	}
 	if (len == SSIZE_MAX) {
@@ -333,15 +377,29 @@ do_copyfilerange(int sfd, int dfd, loff_t soff, loff_t doff, size_t len)
 		len = sb.st_size;
 	}
 	if (copied != len) {
-		fprintf(stderr, "copy_file_range: copied less than requested: "
-		    "requested=%zu; copied=%zd\n", len, copied);
+		fprintf(stderr, "%s: copied less than requested: "
+		    "requested=%zu; copied=%zd\n", name, len, copied);
 		return (1);
 	}
 	return (0);
 }
 
 int
-do_deduperange(int sfd, int dfd, loff_t soff, loff_t doff, size_t len)
+do_copyfilerange(int sfd, int dfd, off_t soff, off_t doff, size_t len)
+{
+	return (_do_copyfilerange_impl(sfd, dfd, soff, doff, len, 0,
+	    "copy_file_range"));
+}
+
+int
+do_copyfilerange_clone(int sfd, int dfd, off_t soff, off_t doff, size_t len)
+{
+	return (_do_copyfilerange_impl(sfd, dfd, soff, doff, len,
+	    CF_COPY_FILE_RANGE_CLONE, "copy_file_range(CLONE)"));
+}
+
+int
+do_deduperange(int sfd, int dfd, off_t soff, off_t doff, size_t len)
 {
 	if (!quiet)
 		fprintf(stderr, "using FIDEDUPERANGE\n");

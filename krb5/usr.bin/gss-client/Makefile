@@ -1,5 +1,5 @@
 #
-# SPDX-License-Idendifier: BSD-2-Clause
+# SPDX-License-Identifier: BSD-2-Clause
 #
 # Copyright (c) 2025 FreeBSD Foundation
 #
@@ -19,7 +19,8 @@ CFLAGS+=-I${KRB5_DIR}/include \
 	-I${KRB5_OBJTOP}/lib \
 	-I${KRB5_DIR}/lib/gssapi/generic \
 	-I${KRB5_DIR}/lib/gssapi/krb5 \
-	-I${KRB5_DIR}/lib/gssapi/mechglue
+	-I${KRB5_DIR}/lib/gssapi/mechglue \
+	-I${KRB5_OBJTOP}/util/profile
 
 MAN=
 

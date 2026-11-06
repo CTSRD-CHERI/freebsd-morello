@@ -31,6 +31,7 @@ BADHDRS= \
 	sys/domainset.h \
 	sys/dtrace_bsd.h \
 	sys/dvdio.h \
+	sys/efitcg.h \
 	sys/elf32.h \
 	sys/elf64.h \
 	sys/elf_common.h \
@@ -62,7 +63,6 @@ BADHDRS= \
 	sys/kdb.h \
 	sys/kernel.h \
 	sys/khelp.h \
-	sys/kobj.h \
 	sys/ksem.h \
 	sys/ktls.h \
 	sys/libkern.h \
@@ -90,14 +90,12 @@ BADHDRS= \
 	sys/pmckern.h \
 	sys/posix4.h \
 	sys/power.h \
-	sys/priority.h \
 	sys/prng.h \
 	sys/qmath.h \
 	sys/racct.h \
 	sys/resourcevar.h \
 	sys/rman.h \
 	sys/rmlock.h \
-	sys/rtprio.h \
 	sys/runq.h \
 	sys/rwlock.h \
 	sys/sbuf.h \

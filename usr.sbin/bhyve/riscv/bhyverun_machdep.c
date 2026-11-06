@@ -49,13 +49,28 @@
 
 #include "bhyverun.h"
 #include "config.h"
+#include "config_schema.h"
 #include "debug.h"
 #include "fdt.h"
+#include "ipc.h"
 #include "mem.h"
 #include "pci_emul.h"
 #include "pci_irq.h"
 #include "uart_emul.h"
 #include "riscv.h"
+
+static const struct config_option config_options_machdep[] = {
+	{ "console", CONFIG_OPTION_STRING },
+	{ "fdt.bootargs", CONFIG_OPTION_STRING },
+};
+
+void
+config_schema_merge_options_machdep(struct config_schema *schema)
+{
+
+	config_schema_merge_options(schema, NULL, config_options_machdep,
+	    nitems(config_options_machdep));
+}
 
 #define	FDT_SIZE	(64 * 1024)
 #define	FDT_DTB_ALIGN	8
@@ -82,6 +97,7 @@ bhyve_init_config(void)
 	set_config_bool("acpi_tables", false);
 	set_config_bool("acpi_tables_in_memory", false);
 	set_config_value("memory.size", "256M");
+	set_config_value("rundir", BHYVE_RUN_DIR);
 }
 
 void
@@ -95,13 +111,16 @@ bhyve_usage(int code)
 	    "Usage: %s [-CDHhSW]\n"
 	    "       %*s [-c [[cpus=]numcpus][,sockets=n][,cores=n][,threads=n]]\n"
 	    "       %*s [-k config_file] [-m mem] [-o var=value]\n"
-	    "       %*s [-p vcpu:hostcpu] [-r file] [-s pci] [-U uuid] vmname\n"
+	    "       %*s [-p vcpuN[-vcpuM]]:hostcpuX[-hostcpuY]\n"
+	    "       %*s [-r file] [-s pci] [-U uuid] vmname\n"
 	    "       -C: include guest memory in core file\n"
 	    "       -c: number of CPUs and/or topology specification\n"
 	    "       -D: destroy on power-off\n"
 	    "       -h: help\n"
 	    "       -k: key=value flat config file\n"
+	    "       -M: monitor mode\n"
 	    "       -m: memory size\n"
+	    "       -N: don't reboot while in monitor mode\n"
 	    "       -o: set config 'var' to 'value'\n"
 	    "       -p: pin 'vcpu' to 'hostcpu'\n"
 	    "       -S: guest memory cannot be swapped\n"
@@ -109,7 +128,7 @@ bhyve_usage(int code)
 	    "       -U: UUID\n"
 	    "       -W: force virtio to use single-vector MSI\n",
 	    progname, (int)strlen(progname), "", (int)strlen(progname), "",
-	    (int)strlen(progname), "");
+	    (int)strlen(progname), "", (int)strlen(progname), "");
 	exit(code);
 }
 
@@ -119,7 +138,7 @@ bhyve_optparse(int argc, char **argv)
 	const char *optstr;
 	int c;
 
-	optstr = "hCDSWk:f:o:p:c:s:m:U:";
+	optstr = "hCDMNSWk:f:o:p:c:s:m:U:";
 	while ((c = getopt(argc, argv, optstr)) != -1) {
 		switch (c) {
 		case 'c':
@@ -137,10 +156,20 @@ bhyve_optparse(int argc, char **argv)
 		case 'k':
 			bhyve_parse_simple_config_file(optarg);
 			break;
+		case 'M':
+			set_config_bool("monitor.enabled", true);
+			break;
 		case 'm':
 			set_config_value("memory.size", optarg);
 			break;
+		case 'N':
+			set_config_bool("monitor.no_reboot", true);
+			break;
 		case 'o':
+			if (strcmp(optarg, "help") == 0) {
+				print_config_options();
+				exit(0);
+			}
 			if (!bhyve_parse_config_option(optarg)) {
 				errx(EX_USAGE,
 				    "invalid configuration option '%s'",
@@ -159,7 +188,7 @@ bhyve_optparse(int argc, char **argv)
 				pci_print_supported_devices();
 				exit(0);
 			} else if (pci_parse_slot(optarg) != 0)
-				exit(4);
+				exit(BHYVE_EXIT_ERROR);
 			else
 				break;
 		case 'S':
@@ -169,7 +198,7 @@ bhyve_optparse(int argc, char **argv)
 			set_config_value("uuid", optarg);
 			break;
 		case 'W':
-			set_config_bool("virtio_msix", false);
+			set_config_bool("virtio.msix", false);
 			break;
 		case 'h':
 			bhyve_usage(0);
@@ -177,6 +206,10 @@ bhyve_optparse(int argc, char **argv)
 			bhyve_usage(1);
 		}
 	}
+
+	/* Handle backwards compatibility aliases in config options. */
+	bhyve_cfg_warn("virtio_msix", "virtio.msix");
+	bhyve_cfg_warn("monitor", "monitor.enabled");
 }
 
 void

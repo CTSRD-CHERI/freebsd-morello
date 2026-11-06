@@ -261,6 +261,9 @@ ptsdev_ioctl(struct file *fp, u_long cmd, void *data,
 	struct pts_softc *psc = tty_softc(tp);
 	int error = 0, sig;
 
+	if (cmd == TIOCNOTTY || cmd == TIOCSCTTY || cmd == TIOCSPGRP)
+		return (ttydev_ioctl_proctree(tp, cmd, data, td));
+
 	switch (cmd) {
 	case FIODTYPE:
 		*(int *)data = D_TTY;
@@ -491,11 +494,13 @@ static const struct filterops pts_kqops_read = {
 	.f_isfd = 1,
 	.f_detach = pts_kqops_read_detach,
 	.f_event = pts_kqops_read_event,
+	.f_copy = knote_triv_copy,
 };
 static const struct filterops pts_kqops_write = {
 	.f_isfd = 1,
 	.f_detach = pts_kqops_write_detach,
 	.f_event = pts_kqops_write_event,
+	.f_copy = knote_triv_copy,
 };
 
 static int

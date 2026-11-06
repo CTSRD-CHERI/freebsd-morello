@@ -280,6 +280,9 @@ device_sysctl_handler(SYSCTL_HANDLER_ARGS)
 	struct sbuf sb;
 	device_t dev = (device_t)arg1;
 	device_t iommu;
+#ifdef IOMMU
+	device_t requester;
+#endif
 	int error;
 	uint16_t rid;
 	const char *c;
@@ -314,9 +317,15 @@ device_sysctl_handler(SYSCTL_HANDLER_ARGS)
 		}
 		rid = 0;
 #ifdef IOMMU
-		iommu_get_requester(dev, &rid);
+		error = iommu_get_requester(dev, &requester, &rid);
+		/*
+		 * Do not return requester error from sysctl, iommu
+		 * unit might be assigned by other means.
+		 */
+#else
+		error = ENXIO;
 #endif
-		if (rid != 0)
+		if (error == 0)
 			sbuf_printf(&sb, "%srid=%#x", c, rid);
 		break;
 	default:
@@ -1548,7 +1557,7 @@ device_delete_child(device_t dev, device_t child)
 			return (error);
 	}
 
-	device_destroy_props(dev);
+	device_destroy_props(child);
 	if (child->devclass)
 		devclass_delete_device(child->devclass, child);
 	if (child->parent)
@@ -1849,6 +1858,10 @@ device_get_children(device_t dev, device_t **devlistp, int *devcountp)
 	TAILQ_FOREACH(child, &dev->children, link) {
 		count++;
 	}
+	if (devlistp == NULL) {
+		*devcountp = count;
+		return (0);
+	}
 	if (count == 0) {
 		*devlistp = NULL;
 		*devcountp = 0;
@@ -1869,6 +1882,20 @@ device_get_children(device_t dev, device_t **devlistp, int *devcountp)
 	*devcountp = count;
 
 	return (0);
+}
+
+/**
+ * @brief Check if a device has children
+ *
+ * @param dev		the device to examine
+ *
+ * @rerval true		the device has at least one child
+ * @retval false	the device has no children
+ */
+bool
+device_has_children(device_t dev)
+{
+	return (!TAILQ_EMPTY(&dev->children));
 }
 
 /**
@@ -2130,6 +2157,17 @@ void *
 device_get_softc(device_t dev)
 {
 	return (dev->softc);
+}
+
+void *
+device_get_softc_class(device_t dev, kobj_class_t cls)
+{
+	char *ptr;
+
+	ptr = dev->softc;
+	ptr += kobj_instance_offset(device_get_driver(dev), cls);
+
+	return (ptr);
 }
 
 /**
@@ -2445,6 +2483,7 @@ device_set_driver(device_t dev, driver_t *driver)
 {
 	int domain;
 	struct domainset *policy;
+	size_t size;
 
 	if (dev->state >= DS_ATTACHED)
 		return (EBUSY);
@@ -2461,13 +2500,14 @@ device_set_driver(device_t dev, driver_t *driver)
 	dev->driver = driver;
 	if (driver) {
 		kobj_init((kobj_t) dev, (kobj_class_t) driver);
-		if (!(dev->flags & DF_EXTERNALSOFTC) && driver->size > 0) {
+		size = kobj_total_data_size(driver);
+		if (!(dev->flags & DF_EXTERNALSOFTC) && size > 0) {
 			if (bus_get_domain(dev, &domain) == 0)
 				policy = DOMAINSET_PREF(domain);
 			else
 				policy = DOMAINSET_RR();
-			dev->softc = malloc_domainset(driver->size, M_BUS_SC,
-			    policy, M_WAITOK | M_ZERO);
+			dev->softc = malloc_domainset(size, M_BUS_SC, policy,
+			    M_WAITOK | M_ZERO);
 		}
 	} else {
 		kobj_init((kobj_t) dev, &null_class);
@@ -3069,7 +3109,7 @@ resource_list_delete(struct resource_list *rl, int type, int rid)
  */
 struct resource *
 resource_list_reserve(struct resource_list *rl, device_t bus, device_t child,
-    int type, int *rid, rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
+    int type, int rid, rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
 {
 	struct resource_list_entry *rle = NULL;
 	int passthrough = (device_get_parent(child) != bus);
@@ -3085,7 +3125,7 @@ resource_list_reserve(struct resource_list *rl, device_t bus, device_t child,
 	r = resource_list_alloc(rl, bus, child, type, rid, start, end, count,
 	    flags);
 	if (r != NULL) {
-		rle = resource_list_find(rl, type, *rid);
+		rle = resource_list_find(rl, type, rid);
 		rle->flags |= RLE_RESERVED;
 	}
 	return (r);
@@ -3126,7 +3166,7 @@ resource_list_reserve(struct resource_list *rl, device_t bus, device_t child,
  */
 struct resource *
 resource_list_alloc(struct resource_list *rl, device_t bus, device_t child,
-    int type, int *rid, rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
+    int type, int rid, rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
 {
 	struct resource_list_entry *rle = NULL;
 	int passthrough = (device_get_parent(child) != bus);
@@ -3137,7 +3177,7 @@ resource_list_alloc(struct resource_list *rl, device_t bus, device_t child,
 		    type, rid, start, end, count, flags));
 	}
 
-	rle = resource_list_find(rl, type, *rid);
+	rle = resource_list_find(rl, type, rid);
 
 	if (!rle)
 		return (NULL);		/* no resource of that type/rid */
@@ -3147,14 +3187,14 @@ resource_list_alloc(struct resource_list *rl, device_t bus, device_t child,
 			if (rle->flags & RLE_ALLOCATED)
 				return (NULL);
 			if ((flags & RF_ACTIVE) &&
-			    bus_activate_resource(child, type, *rid,
+			    bus_activate_resource(child, type, rid,
 			    rle->res) != 0)
 				return (NULL);
 			rle->flags |= RLE_ALLOCATED;
 			return (rle->res);
 		}
 		device_printf(bus,
-		    "resource entry %#x type %d for child %s is busy\n", *rid,
+		    "resource entry %#x type %d for child %s is busy\n", rid,
 		    type, device_get_nameunit(child));
 		return (NULL);
 	}
@@ -4006,7 +4046,7 @@ bus_generic_translate_resource(device_t dev, int type, rman_res_t start,
  * BUS_ALLOC_RESOURCE() method of the parent of @p dev.
  */
 struct resource *
-bus_generic_alloc_resource(device_t dev, device_t child, int type, int *rid,
+bus_generic_alloc_resource(device_t dev, device_t child, int type, int rid,
     rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
 {
 	/* Propagate up the bus hierarchy until someone handles it. */
@@ -4297,7 +4337,7 @@ bus_generic_rl_release_resource(device_t dev, device_t child,
  */
 struct resource *
 bus_generic_rl_alloc_resource(device_t dev, device_t child, int type,
-    int *rid, rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
+    int rid, rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
 {
 	struct resource_list *		rl = NULL;
 
@@ -4322,7 +4362,7 @@ bus_generic_rl_alloc_resource(device_t dev, device_t child, int type,
  */
 struct resource *
 bus_generic_rman_alloc_resource(device_t dev, device_t child, int type,
-    int *rid, rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
+    int rid, rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
 {
 	struct resource *r;
 	struct rman *rm;
@@ -4335,11 +4375,11 @@ bus_generic_rman_alloc_resource(device_t dev, device_t child, int type,
 	    child);
 	if (r == NULL)
 		return (NULL);
-	rman_set_rid(r, *rid);
+	rman_set_rid(r, rid);
 	rman_set_type(r, type);
 
 	if (flags & RF_ACTIVE) {
-		if (bus_activate_resource(child, type, *rid, r) != 0) {
+		if (bus_activate_resource(child, type, rid, r) != 0) {
 			rman_release_resource(r);
 			return (NULL);
 		}
@@ -4624,7 +4664,7 @@ bus_release_resources(device_t dev, const struct resource_spec *rs,
  * parent of @p dev.
  */
 struct resource *
-bus_alloc_resource(device_t dev, int type, int *rid, rman_res_t start,
+(bus_alloc_resource)(device_t dev, int type, int rid, rman_res_t start,
     rman_res_t end, rman_res_t count, u_int flags)
 {
 	struct resource *res;
@@ -5934,7 +5974,19 @@ devctl2_ioctl(struct cdev *cdev, u_long cmd, caddr_t data, int fflag,
 		dev->flags &= ~DF_FIXEDCLASS;
 		dev->flags |= DF_WILDCARD;
 		devclass_delete_device(dev->devclass, dev);
-		error = device_probe_and_attach(dev);
+
+		/*
+		 * Don't use device_probe_and_attach so that failing
+		 * to find a new driver isn't reported as an error.
+		 */
+		error = device_probe(dev);
+		if (error == ENXIO) {
+			error = 0;
+			break;
+		}
+		if (error == 0) {
+			error = device_attach(dev);
+		}
 		break;
 	case DEV_RESCAN:
 		if (!device_is_attached(dev)) {

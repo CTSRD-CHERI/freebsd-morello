@@ -17,9 +17,10 @@ SRCS+=	tpm20.c tpm_tis_core.c
 .if defined(${OPT_FDT})
 SRCS+=  tpm_spibus.c tpm_tis_spibus.c spibus_if.h
 .endif
-.if ${MACHINE_ARCH:Namd64:Ni386:Narm64} == ""
+.if ${MACHINE_ARCH:Namd64:Ni386:Naarch64} == ""
 SRCS+= acpi_if.h
 SRCS+= tpm_tis_acpi.c
+SRCS+= tpm_acpi_subr.c
 SRCS+= tpm_crb.c
 SRCS+= tpm_bus.c
 CFLAGS+=-DDEV_ACPI

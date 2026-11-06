@@ -183,6 +183,10 @@ static struct rmlock sptree_lock;
 #define	SPTREE_WLOCK_ASSERT()   rm_assert(&sptree_lock, RA_WLOCKED)
 #define	SPTREE_UNLOCK_ASSERT()  rm_assert(&sptree_lock, RA_UNLOCKED)
 
+/* Size of the SPD */
+VNET_DEFINE_STATIC(unsigned long, spd_size) = 0;
+#define	V_spd_size		VNET(spd_size)
+
 /* Hash table for lookup SP using unique id */
 VNET_DEFINE_STATIC(struct secpolicy_list *, sphashtbl);
 VNET_DEFINE_STATIC(u_long, sphash_mask);
@@ -209,8 +213,6 @@ VNET_DEFINE_STATIC(u_int, key_spdcache_maxentries) = 0;
 #define	V_key_spdcache_maxentries	VNET(key_spdcache_maxentries)
 VNET_DEFINE_STATIC(u_int, key_spdcache_threshold) = 32;
 #define	V_key_spdcache_threshold	VNET(key_spdcache_threshold)
-VNET_DEFINE_STATIC(unsigned long, spd_size) = 0;
-#define	V_spd_size		VNET(spd_size)
 
 #define SPDCACHE_ENABLED()	(V_key_spdcache_maxentries != 0)
 #define SPDCACHE_ACTIVE() \
@@ -567,36 +569,49 @@ MALLOC_DEFINE(M_IPSEC_SPDCACHE, "ipsec-spdcache", "ipsec SPD cache");
 
 static uma_zone_t __read_mostly ipsec_key_lft_zone;
 
+static int key_checksockaddrs(const struct sockaddr *src,
+    const struct sockaddr *dst);
+
 /*
  * set parameters into secpolicyindex buffer.
  * Must allocate secpolicyindex buffer passed to this function.
  */
-#define KEY_SETSECSPIDX(_dir, s, d, ps, pd, ulp, idx) \
-do { \
-	bzero((idx), sizeof(struct secpolicyindex));                         \
-	(idx)->dir = (_dir);                                                 \
-	(idx)->prefs = (ps);                                                 \
-	(idx)->prefd = (pd);                                                 \
-	(idx)->ul_proto = (ulp);                                             \
-	bcopy((s), &(idx)->src, ((const struct sockaddr *)(s))->sa_len);     \
-	bcopy((d), &(idx)->dst, ((const struct sockaddr *)(d))->sa_len);     \
-} while (0)
+static void
+key_setsecspidx(uint8_t dir, const void *s, const void *d, uint8_t prefs,
+    uint8_t prefd, uint8_t ul_proto, struct secpolicyindex *idx)
+{
+	MPASS(key_checksockaddrs((const struct sockaddr *)s,
+	    (const struct sockaddr *)d) == 0);
+
+	memset(idx, 0, sizeof(*idx));
+	idx->dir = dir;
+	idx->prefs = prefs;
+	idx->prefd = prefd;
+	idx->ul_proto = ul_proto;
+	memcpy(&idx->src, s, ((const struct sockaddr *)s)->sa_len);
+	memcpy(&idx->dst, d, ((const struct sockaddr *)d)->sa_len);
+}
 
 /*
  * set parameters into secasindex buffer.
  * Must allocate secasindex buffer before calling this function.
  */
-#define KEY_SETSECASIDX(p, m, r, s, d, idx) \
-do { \
-	bzero((idx), sizeof(struct secasindex));                             \
-	(idx)->proto = (p);                                                  \
-	(idx)->mode = (m);                                                   \
-	(idx)->reqid = (r);                                                  \
-	bcopy((s), &(idx)->src, ((const struct sockaddr *)(s))->sa_len);     \
-	bcopy((d), &(idx)->dst, ((const struct sockaddr *)(d))->sa_len);     \
-	key_porttosaddr(&(idx)->src.sa, 0);				     \
-	key_porttosaddr(&(idx)->dst.sa, 0);				     \
-} while (0)
+static void
+key_setsecasidx(uint8_t proto, uint8_t mode, uint32_t reqid,
+    const void *s, const void *d, struct secasindex *idx)
+{
+	MPASS(key_checksockaddrs((const struct sockaddr *)s,
+	    (const struct sockaddr *)d) == 0);
+
+	memset(idx, 0, sizeof(*idx));
+	idx->proto = proto;
+	idx->mode = mode;
+	idx->reqid = reqid;
+	memcpy(&idx->src, s, ((const struct sockaddr *)s)->sa_len);
+	memcpy(&idx->dst, d, ((const struct sockaddr *)d)->sa_len);
+	key_porttosaddr(&idx->src.sa, 0);
+	key_porttosaddr(&idx->dst.sa, 0);
+}
 
 /* key statistics */
 struct _keystat {
@@ -882,7 +897,7 @@ key_bumpspgen(void)
 }
 
 static int
-key_checksockaddrs(struct sockaddr *src, struct sockaddr *dst)
+key_checksockaddrs(const struct sockaddr *src, const struct sockaddr *dst)
 {
 
 	/* family match */
@@ -1206,7 +1221,7 @@ key_allocsa_tunnel(union sockaddr_union *src, union sockaddr_union *dst,
 	IPSEC_ASSERT(src != NULL, ("null src address"));
 	IPSEC_ASSERT(dst != NULL, ("null dst address"));
 
-	KEY_SETSECASIDX(proto, IPSEC_MODE_TUNNEL, 0, &src->sa,
+	key_setsecasidx(proto, IPSEC_MODE_TUNNEL, 0, &src->sa,
 	    &dst->sa, &saidx);
 
 	sav = NULL;
@@ -1397,7 +1412,6 @@ key_unregister_ifnet(struct secpolicy **spp, u_int count)
 		ipsec_accel_spddel(spp[i]);
 		TAILQ_REMOVE(&V_sptree_ifnet[spp[i]->spidx.dir],
 		    spp[i], chain);
-		V_spd_size--;
 		LIST_REMOVE(spp[i], idhash);
 	}
 	SPTREE_WUNLOCK();
@@ -2107,13 +2121,9 @@ key_spdadd(struct socket *so, struct mbuf *m, const struct sadb_msghdr *mhp)
 		return key_senderror(so, m, error);
 	}
 	/* make secindex */
-	KEY_SETSECSPIDX(xpl0->sadb_x_policy_dir,
-	                src0 + 1,
-	                dst0 + 1,
-	                src0->sadb_address_prefixlen,
-	                dst0->sadb_address_prefixlen,
-	                src0->sadb_address_proto,
-	                &spidx);
+	key_setsecspidx(xpl0->sadb_x_policy_dir, src0 + 1, dst0 + 1,
+	    src0->sadb_address_prefixlen, dst0->sadb_address_prefixlen,
+	    src0->sadb_address_proto, &spidx);
 	/* Checking there is SP already or not. */
 	oldsp = key_getsp(&spidx);
 	if (oldsp != NULL) {
@@ -2215,11 +2225,9 @@ key_spdadd(struct socket *so, struct mbuf *m, const struct sadb_msghdr *mhp)
 	if (!n)
 		return key_senderror(so, m, ENOBUFS);
 
-	if (n->m_len < sizeof(*newmsg)) {
-		n = m_pullup(n, sizeof(*newmsg));
-		if (!n)
-			return key_senderror(so, m, ENOBUFS);
-	}
+	if ((n = m_pullup(n, sizeof(*newmsg))) == NULL)
+		return key_senderror(so, m, ENOBUFS);
+
 	newmsg = mtod(n, struct sadb_msg *);
 	newmsg->sadb_msg_errno = 0;
 	newmsg->sadb_msg_len = PFKEY_UNIT64(n->m_pkthdr.len);
@@ -2348,13 +2356,9 @@ key_spddelete(struct socket *so, struct mbuf *m,
 		return key_senderror(so, m, EINVAL);
 	}
 	/* make secindex */
-	KEY_SETSECSPIDX(xpl0->sadb_x_policy_dir,
-	                src0 + 1,
-	                dst0 + 1,
-	                src0->sadb_address_prefixlen,
-	                dst0->sadb_address_prefixlen,
-	                src0->sadb_address_proto,
-	                &spidx);
+	key_setsecspidx(xpl0->sadb_x_policy_dir, src0 + 1, dst0 + 1,
+	    src0->sadb_address_prefixlen, dst0->sadb_address_prefixlen,
+	    src0->sadb_address_proto, &spidx);
 
 	/* Is there SP in SPD ? */
 	if ((sp = key_getsp(&spidx)) == NULL) {
@@ -2803,11 +2807,8 @@ key_setdumpsp(struct secpolicy *sp, u_int8_t type, u_int32_t seq,
 	if ((result->m_flags & M_PKTHDR) == 0)
 		goto fail;
 
-	if (result->m_len < sizeof(struct sadb_msg)) {
-		result = m_pullup(result, sizeof(struct sadb_msg));
-		if (result == NULL)
-			goto fail;
-	}
+	if ((result = m_pullup(result, sizeof(struct sadb_msg))) == NULL)
+		goto fail;
 
 	result->m_pkthdr.len = 0;
 	for (m = result; m; m = m->m_next)
@@ -2940,12 +2941,9 @@ key_spdexpire(struct secpolicy *sp)
 		goto fail;
 	}
 
-	if (result->m_len < sizeof(struct sadb_msg)) {
-		result = m_pullup(result, sizeof(struct sadb_msg));
-		if (result == NULL) {
-			error = ENOBUFS;
-			goto fail;
-		}
+	if ((result = m_pullup(result, sizeof(struct sadb_msg))) == NULL) {
+		error = ENOBUFS;
+		goto fail;
 	}
 
 	result->m_pkthdr.len = 0;
@@ -3951,11 +3949,8 @@ key_setdumpsa(struct secasvar *sav, uint8_t type, uint8_t satype,
 
 	m_cat(result, tres);
 	tres = NULL;
-	if (result->m_len < sizeof(struct sadb_msg)) {
-		result = m_pullup(result, sizeof(struct sadb_msg));
-		if (result == NULL)
-			goto fail;
-	}
+	if ((result = m_pullup(result, sizeof(struct sadb_msg))) == NULL)
+		goto fail;
 
 	result->m_pkthdr.len = 0;
 	for (m = result; m; m = m->m_next)
@@ -5118,7 +5113,7 @@ key_getspi(struct socket *so, struct mbuf *m, const struct sadb_msghdr *mhp)
 		error = EINVAL;
 		goto fail;
 	}
-	KEY_SETSECASIDX(proto, mode, reqid, src0 + 1, dst0 + 1, &saidx);
+	key_setsecasidx(proto, mode, reqid, src0 + 1, dst0 + 1, &saidx);
 
 	/* SPI allocation */
 	SPI_ALLOC_LOCK();
@@ -5201,11 +5196,8 @@ key_getspi(struct socket *so, struct mbuf *m, const struct sadb_msghdr *mhp)
 		goto fail;
 	}
 
-	if (n->m_len < sizeof(struct sadb_msg)) {
-		n = m_pullup(n, sizeof(struct sadb_msg));
-		if (n == NULL)
-			return key_sendup_mbuf(so, m, KEY_SENDUP_ONE);
-	}
+	if ((n = m_pullup(n, sizeof(struct sadb_msg))) == NULL)
+		return (key_sendup_mbuf(so, m, KEY_SENDUP_ONE));
 
 	n->m_pkthdr.len = 0;
 	for (nn = n; nn; nn = nn->m_next)
@@ -5351,36 +5343,44 @@ key_updateaddresses(struct socket *so, struct mbuf *m,
     const struct sadb_msghdr *mhp, struct secasvar *sav,
     struct secasindex *saidx)
 {
-	struct sockaddr *newaddr;
+	struct sockaddr *dnewaddr, *snewaddr;
 	struct secashead *sah;
 	struct secasvar *newsav, *tmp;
 	struct mbuf *n;
 	int error, isnew;
+	bool newsaidx;
 
+	newsaidx = false;
 	/* Check that we need to change SAH */
 	if (!SADB_CHECKHDR(mhp, SADB_X_EXT_NEW_ADDRESS_SRC)) {
-		newaddr = (struct sockaddr *)(
-		    ((struct sadb_address *)
+		snewaddr = (struct sockaddr *)(((struct sadb_address *)
 		    mhp->ext[SADB_X_EXT_NEW_ADDRESS_SRC]) + 1);
-		bcopy(newaddr, &saidx->src, newaddr->sa_len);
+		newsaidx = true;
+	} else {
+		snewaddr = &saidx->src.sa;
+	}
+	if (!SADB_CHECKHDR(mhp, SADB_X_EXT_NEW_ADDRESS_DST)) {
+		dnewaddr = (struct sockaddr *)(((struct sadb_address *)
+		    mhp->ext[SADB_X_EXT_NEW_ADDRESS_DST]) + 1);
+		newsaidx = true;
+	} else {
+		dnewaddr = &saidx->dst.sa;
+	}
+	error = key_checksockaddrs(snewaddr, dnewaddr);
+	if (error != 0) {
+		ipseclog((LOG_DEBUG, "%s: invalid new sockaddr.\n",
+		    __func__));
+		return (error);
+	}
+	if (!SADB_CHECKHDR(mhp, SADB_X_EXT_NEW_ADDRESS_SRC)) {
+		memcpy(&saidx->src, snewaddr, snewaddr->sa_len);
 		key_porttosaddr(&saidx->src.sa, 0);
 	}
 	if (!SADB_CHECKHDR(mhp, SADB_X_EXT_NEW_ADDRESS_DST)) {
-		newaddr = (struct sockaddr *)(
-		    ((struct sadb_address *)
-		    mhp->ext[SADB_X_EXT_NEW_ADDRESS_DST]) + 1);
-		bcopy(newaddr, &saidx->dst, newaddr->sa_len);
+		memcpy(&saidx->dst, dnewaddr, dnewaddr->sa_len);
 		key_porttosaddr(&saidx->dst.sa, 0);
 	}
-	if (!SADB_CHECKHDR(mhp, SADB_X_EXT_NEW_ADDRESS_SRC) ||
-	    !SADB_CHECKHDR(mhp, SADB_X_EXT_NEW_ADDRESS_DST)) {
-		error = key_checksockaddrs(&saidx->src.sa, &saidx->dst.sa);
-		if (error != 0) {
-			ipseclog((LOG_DEBUG, "%s: invalid new sockaddr.\n",
-			    __func__));
-			return (error);
-		}
-
+	if (newsaidx) {
 		sah = key_getsah(saidx);
 		if (sah == NULL) {
 			/* create a new SA index */
@@ -5637,7 +5637,7 @@ key_update(struct socket *so, struct mbuf *m, const struct sadb_msghdr *mhp)
 		ipseclog((LOG_DEBUG, "%s: invalid sockaddr.\n", __func__));
 		return key_senderror(so, m, error);
 	}
-	KEY_SETSECASIDX(proto, mode, reqid, src0 + 1, dst0 + 1, &saidx);
+	key_setsecasidx(proto, mode, reqid, src0 + 1, dst0 + 1, &saidx);
 	sav = key_getsavbyspi(sa0->sadb_sa_spi);
 	if (sav == NULL) {
 		ipseclog((LOG_DEBUG, "%s: no SA found for SPI %u\n",
@@ -5870,7 +5870,7 @@ key_add(struct socket *so, struct mbuf *m, const struct sadb_msghdr *mhp)
 		ipseclog((LOG_DEBUG, "%s: invalid sockaddr.\n", __func__));
 		return key_senderror(so, m, error);
 	}
-	KEY_SETSECASIDX(proto, mode, reqid, src0 + 1, dst0 + 1, &saidx);
+	key_setsecasidx(proto, mode, reqid, src0 + 1, dst0 + 1, &saidx);
 	spi = sa0->sadb_sa_spi;
 	/*
 	 * For TCP-MD5 SAs we don't use SPI. Check the uniqueness using
@@ -6264,11 +6264,9 @@ key_getmsgbuf_x1(struct mbuf *m, const struct sadb_msghdr *mhp)
 	if (!n)
 		return NULL;
 
-	if (n->m_len < sizeof(struct sadb_msg)) {
-		n = m_pullup(n, sizeof(struct sadb_msg));
-		if (n == NULL)
-			return NULL;
-	}
+	if ((n = m_pullup(n, sizeof(struct sadb_msg))) == NULL)
+		return NULL;
+
 	mtod(n, struct sadb_msg *)->sadb_msg_errno = 0;
 	mtod(n, struct sadb_msg *)->sadb_msg_len =
 	    PFKEY_UNIT64(n->m_pkthdr.len);
@@ -6325,7 +6323,7 @@ key_delete(struct socket *so, struct mbuf *m, const struct sadb_msghdr *mhp)
 		ipseclog((LOG_DEBUG, "%s: invalid sockaddr.\n", __func__));
 		return (key_senderror(so, m, EINVAL));
 	}
-	KEY_SETSECASIDX(proto, IPSEC_MODE_ANY, 0, src0 + 1, dst0 + 1, &saidx);
+	key_setsecasidx(proto, IPSEC_MODE_ANY, 0, src0 + 1, dst0 + 1, &saidx);
 	if (SADB_CHECKHDR(mhp, SADB_EXT_SA)) {
 		/*
 		 * Caller wants us to delete all non-LARVAL SAs
@@ -6375,11 +6373,9 @@ key_delete(struct socket *so, struct mbuf *m, const struct sadb_msghdr *mhp)
 	if (!n)
 		return key_senderror(so, m, ENOBUFS);
 
-	if (n->m_len < sizeof(struct sadb_msg)) {
-		n = m_pullup(n, sizeof(struct sadb_msg));
-		if (n == NULL)
-			return key_senderror(so, m, ENOBUFS);
-	}
+	if ((n = m_pullup(n, sizeof(struct sadb_msg))) == NULL)
+		return (key_senderror(so, m, ENOBUFS));
+
 	newmsg = mtod(n, struct sadb_msg *);
 	newmsg->sadb_msg_errno = 0;
 	newmsg->sadb_msg_len = PFKEY_UNIT64(n->m_pkthdr.len);
@@ -6437,11 +6433,9 @@ key_delete_all(struct socket *so, struct mbuf *m,
 	if (!n)
 		return key_senderror(so, m, ENOBUFS);
 
-	if (n->m_len < sizeof(struct sadb_msg)) {
-		n = m_pullup(n, sizeof(struct sadb_msg));
-		if (n == NULL)
-			return key_senderror(so, m, ENOBUFS);
-	}
+	if ((n = m_pullup(n, sizeof(struct sadb_msg))) == NULL)
+		return (key_senderror(so, m, ENOBUFS));
+
 	newmsg = mtod(n, struct sadb_msg *);
 	newmsg->sadb_msg_errno = 0;
 	newmsg->sadb_msg_len = PFKEY_UNIT64(n->m_pkthdr.len);
@@ -6556,7 +6550,7 @@ key_get(struct socket *so, struct mbuf *m, const struct sadb_msghdr *mhp)
 		ipseclog((LOG_DEBUG, "%s: invalid sockaddr.\n", __func__));
 		return key_senderror(so, m, EINVAL);
 	}
-	KEY_SETSECASIDX(proto, IPSEC_MODE_ANY, 0, src0 + 1, dst0 + 1, &saidx);
+	key_setsecasidx(proto, IPSEC_MODE_ANY, 0, src0 + 1, dst0 + 1, &saidx);
 
 	SPI_ALLOC_LOCK();
 	if (proto == IPPROTO_TCP)
@@ -7078,12 +7072,9 @@ key_acquire(const struct secasindex *saidx, struct secpolicy *sp)
 		goto fail;
 	}
 
-	if (result->m_len < sizeof(struct sadb_msg)) {
-		result = m_pullup(result, sizeof(struct sadb_msg));
-		if (result == NULL) {
-			error = ENOBUFS;
-			goto fail;
-		}
+	if ((result = m_pullup(result, sizeof(struct sadb_msg))) == NULL) {
+		error = ENOBUFS;
+		goto fail;
 	}
 
 	result->m_pkthdr.len = 0;
@@ -7373,7 +7364,7 @@ key_acquire2(struct socket *so, struct mbuf *m, const struct sadb_msghdr *mhp)
 		ipseclog((LOG_DEBUG, "%s: invalid sockaddr.\n", __func__));
 		return key_senderror(so, m, EINVAL);
 	}
-	KEY_SETSECASIDX(proto, mode, reqid, src0 + 1, dst0 + 1, &saidx);
+	key_setsecasidx(proto, mode, reqid, src0 + 1, dst0 + 1, &saidx);
 
 	/* get a SA index */
 	SAHTREE_RLOCK();
@@ -7719,12 +7710,9 @@ key_expire(struct secasvar *sav, int hard)
 		goto fail;
 	}
 
-	if (result->m_len < sizeof(struct sadb_msg)) {
-		result = m_pullup(result, sizeof(struct sadb_msg));
-		if (result == NULL) {
-			error = ENOBUFS;
-			goto fail;
-		}
+	if ((result = m_pullup(result, sizeof(struct sadb_msg))) == NULL) {
+		error = ENOBUFS;
+		goto fail;
 	}
 
 	result->m_pkthdr.len = 0;
@@ -8088,11 +8076,9 @@ key_parse(struct mbuf *m, struct socket *so)
 	IPSEC_ASSERT(so != NULL, ("null socket"));
 	IPSEC_ASSERT(m != NULL, ("null mbuf"));
 
-	if (m->m_len < sizeof(struct sadb_msg)) {
-		m = m_pullup(m, sizeof(struct sadb_msg));
-		if (!m)
-			return ENOBUFS;
-	}
+	if ((m = m_pullup(m, sizeof(struct sadb_msg))) == NULL)
+		return ENOBUFS;
+
 	msg = mtod(m, struct sadb_msg *);
 	orglen = PFKEY_UNUNIT64(msg->sadb_msg_len);
 	target = KEY_SENDUP_ONE;

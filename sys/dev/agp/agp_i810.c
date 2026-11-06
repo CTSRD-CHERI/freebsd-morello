@@ -1234,7 +1234,7 @@ agp_gen4_install_gatt(device_t dev, const vm_size_t gtt_offset)
 	struct agp_i810_softc *sc;
 
 	sc = device_get_softc(dev);
-	pmap_change_attr((vm_offset_t)rman_get_virtual(sc->sc_res[0]) +
+	pmap_change_attr((char *)rman_get_virtual(sc->sc_res[0]) +
 	    gtt_offset, rman_get_size(sc->sc_res[0]) - gtt_offset,
 	    VM_MEMATTR_WRITE_COMBINING);
 	agp_i830_install_gatt_init(sc);
@@ -1913,7 +1913,7 @@ static device_method_t agp_i810_methods[] = {
 	DEVMETHOD(agp_bind_memory,	agp_i810_bind_memory),
 	DEVMETHOD(agp_unbind_memory,	agp_i810_unbind_memory),
 	DEVMETHOD(agp_chipset_flush,	agp_intel_gtt_chipset_flush),
-	{ 0, 0 }
+	DEVMETHOD_END
 };
 
 static driver_t agp_i810_driver = {
@@ -2025,7 +2025,7 @@ agp_i915_chipset_flush_alloc_page(device_t dev, uint64_t start, uint64_t end)
 	vga = device_get_parent(dev);
 	sc->sc_flush_page_rid = 100;
 	sc->sc_flush_page_res = BUS_ALLOC_RESOURCE(device_get_parent(vga), dev,
-	    SYS_RES_MEMORY, &sc->sc_flush_page_rid, start, end, PAGE_SIZE,
+	    SYS_RES_MEMORY, sc->sc_flush_page_rid, start, end, PAGE_SIZE,
 	    RF_ACTIVE);
 	if (sc->sc_flush_page_res == NULL) {
 		device_printf(dev, "Failed to allocate flush page at 0x%jx\n",

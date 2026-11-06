@@ -11,6 +11,7 @@ FILESNAME=	LC_NUMERIC
 
 LOCALES+=	en_US.UTF-8
 LOCALES+=	fa_IR.UTF-8
+LOCALES+=	fr_CH.UTF-8
 LOCALES+=	fr_FR.UTF-8
 LOCALES+=	hi_IN.UTF-8
 LOCALES+=	it_CH.UTF-8
@@ -38,6 +39,7 @@ SAME+=		uk_UA.UTF-8 fr_CA.UTF-8
 SAME+=		uk_UA.UTF-8 fi_FI.UTF-8
 SAME+=		uk_UA.UTF-8 et_EE.UTF-8
 SAME+=		uk_UA.UTF-8 es_CR.UTF-8
+SAME+=		uk_UA.UTF-8 en_ZA.UTF-8
 SAME+=		uk_UA.UTF-8 de_AT.UTF-8
 SAME+=		uk_UA.UTF-8 cs_CZ.UTF-8
 SAME+=		uk_UA.UTF-8 bg_BG.UTF-8
@@ -52,7 +54,6 @@ SAME+=		en_US.UTF-8 ja_JP.UTF-8
 SAME+=		en_US.UTF-8 he_IL.UTF-8
 SAME+=		en_US.UTF-8 ga_IE.UTF-8
 SAME+=		en_US.UTF-8 es_MX.UTF-8
-SAME+=		en_US.UTF-8 en_ZA.UTF-8
 SAME+=		en_US.UTF-8 en_SG.UTF-8
 SAME+=		en_US.UTF-8 en_PH.UTF-8
 SAME+=		en_US.UTF-8 en_NZ.UTF-8
@@ -90,7 +91,6 @@ SAME+=		tr_TR.UTF-8 ca_ES.UTF-8
 SAME+=		tr_TR.UTF-8 ca_AD.UTF-8
 SAME+=		tr_TR.UTF-8 ar_MA.UTF-8
 SAME+=		it_CH.UTF-8 de_CH.UTF-8
-SAME+=		fr_FR.UTF-8 fr_CH.UTF-8
 SAME+=		fr_FR.UTF-8 fr_BE.UTF-8
 
 FILES=		${LOCALES:S/$/.out/}
@@ -106,6 +106,7 @@ SYMLINKS+=	../$f/${FILESNAME} \
 
 .for f in ${LOCALES}
 FILESDIR_${f}.out= ${LOCALEDIR}/${f}
+FILESDIR_${f}.outPACKAGE= locales
 .endfor
 
 .include <bsd.prog.mk>

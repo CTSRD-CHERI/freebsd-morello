@@ -54,6 +54,7 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
+#include <sys/jail.h>
 #include <sys/kernel.h>
 #include <sys/kthread.h>
 #include <sys/ktls.h>
@@ -559,15 +560,19 @@ got_reply:
 		 * If unsuccessful AND error is an authentication error
 		 * then refresh credentials and try again, else break
 		 */
-		else if (stat == RPC_AUTHERROR)
+		else if (stat == RPC_AUTHERROR) {
 			/* maybe our credentials need to be refreshed ... */
+			CURVNET_SET_QUIET(TD_TO_VNET(curthread));
 			if (nrefreshes > 0 &&
 			    AUTH_REFRESH(auth, &reply_msg)) {
+				CURVNET_RESTORE();
 				nrefreshes--;
 				XDR_DESTROY(&xdrs);
 				mtx_lock(&ct->ct_lock);
 				goto call_again;
 			}
+			CURVNET_RESTORE();
+		}
 		/* end of unsuccessful completion */
 	}	/* end of valid reply message */
 	else {
@@ -851,6 +856,7 @@ clnt_vc_destroy(CLIENT *cl)
 	struct socket *so;
 	SVCXPRT *xprt;
 	uint32_t reterr;
+	bool_t rlse;
 
 	clnt_vc_close(cl);
 
@@ -859,11 +865,16 @@ clnt_vc_destroy(CLIENT *cl)
 	ct->ct_backchannelxprt = NULL;
 	if (xprt != NULL) {
 		mtx_unlock(&ct->ct_lock);	/* To avoid a LOR. */
+		rlse = FALSE;
 		sx_xlock(&xprt->xp_lock);
 		mtx_lock(&ct->ct_lock);
-		xprt->xp_p2 = NULL;
+		if (xprt->xp_p2 == ct) {
+			xprt->xp_p2 = NULL;
+			rlse = TRUE;
+		}
 		sx_xunlock(&xprt->xp_lock);
-		SVC_RELEASE(xprt);
+		if (rlse)
+			SVC_RELEASE(xprt);
 	}
 
 	/* Wait for the upcall kthread to terminate. */
@@ -953,11 +964,8 @@ clnt_vc_soupcall(struct socket *so, void *arg, int waitflag)
 	mtx_unlock(&ct->ct_lock);
 
 	/*
-	 * If another thread is already here, it must be in
-	 * soreceive(), so just return to avoid races with it.
-	 * ct_upcallrefs is protected by the socket receive buffer lock
-	 * which is held in this function, except when
-	 * soreceive() is called.
+	 * ct_upcallrefs prevents another upcall from processing the
+	 * socket while the receive buffer lock is dropped.
 	 */
 	if (ct->ct_upcallrefs > 0)
 		return (SU_OK);
@@ -998,6 +1006,11 @@ clnt_vc_soupcall(struct socket *so, void *arg, int waitflag)
 			 * to read from the stream.
 			 */
 			error = ECONNRESET;
+
+			/* Avoid reversing the so_snd -> so_rcv lock order. */
+			SOCK_RECVBUF_UNLOCK(so);
+			socantsendmore(so);
+			SOCK_RECVBUF_LOCK(so);
 		}
 
 		/*

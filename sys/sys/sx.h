@@ -99,7 +99,7 @@
  * Function prototipes.  Routines that start with an underscore are not part
  * of the public interface and are wrappered with a macro.
  */
-void	sx_sysinit(void *arg);
+void	sx_sysinit(const void *arg);
 #define	sx_init(sx, desc)	sx_init_flags((sx), (desc), 0)
 void	sx_init_flags(struct sx *sx, const char *description, int opts);
 void	sx_destroy(struct sx *sx);
@@ -258,6 +258,10 @@ __sx_xunlock(struct sx *sx, struct thread *td, const char *file, int line)
 		sx_sunlock_(sx, file, line);				\
 	(void)0; /* ensure void type for expression */			\
 })
+
+/* Return true if there are threads waiting to acquire this sx lock. */
+#define	sx_has_waiters(sx)						\
+	((SX_READ_VALUE(sx) & SX_LOCK_WAITERS) != 0)
 
 #define	sx_unlock(sx)	sx_unlock_((sx), LOCK_FILE, LOCK_LINE)
 

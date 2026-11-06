@@ -495,6 +495,13 @@ lockdisablerecurse(struct lock *lk)
 	lk->lock_object.lo_flags &= ~LO_RECURSABLE;
 }
 
+bool
+lockcanrecurse(struct lock *lk)
+{
+	lockmgr_assert(lk, KA_LOCKED);
+	return ((lk->lock_object.lo_flags & LO_RECURSABLE) != 0);
+}
+
 void
 lockdestroy(struct lock *lk)
 {
@@ -1780,9 +1787,11 @@ lockmgr_chain(struct thread *td, struct thread **ownerp)
 
 	lk = td->td_wchan;
 
-	if (LOCK_CLASS(&lk->lock_object) != &lock_class_lockmgr)
+	if (!TD_ON_SLEEPQ(td) || sleepq_type(td->td_wchan) != SLEEPQ_LK ||
+	    LOCK_CLASS(&lk->lock_object) != &lock_class_lockmgr)
 		return (0);
-	db_printf("blocked on lockmgr %s", lk->lock_object.lo_name);
+	db_printf("blocked on lock %p (%s) \"%s\" ", &lk->lock_object,
+	    lock_class_lockmgr.lc_name, lk->lock_object.lo_name);
 	if (lk->lk_lock & LK_SHARE)
 		db_printf("SHARED (count %ju)\n",
 		    (uintmax_t)LK_SHARERS(lk->lk_lock));

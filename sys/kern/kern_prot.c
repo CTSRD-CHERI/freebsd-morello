@@ -6,6 +6,11 @@
  * (c) UNIX System Laboratories, Inc.
  * Copyright (c) 2000-2001 Robert N. M. Watson.
  * All rights reserved.
+ * Copyright (c) 2024-2025 The FreeBSD Foundation
+ *
+ * Portions of this software were developed by Olivier Certner
+ * <olce@FreeBSD.org> at Kumacom SARL under sponsorship from the FreeBSD
+ * Foundation.
  *
  * All or some portions of this file are derived from material licensed
  * to the University of California by American Telephone and Telegraph
@@ -41,14 +46,14 @@
  * System calls related to processes and protection
  */
 
-#include <sys/cdefs.h>
 #include "opt_inet.h"
 #include "opt_inet6.h"
 
-#include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/abi_compat.h>
 #include <sys/acct.h>
+#include <sys/capsicum.h>
+#include <sys/imgact.h>
 #include <sys/kdb.h>
 #include <sys/kernel.h>
 #include <sys/libkern.h>
@@ -190,7 +195,7 @@ sys_getpgid(struct thread *td, struct getpgid_args *uap)
 		p = td->td_proc;
 		PROC_LOCK(p);
 	} else {
-		p = pfind(uap->pid);
+		p = pfind_any(uap->pid);
 		if (p == NULL)
 			return (ESRCH);
 		error = p_cansee(td, p);
@@ -225,11 +230,12 @@ kern_getsid(struct thread *td, pid_t pid)
 	struct proc *p;
 	int error;
 
+	error = 0;
 	if (pid == 0) {
 		p = td->td_proc;
 		PROC_LOCK(p);
 	} else {
-		p = pfind(pid);
+		p = pfind_any(pid);
 		if (p == NULL)
 			return (ESRCH);
 		error = p_cansee(td, p);
@@ -238,9 +244,12 @@ kern_getsid(struct thread *td, pid_t pid)
 			return (error);
 		}
 	}
-	td->td_retval[0] = p->p_session->s_sid;
+	if (p->p_session != NULL)
+		td->td_retval[0] = p->p_session->s_sid;
+	else
+		error = EINVAL;
 	PROC_UNLOCK(p);
-	return (0);
+	return (error);
 }
 
 #ifndef _SYS_SYSPROTO_H_
@@ -291,11 +300,6 @@ sys_getgid(struct thread *td, struct getgid_args *uap)
 	return (0);
 }
 
-/*
- * Get effective group ID.  The "egid" is groups[0], and could be obtained
- * via getgroups.  This syscall exists because it is somewhat painful to do
- * correctly in a library function.
- */
 #ifndef _SYS_SYSPROTO_H_
 struct getegid_args {
         int     dummy;
@@ -332,7 +336,7 @@ freebsd14_getgroups(struct thread *td, struct freebsd14_getgroups_args *uap)
 	}
 
 	error = copyout(&cred->cr_gid, uap->gidset, sizeof(gid_t));
-	if (error != 0)
+	if (error == 0)
 		error = copyout(cred->cr_groups, uap->gidset + 1,
 		    (ngrp - 1) * sizeof(gid_t));
 
@@ -427,7 +431,7 @@ again:
  *	pid must be in same session (EPERM)
  *	pid can't have done an exec (EACCES)
  * if pgid != pid
- * 	there must exist some pid in same session having pgid (EPERM)
+ *	there must exist some pid in same session having pgid (EPERM)
  * pid must not be session leader (EPERM)
  */
 #ifndef _SYS_SYSPROTO_H_
@@ -531,61 +535,68 @@ gidp_cmp(const void *p1, const void *p2)
 }
 
 /*
- * Final storage for supplementary groups will be returned via 'groups'.
- * '*groups' must be NULL on input, and if not equal to 'smallgroups'
- * on output, must be freed (M_TEMP) *even if* an error is returned.
+ * 'smallgroups' must be an (uninitialized) array of length CRED_SMALLGROUPS_NB.
+ * Always sets 'sc_supp_groups', either to a valid kernel-space groups array
+ * (which may or may not be 'smallgroups'), or NULL if SETCREDF_SUPP_GROUPS was
+ * not specified or there are too many groups, or a buffer containing garbage on
+ * copyin() failure.  In the last two cases, 'sc_supp_groups_nb' is additionally
+ * set to 0 as a security measure.  'sc_supp_groups' must be freed (M_TEMP) if
+ * not equal to 'smallgroups' even on failure.
  */
 static int
-kern_setcred_copyin_supp_groups(struct setcred *const wcred,
-    const u_int flags, gid_t *const smallgroups, gid_t **const groups)
+user_setcred_copyin_supp_groups(struct setcred *const wcred,
+    const u_int flags, gid_t *const smallgroups)
 {
-	MPASS(*groups == NULL);
+	gid_t *groups;
+	int error;
 
-	if (flags & SETCREDF_SUPP_GROUPS) {
-		int error;
+	if ((flags & SETCREDF_SUPP_GROUPS) == 0) {
+		error = 0;
+		goto reset_groups_exit;
+	}
 
-		/*
-		 * Check for the limit for number of groups right now in order
-		 * to limit the amount of bytes to copy.
-		 */
-		if (wcred->sc_supp_groups_nb > ngroups_max)
-			return (EINVAL);
+	/*
+	 * Check the number of groups' limit right now in order to limit the
+	 * amount of bytes to copy.
+	 */
+	if (wcred->sc_supp_groups_nb > ngroups_max) {
+		error = EINVAL;
+		goto reset_groups_exit;
+	}
 
-		/*
-		 * Since we are going to be copying the supplementary groups
-		 * from userland, make room also for the effective GID right
-		 * now, to avoid having to allocate and copy again the
-		 * supplementary groups.
-		 */
-		*groups = wcred->sc_supp_groups_nb <= CRED_SMALLGROUPS_NB ?
-		    smallgroups : malloc(wcred->sc_supp_groups_nb *
-		    sizeof(*groups), M_TEMP, M_WAITOK);
+	groups = wcred->sc_supp_groups_nb <= CRED_SMALLGROUPS_NB ?
+	    smallgroups : malloc(wcred->sc_supp_groups_nb * sizeof(gid_t),
+	    M_TEMP, M_WAITOK);
+	error = copyin(wcred->sc_supp_groups, groups,
+	    wcred->sc_supp_groups_nb * sizeof(gid_t));
+	wcred->sc_supp_groups = groups;
 
-		error = copyin(wcred->sc_supp_groups, *groups,
-		    wcred->sc_supp_groups_nb * sizeof(*groups));
-		if (error != 0)
-			return (error);
-		wcred->sc_supp_groups = *groups;
-	} else {
+	if (error != 0) {
 		wcred->sc_supp_groups_nb = 0;
-		wcred->sc_supp_groups = NULL;
+		/*
+		 * 'sc_supp_groups' must be freed by caller if not
+		 * 'smallgroups'.
+		 */
+		return (error);
 	}
 
 	return (0);
+
+reset_groups_exit:
+	wcred->sc_supp_groups_nb = 0;
+	wcred->sc_supp_groups = NULL;
+	return (error);
 }
 
 int
-user_setcred(struct thread *td, const u_int flags,
-    const void *const uwcred, const size_t size, bool is_32bit)
+user_setcred(struct thread *td, const u_int flags, struct setcred *const wcred)
 {
-	struct setcred wcred;
 #ifdef MAC
 	struct mac mac;
 	/* Pointer to 'struct mac' or 'struct mac32'. */
 	void *umac;
 #endif
 	gid_t smallgroups[CRED_SMALLGROUPS_NB];
-	gid_t *groups = NULL;
 	int error;
 
 	/*
@@ -598,70 +609,40 @@ user_setcred(struct thread *td, const u_int flags,
 	if ((flags & ~SETCREDF_MASK) != 0)
 		return (EINVAL);
 
-#ifdef COMPAT_FREEBSD32
-	if (is_32bit) {
-		struct setcred32 wcred32;
-
-		if (size != sizeof(wcred32))
-			return (EINVAL);
-		error = copyin(uwcred, &wcred32, sizeof(wcred32));
-		if (error != 0)
-			return (error);
-		/* These fields have exactly the same sizes and positions. */
-		memcpy(&wcred, &wcred32, &wcred32.setcred32_copy_end -
-		    &wcred32.setcred32_copy_start);
-		/* Remaining fields are pointers and need PTRIN*(). */
-		PTRIN_CP(wcred32, wcred, sc_supp_groups);
-		PTRIN_CP(wcred32, wcred, sc_label);
-	} else
-#endif /* COMPAT_FREEBSD32 */
-	{
-		if (size != sizeof(wcred))
-			return (EINVAL);
-		error = copyin(uwcred, &wcred, sizeof(wcred));
-		if (error != 0)
-			return (error);
-	}
 #ifdef MAC
-	umac = wcred.sc_label;
+	umac = wcred->sc_label;
 #endif
 	/* Also done on !MAC as a defensive measure. */
-	wcred.sc_label = NULL;
+	wcred->sc_label = NULL;
 
 	/*
 	 * Copy supplementary groups as needed.  There is no specific
 	 * alternative for 32-bit compatibility as 'gid_t' has the same size
 	 * everywhere.
 	 */
-	error = kern_setcred_copyin_supp_groups(&wcred, flags, smallgroups,
-	    &groups);
+	error = user_setcred_copyin_supp_groups(wcred, flags, smallgroups);
 	if (error != 0)
 		goto free_groups;
 
 #ifdef MAC
 	if ((flags & SETCREDF_MAC_LABEL) != 0) {
-#ifdef COMPAT_FREEBSD32
-		if (is_32bit)
-			error = mac_label_copyin32(umac, &mac, NULL);
-		else
-#endif
-			error = mac_label_copyin(umac, &mac, NULL);
+		error = mac_label_copyin(umac, &mac, NULL);
 		if (error != 0)
 			goto free_groups;
-		wcred.sc_label = &mac;
+		wcred->sc_label = &mac;
 	}
 #endif
 
-	error = kern_setcred(td, flags, &wcred, groups);
+	error = kern_setcred(td, flags, wcred);
 
 #ifdef MAC
-	if (wcred.sc_label != NULL)
-		free_copied_label(wcred.sc_label);
+	if (wcred->sc_label != NULL)
+		free_copied_label(wcred->sc_label);
 #endif
 
 free_groups:
-	if (groups != smallgroups)
-		free(groups, M_TEMP);
+	if (wcred->sc_supp_groups != smallgroups)
+		free(wcred->sc_supp_groups, M_TEMP);
 
 	return (error);
 }
@@ -677,31 +658,33 @@ struct setcred_args {
 int
 sys_setcred(struct thread *td, struct setcred_args *uap)
 {
-	return (user_setcred(td, uap->flags, uap->wcred, uap->size, false));
+	struct setcred wcred;
+	int error;
+
+	if (uap->size != sizeof(wcred))
+		return (EINVAL);
+	error = copyin(uap->wcred, &wcred, sizeof(wcred));
+	if (error != 0)
+		return (error);
+	return (user_setcred(td, uap->flags, &wcred));
 }
 
 /*
  * CAUTION: This function normalizes groups in 'wcred'.
- *
- * If 'preallocated_groups' is non-NULL, it must be an already allocated array
- * of size 'wcred->sc_supp_groups_nb' containing the supplementary groups, and
- * 'wcred->sc_supp_groups' then must point to it.
  */
 int
 kern_setcred(struct thread *const td, const u_int flags,
-    struct setcred *const wcred, gid_t *preallocated_groups)
+    struct setcred *const wcred)
 {
 	struct proc *const p = td->td_proc;
-	struct ucred *new_cred, *old_cred, *to_free_cred;
+	struct ucred *new_cred, *old_cred, *to_free_cred = NULL;
 	struct uidinfo *uip = NULL, *ruip = NULL;
 #ifdef MAC
 	void *mac_set_proc_data = NULL;
 	bool proc_label_set = false;
 #endif
-	gid_t *groups = NULL;
-	gid_t smallgroups[CRED_SMALLGROUPS_NB];
 	int error;
-	bool cred_set;
+	bool cred_set = false;
 
 	/* Bail out on unrecognized flags. */
 	if (flags & ~SETCREDF_MASK)
@@ -711,32 +694,18 @@ kern_setcred(struct thread *const td, const u_int flags,
 	 * Part 1: We allocate and perform preparatory operations with no locks.
 	 */
 
-	if (flags & SETCREDF_SUPP_GROUPS) {
-		if (wcred->sc_supp_groups_nb > ngroups_max)
+	if ((flags & SETCREDF_SUPP_GROUPS) != 0 &&
+	    wcred->sc_supp_groups_nb > ngroups_max)
 			return (EINVAL);
-		if (preallocated_groups != NULL) {
-			groups = preallocated_groups;
-			MPASS(preallocated_groups == wcred->sc_supp_groups);
-		} else {
-			if (wcred->sc_supp_groups_nb <= CRED_SMALLGROUPS_NB)
-				groups = smallgroups;
-			else
-				groups = malloc(wcred->sc_supp_groups_nb *
-				    sizeof(*groups), M_TEMP, M_WAITOK);
-			memcpy(groups, wcred->sc_supp_groups,
-			    wcred->sc_supp_groups_nb * sizeof(*groups));
-		}
-	}
 
 	if (flags & SETCREDF_MAC_LABEL) {
 #ifdef MAC
 		error = mac_set_proc_prepare(td, wcred->sc_label,
 		    &mac_set_proc_data);
 		if (error != 0)
-			goto free_groups;
+			return (error);
 #else
-		error = ENOTSUP;
-		goto free_groups;
+		return (ENOTSUP);
 #endif
 	}
 
@@ -762,8 +731,10 @@ kern_setcred(struct thread *const td, const u_int flags,
 		 * Output the raw supplementary groups array for better
 		 * traceability.
 		 */
-		AUDIT_ARG_GROUPSET(groups, wcred->sc_supp_groups_nb);
-		groups_normalize(&wcred->sc_supp_groups_nb, groups);
+		AUDIT_ARG_GROUPSET(wcred->sc_supp_groups,
+		    wcred->sc_supp_groups_nb);
+		groups_normalize(&wcred->sc_supp_groups_nb,
+		    wcred->sc_supp_groups);
 	}
 
 	/*
@@ -804,7 +775,7 @@ kern_setcred(struct thread *const td, const u_int flags,
 	 */
 	if (flags & SETCREDF_SUPP_GROUPS)
 		crsetgroups_internal(new_cred, wcred->sc_supp_groups_nb,
-		    groups);
+		    wcred->sc_supp_groups);
 	if (flags & SETCREDF_GID)
 		change_egid(new_cred, wcred->sc_gid);
 	if (flags & SETCREDF_RGID)
@@ -837,23 +808,49 @@ kern_setcred(struct thread *const td, const u_int flags,
 	if (error != 0)
 		goto unlock_finish;
 
+#ifdef RACCT
 	/*
-	 * Set the new credentials, noting that they have changed.
+	 * Hold a reference to 'new_cred', as we need to call some functions on
+	 * it after proc_set_cred_enforce_proc_lim().
 	 */
+	crhold(new_cred);
+#endif
+
+	/* Set the new credentials. */
 	cred_set = proc_set_cred_enforce_proc_lim(p, new_cred);
 	if (cred_set) {
 		setsugid(p);
+#ifdef RACCT
+		/* Adjust RACCT counters. */
+		racct_proc_ucred_changed(p, old_cred, new_cred);
+#endif
 		to_free_cred = old_cred;
 		MPASS(error == 0);
-	} else
+	} else {
+#ifdef RACCT
+		/* Matches the crhold() just before the containing 'if'. */
+		crfree(new_cred);
+#endif
 		error = EAGAIN;
+	}
 
 unlock_finish:
 	PROC_UNLOCK(p);
+
 	/*
 	 * Part 3: After releasing the process lock, we perform cleanups and
 	 * finishing operations.
 	 */
+
+#ifdef RACCT
+	if (cred_set) {
+#ifdef RCTL
+		rctl_proc_ucred_changed(p, new_cred);
+#endif
+		/* Paired with the crhold() above. */
+		crfree(new_cred);
+	}
+#endif
 
 #ifdef MAC
 	if (mac_set_proc_data != NULL)
@@ -865,9 +862,7 @@ unlock_finish:
 		uifree(uip);
 	if (ruip != NULL)
 		uifree(ruip);
-free_groups:
-	if (groups != preallocated_groups && groups != smallgroups)
-		free(groups, M_TEMP); /* Deals with 'groups' being NULL. */
+
 	return (error);
 }
 
@@ -981,14 +976,19 @@ sys_setuid(struct thread *td, struct setuid_args *uap)
 		change_euid(newcred, uip);
 		setsugid(p);
 	}
-	/*
-	 * This also transfers the proc count to the new user.
-	 */
-	proc_set_cred(p, newcred);
+
 #ifdef RACCT
 	racct_proc_ucred_changed(p, oldcred, newcred);
+#endif
+#ifdef RCTL
 	crhold(newcred);
 #endif
+	/*
+	 * Takes over 'newcred''s reference, so 'newcred' must not be used
+	 * besides this point except on RCTL where we took an additional
+	 * reference above.
+	 */
+	proc_set_cred(p, newcred);
 	PROC_UNLOCK(p);
 #ifdef RCTL
 	rctl_proc_ucred_changed(p, newcred);
@@ -1025,6 +1025,8 @@ sys_seteuid(struct thread *td, struct seteuid_args *uap)
 	newcred = crget();
 	euip = uifind(euid);
 	PROC_LOCK(p);
+	execve_block_pass(td);
+
 	/*
 	 * Copy credentials so other references do not see our changes.
 	 */
@@ -1079,6 +1081,7 @@ sys_setgid(struct thread *td, struct setgid_args *uap)
 	AUDIT_ARG_GID(gid);
 	newcred = crget();
 	PROC_LOCK(p);
+	execve_block_pass(td);
 	oldcred = crcopysafe(p, newcred);
 
 #ifdef MAC
@@ -1177,6 +1180,7 @@ sys_setegid(struct thread *td, struct setegid_args *uap)
 	AUDIT_ARG_EGID(egid);
 	newcred = crget();
 	PROC_LOCK(p);
+	execve_block_pass(td);
 	oldcred = crcopysafe(p, newcred);
 
 #ifdef MAC
@@ -1215,9 +1219,7 @@ freebsd14_setgroups(struct thread *td, struct freebsd14_setgroups_args *uap)
 
 	/*
 	 * Before FreeBSD 15.0, we allow one more group to be supplied to
-	 * account for the egid appearing before the supplementary groups.  This
-	 * may technically allow one more supplementary group for systems that
-	 * did use the default NGROUPS_MAX if we round it back up to 1024.
+	 * account for the egid appearing before the supplementary groups.
 	 */
 	gidsetsize = uap->gidsetsize;
 	if (gidsetsize > ngroups_max + 1 || gidsetsize < 0)
@@ -1229,13 +1231,8 @@ freebsd14_setgroups(struct thread *td, struct freebsd14_setgroups_args *uap)
 		groups = smallgroups;
 
 	error = copyin(uap->gidset, groups, gidsetsize * sizeof(gid_t));
-	if (error == 0) {
-		int ngroups = gidsetsize > 0 ? gidsetsize - 1 /* egid */ : 0;
-
-		error = kern_setgroups(td, &ngroups, groups + 1);
-		if (error == 0 && gidsetsize > 0)
-			td->td_proc->p_ucred->cr_gid = groups[0];
-	}
+	if (error == 0)
+		error = kern_setgroups(td, &gidsetsize, groups, true);
 
 	if (groups != smallgroups)
 		free(groups, M_TEMP);
@@ -1277,7 +1274,7 @@ sys_setgroups(struct thread *td, struct setgroups_args *uap)
 
 	error = copyin(uap->gidset, groups, gidsetsize * sizeof(gid_t));
 	if (error == 0)
-		error = kern_setgroups(td, &gidsetsize, groups);
+		error = kern_setgroups(td, &gidsetsize, groups, false);
 
 	if (groups != smallgroups)
 		free(groups, M_TEMP);
@@ -1285,29 +1282,48 @@ sys_setgroups(struct thread *td, struct setgroups_args *uap)
 }
 
 /*
- * CAUTION: This function normalizes 'groups', possibly also changing the value
- * of '*ngrpp' as a consequence.
+ * 'includes_egid' indicates that the first element of groups[] (if any) is the
+ * desired effective GID and that only the other elements will be used to set
+ * the supplementary groups.  If true, and groups[] is empty, the effective GID
+ * is left unchanged and all supplementary groups deleted (see setgroups(2)).
+ *
+ * CAUTION: This function normalizes 'groups' (only the supplementary groups on
+ * 'includes_egid') and may need to update the value of '*ngrpp' as
+ * a consequence.
  */
 int
-kern_setgroups(struct thread *td, int *ngrpp, gid_t *groups)
+kern_setgroups(struct thread *td, int *ngrpp, gid_t *groups, bool includes_egid)
 {
 	struct proc *p = td->td_proc;
 	struct ucred *newcred, *oldcred;
+	gid_t egid;
 	int ngrp, error;
 
 	ngrp = *ngrpp;
 	/* Sanity check size. */
-	if (ngrp < 0 || ngrp > ngroups_max)
+	if (ngrp < 0 || ngrp > (includes_egid ? ngroups_max + 1 : ngroups_max))
 		return (EINVAL);
 
+	if (includes_egid) {
+		if (ngrp > 0) {
+			egid = groups[0];
+			groups++;
+			ngrp--;
+		} else
+			includes_egid = false;
+	}
+
 	AUDIT_ARG_GROUPSET(groups, ngrp);
+	if (includes_egid)
+		AUDIT_ARG_EGID(egid);
 
 	groups_normalize(&ngrp, groups);
-	*ngrpp = ngrp;
+	*ngrpp = includes_egid ? ngrp + 1 : ngrp;
 
 	newcred = crget();
 	crextend(newcred, ngrp);
 	PROC_LOCK(p);
+	execve_block_pass(td);
 	oldcred = crcopysafe(p, newcred);
 
 #ifdef MAC
@@ -1319,15 +1335,29 @@ kern_setgroups(struct thread *td, int *ngrpp, gid_t *groups)
 	 */
 	error = mac_cred_check_setgroups(oldcred, ngrp,
 	    ngrp == 0 ? NULL : groups);
-	if (error)
+	if (error != 0)
 		goto fail;
+
+	if (includes_egid) {
+		error = mac_cred_check_setegid(oldcred, egid);
+		if (error != 0)
+			goto fail;
+	}
 #endif
 
 	error = priv_check_cred(oldcred, PRIV_CRED_SETGROUPS);
-	if (error)
+	if (error != 0)
 		goto fail;
 
+	if (includes_egid) {
+		error = priv_check_cred(oldcred, PRIV_CRED_SETEGID);
+		if (error != 0)
+			goto fail;
+	}
+
 	crsetgroups_internal(newcred, ngrp, groups);
+	if (includes_egid)
+		change_egid(newcred, egid);
 	setsugid(p);
 	proc_set_cred(p, newcred);
 	PROC_UNLOCK(p);
@@ -1364,6 +1394,7 @@ sys_setreuid(struct thread *td, struct setreuid_args *uap)
 	euip = uifind(euid);
 	ruip = uifind(ruid);
 	PROC_LOCK(p);
+	execve_block_pass(td);
 	oldcred = crcopysafe(p, newcred);
 
 #ifdef MAC
@@ -1392,11 +1423,18 @@ sys_setreuid(struct thread *td, struct setreuid_args *uap)
 		change_svuid(newcred, newcred->cr_uid);
 		setsugid(p);
 	}
-	proc_set_cred(p, newcred);
 #ifdef RACCT
 	racct_proc_ucred_changed(p, oldcred, newcred);
+#endif
+#ifdef RCTL
 	crhold(newcred);
 #endif
+	/*
+	 * Takes over 'newcred''s reference, so 'newcred' must not be used
+	 * besides this point except on RCTL where we took an additional
+	 * reference above.
+	 */
+	proc_set_cred(p, newcred);
 	PROC_UNLOCK(p);
 #ifdef RCTL
 	rctl_proc_ucred_changed(p, newcred);
@@ -1436,6 +1474,7 @@ sys_setregid(struct thread *td, struct setregid_args *uap)
 	AUDIT_ARG_RGID(rgid);
 	newcred = crget();
 	PROC_LOCK(p);
+	execve_block_pass(td);
 	oldcred = crcopysafe(p, newcred);
 
 #ifdef MAC
@@ -1506,6 +1545,7 @@ sys_setresuid(struct thread *td, struct setresuid_args *uap)
 	euip = uifind(euid);
 	ruip = uifind(ruid);
 	PROC_LOCK(p);
+	execve_block_pass(td);
 	oldcred = crcopysafe(p, newcred);
 
 #ifdef MAC
@@ -1538,11 +1578,18 @@ sys_setresuid(struct thread *td, struct setresuid_args *uap)
 		change_svuid(newcred, suid);
 		setsugid(p);
 	}
-	proc_set_cred(p, newcred);
 #ifdef RACCT
 	racct_proc_ucred_changed(p, oldcred, newcred);
+#endif
+#ifdef RCTL
 	crhold(newcred);
 #endif
+	/*
+	 * Takes over 'newcred''s reference, so 'newcred' must not be used
+	 * besides this point except on RCTL where we took an additional
+	 * reference above.
+	 */
+	proc_set_cred(p, newcred);
 	PROC_UNLOCK(p);
 #ifdef RCTL
 	rctl_proc_ucred_changed(p, newcred);
@@ -1590,6 +1637,7 @@ sys_setresgid(struct thread *td, struct setresgid_args *uap)
 	AUDIT_ARG_SGID(sgid);
 	newcred = crget();
 	PROC_LOCK(p);
+	execve_block_pass(td);
 	oldcred = crcopysafe(p, newcred);
 
 #ifdef MAC
@@ -1803,12 +1851,6 @@ groupmember(gid_t gid, const struct ucred *cred)
 bool
 realgroupmember(gid_t gid, const struct ucred *cred)
 {
-	/*
-	 * Although the equality test on 'cr_rgid' below doesn't access
-	 * 'cr_groups', we check for the latter's length here as we assume that,
-	 * if 'cr_ngroups' is 0, the passed 'struct ucred' is invalid, and
-	 * 'cr_rgid' may not have been filled.
-	 */
 	groups_check_positive_len(cred->cr_ngroups);
 
 	if (gid == cred->cr_rgid)
@@ -1896,19 +1938,22 @@ SYSCTL_INT(_security_bsd, OID_AUTO, see_other_gids, CTLFLAG_RW,
 static int
 cr_canseeothergids(struct ucred *u1, struct ucred *u2)
 {
-	if (!see_other_gids) {
-		if (realgroupmember(u1->cr_rgid, u2))
+	if (see_other_gids)
+		return (0);
+
+	/* Restriction in force. */
+
+	if (realgroupmember(u1->cr_rgid, u2))
+		return (0);
+
+	for (int i = 0; i < u1->cr_ngroups; i++)
+		if (realgroupmember(u1->cr_groups[i], u2))
 			return (0);
 
-		for (int i = 1; i < u1->cr_ngroups; i++)
-			if (realgroupmember(u1->cr_groups[i], u2))
-				return (0);
+	if (priv_check_cred(u1, PRIV_SEEOTHERGIDS) == 0)
+		return (0);
 
-		if (priv_check_cred(u1, PRIV_SEEOTHERGIDS) != 0)
-			return (ESRCH);
-	}
-
-	return (0);
+	return (ESRCH);
 }
 
 /*
@@ -2276,6 +2321,7 @@ cr_xids_subset(struct ucred *active_cred, struct ucred *obj_cred)
 		}
 	}
 	grpsubset = grpsubset &&
+	    groupmember(obj_cred->cr_gid, active_cred) &&
 	    groupmember(obj_cred->cr_rgid, active_cred) &&
 	    groupmember(obj_cred->cr_svgid, active_cred);
 
@@ -2289,6 +2335,31 @@ cr_xids_subset(struct ucred *active_cred, struct ucred *obj_cred)
 	    active_cred->cr_uid == obj_cred->cr_ruid);
 
 	return (uidsubset && grpsubset);
+}
+
+/*
+ * Determine whether the td thread allowed to do pdopenpid(2) on the
+ * process p.  The permissions are scoped to the PIDs namespace and
+ * processes hierarchy, and do not imply permissions to perform
+ * operations on the resulting process descriptor, e.g. pdkill(2) and
+ * other.
+ */
+int
+p_canopen(struct thread *td, struct proc *p)
+{
+#ifdef INVARIANTS
+	if (IN_CAPABILITY_MODE(td))
+		sx_assert(&proctree_lock, SX_LOCKED);
+#endif
+
+	/*
+	 * Allow implicit parent in cap mode: either real parent or
+	 * debugger can open pid.
+	 */
+	if (!IN_CAPABILITY_MODE(td) || (allow_ptrace_in_cap_mode &&
+	    (td->td_proc == p->p_pptr || p->p_oppid == td->td_proc->p_pid)))
+		return (0);
+	return (ECAPMODE);
 }
 
 /*-
@@ -2352,11 +2423,11 @@ p_candebug(struct thread *td, struct proc *p)
 	}
 
 	/*
-	 * Can't trace a process that's currently exec'ing.
-	 *
-	 * XXX: Note, this is not a security policy decision, it's a
-	 * basic correctness/functionality decision.  Therefore, this check
-	 * should be moved to the caller's of p_candebug().
+	 * Can't trace a process that's currently exec'ing.  Otherwise
+	 * the process vmspace might change, and the target might be
+	 * loading a setugid image.  The execve_block(9) and
+	 * proc_vmspace_ref(9) allow to get the stable credentials and
+	 * vmspace reference.
 	 */
 	if ((p->p_flag & P_INEXEC) != 0)
 		return (EBUSY);
@@ -2769,7 +2840,7 @@ cru2xt(struct thread *td, struct xucred *xcr)
  * 'enforce_proc_lim' being true and if no new process can be accounted to the
  * new real UID because of the current limit (see the inner comment for more
  * details) and the caller does not have privilege (PRIV_PROC_LIMIT) to override
- * that.
+ * that.  In this case, the reference to 'newcred' is not taken over.
  */
 static bool
 _proc_set_cred(struct proc *p, struct ucred *newcred, bool enforce_proc_lim)
@@ -2778,10 +2849,6 @@ _proc_set_cred(struct proc *p, struct ucred *newcred, bool enforce_proc_lim)
 
 	MPASS(oldcred != NULL);
 	PROC_LOCK_ASSERT(p, MA_OWNED);
-	KASSERT(newcred->cr_users == 0, ("%s: users %d not 0 on cred %p",
-	    __func__, newcred->cr_users, newcred));
-	KASSERT(newcred->cr_ref == 1, ("%s: ref %ld not 1 on cred %p",
-	    __func__, newcred->cr_ref, newcred));
 
 	if (newcred->cr_ruidinfo != oldcred->cr_ruidinfo) {
 		/*
@@ -2807,8 +2874,10 @@ _proc_set_cred(struct proc *p, struct ucred *newcred, bool enforce_proc_lim)
 	    __func__, oldcred->cr_users, oldcred));
 	oldcred->cr_users--;
 	mtx_unlock(&oldcred->cr_mtx);
+	mtx_lock(&newcred->cr_mtx);
+	newcred->cr_users++;
+	mtx_unlock(&newcred->cr_mtx);
 	p->p_ucred = newcred;
-	newcred->cr_users = 1;
 	PROC_UPDATE_COW(p);
 	if (newcred->cr_ruidinfo != oldcred->cr_ruidinfo)
 		(void)chgproccnt(oldcred->cr_ruidinfo, -1, 0);
@@ -2921,7 +2990,8 @@ crextend(struct ucred *cr, int n)
  * Normalizes a set of groups to be applied to a 'struct ucred'.
  *
  * Normalization ensures that the supplementary groups are sorted in ascending
- * order and do not contain duplicates.
+ * order and do not contain duplicates.  This allows group_is_supplementary() to
+ * do a binary search.
  */
 static void
 groups_normalize(int *ngrp, gid_t *groups)
@@ -2984,9 +3054,9 @@ crsetgroups_internal(struct ucred *cr, int ngrp, const gid_t *groups)
  * Copy groups in to a credential after expanding it if required.
  *
  * May sleep in order to allocate memory (except if, e.g., crextend() was called
- * before with 'ngrp' or greater).  Truncates the list to ngroups_max if
+ * before with 'ngrp' or greater).  Truncates the list to 'ngroups_max' if
  * it is too large.  Array 'groups' doesn't need to be sorted.  'ngrp' must be
- * strictly positive.
+ * positive.
  */
 void
 crsetgroups(struct ucred *cr, int ngrp, const gid_t *groups)
@@ -3017,8 +3087,8 @@ crsetgroups(struct ucred *cr, int ngrp, const gid_t *groups)
  * Same as crsetgroups() but sets the effective GID as well.
  *
  * This function ensures that an effective GID is always present in credentials.
- * An empty array will only set the effective GID to the default_egid, while a
- * non-empty array will peel off groups[0] to set as the effective GID and use
+ * An empty array will only set the effective GID to 'default_egid', while
+ * a non-empty array will peel off groups[0] to set as the effective GID and use
  * the remainder, if any, as supplementary groups.
  */
 void

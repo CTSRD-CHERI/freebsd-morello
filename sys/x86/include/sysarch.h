@@ -52,6 +52,8 @@
 #define	I386_GET_XFPUSTATE	11
 #define	I386_SET_PKRU		12
 #define	I386_CLEAR_PKRU		13
+#define	I386_SET_SPLITLOCK	14
+#define	I386_GET_SPLITLOCK	15
 
 /* Leave space for 0-127 for to avoid translating syscalls */
 #define	AMD64_GET_FSBASE	128
@@ -68,6 +70,8 @@
 /* Flags for AMD64_SET_PKRU */
 #define	AMD64_PKRU_EXCL		0x0001
 #define	AMD64_PKRU_PERSIST	0x0002
+
+#ifndef LOCORE
 
 struct i386_ioperm_args {
 	unsigned int start;
@@ -91,7 +95,7 @@ struct i386_get_xfpustate {
 	void *addr;
 	int len;
 };
-#else
+#else	/* __i386__ */
 struct i386_ldt_args {
 	unsigned int start;
 	struct user_segment_descriptor *descs __packed;
@@ -114,7 +118,7 @@ struct amd64_get_xfpustate {
 	void *addr;
 	int len;
 };
-#endif
+#endif	/* __i386__ */
 
 struct amd64_set_pkru {
 	void *addr;
@@ -151,7 +155,7 @@ int x86_pkru_protect_range(void *addr, unsigned long len, unsigned int keyidx,
 int x86_pkru_unprotect_range(void *addr, unsigned long len);
 int sysarch(int, void *);
 __END_DECLS
-#else
+#else	/* _KERNEL */
 struct thread;
 union descriptor;
 
@@ -164,6 +168,9 @@ int amd64_set_ldt(struct thread *, struct i386_ldt_args *,
     struct user_segment_descriptor *);
 int amd64_get_ioperm(struct thread *, struct i386_ioperm_args *);
 int amd64_set_ioperm(struct thread *, struct i386_ioperm_args *);
-#endif
+int amd64_pkru_update(struct thread *, uintptr_t, size_t, u_int, int, bool);
+#endif	/* _KERNEL */
+
+#endif	/* LOCORE */
 
 #endif /* !_MACHINE_SYSARCH_H_ */

@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2025, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2026, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -239,7 +239,11 @@ static ACPI_INTERFACE_INFO    AcpiDefaultSupportedInterfaces[] =
     {"Processor Device",            NULL, ACPI_OSI_OPTIONAL_FEATURE, 0},
     {"3.0 Thermal Model",           NULL, ACPI_OSI_OPTIONAL_FEATURE, 0},
     {"3.0 _SCP Extensions",         NULL, ACPI_OSI_OPTIONAL_FEATURE, 0},
-    {"Processor Aggregator Device", NULL, ACPI_OSI_OPTIONAL_FEATURE, 0}
+    {"Processor Aggregator Device", NULL, ACPI_OSI_OPTIONAL_FEATURE, 0},
+
+    /* See https://learn.microsoft.com/en-us/windows-hardware/drivers/display/automatic-display-switch */
+
+    {"DisplayMux",                  NULL, ACPI_OSI_OPTIONAL_FEATURE, 0}
 };
 
 

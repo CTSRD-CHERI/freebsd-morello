@@ -45,6 +45,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -108,6 +109,7 @@ struct header_32 {
 
 static int doexit;
 static int pkt_captured;
+static bool print_time = true;
 static int verbose;
 static int uf_minor;
 static char *i_arg;
@@ -162,6 +164,9 @@ static const char *speed_table[USB_SPEED_MAX] = {
 	[USB_SPEED_LOW] = "LOW",
 	[USB_SPEED_VARIABLE] = "VARI",
 	[USB_SPEED_SUPER] = "SUPER",
+	[USB_SPEED_SUPER_PLUS] = "SUPER PLUS",
+	[USB_SPEED_SUPER_PLUS_X2] = "SUPER PLUS X2",
+	[USB_SPEED_SUPER_PLUS_GEN2_X2] = "SUPER PLUS GEN2 X2",
 };
 
 static STAILQ_HEAD(,usb_filt) usb_filt_head =
@@ -459,13 +464,9 @@ hexdump(const uint8_t *region, uint32_t len)
 static void
 print_apacket(const struct header_32 *hdr, const uint8_t *ptr, int ptr_len)
 {
-	struct tm *tm;
 	struct usbpf_pkthdr up_temp;
 	struct usbpf_pkthdr *up;
-	struct timeval tv;
-	size_t len;
 	uint32_t x;
-	char buf[64];
 
 	ptr += USBPF_HDR_LEN;
 	ptr_len -= USBPF_HDR_LEN;
@@ -494,15 +495,22 @@ print_apacket(const struct header_32 *hdr, const uint8_t *ptr, int ptr_len)
 	if (!match_filter(up->up_address, up->up_endpoint))
 		return;
 
-	tv.tv_sec = hdr->ts_sec;
-	tv.tv_usec = hdr->ts_usec;
-	tm = localtime(&tv.tv_sec);
-
-	len = strftime(buf, sizeof(buf), "%H:%M:%S", tm);
-
 	if (verbose >= 0) {
-		printf("%.*s.%06ld usbus%d.%d %s-%s-EP=%08x,SPD=%s,NFR=%d,SLEN=%d,IVAL=%d%s%s\n",
-		    (int)len, buf, tv.tv_usec,
+		if (print_time) {
+			struct timeval tv;
+			char buf[64];
+			struct tm *tm;
+			size_t len;
+
+			tv.tv_sec = hdr->ts_sec;
+			tv.tv_usec = hdr->ts_usec;
+			tm = localtime(&tv.tv_sec);
+
+			len = strftime(buf, sizeof(buf), "%H:%M:%S", tm);
+			printf("%.*s.%06ld ", (int)len, buf, tv.tv_usec);
+		}
+
+		printf("usbus%d.%d %s-%s-EP=%08x,SPD=%s,NFR=%d,SLEN=%d,IVAL=%d%s%s\n",
 		    (int)up->up_busunit, (int)up->up_address,
 		    (up->up_type == USBPF_XFERTAP_SUBMIT) ? "SUBM" : "DONE",
 		    usb_xferstr(up->up_xfertype),
@@ -784,29 +792,13 @@ usage(void)
 	fprintf(stderr, FMT, "-f <unit[.endpoint]>", "Specify a device and endpoint filter");
 	fprintf(stderr, FMT, "-r <file>", "Read the raw packets from file");
 	fprintf(stderr, FMT, "-s <snaplen>", "Snapshot bytes from each packet");
+	fprintf(stderr, FMT, "-t", "Do not print packet timestamps");
 	fprintf(stderr, FMT, "-v", "Increase the verbose level");
 	fprintf(stderr, FMT, "-b <file>", "Save raw version of all recorded data to file");
 	fprintf(stderr, FMT, "-w <file>", "Write the raw packets to file");
 	fprintf(stderr, FMT, "-h", "Display summary of command line options");
 #undef FMT
 	exit(EX_USAGE);
-}
-
-static void
-check_usb_pf_sysctl(void)
-{
-	int error;
-	int no_pf_val = 0;
-	size_t no_pf_len = sizeof(int);
-
-	/* check "hw.usb.no_pf" sysctl for 8- and 9- stable */
-
-	error = sysctlbyname("hw.usb.no_pf", &no_pf_val,
-	    &no_pf_len, NULL, 0);
-	if (error == 0 && no_pf_val != 0) {
-		warnx("The USB packet filter might be disabled.");
-		warnx("See the \"hw.usb.no_pf\" sysctl for more information.");
-	}
 }
 
 int
@@ -824,12 +816,11 @@ main(int argc, char *argv[])
 	int o;
 	int filt_unit;
 	int filt_ep;
-	int s;
 	int ifindex;
 	const char *optstring;
 	char *pp;
 
-	optstring = "b:d:hi:r:s:uvw:f:";
+	optstring = "b:d:hi:r:s:tuvw:f:";
 	while ((o = getopt(argc, argv, optstring)) != -1) {
 		switch (o) {
 		case 'b':
@@ -899,6 +890,9 @@ main(int argc, char *argv[])
 			if (snapshot == 0)
 				snapshot = -1;
 			break;
+		case 't':
+			print_time = false;
+			break;
 		case 'u':
 			setbuf(stdout, NULL);
 			setbuf(stderr, NULL);
@@ -940,8 +934,6 @@ main(int argc, char *argv[])
 		exit(EXIT_SUCCESS);
 	}
 
-	check_usb_pf_sysctl();
-
 	p->fd = fd = open("/dev/bpf", O_RDONLY);
 	if (p->fd < 0)
 		err(EXIT_FAILURE, "Could not open BPF device");
@@ -958,17 +950,6 @@ main(int argc, char *argv[])
 
 	/* clear ifr structure */
 	memset(&ifr, 0, sizeof(ifr));
-
-	/* Try to create usbusN interface if it is not available. */
-	s = socket(AF_LOCAL, SOCK_DGRAM, 0);
-	if (s < 0)
-		errx(EXIT_FAILURE, "Could not open a socket");
-	ifindex = if_nametoindex(i_arg);
-	if (ifindex == 0) {
-		(void)strlcpy(ifr.ifr_name, i_arg, sizeof(ifr.ifr_name));
-		if (ioctl(s, SIOCIFCREATE2, &ifr) < 0)
-			errx(EXIT_FAILURE, "Invalid bus interface: %s", i_arg);
-	}
 
 	for ( ; v >= USBPF_HDR_LEN; v >>= 1) {
 		(void)ioctl(fd, BIOCSBLEN, (caddr_t)&v);
@@ -1012,17 +993,6 @@ main(int argc, char *argv[])
 	printf("%d packets captured\n", pkt_captured);
 	printf("%d packets received by filter\n", us.bs_recv);
 	printf("%d packets dropped by kernel\n", us.bs_drop);
-
-	/*
-	 * Destroy the usbusN interface only if it was created by
-	 * usbdump(8).  Ignore when it was already destroyed.
-	 */
-	if (ifindex == 0 && if_nametoindex(i_arg) > 0) {
-		(void)strlcpy(ifr.ifr_name, i_arg, sizeof(ifr.ifr_name));
-		if (ioctl(s, SIOCIFDESTROY, &ifr) < 0)
-			warn("SIOCIFDESTROY ioctl failed");
-	}
-	close(s);
 
 	if (p->fd > 0)
 		close(p->fd);

@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2025, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2026, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -305,7 +305,7 @@ AcpiUtCreatePackageObject (
         ((ACPI_SIZE) Count + 1) * sizeof (void *));
     if (!PackageElements)
     {
-        ACPI_FREE (PackageDesc);
+        AcpiUtDeleteObjectDesc (PackageDesc);
         return_PTR (NULL);
     }
 

@@ -2,7 +2,7 @@
 
 LIB=	sysdecode
 
-SRCS=	errno.c flags.c ioctl.c signal.c syscallnames.c utrace.c support.c
+SRCS=	errno.c flags.c ioctl.c netlink.c signal.c syscallnames.c utrace.c support.c
 .if ${MACHINE_CPUARCH} == "aarch64" || ${MACHINE_CPUARCH} == "amd64" || \
 	${MACHINE_CPUARCH} == "i386"
 SRCS+= linux.c
@@ -27,7 +27,7 @@ MAN=	sysdecode.3 \
 	sysdecode_sigcode.3 \
 	sysdecode_sockopt_name.3 \
 	sysdecode_socket_protocol.3 \
-	sysdecode_syscallnames.3 \
+	sysdecode_syscallname.3 \
 	sysdecode_utrace.3
 MLINKS= sysdecode_abi_to_freebsd_errno.3 sysdecode_freebsd_to_abi_errno.3
 MLINKS+=sysdecode_enum.3 sysdecode_acltype.3 \
@@ -144,7 +144,7 @@ ioctl.c.tmp: .PHONY
 .endif
 ioctl.c.tmp: mkioctls .META
 	env CPP="${CPP}" MK_PF="${MK_PF}" \
-	    /bin/sh ${.CURDIR}/mkioctls ${SYSROOT:U${DESTDIR}}${INCLUDEDIR} > ${.TARGET}
+	    /bin/sh ${.CURDIR}/mkioctls ${MKTABLES_INCLUDEDIR} > ${.TARGET}
 
 ioctl.c: ioctl.c.tmp
 	if [ ! -e ${.TARGET} ] || ! cmp -s ${.TARGET} ${.TARGET}.tmp; then \

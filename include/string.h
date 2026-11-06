@@ -154,6 +154,34 @@ void	 swab(const void * __restrict, void * __restrict, ssize_t);
 
 int	 timingsafe_bcmp(const void *, const void *, size_t);
 int	 timingsafe_memcmp(const void *, const void *, size_t);
+
+#if __has_builtin(__builtin_alloca)
+#define	strdupa(_Str) (__extension__({				\
+	const char *_Str1;					\
+	size_t _Len;						\
+	char *_Copy;						\
+								\
+	_Str1 = (_Str);						\
+	_Len = strlen(_Str1) + 1;				\
+	_Copy = (char *)__builtin_alloca(_Len);			\
+	memcpy(_Copy, _Str1, _Len);				\
+	_Copy;							\
+}))
+
+#define	strndupa(_Str, _Maxlen) (__extension__({		\
+	const char *_Str1;					\
+	char *_Copy;						\
+	size_t _Len;						\
+								\
+	_Str1 = (_Str);						\
+	_Len = strnlen((_Str1), (_Maxlen));			\
+	_Copy = __builtin_alloca(_Len + 1);			\
+	(void)memcpy(_Copy, _Str1, _Len);			\
+	_Copy[_Len] = '\0';					\
+	_Copy;							\
+}))
+#endif
+
 #endif /* __BSD_VISIBLE */
 
 #if __POSIX_VISIBLE >= 200112 || defined(_XLOCALE_H_)
@@ -176,5 +204,33 @@ typedef int errno_t;
 errno_t memset_s(void *, rsize_t, int, rsize_t);
 #endif /* __EXT1_VISIBLE */
 __END_DECLS
+
+#if defined(__qualsel) && !defined(__cplusplus) && \
+    defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
+#define	memchr(b, c, n)		__qualsel((b),				\
+	(const void *)(memchr)((b), (c), (n)), (memchr)((b), (c), (n)))
+#define	strchr(s, c)		__qualsel((s),				\
+	(const char *)(strchr)((s), (c)), (strchr)((s), (c)))
+#define	strpbrk(s, charset)	__qualsel((s),				\
+	(const char *)(strpbrk)((s), (charset)), (strpbrk)((s), (charset)))
+#define	strrchr(s, c)		__qualsel((s),				\
+	(const char *)(strrchr)((s), (c)), (strrchr)((s), (c)))
+#define	strstr(s, find)		__qualsel((s),				\
+	(const char *)(strstr)((s), (find)), (strstr)((s), (find)))
+#if __BSD_VISIBLE
+#define	memmem(b, blen, pat, plen)	__qualsel((b),			\
+	(const void *)(memmem)((b), (blen), (pat), (plen)),		\
+	(memmem)((b), (blen), (pat), (plen)))
+#define	memrchr(b, c, n)	__qualsel((b),				\
+	(const void *)(memrchr)((b), (c), (n)), (memrchr)((b), (c), (n)))
+#define	strcasestr(s, find)	__qualsel((s),				\
+	(const char *)(strcasestr)((s), (find)), (strcasestr)((s), (find)))
+#define	strchrnul(s, c)		__qualsel((s),				\
+	(const char *)(strchrnul)((s), (c)), (strchrnul)((s), (c)))
+#define	strnstr(s, find, slen)	__qualsel((s),				\
+	(const char *)(strnstr)((s), (find), (slen)),			\
+	(strnstr)((s), (find), (slen)))
+#endif /* __BSD_VISIBLE */
+#endif
 
 #endif /* _STRING_H_ */

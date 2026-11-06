@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2025, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2026, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -282,6 +282,8 @@ typedef enum
     ACPI_DMT_HESTNTYP,
     ACPI_DMT_HMAT,
     ACPI_DMT_IORTMEM,
+    ACPI_DMT_IOVT,
+    ACPI_DMT_IOVTDEV,
     ACPI_DMT_IVRS,
     ACPI_DMT_IVRS_DE,
     ACPI_DMT_IVRS_UNTERMINATED_STRING,
@@ -301,6 +303,7 @@ typedef enum
     ACPI_DMT_SDEV,
     ACPI_DMT_SLIC,
     ACPI_DMT_SRAT,
+    ACPI_DMT_SWFT,
     ACPI_DMT_TPM2,
     ACPI_DMT_VIOT,
     ACPI_DMT_WPBT_UNICODE,
@@ -464,6 +467,11 @@ extern ACPI_DMTABLE_INFO        AcpiDmTableInfoDrtm0a[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoDrtm1[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoDrtm1a[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoDrtm2[];
+extern ACPI_DMTABLE_INFO        AcpiDmTableInfoDtpr[];
+extern ACPI_DMTABLE_INFO        AcpiDmTableInfoDtprInstance[];
+extern ACPI_DMTABLE_INFO        AcpiDmTableInfoDtprArr[];
+extern ACPI_DMTABLE_INFO        AcpiDmTableInfoDtprSerializeReq0[];
+extern ACPI_DMTABLE_INFO        AcpiDmTableInfoDtprSerializeReq1[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoEcdt[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoEinj[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoEinj0[];
@@ -544,11 +552,15 @@ extern ACPI_DMTABLE_INFO        AcpiDmTableInfoIort4[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoIort5[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoIort6[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoIort6a[];
+extern ACPI_DMTABLE_INFO        AcpiDmTableInfoIort7[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoIortAcc[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoIortHdr[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoIortHdr3[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoIortMap[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoIortPad[];
+extern ACPI_DMTABLE_INFO        AcpiDmTableInfoIovt[];
+extern ACPI_DMTABLE_INFO        AcpiDmTableInfoIovt0[];
+extern ACPI_DMTABLE_INFO        AcpiDmTableInfoIovtdev[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoIvrs[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoIvrsHware1[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoIvrsHware23[];
@@ -597,6 +609,9 @@ extern ACPI_DMTABLE_INFO        AcpiDmTableInfoMadt24[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoMadt25[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoMadt26[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoMadt27[];
+extern ACPI_DMTABLE_INFO        AcpiDmTableInfoMadt28[];
+extern ACPI_DMTABLE_INFO        AcpiDmTableInfoMadt29[];
+extern ACPI_DMTABLE_INFO        AcpiDmTableInfoMadt30[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoMadt128[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoMadtHdr[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoMcfg[];
@@ -725,6 +740,9 @@ extern ACPI_DMTABLE_INFO        AcpiDmTableInfoStao[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoStaoStr[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoSvkl[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoSvkl0[];
+extern ACPI_DMTABLE_INFO        AcpiDmTableInfoSwft[];
+extern ACPI_DMTABLE_INFO        AcpiDmTableInfoSwftFileHdr[];
+extern ACPI_DMTABLE_INFO        AcpiDmTableInfoSwftFileData[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoTcpaHdr[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoTcpaClient[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoTcpaServer[];
@@ -861,6 +879,10 @@ AcpiDmDumpDrtm (
     ACPI_TABLE_HEADER       *Table);
 
 void
+AcpiDmDumpDtpr (
+    ACPI_TABLE_HEADER       *Table);
+
+void
 AcpiDmDumpEinj (
     ACPI_TABLE_HEADER       *Table);
 
@@ -894,6 +916,10 @@ AcpiDmDumpHmat (
 
 void
 AcpiDmDumpIort (
+    ACPI_TABLE_HEADER       *Table);
+
+void
+AcpiDmDumpIovt (
     ACPI_TABLE_HEADER       *Table);
 
 void
@@ -1006,6 +1032,10 @@ AcpiDmDumpStao (
 
 void
 AcpiDmDumpSvkl (
+    ACPI_TABLE_HEADER       *Table);
+
+void
+AcpiDmDumpSwft (
     ACPI_TABLE_HEADER       *Table);
 
 void

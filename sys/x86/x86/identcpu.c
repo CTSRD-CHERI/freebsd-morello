@@ -64,6 +64,7 @@
 #include <machine/specialreg.h>
 
 #include <amd64/vmm/intel/vmx_controls.h>
+#include <x86/cputypes.h>
 #include <x86/isa/icu.h>
 #include <x86/vmware.h>
 
@@ -117,6 +118,7 @@ u_int	cpu_stdext_feature2;	/* %ecx */
 u_int	cpu_stdext_feature3;	/* %edx */
 /* leaf 7 %ecx = 1 */
 u_int	cpu_stdext_feature4;	/* %eax */
+u_int	cpu_stdext_feature5;	/* %ecx */
 uint64_t cpu_ia32_arch_caps;
 u_int	cpu_max_ext_state_size;
 u_int	cpu_mon_mwait_flags;	/* MONITOR/MWAIT flags (CPUID.05H.ECX) */
@@ -1046,16 +1048,30 @@ printcpuinfo(void)
 				       "\040SSBD"
 				       );
 			}
-#define	STDEXT4_MASK	(CPUID_STDEXT4_LASS | CPUID_STDEXT4_LAM)
-			if ((cpu_stdext_feature4 & STDEXT4_MASK) != 0) {
+
+			if (cpu_stdext_feature4 != 0) {
 				printf("\n  Structured Extended Features4=0x%b",
-				    cpu_stdext_feature4 & STDEXT4_MASK,
+				    cpu_stdext_feature4,
 				       "\020"
+				       "\001SHA512"
+				       "\002SM3"
+				       "\003SM4"
 				       "\007LASS"
+				       "\022FRED"
+				       "\023LKGS"
+				       "\024WRMSRNS"
+				       "\025NMISRC"
 				       "\033LAM"
 				       );
 			}
-#undef STDEXT4_MASK
+
+			if (cpu_stdext_feature5 != 0) {
+				printf("\n  Structured Extended Features5=0x%b",
+				    cpu_stdext_feature5,
+				       "\020"
+				       "\006MSR_IMM"
+				       );
+			}
 
 			if ((cpu_feature2 & CPUID2_XSAVE) != 0) {
 				cpuid_count(0xd, 0x1, regs);
@@ -1538,7 +1554,7 @@ fix_cpuid(void)
 	 * Re-enable AMD Topology Extension that could be disabled by BIOS
 	 * on some notebook processors.  Without the extension it's really
 	 * hard to determine the correct CPU cache topology.
-	 * See BIOS and Kernel Developer’s Guide (BKDG) for AMD Family 15h
+	 * See BIOS and Kernel Developer's Guide (BKDG) for AMD Family 15h
 	 * Models 60h-6Fh Processors, Publication # 50742.
 	 */
 	if (vm_guest == VM_GUEST_NO && cpu_vendor_id == CPU_VENDOR_AMD &&
@@ -1609,6 +1625,7 @@ identify_cpu2(void)
 		if (max_eax_l7 >= 1) {
 			cpuid_count(7, 1, regs);
 			cpu_stdext_feature4 = regs[0];
+			cpu_stdext_feature5 = regs[2];
 		}
 	}
 }
@@ -2613,7 +2630,7 @@ print_vmx_info(void)
 		"\020EPT#VE"		/* EPT-violation #VE */
 		"\021XSAVES"		/* Enable XSAVES/XRSTORS */
 		);
-	printf("\n        Exit Controls=0x%b", mask,
+	printf("\n        Exit Controls=0x%b", exit,
 	"\020"
 	"\003DR"		/* Save debug controls */
 				/* Ignore Host address-space size */
@@ -2625,7 +2642,7 @@ print_vmx_info(void)
 	"\026EFER-LD"		/* Load MSR_EFER */
 	"\027PTMR-SV"		/* Save VMX-preemption timer value */
 	);
-	printf("\n        Entry Controls=0x%b", mask,
+	printf("\n        Entry Controls=0x%b", entry,
 	"\020"
 	"\003DR"		/* Save debug controls */
 				/* Ignore IA-32e mode guest */
@@ -2686,4 +2703,50 @@ cpu_getmaxphyaddr(void)
 		return (0xffffffff);
 #endif
 	return ((1ULL << cpu_maxphyaddr) - 1);
+}
+
+const static struct {
+	u_int family;
+	u_int model_min;
+	u_int model_max;
+	u_int generation;
+} zen_idents[] = {
+	{ .family = 0x17, .model_min = 0x00, .model_max = 0x2f, .generation = CPU_AMD_ZEN1 },
+	{ .family = 0x17, .model_min = 0x50, .model_max = 0x5f, .generation = CPU_AMD_ZEN1 },
+	{ .family = 0x17, .model_min = 0x30, .model_max = 0x4f, .generation = CPU_AMD_ZEN2 },
+	{ .family = 0x17, .model_min = 0x60, .model_max = 0x7f, .generation = CPU_AMD_ZEN2 },
+	{ .family = 0x17, .model_min = 0x90, .model_max = 0x91, .generation = CPU_AMD_ZEN2 },
+	{ .family = 0x17, .model_min = 0xa0, .model_max = 0xaf, .generation = CPU_AMD_ZEN2 },
+	{ .family = 0x19, .model_min = 0x00, .model_max = 0x0f, .generation = CPU_AMD_ZEN3 },
+	{ .family = 0x19, .model_min = 0x20, .model_max = 0x5f, .generation = CPU_AMD_ZEN3 },
+	{ .family = 0x19, .model_min = 0x10, .model_max = 0x1f, .generation = CPU_AMD_ZEN4 },
+	{ .family = 0x19, .model_min = 0x60, .model_max = 0xaf, .generation = CPU_AMD_ZEN4 },
+	{ .family = 0x1a, .model_min = 0x00, .model_max = 0x2f, .generation = CPU_AMD_ZEN5 },
+	{ .family = 0x1a, .model_min = 0x40, .model_max = 0x4f, .generation = CPU_AMD_ZEN5 },
+	{ .family = 0x1a, .model_min = 0x60, .model_max = 0x7f, .generation = CPU_AMD_ZEN5 },
+	{ .family = 0x1a, .model_min = 0x50, .model_max = 0x5f, .generation = CPU_AMD_ZEN6 },
+	{ .family = 0x1a, .model_min = 0x80, .model_max = 0xaf, .generation = CPU_AMD_ZEN6 },
+	{ .family = 0x1a, .model_min = 0xc0, .model_max = 0xcf, .generation = CPU_AMD_ZEN6 },
+};
+
+u_int
+ident_zen_cpu(void)
+{
+	u_int family = CPUID_TO_FAMILY(cpu_id);
+	u_int model = CPUID_TO_MODEL(cpu_id);
+	int i;
+
+	if (cpu_vendor_id != CPU_VENDOR_AMD)
+		return (CPU_AMD_UNKNOWN);
+
+	for (i = 0; i < nitems(zen_idents); i++) {
+		if (family != zen_idents[i].family)
+			continue;
+		if (model < zen_idents[i].model_min ||
+		    model > zen_idents[i].model_max)
+			continue;
+		return (zen_idents[i].generation);
+	}
+
+	return (CPU_AMD_UNKNOWN);
 }

@@ -260,7 +260,7 @@ test_archive_string_normalization_nfc(const char *testdata)
 	int locale_is_utf8, wc_is_unicode;
 	int sconv_opt = SCONV_SET_OPT_NORMALIZATION_C;
 
-	locale_is_utf8 = (NULL != setlocale(LC_ALL, "en_US.UTF-8"));
+	locale_is_utf8 = setCheckedLocale("en_US.UTF-8", "\xC3\xA4", L'\x00E4');
 	wc_is_unicode = is_wc_unicode();
 	/* If it doesn't exist, just warn and return. */
 	if (!locale_is_utf8 && !wc_is_unicode) {
@@ -338,13 +338,13 @@ test_archive_string_normalization_nfc(const char *testdata)
 		nfd[sizeof(nfd)-1] = '\0';
 
 		/*
-		 * Get an NFC patterns.
+		 * Get an NFC pattern.
 		 */
 		scan_unicode_pattern(utf8_nfc, wc_nfc, utf16be_nfc, utf16le_nfc,
 		    nfc, 0);
 
 		/*
-		 * Get an NFD patterns.
+		 * Get an NFD pattern.
 		 */
 		scan_unicode_pattern(utf8_nfd, wc_nfd, utf16be_nfd, utf16le_nfd,
 		    nfd, 0);
@@ -471,7 +471,7 @@ test_archive_string_normalization_mac_nfd(const char *testdata)
 	int locale_is_utf8, wc_is_unicode;
 	int sconv_opt = SCONV_SET_OPT_NORMALIZATION_D;
 
-	locale_is_utf8 = (NULL != setlocale(LC_ALL, "en_US.UTF-8"));
+	locale_is_utf8 = setCheckedLocale("en_US.UTF-8", "\xC3\xA4", L'\x00E4');
 	wc_is_unicode = is_wc_unicode();
 	/* If it doesn't exist, just warn and return. */
 	if (!locale_is_utf8 && !wc_is_unicode) {
@@ -550,7 +550,7 @@ test_archive_string_normalization_mac_nfd(const char *testdata)
 		nfd[sizeof(nfd)-1] = '\0';
 
 		/*
-		 * Get an NFC patterns.
+		 * Get an NFC pattern.
 		 */
 		should_be_nfc = scan_unicode_pattern(utf8_nfc, wc_nfc,
 			utf16be_nfc, utf16le_nfc, nfc, 1);
@@ -883,6 +883,155 @@ DEFINE_TEST(test_archive_string_conversion)
 	test_archive_string_set_get();
 }
 
+static void
+test_archive_string_conversion_fail_charset(void)
+{
+	/* Conversion error message construction may use the charset name.  */
+	assertEqualString("current locale",
+	    archive_string_conversion_charset_name(NULL));
+}
+
+static void
+test_archive_string_conversion_fail_utf16_mbs(struct archive *a,
+    struct archive_string_conv *sconv)
+{
+	static const wchar_t wcs_string[] = L"\U0000043f\U00000440\U00000438";
+	int r;
+	const char* p;
+	size_t len;
+
+	/* WCS to MBS should fail.  */
+	{
+		struct archive_string str;
+		archive_string_init(&str);
+		r = archive_string_append_from_wcs(
+		    &str, wcs_string, sizeof(wcs_string) / sizeof(*wcs_string) - 1);
+		assertEqualInt(-1, r);
+		archive_string_free(&str);
+	}
+	{
+		struct archive_mstring mstr;
+		memset(&mstr, 0, sizeof(mstr));
+		assertEqualInt(ARCHIVE_OK,
+		    archive_mstring_copy_wcs(&mstr, wcs_string));
+		r = archive_mstring_get_mbs_l(a, &mstr, &p, &len, NULL);
+		assertEqualInt(-1, r);
+		assertEqualInt(0, mstr.aes_set & AES_SET_MBS);
+		archive_mstring_clean(&mstr);
+	}
+	if (sconv) {
+		struct archive_mstring mstr;
+		memset(&mstr, 0, sizeof(mstr));
+		assertEqualInt(ARCHIVE_OK,
+		    archive_mstring_copy_wcs(&mstr, wcs_string));
+		r = archive_mstring_get_mbs_l(a, &mstr, &p, &len, sconv);
+		assertEqualInt(-1, r);
+		assertEqualInt(0, mstr.aes_set & AES_SET_MBS);
+		archive_mstring_clean(&mstr);
+	}
+}
+
+static void
+test_archive_string_conversion_fail_utf8_mbs(struct archive *a,
+    struct archive_string_conv *sconv)
+{
+	static const char utf8_string[] = "\xD0\xBF\xD1\x80\xD0\xB8";
+	int r;
+	const char* p;
+	size_t len;
+
+	/* UTF-8 to MBS should fail.  */
+	{
+		struct archive_mstring mstr;
+		memset(&mstr, 0, sizeof(mstr));
+		assertEqualInt(6,
+		    archive_mstring_copy_utf8(&mstr, utf8_string));
+		r = archive_mstring_get_mbs_l(a, &mstr, &p, &len, NULL);
+		assertEqualInt(-1, r);
+		assertEqualInt(0, mstr.aes_set & AES_SET_MBS);
+		archive_mstring_clean(&mstr);
+	}
+	if (sconv) {
+		struct archive_mstring mstr;
+		memset(&mstr, 0, sizeof(mstr));
+		assertEqualInt(6,
+		    archive_mstring_copy_utf8(&mstr, utf8_string));
+		r = archive_mstring_get_mbs_l(a, &mstr, &p, &len, sconv);
+		assertEqualInt(-1, r);
+		assertEqualInt(0, mstr.aes_set & AES_SET_MBS);
+		archive_mstring_clean(&mstr);
+	}
+}
+
+DEFINE_TEST(test_archive_string_conversion_fail_c)
+{
+	struct archive *a;
+#if defined(__sun)
+	skipping("Solaris iconv substitutes unrepresentable UTF-8 characters");
+	return;
+#endif
+
+	/* Test the C locale by not calling setlocale.  */
+
+	test_archive_string_conversion_fail_charset();
+
+	assert((a = archive_write_new()) != NULL);
+
+	test_archive_string_conversion_fail_utf16_mbs(a, NULL);
+	test_archive_string_conversion_fail_utf8_mbs(a, NULL);
+
+	assertEqualInt(ARCHIVE_OK, archive_write_free(a));
+}
+
+DEFINE_TEST(test_archive_string_conversion_fail_latin1)
+{
+	struct archive *a;
+	struct archive_string_conv *sconv;
+	const char *charset;
+
+#if defined(__sun)
+	skipping("Solaris iconv substitutes unrepresentable UTF-8 characters");
+	return;
+#endif
+
+	/* Test a Latin-1 locale.  */
+	if (
+#if defined(_WIN32) && !defined(__CYGWIN__)
+	    /* Windows allows ".<code-page>" to change encoding.  */
+	    setlocale(LC_ALL, ".1252") == NULL
+#else
+	    !setCheckedLocale("en_US.ISO8859-1", "\xA0", L'\x00A0')
+#endif
+	   ) {
+		skipping("No Latin-1 locale found on this system.");
+		return;
+	}
+
+	test_archive_string_conversion_fail_charset();
+
+	assert((a = archive_write_new()) != NULL);
+
+#if defined(_WIN32) && !defined(__CYGWIN__)
+	charset = "CP1252";
+#else
+	charset = "ISO8859-1";
+#endif
+	sconv = archive_string_conversion_to_charset(a, charset, 0);
+#if !defined(_WIN32) || defined(__CYGWIN__)
+	if (sconv == NULL) {
+		charset = "ISO-8859-1";
+		sconv = archive_string_conversion_to_charset(a, charset, 0);
+	}
+#endif
+	assertA(NULL != sconv);
+	assertEqualString(charset,
+	    archive_string_conversion_charset_name(sconv));
+	test_archive_string_conversion_fail_utf16_mbs(a, sconv);
+	test_archive_string_conversion_fail_utf8_mbs(a, sconv);
+
+	assertEqualInt(ARCHIVE_OK, archive_write_free(a));
+}
+
 DEFINE_TEST(test_archive_string_conversion_utf16_utf8)
 {
 #if !defined(_WIN32) || defined(__CYGWIN__)
@@ -968,7 +1117,7 @@ DEFINE_TEST(test_archive_string_update_utf8_utf8)
 
 	memset(&mstr, 0, sizeof(mstr));
 
-	if (setlocale(LC_ALL, "en_US.UTF-8") == NULL) {
+	if (!setCheckedLocale("en_US.UTF-8", "\xC3\xA4", L'\x00E4')) {
 		skipping("UTF-8 not supported on this system.");
 		return;
 	}
@@ -991,14 +1140,24 @@ DEFINE_TEST(test_archive_string_update_utf8_koi8)
 	static const char koi8_string[] = "\xD0\xD2\xC9";
 	static const wchar_t wcs_string[] = L"\U0000043f\U00000440\U00000438";
 	struct archive_mstring mstr;
+	struct archive *a;
 	int r;
 
 	memset(&mstr, 0, sizeof(mstr));
 
-	if (setlocale(LC_ALL, "ru_RU.KOI8-R") == NULL) {
+	if (!setCheckedLocale("ru_RU.KOI8-R", "\xE1", L'\x0410')) {
 		skipping("KOI8-R locale not available on this system.");
 		return;
 	}
+	a = archive_write_new();
+	assertEqualInt(ARCHIVE_OK, archive_write_set_format_pax(a));
+	if (archive_write_set_options(a, "hdrcharset=UTF-8") != ARCHIVE_OK) {
+		skipping("This system cannot convert character-set"
+		    " from KOI8-R to UTF-8.");
+		archive_write_free(a);
+		return;
+	}
+	archive_write_free(a);
 
 	r = archive_mstring_update_utf8(NULL, &mstr, utf8_string);
 

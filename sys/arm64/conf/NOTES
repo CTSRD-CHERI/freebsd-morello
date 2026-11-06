@@ -34,6 +34,7 @@ options 	RACCT_DEFAULT_TO_DISABLED # Set kern.racct.enable=0 by default
 options 	SOC_ALLWINNER_A64
 options 	SOC_ALLWINNER_H5
 options 	SOC_ALLWINNER_H6
+options 	SOC_ALLWINNER_H616
 options 	SOC_BRCM_BCM2837
 options 	SOC_BRCM_BCM2838
 options 	SOC_BRCM_NS2
@@ -92,6 +93,7 @@ device		al_eth		# Annapurna Alpine Ethernet NIC
 device  	dwc		# Synopsys Designware GMAC Ethernet
 device		dwc_rk		# Rockchip Designware
 device		dwc_socfpga	# Altera SOCFPGA Ethernet MAC
+device		ixl		# Intel 700 Series Physical Function
 device		ice		# Intel 800 Series Physical Function
 device		ice_ddp		# Intel 800 Series DDP Package
 

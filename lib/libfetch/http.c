@@ -77,6 +77,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <xlocale.h>
 
 #ifdef WITH_SSL
 #include <openssl/md5.h>
@@ -121,13 +122,21 @@
 
 #define HTTP_ERROR(xyz) ((xyz) >= 400 && (xyz) <= 599)
 
+static locale_t
+fetch_time_locale(void)
+{
+	static locale_t loc;
+
+	if (loc == NULL)
+		loc = newlocale(LC_TIME_MASK, "C", NULL);
+	return (loc);
+}
 
 /*****************************************************************************
  * I/O functions for decoding chunked streams
  */
 
-struct httpio
-{
+struct httpio {
 	conn_t		*conn;		/* connection */
 	int		 chunked;	/* chunked mode */
 	char		*buf;		/* chunk buffer */
@@ -153,21 +162,18 @@ http_new_chunk(struct httpio *io)
 	if (fetch_getln(io->conn) == -1)
 		return (-1);
 
-	if (io->conn->buflen < 2 || !isxdigit((unsigned char)*io->conn->buf))
-		return (-1);
-
-	for (p = io->conn->buf; *p && !isspace((unsigned char)*p); ++p) {
-		if (*p == ';')
-			break;
-		if (!isxdigit((unsigned char)*p))
+	for (p = io->conn->line;
+	     *p != '\0' && !isspace((unsigned char)*p) && *p != ';';
+	     p++) {
+		io->chunksize <<= 4;
+		if (*p >= '0' && *p <= '9')
+			io->chunksize += *p - '0';
+		else if (*p >= 'A' && *p <= 'F')
+			io->chunksize += 10 + *p - 'A';
+		else if (*p >= 'a' && *p <= 'f')
+			io->chunksize += 10 + *p - 'a';
+		else
 			return (-1);
-		if (isdigit((unsigned char)*p)) {
-			io->chunksize = io->chunksize * 16 +
-			    *p - '0';
-		} else {
-			io->chunksize = io->chunksize * 16 +
-			    10 + tolower((unsigned char)*p) - 'a';
-		}
 	}
 
 #ifndef NDEBUG
@@ -221,7 +227,7 @@ http_fillbuf(struct httpio *io, size_t len)
 	if (io->chunked == 0) {
 		if (http_growbuf(io, len) == -1)
 			return (-1);
-		if ((nbytes = fetch_read(io->conn, io->buf, len)) == -1) {
+		if ((nbytes = fetch_bufread(io->conn, io->buf, len)) == -1) {
 			io->error = errno;
 			return (-1);
 		}
@@ -247,7 +253,7 @@ http_fillbuf(struct httpio *io, size_t len)
 		len = io->chunksize;
 	if (http_growbuf(io, len) == -1)
 		return (-1);
-	if ((nbytes = fetch_read(io->conn, io->buf, len)) == -1) {
+	if ((nbytes = fetch_bufread(io->conn, io->buf, len)) == -1) {
 		io->error = errno;
 		return (-1);
 	}
@@ -256,8 +262,8 @@ http_fillbuf(struct httpio *io, size_t len)
 	io->chunksize -= nbytes;
 
 	if (io->chunksize == 0) {
-		if (fetch_read(io->conn, &ch, 1) != 1 || ch != '\r' ||
-		    fetch_read(io->conn, &ch, 1) != 1 || ch != '\n')
+		if (fetch_bufread(io->conn, &ch, 1) != 1 || ch != '\r' ||
+		    fetch_bufread(io->conn, &ch, 1) != 1 || ch != '\n')
 			return (-1);
 	}
 
@@ -434,9 +440,9 @@ http_get_reply(conn_t *conn)
 	 * on finding one, but if we do, insist on it being 1.0 or 1.1.
 	 * We don't care about the reason phrase.
 	 */
-	if (strncmp(conn->buf, "HTTP", 4) != 0)
+	if (conn->linelen < 4 || strncmp(conn->line, "HTTP", 4) != 0)
 		return (HTTP_PROTOCOL_ERROR);
-	p = conn->buf + 4;
+	p = conn->line + 4;
 	if (*p == '/') {
 		if (p[1] != '1' || p[2] != '.' || (p[3] != '0' && p[3] != '1'))
 			return (HTTP_PROTOCOL_ERROR);
@@ -515,37 +521,22 @@ clean_http_headerbuf(http_headerbuf_t *buf)
 	init_http_headerbuf(buf);
 }
 
-/* Remove whitespace at the end of the buffer */
-static void
-http_conn_trimright(conn_t *conn)
-{
-	while (conn->buflen &&
-	       isspace((unsigned char)conn->buf[conn->buflen - 1]))
-		conn->buflen--;
-	conn->buf[conn->buflen] = '\0';
-}
-
 static hdr_t
 http_next_header(conn_t *conn, http_headerbuf_t *hbuf, const char **p)
 {
 	unsigned int i, len;
 
-	/*
-	 * Have to do the stripping here because of the first line. So
-	 * it's done twice for the subsequent lines. No big deal
-	 */
-	http_conn_trimright(conn);
-	if (conn->buflen == 0)
+	if (conn->linelen == 0)
 		return (hdr_end);
 
 	/* Copy the line to the headerbuf */
-	if (hbuf->bufsize < conn->buflen + 1) {
-		if ((hbuf->buf = realloc(hbuf->buf, conn->buflen + 1)) == NULL)
+	if (hbuf->bufsize <= conn->linelen) {
+		if ((hbuf->buf = realloc(hbuf->buf, conn->linelen + 1)) == NULL)
 			return (hdr_syserror);
-		hbuf->bufsize = conn->buflen + 1;
+		hbuf->bufsize = conn->linelen + 1;
 	}
-	strcpy(hbuf->buf, conn->buf);
-	hbuf->buflen = conn->buflen;
+	memcpy(hbuf->buf, conn->line, conn->linelen + 1);
+	hbuf->buflen = conn->linelen;
 
 	/*
 	 * Fetch possible continuation lines. Stop at 1st non-continuation
@@ -556,25 +547,22 @@ http_next_header(conn_t *conn, http_headerbuf_t *hbuf, const char **p)
 			return (hdr_syserror);
 
 		/*
-		 * Note: we carry on the idea from the previous version
-		 * that a pure whitespace line is equivalent to an empty
-		 * one (so it's not continuation and will be handled when
-		 * we are called next)
+		 * Note: we previously considered a pure whitespace line
+		 * equivalent to an empty one.  This was incorrect.
 		 */
-		http_conn_trimright(conn);
-		if (conn->buf[0] != ' ' && conn->buf[0] != "\t"[0])
+		if (conn->line[0] != ' ' && conn->line[0] != '\t')
 			break;
 
 		/* Got a continuation line. Concatenate to previous */
-		len = hbuf->buflen + conn->buflen;
-		if (hbuf->bufsize < len + 1) {
+		len = hbuf->buflen + conn->linelen;
+		if (hbuf->bufsize <= len) {
 			len *= 2;
 			if ((hbuf->buf = realloc(hbuf->buf, len + 1)) == NULL)
 				return (hdr_syserror);
 			hbuf->bufsize = len + 1;
 		}
-		strcpy(hbuf->buf + hbuf->buflen, conn->buf);
-		hbuf->buflen += conn->buflen;
+		memcpy(hbuf->buf + hbuf->buflen, conn->line, conn->linelen + 1);
+		hbuf->buflen += conn->linelen;
 	}
 
 	/*
@@ -876,20 +864,20 @@ out:
 static int
 http_parse_mtime(const char *p, time_t *mtime)
 {
-	char locale[64], *r;
 	struct tm tm;
+	char *r;
 
-	strlcpy(locale, setlocale(LC_TIME, NULL), sizeof(locale));
-	setlocale(LC_TIME, "C");
-	r = strptime(p, "%a, %d %b %Y %H:%M:%S GMT", &tm);
+	r = strptime_l(p, "%a, %d %b %Y %H:%M:%S GMT", &tm,
+	    fetch_time_locale());
 	/*
 	 * Some proxies use UTC in response, but it should still be
 	 * parsed. RFC2616 states GMT and UTC are exactly equal for HTTP.
 	 */
-	if (r == NULL)
-		r = strptime(p, "%a, %d %b %Y %H:%M:%S UTC", &tm);
+	if (r == NULL) {
+		r = strptime_l(p, "%a, %d %b %Y %H:%M:%S UTC", &tm,
+		    fetch_time_locale());
+	}
 	/* XXX should add support for date-2 and date-3 */
-	setlocale(LC_TIME, locale);
 	if (r == NULL)
 		return (-1);
 	DEBUGF("last modified: [%04d-%02d-%02d %02d:%02d:%02d]\n",
@@ -1587,7 +1575,7 @@ http_request_body(struct url *URL, const char *op, struct url_stat *us,
 	char timebuf[80];
 	char hbuf[MAXHOSTNAMELEN + 7], *host;
 	conn_t *conn;
-	struct url *url, *new;
+	struct url *url, *loc;
 	int chunked, direct, ims, noredirect, verbose;
 	int e, i, n, val;
 	off_t offset, clength, length, size;
@@ -1624,7 +1612,7 @@ http_request_body(struct url *URL, const char *op, struct url_stat *us,
 
 	e = HTTP_PROTOCOL_ERROR;
 	do {
-		new = NULL;
+		loc = NULL;
 		chunked = 0;
 		offset = 0;
 		clength = -1;
@@ -1669,8 +1657,8 @@ http_request_body(struct url *URL, const char *op, struct url_stat *us,
 
 		if (ims && url->ims_time) {
 			timestruct = gmtime((time_t *)&url->ims_time);
-			(void)strftime(timebuf, 80, "%a, %d %b %Y %T GMT",
-			    timestruct);
+			(void)strftime_l(timebuf, 80, "%a, %d %b %Y %T GMT",
+			    timestruct, fetch_time_locale());
 			if (verbose)
 				fetch_info("If-Modified-Since: %s", timebuf);
 			http_cmd(conn, "If-Modified-Since: %s", timebuf);
@@ -1893,32 +1881,32 @@ http_request_body(struct url *URL, const char *op, struct url_stat *us,
 					n = 1;
 					break;
 				}
-				if (new)
-					free(new);
+				if (loc != NULL)
+					fetchFreeURL(loc);
 				if (verbose)
 					fetch_info("%d redirect to %s",
 					    conn->err, p);
 				if (*p == '/')
 					/* absolute path */
-					new = fetchMakeURL(url->scheme, url->host,
+					loc = fetchMakeURL(url->scheme, url->host,
 					    url->port, p, url->user, url->pwd);
 				else
-					new = fetchParseURL(p);
-				if (new == NULL) {
+					loc = fetchParseURL(p);
+				if (loc == NULL) {
 					/* XXX should set an error code */
 					DEBUGF("failed to parse new URL\n");
 					goto ouch;
 				}
 
 				/* Only copy credentials if the host matches */
-				if (strcmp(new->host, url->host) == 0 &&
-				    !*new->user && !*new->pwd) {
-					strcpy(new->user, url->user);
-					strcpy(new->pwd, url->pwd);
+				if (strcmp(loc->host, url->host) == 0 &&
+				    !*loc->user && !*loc->pwd) {
+					strcpy(loc->user, url->user);
+					strcpy(loc->pwd, url->pwd);
 				}
-				new->offset = url->offset;
-				new->length = url->length;
-				new->ims_time = url->ims_time;
+				loc->offset = url->offset;
+				loc->length = url->length;
+				loc->ims_time = url->ims_time;
 				break;
 			case hdr_transfer_encoding:
 				/* XXX weak test*/
@@ -1987,13 +1975,13 @@ http_request_body(struct url *URL, const char *op, struct url_stat *us,
 		clean_http_auth_challenges(&server_challenges);
 		fetch_close(conn);
 		conn = NULL;
-		if (!new) {
+		if (loc == NULL) {
 			DEBUGF("redirect with no new location\n");
 			break;
 		}
 		if (url != URL)
 			fetchFreeURL(url);
-		url = new;
+		url = loc;
 	} while (++i < n);
 
 	/* we failed, or ran out of retries */
@@ -2008,7 +1996,7 @@ http_request_body(struct url *URL, const char *op, struct url_stat *us,
 
 	if (conn->err == HTTP_NOT_MODIFIED) {
 		http_seterr(HTTP_NOT_MODIFIED);
-		return (NULL);
+		goto ouch;
 	}
 
 	/* check for inconsistencies */

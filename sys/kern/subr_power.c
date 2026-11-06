@@ -3,6 +3,10 @@
  *
  * Copyright (c) 2001 Mitsuru IWASAKI
  * All rights reserved.
+ * Copyright (c) 2025 The FreeBSD Foundation
+ *
+ * Portions of this software were developed by Aymeric Wibo
+ * <obiwac@freebsd.org> under sponsorship from the FreeBSD Foundation.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -27,27 +31,167 @@
  */
 
 #include <sys/param.h>
+#include <sys/conf.h>
 #include <sys/eventhandler.h>
+#include <sys/fcntl.h>
+#include <sys/kernel.h>
 #include <sys/power.h>
 #include <sys/proc.h>
+#include <sys/sbuf.h>
+#include <sys/sysctl.h>
 #include <sys/systm.h>
 #include <sys/taskqueue.h>
+
+enum power_stype	 power_standby_stype	= POWER_STYPE_UNKNOWN;
+enum power_stype	 power_suspend_stype	= POWER_STYPE_UNKNOWN;
+enum power_stype	 power_hibernate_stype	= POWER_STYPE_UNKNOWN;
 
 static u_int		 power_pm_type	= POWER_PM_TYPE_NONE;
 static power_pm_fn_t	 power_pm_fn	= NULL;
 static void		*power_pm_arg	= NULL;
+static bool		 power_pm_supported[POWER_STYPE_COUNT] = {0};
 static struct task	 power_pm_task;
+
+static d_ioctl_t	 power_ioctl;
+
+static struct cdevsw power_cdevsw = {
+	.d_version	= D_VERSION,
+	.d_ioctl	= power_ioctl,
+	.d_name		= "power",
+};
+
+static void
+power_init(void *unused)
+{
+	struct make_dev_args args;
+	struct cdev *dev;
+
+	make_dev_args_init(&args);
+	args.mda_devsw = &power_cdevsw;
+	args.mda_uid = UID_ROOT;
+	args.mda_gid = GID_OPERATOR;
+	args.mda_mode = 0660;
+	if (make_dev_s(&args, &dev, "power") != 0)
+		printf("Failed to create power device");
+}
+SYSINIT(powerdev, SI_SUB_PSEUDO, SI_ORDER_ANY, power_init, NULL);
+
+static int
+power_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
+    struct thread *td)
+{
+	int err = 0;
+	uint32_t trans;
+
+	if ((fflag & FWRITE) == 0)
+		return (EPERM);
+
+	switch (cmd) {
+	case PIOTRANSITION:
+		trans = *(uint32_t *)data;
+		/* Check for overflow */
+		if ((enum power_transition)trans != trans)
+			return (EINVAL);
+		err = power_pm_suspend((enum power_transition)trans);
+		break;
+	default:
+		err = EINVAL;
+	}
+	return (err);
+}
+
+enum power_stype
+power_name_to_stype(const char *name)
+{
+	enum power_stype	stype;
+
+	for (stype = 0; stype < POWER_STYPE_COUNT; stype++) {
+		if (strcasecmp(name, power_stype_names[stype]) == 0)
+			return (stype);
+	}
+	return (POWER_STYPE_UNKNOWN);
+}
+
+const char *
+power_stype_to_name(enum power_stype stype)
+{
+	if (stype == POWER_STYPE_UNKNOWN)
+		return ("NONE");
+	if (stype < POWER_STYPE_AWAKE || stype >= POWER_STYPE_COUNT)
+		return (NULL);
+	return (power_stype_names[stype]);
+}
+
+static int
+sysctl_supported_stypes(SYSCTL_HANDLER_ARGS)
+{
+	int error;
+	struct sbuf sb;
+	enum power_stype stype;
+
+	sbuf_new(&sb, NULL, 32, SBUF_AUTOEXTEND);
+	for (stype = 0; stype < POWER_STYPE_COUNT; stype++) {
+		if (power_pm_supported[stype])
+			sbuf_printf(&sb, "%s ", power_stype_to_name(stype));
+	}
+	sbuf_trim(&sb);
+	sbuf_finish(&sb);
+	error = sysctl_handle_string(oidp, sbuf_data(&sb), sbuf_len(&sb), req);
+	sbuf_delete(&sb);
+
+	return (error);
+}
+
+static int
+power_sysctl_stype(SYSCTL_HANDLER_ARGS)
+{
+	char			name[POWER_STYPE_NAME_LEN];
+	int			err;
+	enum power_stype	new_stype, old_stype;
+
+	old_stype = *(enum power_stype *)oidp->oid_arg1;
+	strlcpy(name, power_stype_to_name(old_stype), sizeof(name));
+	err = sysctl_handle_string(oidp, name, sizeof(name), req);
+	if (err != 0 || req->newptr == NULL)
+		return (err);
+
+	new_stype = power_name_to_stype(name);
+	if (new_stype == POWER_STYPE_UNKNOWN)
+		return (EINVAL);
+	if (!power_pm_supported[new_stype])
+		return (EOPNOTSUPP);
+	if (new_stype != old_stype)
+		*(enum power_stype *)oidp->oid_arg1 = new_stype;
+	return (0);
+}
+
+static SYSCTL_NODE(_kern, OID_AUTO, power, CTLFLAG_RW, 0,
+    "Generic power management related sysctls");
+
+SYSCTL_PROC(_kern_power, OID_AUTO, supported_stype,
+    CTLTYPE_STRING | CTLFLAG_RD, 0, 0, sysctl_supported_stypes, "A",
+    "List supported sleep types");
+SYSCTL_PROC(_kern_power, OID_AUTO, standby, CTLTYPE_STRING | CTLFLAG_RW,
+    &power_standby_stype, 0, power_sysctl_stype, "A",
+    "Sleep type to enter on standby");
+SYSCTL_PROC(_kern_power, OID_AUTO, suspend, CTLTYPE_STRING | CTLFLAG_RW,
+    &power_suspend_stype, 0, power_sysctl_stype, "A",
+    "Sleep type to enter on suspend");
+SYSCTL_PROC(_kern_power, OID_AUTO, hibernate, CTLTYPE_STRING | CTLFLAG_RW,
+    &power_hibernate_stype, 0, power_sysctl_stype, "A",
+    "Sleep type to enter on hibernate");
 
 static void
 power_pm_deferred_fn(void *arg, int pending)
 {
-	int state = (intptr_t)arg;
+	enum power_stype stype = (intptr_t)arg;
 
-	power_pm_fn(POWER_CMD_SUSPEND, power_pm_arg, state);
+	power_pm_fn(POWER_CMD_SUSPEND, power_pm_arg, stype);
 }
 
 int
-power_pm_register(u_int pm_type, power_pm_fn_t pm_fn, void *pm_arg)
+power_pm_register(u_int pm_type, power_pm_fn_t pm_fn, void *pm_arg,
+    const bool pm_supported[static POWER_STYPE_COUNT])
 {
 	int	error;
 
@@ -56,6 +200,16 @@ power_pm_register(u_int pm_type, power_pm_fn_t pm_fn, void *pm_arg)
 		power_pm_type	= pm_type;
 		power_pm_fn	= pm_fn;
 		power_pm_arg	= pm_arg;
+		memcpy(power_pm_supported, pm_supported,
+		    sizeof(power_pm_supported));
+		if (power_pm_supported[POWER_STYPE_STANDBY])
+			power_standby_stype = POWER_STYPE_STANDBY;
+		if (power_pm_supported[POWER_STYPE_FW_SUSPEND])
+			power_suspend_stype = POWER_STYPE_FW_SUSPEND;
+		else if (power_pm_supported[POWER_STYPE_SUSPEND_TO_IDLE])
+			power_suspend_stype = POWER_STYPE_SUSPEND_TO_IDLE;
+		if (power_pm_supported[POWER_STYPE_FW_HIBERNATE])
+			power_hibernate_stype = POWER_STYPE_FW_HIBERNATE;
 		error = 0;
 		TASK_INIT(&power_pm_task, 0, power_pm_deferred_fn, NULL);
 	} else {
@@ -72,18 +226,34 @@ power_pm_get_type(void)
 	return (power_pm_type);
 }
 
-void
-power_pm_suspend(int state)
+int
+power_pm_suspend(enum power_transition trans)
 {
-	if (power_pm_fn == NULL)
-		return;
+	enum power_stype	stype;
 
-	if (state != POWER_SLEEP_STATE_STANDBY &&
-	    state != POWER_SLEEP_STATE_SUSPEND &&
-	    state != POWER_SLEEP_STATE_HIBERNATE)
-		return;
-	power_pm_task.ta_context = (void *)(intptr_t)state;
+	if (power_pm_fn == NULL)
+		return (ENXIO);
+
+	switch (trans) {
+	case POWER_TRANSITION_STANDBY:
+		stype = power_standby_stype;
+		break;
+	case POWER_TRANSITION_SUSPEND:
+		stype = power_suspend_stype;
+		break;
+	case POWER_TRANSITION_HIBERNATE:
+		stype = power_hibernate_stype;
+		break;
+	default:
+		printf("%s: unknown sleep state transition %d\n", __func__,
+		    trans);
+		return (EINVAL);
+	}
+
+	power_pm_task.ta_context = (void *)(intptr_t)stype;
 	taskqueue_enqueue(taskqueue_thread, &power_pm_task);
+
+	return (0);
 }
 
 /*

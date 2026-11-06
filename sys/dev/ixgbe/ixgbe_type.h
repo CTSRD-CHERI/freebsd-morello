@@ -74,6 +74,7 @@
  */
 
 #include "ixgbe_osdep.h"
+#include "ixgbe_type_e610.h"
 
 /* Override this by setting IOMEM in your ixgbe_osdep.h header */
 #define IOMEM
@@ -150,12 +151,19 @@
 #define IXGBE_DEV_ID_X550EM_X_10G_T		0x15AD
 #define IXGBE_DEV_ID_X550EM_X_1G_T		0x15AE
 #define IXGBE_DEV_ID_X550EM_X_XFI		0x15B0
+#define IXGBE_DEV_ID_E610_BACKPLANE		0x57AE
+#define IXGBE_DEV_ID_E610_SFP			0x57AF
+#define IXGBE_DEV_ID_E610_10G_T			0x57B0
+#define IXGBE_DEV_ID_E610_2_5G_T		0x57B1
+#define IXGBE_DEV_ID_E610_SGMII			0x57B2
 #define IXGBE_DEV_ID_X550_VF_HV			0x1564
 #define IXGBE_DEV_ID_X550_VF			0x1565
 #define IXGBE_DEV_ID_X550EM_A_VF		0x15C5
 #define IXGBE_DEV_ID_X550EM_A_VF_HV		0x15B4
 #define IXGBE_DEV_ID_X550EM_X_VF		0x15A8
 #define IXGBE_DEV_ID_X550EM_X_VF_HV		0x15A9
+#define IXGBE_DEV_ID_E610_VF			0x57AD
+#define IXGBE_SUBDEV_ID_E610_VF_HV		0x00FF
 
 #define IXGBE_CAT(r, m) IXGBE_##r##m
 
@@ -569,7 +577,7 @@ struct ixgbe_nvm_version {
 
 /* Registers for setting up RSS on X550 with SRIOV
  * _p - pool number (0..63)
- * _i - index (0..10 for PFVFRSSRK, 0..15 for PFVFRETA)
+ * _i - index (0..9 for PFVFRSSRK, 0..15 for PFVFRETA)
  */
 #define IXGBE_PFVFMRQC(_p)	(0x03400 + ((_p) * 4))
 #define IXGBE_PFVFRSSRK(_i, _p)	(0x018000 + ((_i) * 4) + ((_p) * 0x40))
@@ -1969,6 +1977,7 @@ enum {
 #define IXGBE_EICR_MAILBOX	0x00080000 /* VF to PF Mailbox Interrupt */
 #define IXGBE_EICR_LSC		0x00100000 /* Link Status Change */
 #define IXGBE_EICR_LINKSEC	0x00200000 /* PN Threshold */
+#define IXGBE_EICR_FW_EVENT	0x00200000 /* Async FW event */
 #define IXGBE_EICR_MNG		0x00400000 /* Manageability Event Interrupt */
 #define IXGBE_EICR_TS		0x00800000 /* Thermal Sensor Event */
 #define IXGBE_EICR_TIMESYNC	0x01000000 /* Timesync Event */
@@ -2004,6 +2013,7 @@ enum {
 #define IXGBE_EICS_PCI		IXGBE_EICR_PCI /* PCI Exception */
 #define IXGBE_EICS_MAILBOX	IXGBE_EICR_MAILBOX   /* VF to PF Mailbox Int */
 #define IXGBE_EICS_LSC		IXGBE_EICR_LSC /* Link Status Change */
+#define IXGBE_EICS_FW_EVENT	IXGBE_EICR_FW_EVENT /* Async FW event */
 #define IXGBE_EICS_MNG		IXGBE_EICR_MNG /* MNG Event Interrupt */
 #define IXGBE_EICS_TIMESYNC	IXGBE_EICR_TIMESYNC /* Timesync Event */
 #define IXGBE_EICS_GPI_SDP0	IXGBE_EICR_GPI_SDP0 /* SDP0 Gen Purpose Int */
@@ -2025,6 +2035,7 @@ enum {
 #define IXGBE_EIMS_PCI		IXGBE_EICR_PCI /* PCI Exception */
 #define IXGBE_EIMS_MAILBOX	IXGBE_EICR_MAILBOX   /* VF to PF Mailbox Int */
 #define IXGBE_EIMS_LSC		IXGBE_EICR_LSC /* Link Status Change */
+#define IXGBE_EIMS_FW_EVENT	IXGBE_EICR_FW_EVENT /* Async FW event */
 #define IXGBE_EIMS_MNG		IXGBE_EICR_MNG /* MNG Event Interrupt */
 #define IXGBE_EIMS_TS		IXGBE_EICR_TS /* Thermal Sensor Event */
 #define IXGBE_EIMS_TIMESYNC	IXGBE_EICR_TIMESYNC /* Timesync Event */
@@ -2047,6 +2058,7 @@ enum {
 #define IXGBE_EIMC_PCI		IXGBE_EICR_PCI /* PCI Exception */
 #define IXGBE_EIMC_MAILBOX	IXGBE_EICR_MAILBOX /* VF to PF Mailbox Int */
 #define IXGBE_EIMC_LSC		IXGBE_EICR_LSC /* Link Status Change */
+#define IXGBE_EIMC_FW_EVENT	IXGBE_EICR_FW_EVENT /* Async FW event */
 #define IXGBE_EIMC_MNG		IXGBE_EICR_MNG /* MNG Event Interrupt */
 #define IXGBE_EIMC_TIMESYNC	IXGBE_EICR_TIMESYNC /* Timesync Event */
 #define IXGBE_EIMC_GPI_SDP0	IXGBE_EICR_GPI_SDP0 /* SDP0 Gen Purpose Int */
@@ -2216,7 +2228,7 @@ enum {
 #define IXGBE_LED_IVRT_BASE		0x00000040
 #define IXGBE_LED_BLINK_BASE		0x00000080
 #define IXGBE_LED_MODE_MASK_BASE	0x0000000F
-#define IXGBE_LED_OFFSET(_base, _i)	(_base << (8 * (_i)))
+#define IXGBE_LED_OFFSET(_base, _i)	((u32)(_base) << (8 * (_i)))
 #define IXGBE_LED_MODE_SHIFT(_i)	(8*(_i))
 #define IXGBE_LED_IVRT(_i)	IXGBE_LED_OFFSET(IXGBE_LED_IVRT_BASE, _i)
 #define IXGBE_LED_BLINK(_i)	IXGBE_LED_OFFSET(IXGBE_LED_BLINK_BASE, _i)
@@ -2454,6 +2466,7 @@ enum {
 #define IXGBE_82599_SERIAL_NUMBER_MAC_ADDR	0x11
 #define IXGBE_X550_SERIAL_NUMBER_MAC_ADDR	0x04
 
+#define IXGBE_PCIE_MSIX_E610_CAPS	0xB2
 #define IXGBE_PCIE_MSIX_82599_CAPS	0x72
 #define IXGBE_MAX_MSIX_VECTORS_82599	0x40
 #define IXGBE_PCIE_MSIX_82598_CAPS	0x62
@@ -2571,6 +2584,7 @@ enum {
 #define IXGBE_PCI_DEVICE_STATUS		0xAA
 #define IXGBE_PCI_DEVICE_STATUS_TRANSACTION_PENDING	0x0020
 #define IXGBE_PCI_LINK_STATUS		0xB2
+#define IXGBE_PCI_LINK_STATUS_E610	0x82
 #define IXGBE_PCI_DEVICE_CONTROL2	0xC8
 #define IXGBE_PCI_LINK_WIDTH		0x3F0
 #define IXGBE_PCI_LINK_WIDTH_1		0x10
@@ -2581,6 +2595,7 @@ enum {
 #define IXGBE_PCI_LINK_SPEED_2500	0x1
 #define IXGBE_PCI_LINK_SPEED_5000	0x2
 #define IXGBE_PCI_LINK_SPEED_8000	0x3
+#define IXGBE_PCI_LINK_SPEED_16000	0x4
 #define IXGBE_PCI_HEADER_TYPE_REGISTER	0x0E
 #define IXGBE_PCI_HEADER_TYPE_MULTIFUNC	0x80
 #define IXGBE_PCI_DEVICE_CONTROL2_16ms	0x0005
@@ -3258,6 +3273,7 @@ struct ixgbe_hic_hdr2_rsp {
 };
 
 union ixgbe_hic_hdr2 {
+	u32 buf[1];
 	struct ixgbe_hic_hdr2_req req;
 	struct ixgbe_hic_hdr2_rsp rsp;
 };
@@ -3535,6 +3551,7 @@ typedef u64 ixgbe_physical_layer;
 #define IXGBE_PHYSICAL_LAYER_2500BASE_KX	0x10000
 #define IXGBE_PHYSICAL_LAYER_2500BASE_T		0x20000
 #define IXGBE_PHYSICAL_LAYER_5000BASE_T		0x40000
+#define IXGBE_PHYSICAL_LAYER_10GBASE_BX		0x80000
 
 /* Flow Control Data Sheet defined values
  * Calculation and defines taken from 802.1bb Annex O
@@ -3743,6 +3760,8 @@ enum ixgbe_mac_type {
 	ixgbe_mac_X550_vf,
 	ixgbe_mac_X550EM_x_vf,
 	ixgbe_mac_X550EM_a_vf,
+	ixgbe_mac_E610,
+	ixgbe_mac_E610_vf,
 	ixgbe_num_macs
 };
 
@@ -3809,6 +3828,8 @@ enum ixgbe_sfp_type {
 	ixgbe_sfp_type_1g_lx_core1 = 14,
 	ixgbe_sfp_type_1g_bx_core0 = 15,
 	ixgbe_sfp_type_1g_bx_core1 = 16,
+	ixgbe_sfp_type_10g_bx_core0 = 17,
+	ixgbe_sfp_type_10g_bx_core1 = 18,
 	ixgbe_sfp_type_not_present = 0xFFFE,
 	ixgbe_sfp_type_unknown = 0xFFFF
 };
@@ -3822,7 +3843,9 @@ enum ixgbe_media_type {
 	ixgbe_media_type_copper,
 	ixgbe_media_type_backplane,
 	ixgbe_media_type_cx4,
-	ixgbe_media_type_virtual
+	ixgbe_media_type_virtual,
+	ixgbe_media_type_da,
+	ixgbe_media_type_aui
 };
 
 /* Flow Control Settings */
@@ -3831,6 +3854,7 @@ enum ixgbe_fc_mode {
 	ixgbe_fc_rx_pause,
 	ixgbe_fc_tx_pause,
 	ixgbe_fc_full,
+	ixgbe_fc_auto,
 	ixgbe_fc_default
 };
 
@@ -3863,6 +3887,7 @@ enum ixgbe_bus_speed {
 	ixgbe_bus_speed_2500	= 2500,
 	ixgbe_bus_speed_5000	= 5000,
 	ixgbe_bus_speed_8000	= 8000,
+	ixgbe_bus_speed_16000   = 16000,
 	ixgbe_bus_speed_reserved
 };
 
@@ -3921,6 +3946,8 @@ struct ixgbe_hw_stats {
 	u64 mlfc;
 	u64 mrfc;
 	u64 rlec;
+	u64 tlpic;
+	u64 rlpic;
 	u64 lxontxc;
 	u64 lxonrxc;
 	u64 lxofftxc;
@@ -4007,6 +4034,7 @@ struct ixgbe_eeprom_operations {
 	s32 (*validate_checksum)(struct ixgbe_hw *, u16 *);
 	s32 (*update_checksum)(struct ixgbe_hw *);
 	s32 (*calc_checksum)(struct ixgbe_hw *);
+	s32 (*read_pba_string)(struct ixgbe_hw *, u8 *, u32);
 };
 
 struct ixgbe_mac_operations {
@@ -4083,7 +4111,7 @@ struct ixgbe_mac_operations {
 	s32 (*init_uta_tables)(struct ixgbe_hw *);
 	void (*set_mac_anti_spoofing)(struct ixgbe_hw *, bool, int);
 	void (*set_vlan_anti_spoofing)(struct ixgbe_hw *, bool, int);
-	s32 (*toggle_txdctl)(struct ixgbe_hw *hw, u32 vf_index);
+	s32 (*toggle_txdctl)(struct ixgbe_hw *hw, u32 vf_number);
 	s32 (*update_xcast_mode)(struct ixgbe_hw *, int);
 	s32 (*set_rlpml)(struct ixgbe_hw *, u16);
 
@@ -4118,6 +4146,10 @@ struct ixgbe_mac_operations {
 	void (*mdd_event)(struct ixgbe_hw *hw, u32 *vf_bitmap);
 	void (*restore_mdd_vf)(struct ixgbe_hw *hw, u32 vf);
 	bool (*fw_recovery_mode)(struct ixgbe_hw *hw);
+	bool (*fw_rollback_mode)(struct ixgbe_hw *hw);
+	bool (*get_fw_tsam_mode)(struct ixgbe_hw *hw);
+	s32 (*get_fw_version)(struct ixgbe_hw *hw);
+	s32 (*get_nvm_version)(struct ixgbe_hw *hw, struct ixgbe_nvm_info *nvm);
 };
 
 struct ixgbe_phy_operations {
@@ -4162,6 +4194,9 @@ struct ixgbe_link_operations {
 struct ixgbe_link_info {
 	struct ixgbe_link_operations ops;
 	u8 addr;
+	struct ixgbe_link_status link_info;
+	struct ixgbe_link_status link_info_old;
+	u8 get_link_info;
 };
 
 struct ixgbe_eeprom_info {
@@ -4233,6 +4268,9 @@ struct ixgbe_phy_info {
 	bool reset_if_overtemp;
 	bool qsfp_shared_i2c_bus;
 	u32 nw_mng_if_sel;
+	u64 phy_type_low;
+	u64 phy_type_high;
+	struct ixgbe_aci_cmd_set_phy_cfg_data curr_user_phy_cfg;
 };
 
 #include "ixgbe_mbx.h"
@@ -4261,6 +4299,22 @@ struct ixgbe_hw {
 	bool wol_enabled;
 	bool need_crosstalk_fix;
 	u32 fw_rst_cnt;
+	u8 api_branch;
+	u8 api_maj_ver;
+	u8 api_min_ver;
+	u8 api_patch;
+	u8 fw_branch;
+	u8 fw_maj_ver;
+	u8 fw_min_ver;
+	u8 fw_patch;
+	u32 fw_build;
+	struct ixgbe_aci_info aci;
+	struct ixgbe_flash_info flash;
+	struct ixgbe_hw_dev_caps dev_caps;
+	struct ixgbe_hw_func_caps func_caps;
+	struct ixgbe_fwlog_cfg fwlog_cfg;
+	bool fwlog_support_ena;
+	struct ixgbe_fwlog_ring fwlog_ring;
 };
 
 #define ixgbe_call_func(hw, func, params, error) \
@@ -4311,6 +4365,24 @@ struct ixgbe_hw {
 #define IXGBE_ERR_MBX				-41
 #define IXGBE_ERR_MBX_NOMSG			-42
 #define IXGBE_ERR_TIMEOUT			-43
+
+#define IXGBE_ERR_NOT_SUPPORTED			-45
+#define IXGBE_ERR_OUT_OF_RANGE			-46
+
+#define IXGBE_ERR_NVM				-50
+#define IXGBE_ERR_NVM_CHECKSUM			-51
+#define IXGBE_ERR_BUF_TOO_SHORT			-52
+#define IXGBE_ERR_NVM_BLANK_MODE		-53
+#define IXGBE_ERR_INVAL_SIZE			-54
+#define IXGBE_ERR_DOES_NOT_EXIST		-55
+
+#define IXGBE_ERR_ACI_ERROR			-100
+#define IXGBE_ERR_ACI_DISABLED			-101
+#define IXGBE_ERR_ACI_TIMEOUT			-102
+#define IXGBE_ERR_ACI_BUSY			-103
+#define IXGBE_ERR_ACI_NO_WORK			-104
+#define IXGBE_ERR_ACI_NO_EVENTS			-105
+#define IXGBE_ERR_FW_API_VER			-106
 
 #define IXGBE_NOT_IMPLEMENTED			0x7FFFFFFF
 
@@ -4540,5 +4612,7 @@ struct ixgbe_bypass_eeprom {
 #define IXGBE_REQUEST_TASK_FDIR		0x08
 #define IXGBE_REQUEST_TASK_PHY		0x10
 #define IXGBE_REQUEST_TASK_LSC		0x20
+#define IXGBE_REQUEST_TASK_FWEVENT	0x40
+#define IXGBE_REQUEST_TASK_RESET		0x80
 
 #endif /* _IXGBE_TYPE_H_ */

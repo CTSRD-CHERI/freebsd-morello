@@ -34,7 +34,6 @@
  * $NetBSD: ip_gre.c,v 1.29 2003/09/05 23:02:43 itojun Exp $
  */
 
-#include <sys/cdefs.h>
 #include "opt_inet.h"
 #include "opt_inet6.h"
 
@@ -529,7 +528,7 @@ in_gre_output(struct mbuf *m, int af, int hlen)
 		m_copydata(m, hlen + offsetof(struct ip, ip_tos),
 		    sizeof(u_char), &gi->gi_ip.ip_tos);
 		m_copydata(m, hlen + offsetof(struct ip, ip_id),
-		    sizeof(u_short), (caddr_t)&gi->gi_ip.ip_id);
+		    sizeof(u_short), &gi->gi_ip.ip_id);
 		break;
 #ifdef INET6
 	case AF_INET6:

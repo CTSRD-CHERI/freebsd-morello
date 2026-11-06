@@ -6,39 +6,43 @@
 .
     bin
     ..
-    include
-        private
-            bsddialog
+    include                   tags=package=clibs-dev
+        private               tags=package=clibs-dev
+            bsddialog         tags=package=utilities-dev
             ..
-            bsdstat
+            bsdstat           tags=package=libbsdstat-dev
             ..
-            event1
+            event1            tags=package=libevent1-dev
             ..
-            gmock
-                internal
-                    custom
+            gmock             tags=package=utilities-dev
+                internal      tags=package=utilities-dev
+                    custom    tags=package=utilities-dev
                     ..
                 ..
             ..
-            gtest
-                internal
-                    custom
+            gtest             tags=package=utilities-dev
+                internal      tags=package=utilities-dev
+                    custom    tags=package=utilities-dev
                     ..
                 ..
             ..
-            sqlite3
+            pkgconf           tags=package=pkgconf-dev
             ..
-            ucl
+            samplerate        tags=package=sound-dev
             ..
-            yaml
+            sqlite3           tags=package=libsqlite3-dev
             ..
-            zstd
+            ucl               tags=package=libucl-dev
+            ..
+            yaml              tags=package=libyaml-dev
+            ..
+            zstd              tags=package=runtime-dev
             ..
         ..
     ..
     lib
         clang
-            19
+            21
                 include
                     cuda_wrappers
                         bits
@@ -83,15 +87,15 @@
         ..
         i18n
         ..
-        krb5
-            kdb
+        krb5                    tags=package=kerberos-kdc
+            kdb                 tags=package=kerberos-kdc
             ..
-            plugins
-                kdb
+            plugins             tags=package=kerberos-kdc
+                kdb             tags=package=kerberos-kdc
                 ..
-                preauth
+                preauth         tags=package=kerberos-kdc
                 ..
-                tls
+                tls             tags=package=kerberos-kdc
                 ..
             ..
         ..
@@ -100,6 +104,8 @@
             ..
         ..
         ossl-modules
+        ..
+        virtual_oss
         ..
     ..
     libdata
@@ -131,6 +137,10 @@
                 ..
             ..
             080.console
+                include
+                ..
+            ..
+            085.datetime
                 include
                 ..
             ..
@@ -177,10 +187,8 @@
         ..
         hyperv
         ..
-        kgdb
-        ..
-        lpr
-            ru
+        lpr			tags=package=lp
+            ru			tags=package=lp
             ..
         ..
         sendmail
@@ -197,7 +205,7 @@
     sbin
     ..
     share
-        atf             tags=package=tests
+        atf             tags=package=atf
         ..
         bhyve
             gdb
@@ -206,6 +214,8 @@
             ..
         ..
         bsdconfig
+            datetime
+            ..
             media
             ..
             networking
@@ -234,17 +244,15 @@
         doc
             IPv6
             ..
-            atf             tags=package=tests
+            atf             tags=package=atf
             ..
-            kyua            tags=package=tests
+            kyua            tags=package=kyua
             ..
             legal
             ..
-            llvm
-                clang
+            llvm            tags=package=clang
+                clang       tags=package=clang
                 ..
-            ..
-            ncurses
             ..
             ntp
                 drivers
@@ -267,6 +275,8 @@
         ..
         dtrace
         ..
+        et        tags=package=kerberos-dev
+        ..
         examples
             BSD_daemon
             ..
@@ -283,8 +293,6 @@
             diskless
             ..
             dma
-            ..
-            drivers
             ..
             dwatch
             ..
@@ -334,7 +342,7 @@
                     ..
                 ..
             ..
-            kyua            tags=package=tests
+            kyua            tags=package=kyua
             ..
             libusb20
             ..
@@ -344,15 +352,13 @@
             ..
             netgraph
             ..
-            perfmon
-            ..
             pf
             ..
             ppi
             ..
             ppp
             ..
-            printing
+            printing		tags=package=lp
             ..
             scsi_target
             ..
@@ -476,11 +482,17 @@
                 trusted         tags=package=runtime
                 ..
             ..
-        ..
-        kyua            tags=package=tests
-            misc            tags=package=tests
+            pkgbase-15
+                revoked         tags=package=runtime
+                ..
+                trusted         tags=package=runtime
+                ..
             ..
-            store           tags=package=tests
+        ..
+        kyua            tags=package=kyua
+            misc            tags=package=kyua
+            ..
+            store           tags=package=kyua
             ..
         ..
         locale
@@ -497,8 +509,6 @@
             man4
                 aarch64
                 ..
-                amd64
-                ..
                 arm
                 ..
                 i386
@@ -513,12 +523,6 @@
             man7
             ..
             man8
-                amd64
-                ..
-                i386
-                ..
-                powerpc
-                ..
             ..
             man9
             ..
@@ -835,6 +839,10 @@
                 ..
             ..
         ..
+        pkg
+            triggers
+            ..
+        ..
         security
         ..
         sendmail
@@ -855,7 +863,7 @@
             scrnmaps
             ..
         ..
-        tabset
+        tabset                tags=package=ncurses-lib
         ..
         vi
             catalog

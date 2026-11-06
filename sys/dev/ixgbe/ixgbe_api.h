@@ -48,6 +48,7 @@ extern s32 ixgbe_init_ops_X550(struct ixgbe_hw *hw);
 extern s32 ixgbe_init_ops_X550EM(struct ixgbe_hw *hw);
 extern s32 ixgbe_init_ops_X550EM_x(struct ixgbe_hw *hw);
 extern s32 ixgbe_init_ops_X550EM_a(struct ixgbe_hw *hw);
+extern s32 ixgbe_init_ops_E610(struct ixgbe_hw *hw);
 extern s32 ixgbe_init_ops_vf(struct ixgbe_hw *hw);
 
 s32 ixgbe_set_mac_type(struct ixgbe_hw *hw);
@@ -131,7 +132,7 @@ s32 ixgbe_set_vfta(struct ixgbe_hw *hw, u32 vlan,
 s32 ixgbe_set_vlvf(struct ixgbe_hw *hw, u32 vlan, u32 vind,
 		   bool vlan_on, u32 *vfta_delta, u32 vfta,
 		   bool vlvf_bypass);
-s32 ixgbe_toggle_txdctl(struct ixgbe_hw *hw, u32 vind);
+s32 ixgbe_toggle_txdctl(struct ixgbe_hw *hw, u32 vf_number);
 s32 ixgbe_fc_enable(struct ixgbe_hw *hw);
 s32 ixgbe_setup_fc(struct ixgbe_hw *hw);
 s32 ixgbe_set_fw_drv_ver(struct ixgbe_hw *hw, u8 maj, u8 min, u8 build,

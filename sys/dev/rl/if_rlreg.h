@@ -31,7 +31,7 @@
  */
 
 /*
- * RealTek 8129/8139 register offsets
+ * Realtek 8129/8139 register offsets
  */
 #define	RL_IDR0		0x0000		/* ID register 0 (station addr) */
 #define	RL_IDR1		0x0001		/* Must use 32-bit accesses (?) */
@@ -144,6 +144,14 @@
 #define	RL_MAXRXPKTLEN		0x00DA	/* 16 bits, chip multiplies by 8 */
 #define	RL_INTRMOD		0x00E2	/* 16 bits */
 #define	RL_MISC			0x00F0
+
+/*
+ * MCU command / FIFO status register (RTL8168G and later).  Polled to
+ * confirm the on-chip TX/RX FIFOs have drained before a controller reset.
+ */
+#define	RL_MCU_CMD		0x00D3
+#define	RL_MCU_TXFIFO_EMPTY	0x20	/* bit 5 */
+#define	RL_MCU_RXFIFO_EMPTY	0x10	/* bit 4 */
 
 /*
  * TX config register bits
@@ -544,7 +552,7 @@
 #define	RL_GMEDIASTAT_TBI	0x80	/* TBI enabled */
 
 /*
- * The RealTek doesn't use a fragment-based descriptor mechanism.
+ * The Realtek doesn't use a fragment-based descriptor mechanism.
  * Instead, there are only four register sets, each of which represents
  * one 'descriptor.' Basically, each TX descriptor is just a contiguous
  * packet buffer (32-bit aligned!) and we place the buffer addresses in
@@ -801,7 +809,7 @@ struct rl_stats {
 #define	RL_ADDR_HI(y)		((uint64_t) (y) >> 32)
 
 /*
- * The number of bits reserved for MSS in RealTek controllers is
+ * The number of bits reserved for MSS in Realtek controllers is
  * 11bits. This limits the maximum interface MTU size in TSO case
  * as upper stack should not generate TCP segments with MSS greater
  * than the limit.
@@ -985,12 +993,12 @@ struct rl_softc {
 /*
  * General constants that are fun to know.
  *
- * RealTek PCI vendor ID
+ * Realtek PCI vendor ID
  */
 #define	RT_VENDORID				0x10EC
 
 /*
- * RealTek chip device IDs.
+ * Realtek chip device IDs.
  */
 #define	RT_DEVICEID_2600          		0x2600
 #define	RT_DEVICEID_8139D			0x8039

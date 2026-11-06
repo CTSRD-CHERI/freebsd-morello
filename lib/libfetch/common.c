@@ -57,6 +57,8 @@
 #include "fetch.h"
 #include "common.h"
 
+/* Maximum length of a line, newline included, for fetch_getln() */
+#define FETCH_LINE_MAX		65536
 
 /*** Local data **************************************************************/
 
@@ -135,7 +137,7 @@ static struct fetcherr socks5_errlist[] = {
 };
 
 /* End-of-Line */
-static const char ENDL[2] = "\r\n";
+static const char ENDL[2] = { '\r', '\n' };
 
 
 /*** Error-reporting functions ***********************************************/
@@ -229,12 +231,16 @@ void
 fetch_info(const char *fmt, ...)
 {
 	va_list ap;
+	int serrno = errno;
 
 	va_start(ap, fmt);
 	vfprintf(stderr, fmt, ap);
 	va_end(ap);
 	fputc('\n', stderr);
+	errno = serrno;
 }
+#define fetch_verbose(...)						\
+	do { if (verbose) fetch_info(__VA_ARGS__); } while (0)
 
 
 /*** Network-related utility functions ***************************************/
@@ -286,20 +292,11 @@ fetch_reopen(int sd)
 	flags = fcntl(sd, F_GETFD);
 	if (flags != -1 && (flags & FD_CLOEXEC) == 0)
 		(void)fcntl(sd, F_SETFD, flags | FD_CLOEXEC);
+	flags = fcntl(sd, F_GETFL);
+	if (flags != -1 && (flags & O_NONBLOCK) == 0)
+		(void)fcntl(sd, F_SETFL, flags | O_NONBLOCK);
 	(void)setsockopt(sd, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt));
 	conn->sd = sd;
-	++conn->ref;
-	return (conn);
-}
-
-
-/*
- * Bump a connection's reference count.
- */
-conn_t *
-fetch_ref(conn_t *conn)
-{
-
 	++conn->ref;
 	return (conn);
 }
@@ -414,8 +411,7 @@ fetch_socks5_init(conn_t *conn, const char *host, int port, int verbose)
 	unsigned char *ptr;
 	int ret = 1;
 
-	if (verbose)
-		fetch_info("Initializing SOCKS5 connection: %s:%d", host, port);
+	fetch_verbose("Initializing SOCKS5 connection: %s:%d", host, port);
 
 	/* Connection initialization */
 	ptr = buf;
@@ -483,7 +479,7 @@ fetch_socks5_init(conn_t *conn, const char *host, int port, int verbose)
 		goto fail;
 	}
 
-	switch(*ptr++) {
+	switch (*ptr++) {
 	case SOCKS_SUCCESS:
 		break;
 	case SOCKS_GENERAL_FAILURE:
@@ -561,10 +557,8 @@ fetch_socks5_getenv(char **host, int *port)
 		*host = strndup(socks5env, ext - socks5env);
 	}
 
-	if (*host == NULL) {
-		fprintf(stderr, "Failure to allocate memory, exiting.\n");
+	if (*host == NULL)
 		return (-1);
-	}
 	if (ext == NULL) {
 		*port = 1080; /* Default port as defined in RFC1928 */
 	} else {
@@ -585,15 +579,30 @@ fetch_socks5_getenv(char **host, int *port)
 
 
 /*
+ * Return current time in milliseconds since an arbitrary epoch.
+ */
+typedef unsigned long mstime_t;
+static mstime_t
+mstime_mono(void)
+{
+	struct timespec ts;
+
+	(void)clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ((mstime_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+}
+
+/*
  * Establish a TCP connection to the specified port on the specified host.
  */
 conn_t *
 fetch_connect(const char *host, int port, int af, int verbose)
 {
+	struct pollfd pfd;
 	struct addrinfo *cais = NULL, *sais = NULL, *cai, *sai;
 	const char *bindaddr;
 	conn_t *conn = NULL;
-	int err = 0, sd = -1;
+	mstime_t now, deadline, deltams;
+	int err = 0, serrno, sd = -1;
 	char *sockshost;
 	int socksport;
 
@@ -610,26 +619,21 @@ fetch_connect(const char *host, int port, int af, int verbose)
 	/* Not using SOCKS5 proxy */
 	if (sockshost == NULL) {
 		/* resolve server address */
-		if (verbose)
-			fetch_info("resolving server address: %s:%d", host,
-			    port);
+		fetch_verbose("resolving server address: %s:%d", host, port);
 		if ((sais = fetch_resolve(host, port, af)) == NULL)
 			goto fail;
 
 		/* resolve client address */
 		bindaddr = getenv("FETCH_BIND_ADDRESS");
 		if (bindaddr != NULL && *bindaddr != '\0') {
-			if (verbose)
-				fetch_info("resolving client address: %s",
-				    bindaddr);
+			fetch_verbose("resolving client address: %s", bindaddr);
 			if ((cais = fetch_resolve(bindaddr, 0, af)) == NULL)
 				goto fail;
 		}
 	} else {
 		/* resolve socks5 proxy address */
-		if (verbose)
-			fetch_info("resolving SOCKS5 server address: %s:%d",
-			    sockshost, socksport);
+		fetch_verbose("resolving SOCKS5 server address: %s:%d",
+		    sockshost, socksport);
 		if ((sais = fetch_resolve(sockshost, socksport, af)) == NULL) {
 			socks5_seterr(SOCKS5_ERR_BAD_HOST);
 			goto fail;
@@ -638,9 +642,18 @@ fetch_connect(const char *host, int port, int af, int verbose)
 
 	/* try each server address in turn */
 	for (err = 0, sai = sais; sai != NULL; sai = sai->ai_next) {
+		/* start the clock */
+		if (fetchTimeout > 0)
+			deadline = mstime_mono() + fetchTimeout * 1000;
+
 		/* open socket */
-		if ((sd = socket(sai->ai_family, SOCK_STREAM, 0)) < 0)
+		if ((sd = socket(sai->ai_family, SOCK_STREAM, 0)) < 0) {
+			err = -1;
+			if (errno == EAFNOSUPPORT || errno == EPROTONOSUPPORT)
+				continue;
 			goto syserr;
+		}
+
 		/* attempt to bind to client address */
 		for (err = 0, cai = cais; cai != NULL; cai = cai->ai_next) {
 			if (cai->ai_family != sai->ai_family)
@@ -649,39 +662,82 @@ fetch_connect(const char *host, int port, int af, int verbose)
 				break;
 		}
 		if (err != 0) {
-			if (verbose)
-				fetch_info("failed to bind to %s", bindaddr);
+			fetch_verbose("failed to bind to %s", bindaddr);
 			goto syserr;
 		}
+
+		/* make the socket non-blocking */
+		(void)fcntl(sd, F_SETFL, O_NONBLOCK);
+
 		/* attempt to connect to server address */
 		if ((err = connect(sd, sai->ai_addr, sai->ai_addrlen)) == 0)
 			break;
+		if (errno != EINPROGRESS)
+			goto next;
+
+		/* wait for connection */
+		deltams = INFTIM;
+		pfd.fd = sd;
+		pfd.events = POLLOUT;
+		for (;;) {
+			/* check the clock */
+			if (fetchTimeout > 0) {
+				if ((now = mstime_mono()) > deadline) {
+					errno = ETIMEDOUT;
+					err = -1;
+					goto next;
+				}
+				deltams = deadline - now;
+			}
+			/* wait for something to happen */
+			if ((err = poll(&pfd, 1, deltams)) > 0)
+				break;
+			if (err == 0)
+				continue;
+			if (errno != EINTR)
+				goto syserr;
+			if (!fetchRestartCalls)
+				break;
+		}
+
+		/* check the outcome */
+		if (err > 0) {
+			if (pfd.revents == POLLOUT) {
+				/* connection established */
+				err = 0;
+				break;
+			}
+			/* we don't know the actual reason */
+			errno = ECONNREFUSED;
+		}
+next:
 		/* clean up before next attempt */
+		serrno = errno;
 		close(sd);
 		sd = -1;
+		errno = serrno;
 	}
+
+	/* all attempts failed */
 	if (err != 0) {
-		if (verbose && sockshost == NULL) {
-			fetch_info("failed to connect to %s:%d", host, port);
-			goto syserr;
-		} else if (sockshost != NULL) {
-			if (verbose)
-				fetch_info(
-				    "failed to connect to SOCKS5 server %s:%d",
-				    sockshost, socksport);
+		if (sockshost != NULL) {
+			fetch_verbose("failed to connect to SOCKS5 server %s:%d",
+			    sockshost, socksport);
 			socks5_seterr(SOCKS5_ERR_CONN_REFUSED);
 			goto fail;
 		}
+		fetch_verbose("failed to connect to %s:%d", host, port);
 		goto syserr;
 	}
 
 	if ((conn = fetch_reopen(sd)) == NULL)
 		goto syserr;
 
-	if (sockshost)
+	if (sockshost != NULL) {
 		if (!fetch_socks5_init(conn, host, port, verbose))
 			goto fail;
-	free(sockshost);
+		free(sockshost);
+	}
 	if (cais != NULL)
 		freeaddrinfo(cais);
 	if (sais != NULL)
@@ -690,7 +746,8 @@ fetch_connect(const char *host, int port, int af, int verbose)
 syserr:
 	fetch_syserr();
 fail:
-	free(sockshost);
+	if (sockshost != NULL)
+		free(sockshost);
 	/* Fully close if it was opened; otherwise just don't leak the fd. */
 	if (conn != NULL)
 		fetch_close(conn);
@@ -1048,8 +1105,9 @@ fetch_ssl_setup_transport_layer(SSL_CTX *ctx, int verbose)
 		ssl_ctx_options |= SSL_OP_NO_TLSv1_1;
 	if (getenv("SSL_NO_TLS1_2") != NULL)
 		ssl_ctx_options |= SSL_OP_NO_TLSv1_2;
-	if (verbose)
-		fetch_info("SSL options: %lx", ssl_ctx_options);
+	if (getenv("SSL_NO_TLS1_3") != NULL)
+		ssl_ctx_options |= SSL_OP_NO_TLSv1_3;
+	fetch_verbose("SSL options: %lx", ssl_ctx_options);
 	SSL_CTX_set_options(ctx, ssl_ctx_options);
 }
 
@@ -1087,16 +1145,14 @@ fetch_ssl_setup_peer_verification(SSL_CTX *ctx, int verbose)
 		else
 			SSL_CTX_set_default_verify_paths(ctx);
 		if ((crl_file = getenv("SSL_CRL_FILE")) != NULL) {
-			if (verbose)
-				fetch_info("Using CRL file: %s", crl_file);
+			fetch_verbose("Using CRL file: %s", crl_file);
 			crl_store = SSL_CTX_get_cert_store(ctx);
 			crl_lookup = X509_STORE_add_lookup(crl_store,
 			    X509_LOOKUP_file());
 			if (crl_lookup == NULL ||
 			    !X509_load_crl_file(crl_lookup, crl_file,
 				X509_FILETYPE_PEM)) {
-				fprintf(stderr,
-				    "Could not load CRL file %s\n",
+				fetch_info("Could not load CRL file %s",
 				    crl_file);
 				return (0);
 			}
@@ -1119,23 +1175,17 @@ fetch_ssl_setup_client_certificate(SSL_CTX *ctx, int verbose)
 	if ((client_cert_file = getenv("SSL_CLIENT_CERT_FILE")) != NULL) {
 		client_key_file = getenv("SSL_CLIENT_KEY_FILE") != NULL ?
 		    getenv("SSL_CLIENT_KEY_FILE") : client_cert_file;
-		if (verbose) {
-			fetch_info("Using client cert file: %s",
-			    client_cert_file);
-			fetch_info("Using client key file: %s",
-			    client_key_file);
-		}
+		fetch_verbose("Using client cert file: %s", client_cert_file);
+		fetch_verbose("Using client key file: %s", client_key_file);
 		if (SSL_CTX_use_certificate_chain_file(ctx,
 			client_cert_file) != 1) {
-			fprintf(stderr,
-			    "Could not load client certificate %s\n",
+			fetch_info("Could not load client certificate %s",
 			    client_cert_file);
 			return (0);
 		}
 		if (SSL_CTX_use_PrivateKey_file(ctx, client_key_file,
 			SSL_FILETYPE_PEM) != 1) {
-			fprintf(stderr,
-			    "Could not load client key %s\n",
+			fetch_info("Could not load client key %s",
 			    client_key_file);
 			return (0);
 		}
@@ -1160,7 +1210,7 @@ fetch_ssl_cb_verify_crt(int verified, X509_STORE_CTX *ctx)
 		if ((crt = X509_STORE_CTX_get_current_cert(ctx)) != NULL &&
 		    (name = X509_get_subject_name(crt)) != NULL)
 			str = X509_NAME_oneline(name, 0, 0);
-		fprintf(stderr, "Certificate verification failed for %s\n",
+		fetch_info("Certificate verification failed for %s",
 		    str != NULL ? str : "no relevant certificate");
 		OPENSSL_free(str);
 	}
@@ -1176,12 +1226,17 @@ int
 fetch_ssl(conn_t *conn, const struct url *URL, int verbose)
 {
 #ifdef WITH_SSL
+	struct pollfd pfd;
+	mstime_t now, deadline, deltams;
 	int ret, ssl_err;
 	X509_NAME *name;
 	char *str;
 
-	conn->ssl_meth = SSLv23_client_method();
-	conn->ssl_ctx = SSL_CTX_new(conn->ssl_meth);
+	if ((conn->ssl_ctx = SSL_CTX_new(TLS_client_method())) == NULL) {
+		fetch_info("SSL context creation failed");
+		ERR_print_errors_fp(stderr);
+		return (-1);
+	}
 	SSL_CTX_set_mode(conn->ssl_ctx, SSL_MODE_AUTO_RETRY);
 
 	fetch_ssl_setup_transport_layer(conn->ssl_ctx, verbose);
@@ -1192,41 +1247,67 @@ fetch_ssl(conn_t *conn, const struct url *URL, int verbose)
 
 	conn->ssl = SSL_new(conn->ssl_ctx);
 	if (conn->ssl == NULL) {
-		fprintf(stderr, "SSL context creation failed\n");
+		fetch_info("SSL connection creation failed");
+		ERR_print_errors_fp(stderr);
 		return (-1);
 	}
 	SSL_set_fd(conn->ssl, conn->sd);
 
 #if !defined(OPENSSL_NO_TLSEXT)
-	if (!SSL_set_tlsext_host_name(conn->ssl,
-	    __DECONST(struct url *, URL)->host)) {
-		fprintf(stderr,
-		    "TLS server name indication extension failed for host %s\n",
+	if (!SSL_set_tlsext_host_name(conn->ssl, __DECONST(char *, URL->host))) {
+		fetch_info("Failed to set TLS server name indication for host %s",
 		    URL->host);
 		return (-1);
 	}
 #endif
+	if (fetchTimeout > 0)
+		deadline = mstime_mono() + fetchTimeout * 1000;
+	deltams = INFTIM;
+	pfd.fd = conn->sd;
 	while ((ret = SSL_connect(conn->ssl)) == -1) {
 		ssl_err = SSL_get_error(conn->ssl, ret);
-		if (ssl_err != SSL_ERROR_WANT_READ &&
-		    ssl_err != SSL_ERROR_WANT_WRITE) {
+		switch (ssl_err) {
+		case SSL_ERROR_WANT_READ:
+			pfd.events = POLLIN;
+			break;
+		case SSL_ERROR_WANT_WRITE:
+			pfd.events = POLLOUT;
+			break;
+		default:
 			ERR_print_errors_fp(stderr);
+			return (-1);
+		}
+		/* check what's left of our timeout */
+		if (fetchTimeout > 0) {
+			if ((now = mstime_mono()) > deadline) {
+				errno = ETIMEDOUT;
+				fetch_syserr();
+				return (-1);
+			}
+			deltams = deadline - now;
+		}
+		ret = poll(&pfd, 1, deltams);
+		if (ret == 0) {
+			fetch_info("SSL handshake timed out");
+			return (-1);
+		}
+		if (ret < 0) {
+			if (errno == EINTR && fetchRestartCalls)
+				continue;
 			return (-1);
 		}
 	}
 	conn->ssl_cert = SSL_get_peer_certificate(conn->ssl);
 
 	if (conn->ssl_cert == NULL) {
-		fprintf(stderr, "No server SSL certificate\n");
+		fetch_info("No server SSL certificate");
 		return (-1);
 	}
 
 	if (getenv("SSL_NO_VERIFY_HOSTNAME") == NULL) {
-		if (verbose)
-			fetch_info("Verify hostname");
+		fetch_verbose("Verify hostname");
 		if (!fetch_ssl_verify_hname(conn->ssl_cert, URL->host)) {
-			fprintf(stderr,
-			    "SSL certificate subject doesn't match host %s\n",
+			fetch_info("SSL certificate subject does not match host %s",
 			    URL->host);
 			return (-1);
 		}
@@ -1250,18 +1331,14 @@ fetch_ssl(conn_t *conn, const struct url *URL, int verbose)
 	(void)conn;
 	(void)verbose;
 	(void)URL;
-	fprintf(stderr, "SSL support disabled\n");
+	fetch_info("SSL support disabled");
 	return (-1);
 #endif
 }
 
-#define FETCH_READ_WAIT		-2
-#define FETCH_READ_ERROR	-1
-#define FETCH_READ_DONE		 0
-
 #ifdef WITH_SSL
 static ssize_t
-fetch_ssl_read(SSL *ssl, char *buf, size_t len)
+fetch_ssl_read(SSL *ssl, void *buf, size_t len)
 {
 	ssize_t rlen;
 	int ssl_err;
@@ -1269,54 +1346,66 @@ fetch_ssl_read(SSL *ssl, char *buf, size_t len)
 	rlen = SSL_read(ssl, buf, len);
 	if (rlen < 0) {
 		ssl_err = SSL_get_error(ssl, rlen);
-		if (ssl_err == SSL_ERROR_WANT_READ ||
-		    ssl_err == SSL_ERROR_WANT_WRITE) {
-			return (FETCH_READ_WAIT);
-		} else {
-			ERR_print_errors_fp(stderr);
-			return (FETCH_READ_ERROR);
+		switch (ssl_err) {
+		case SSL_ERROR_ZERO_RETURN:
+			return (0);
+		case SSL_ERROR_WANT_READ:
+			errno = EAGAIN;
+			return (-1);
+		case SSL_ERROR_SYSCALL:
+			return (-1);
+		default:
+			errno = EPROTO;
+			return (-1);
 		}
 	}
 	return (rlen);
 }
-#endif
 
 static ssize_t
-fetch_socket_read(int sd, char *buf, size_t len)
+fetch_ssl_write(SSL *ssl, void *buf, size_t len)
 {
-	ssize_t rlen;
+	ssize_t wlen;
+	int ssl_err;
 
-	rlen = read(sd, buf, len);
-	if (rlen < 0) {
-		if (errno == EAGAIN || (errno == EINTR && fetchRestartCalls))
-			return (FETCH_READ_WAIT);
-		else
-			return (FETCH_READ_ERROR);
+	wlen = SSL_write(ssl, buf, len);
+	if (wlen < 0) {
+		ssl_err = SSL_get_error(ssl, wlen);
+		switch (ssl_err) {
+		case SSL_ERROR_ZERO_RETURN:
+			return (0);
+		case SSL_ERROR_WANT_WRITE:
+			errno = EAGAIN;
+			return (-1);
+		case SSL_ERROR_SYSCALL:
+			return (-1);
+		default:
+			errno = EPROTO;
+			return (-1);
+		}
 	}
-	return (rlen);
+	return (wlen);
 }
+#endif
 
 /*
- * Read a character from a connection w/ timeout
+ * Read from a connection w/ timeout
  */
 ssize_t
-fetch_read(conn_t *conn, char *buf, size_t len)
+fetch_read(conn_t *conn, void *buf, size_t len)
 {
-	struct timeval now, timeout, delta;
 	struct pollfd pfd;
-	ssize_t rlen;
-	int deltams;
+	ssize_t rlen, total;
+	mstime_t now, deadline, deltams;
 
-	if (fetchTimeout > 0) {
-		gettimeofday(&timeout, NULL);
-		timeout.tv_sec += fetchTimeout;
-	}
+	if (fetchTimeout > 0)
+		deadline = mstime_mono() + fetchTimeout * 1000;
 
 	deltams = INFTIM;
-	memset(&pfd, 0, sizeof pfd);
 	pfd.fd = conn->sd;
-	pfd.events = POLLIN | POLLERR;
+	pfd.events = POLLIN;
 
+	total = 0;
 	for (;;) {
 		/*
 		 * The socket is non-blocking.  Instead of the canonical
@@ -1324,8 +1413,8 @@ fetch_read(conn_t *conn, char *buf, size_t len)
 		 *
 		 * 1) call read() or SSL_read().
 		 * 2) if we received some data, return it.
-		 * 3) if an error occurred, return -1.
-		 * 4) if read() or SSL_read() signaled EOF, return.
+		 * 3) if read() or SSL_read() signaled EOF, return.
+		 * 4) if an error occurred, return -1.
 		 * 5) if we did not receive any data but we're not at EOF,
 		 *    call poll().
 		 *
@@ -1342,35 +1431,47 @@ fetch_read(conn_t *conn, char *buf, size_t len)
 			rlen = fetch_ssl_read(conn->ssl, buf, len);
 		else
 #endif
-			rlen = fetch_socket_read(conn->sd, buf, len);
-		if (rlen >= 0) {
+			rlen = read(conn->sd, buf, len);
+		if (rlen > 0) {
+			/* something was read */
+			total += rlen;
+			len -= rlen;
+			if (len == 0)
+				break;
+			/* a partial read is success */
 			break;
-		} else if (rlen == FETCH_READ_ERROR) {
+		} else if (rlen == 0) {
+			/* connection closed */
+			break;
+		} else if (errno != EAGAIN) {
+			/* error */
+			if (errno == EINTR && fetchRestartCalls)
+				continue;
 			fetch_syserr();
-			return (-1);
+			break;
 		}
-		// assert(rlen == FETCH_READ_WAIT);
+		/* check what's left of our timeout */
 		if (fetchTimeout > 0) {
-			gettimeofday(&now, NULL);
-			if (!timercmp(&timeout, &now, >)) {
+			if ((now = mstime_mono()) > deadline) {
 				errno = ETIMEDOUT;
 				fetch_syserr();
 				return (-1);
 			}
-			timersub(&timeout, &now, &delta);
-			deltams = delta.tv_sec * 1000 +
-			    delta.tv_usec / 1000;
+			deltams = deadline - now;
 		}
-		errno = 0;
-		pfd.revents = 0;
+		/* wait for the socket to become readable */
 		if (poll(&pfd, 1, deltams) < 0) {
+			if (errno == EAGAIN)
+				continue;
 			if (errno == EINTR && fetchRestartCalls)
 				continue;
-			fetch_syserr();
-			return (-1);
+			break;
 		}
 	}
-	return (rlen);
+	/* a partial read is success */
+	if (rlen < 0 && total == 0)
+		return (-1);
+	return (total);
 }
 
 
@@ -1379,47 +1480,136 @@ fetch_read(conn_t *conn, char *buf, size_t len)
  */
 #define MIN_BUF_SIZE 1024
 
-int
+ssize_t
 fetch_getln(conn_t *conn)
 {
 	char *tmp;
 	size_t tmpsize;
-	ssize_t len;
-	char c;
+	ssize_t rlen;
 
+	/* allocate initial buffer */
 	if (conn->buf == NULL) {
-		if ((conn->buf = malloc(MIN_BUF_SIZE)) == NULL) {
-			errno = ENOMEM;
-			return (-1);
-		}
+		if ((conn->buf = malloc(MIN_BUF_SIZE)) == NULL)
+			goto fail;
+		conn->line = conn->buf;
 		conn->bufsize = MIN_BUF_SIZE;
+		conn->buflen = 0;
+		conn->pos = 0;
 	}
 
-	conn->buf[0] = '\0';
-	conn->buflen = 0;
-
-	do {
-		len = fetch_read(conn, &c, 1);
-		if (len == -1)
-			return (-1);
-		if (len == 0)
-			break;
-		conn->buf[conn->buflen++] = c;
-		if (conn->buflen == conn->bufsize) {
-			tmp = conn->buf;
-			tmpsize = conn->bufsize * 2 + 1;
-			if ((tmp = realloc(tmp, tmpsize)) == NULL) {
-				errno = ENOMEM;
-				return (-1);
+	/* look at the data we already have */
+	if (conn->pos < conn->buflen) {
+		conn->line = conn->buf + conn->pos;
+		while (conn->pos < conn->buflen) {
+			if (conn->buf[conn->pos++] == '\n')
+				goto found;
+			if (conn->buf + conn->pos - conn->line >=
+			    FETCH_LINE_MAX) {
+				errno = EPROTO;
+				goto fail;
 			}
-			conn->buf = tmp;
+		}
+		/* reset for the upcoming memmove() */
+		conn->pos = conn->line - conn->buf;
+	}
+
+	/* move residual data up */
+	if (conn->buflen > 0) {
+		if (conn->pos < conn->buflen) {
+			memmove(conn->buf, conn->buf + conn->pos,
+			    conn->buflen - conn->pos);
+		}
+		conn->buflen -= conn->pos;
+		conn->pos -= conn->pos;
+		conn->line = conn->buf;
+	}
+
+	for (;;) {
+		/* read as much as we can right now */
+		rlen = fetch_read(conn, conn->buf + conn->buflen,
+		    conn->bufsize - conn->buflen - 1);
+		/* error */
+		if (rlen < 0)
+			goto fail;
+		/* advance and terminate */
+		conn->buflen += rlen;
+		conn->buf[conn->buflen] = '\0';
+		/* connection closed */
+		if (rlen == 0)
+			break;
+		/* look for a newline */
+		while (conn->pos < conn->buflen) {
+			if (conn->buf[conn->pos++] == '\n')
+				goto found;
+			if (conn->pos >= FETCH_LINE_MAX) {
+				errno = EPROTO;
+				goto fail;
+			}
+		}
+		/* do we need a bigger buffer? */
+		if (conn->buflen > conn->bufsize / 2) {
+			tmp = conn->buf;
+			tmpsize = conn->bufsize * 2;
+			if ((tmp = realloc(tmp, tmpsize)) == NULL)
+				goto fail;
+			conn->line = conn->buf = tmp;
 			conn->bufsize = tmpsize;
 		}
-	} while (c != '\n');
+	}
+	/* connection closed, return what's left */
+	conn->pos = conn->buflen;
+found:
+	conn->linelen = (conn->buf + conn->pos) - conn->line;
+	if (conn->linelen > 0 && conn->line[conn->linelen - 1] == '\n')
+		conn->line[--conn->linelen] = '\0';
+	if (conn->linelen > 0 && conn->line[conn->linelen - 1] == '\r')
+		conn->line[--conn->linelen] = '\0';
+	DEBUGF("<<< %.*s\n", (int)conn->linelen, conn->line);
+	return (conn->linelen);
+fail:
+	conn->line = NULL;
+	conn->linelen = 0;
+	return (-1);
+}
 
-	conn->buf[conn->buflen] = '\0';
-	DEBUGF("<<< %s", conn->buf);
-	return (0);
+
+/*
+ * Read from a connection, taking previously buffered data into account.
+ */
+ssize_t
+fetch_bufread(conn_t *conn, void *buf, size_t len)
+{
+	ssize_t rlen;
+
+	/* avoid overflow */
+	if (len > SSIZE_MAX)
+		len = SSIZE_MAX;
+
+	/* allocate initial buffer */
+	if (conn->buf == NULL) {
+		conn->bufsize = MIN_BUF_SIZE;
+		while (conn->bufsize < len)
+			conn->bufsize *= 2;
+		if ((conn->buf = malloc(conn->bufsize)) == NULL)
+			return (-1);
+		conn->buflen = 0;
+		conn->pos = 0;
+	}
+	conn->line = NULL;
+	conn->linelen = 0;
+
+	/* return residual data first */
+	if (conn->buflen > conn->pos) {
+		if (len > conn->buflen - conn->pos)
+			rlen = conn->buflen - conn->pos;
+		else
+			rlen = len;
+		memcpy(buf, conn->buf + conn->pos, rlen);
+		conn->pos += rlen;
+		return (rlen);
+	}
+
+	return (fetch_read(conn, buf, len));
 }
 
 
@@ -1427,13 +1617,13 @@ fetch_getln(conn_t *conn)
  * Write to a connection w/ timeout
  */
 ssize_t
-fetch_write(conn_t *conn, const char *buf, size_t len)
+fetch_write(conn_t *conn, const void *buf, size_t len)
 {
 	struct iovec iov;
 
 	iov.iov_base = __DECONST(char *, buf);
 	iov.iov_len = len;
-	return fetch_writev(conn, &iov, 1);
+	return (fetch_writev(conn, &iov, 1));
 }
 
 /*
@@ -1443,73 +1633,86 @@ fetch_write(conn_t *conn, const char *buf, size_t len)
 ssize_t
 fetch_writev(conn_t *conn, struct iovec *iov, int iovcnt)
 {
-	struct timeval now, timeout, delta;
 	struct pollfd pfd;
 	ssize_t wlen, total;
-	int deltams;
+	mstime_t now, deadline, deltams;
 
-	memset(&pfd, 0, sizeof pfd);
-	if (fetchTimeout) {
-		pfd.fd = conn->sd;
-		pfd.events = POLLOUT | POLLERR;
-		gettimeofday(&timeout, NULL);
-		timeout.tv_sec += fetchTimeout;
-	}
+	if (fetchTimeout > 0)
+		deadline = mstime_mono() + fetchTimeout * 1000;
+
+	deltams = INFTIM;
+	pfd.fd = conn->sd;
+	pfd.events = POLLOUT;
 
 	total = 0;
-	while (iovcnt > 0) {
-		while (fetchTimeout && pfd.revents == 0) {
-			gettimeofday(&now, NULL);
-			if (!timercmp(&timeout, &now, >)) {
+	for (;;) {
+		/*
+		 * The socket is non-blocking.  Instead of the canonical
+		 * poll() -> write(), we do the following:
+		 *
+		 * 1) call write() or SSL_write().
+		 * 2) if we wrote everything, return success.
+		 * 3) if write() or SSL_write() signaled EOF before we
+		 *    wrote everything, return -1.
+		 * 4) if an error occurred, return -1.
+		 * 5) if we did not write everything but we're not at EOF,
+		 *    call poll().
+		 */
+#ifdef WITH_SSL
+		if (conn->ssl != NULL) {
+			wlen = fetch_ssl_write(conn->ssl,
+			    iov->iov_base, iov->iov_len);
+		} else
+#endif
+			wlen = writev(conn->sd, iov, iovcnt);
+		if (wlen > 0) {
+			/* something was written */
+			total += wlen;
+			/* skip iovs which were completely written */
+			while (iovcnt > 0 && wlen >= (ssize_t)iov->iov_len) {
+				wlen -= iov->iov_len;
+				iov++;
+				iovcnt--;
+			}
+			/* are we done? */
+			if (iovcnt == 0)
+				break;
+			/* skip written portion of current iov */
+			iov->iov_len -= wlen;
+			iov->iov_base = __DECONST(char *, iov->iov_base) + wlen;
+			/* a partial write is incomplete */
+			continue;
+		} else if (wlen == 0) {
+			/* connection closed */
+			break;
+		} else if (errno != EAGAIN) {
+			/* error */
+			if (errno == EINTR && fetchRestartCalls)
+				continue;
+			fetch_syserr();
+			break;
+		}
+		/* check what's left of our timeout */
+		if (fetchTimeout > 0) {
+			if ((now = mstime_mono()) > deadline) {
 				errno = ETIMEDOUT;
 				fetch_syserr();
 				return (-1);
 			}
-			timersub(&timeout, &now, &delta);
-			deltams = delta.tv_sec * 1000 +
-			    delta.tv_usec / 1000;
-			errno = 0;
-			pfd.revents = 0;
-			if (poll(&pfd, 1, deltams) < 0) {
-				/* POSIX compliance */
-				if (errno == EAGAIN)
-					continue;
-				if (errno == EINTR && fetchRestartCalls)
-					continue;
-				return (-1);
-			}
+			deltams = deadline - now;
 		}
-		errno = 0;
-#ifdef WITH_SSL
-		if (conn->ssl != NULL)
-			wlen = SSL_write(conn->ssl,
-			    iov->iov_base, iov->iov_len);
-		else
-#endif
-			wlen = writev(conn->sd, iov, iovcnt);
-		if (wlen == 0) {
-			/* we consider a short write a failure */
-			/* XXX perhaps we shouldn't in the SSL case */
-			errno = EPIPE;
-			fetch_syserr();
-			return (-1);
-		}
-		if (wlen < 0) {
+		/* wait for the socket to become writeable */
+		if (poll(&pfd, 1, deltams) < 0) {
+			if (errno == EAGAIN)
+				continue;
 			if (errno == EINTR && fetchRestartCalls)
 				continue;
 			return (-1);
 		}
-		total += wlen;
-		while (iovcnt > 0 && wlen >= (ssize_t)iov->iov_len) {
-			wlen -= iov->iov_len;
-			iov++;
-			iovcnt--;
-		}
-		if (iovcnt > 0) {
-			iov->iov_len -= wlen;
-			iov->iov_base = __DECONST(char *, iov->iov_base) + wlen;
-		}
 	}
+	/* a partial write is failure */
+	if (iovcnt > 0)
+		return (-1);
 	return (total);
 }
 

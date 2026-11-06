@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 1984-2025  Mark Nudelman
+ * Copyright (C) 1984-2026  Mark Nudelman
  *
  * You may distribute under the terms of either the GNU General Public
  * License or the Less License, as specified in the README file.
@@ -128,10 +128,12 @@ static struct xbuffer user_wide_array;
 static struct xbuffer user_ubin_array;
 static struct xbuffer user_compose_array;
 static struct xbuffer user_prt_array;
+static struct xbuffer user_omit_array;
 static struct wchar_range_table user_wide_table;
 static struct wchar_range_table user_ubin_table;
 static struct wchar_range_table user_compose_table;
 static struct wchar_range_table user_prt_table;
+static struct wchar_range_table user_omit_table;
 
 /*
  * Set a wchar_range_table to the table in an xbuffer.
@@ -179,6 +181,7 @@ static void ichardef_utf(constant char *s)
 	xbuf_init(&user_ubin_array);
 	xbuf_init(&user_compose_array);
 	xbuf_init(&user_prt_array);
+	xbuf_init(&user_omit_array);
 
 	if (s != NULL)
 	{
@@ -188,28 +191,31 @@ static void ichardef_utf(constant char *s)
 			wchar_range_get(&s, &range);
 			if (range.last == 0)
 			{
-				error("invalid hex number(s) in LESSUTFCHARDEF", NULL_PARG);
+				error(LM(invalid_hex_number_in_LESSUTFCHARDEF), NULL_PARG);
 				quit(QUIT_ERROR);
 			}
 			if (*s++ != ':')
 			{
-				error("missing colon in LESSUTFCHARDEF", NULL_PARG);
+				error(LM(missing_colon_in_LESSUTFCHARDEF), NULL_PARG);
 				quit(QUIT_ERROR);
 			}
 			switch (*s++)
 			{
 			case 'b':
-				xbuf_add_data(&user_ubin_array, (unsigned char *) &range, sizeof(range));
+				xbuf_add_data(&user_ubin_array, &range, sizeof(range));
 				break;
 			case 'c':
-				xbuf_add_data(&user_compose_array, (unsigned char *) &range, sizeof(range));
+				xbuf_add_data(&user_compose_array, &range, sizeof(range));
+				break;
+			case 'd':
+				xbuf_add_data(&user_omit_array, &range, sizeof(range));
 				break;
 			case 'w':
-				xbuf_add_data(&user_wide_array, (unsigned char *) &range, sizeof(range));
-				xbuf_add_data(&user_prt_array, (unsigned char *) &range, sizeof(range));
+				xbuf_add_data(&user_wide_array, &range, sizeof(range));
+				xbuf_add_data(&user_prt_array, &range, sizeof(range));
 				break;
 			case 'p': case '.':
-				xbuf_add_data(&user_prt_array, (unsigned char *) &range, sizeof(range));
+				xbuf_add_data(&user_prt_array, &range, sizeof(range));
 				break;
 			case '\0':
 				s--;
@@ -225,6 +231,7 @@ static void ichardef_utf(constant char *s)
 	wchar_range_table_set(&user_ubin_table, &user_ubin_array);
 	wchar_range_table_set(&user_compose_table, &user_compose_array);
 	wchar_range_table_set(&user_prt_table, &user_prt_array);
+	wchar_range_table_set(&user_omit_table, &user_omit_array);
 }
 
 /*
@@ -272,7 +279,7 @@ static void ichardef(constant char *s)
 
 		default:
 		invalid_chardef:
-			error("invalid chardef", NULL_PARG);
+			error(LM(invalid_chardef), NULL_PARG);
 			quit(QUIT_ERROR);
 			/*NOTREACHED*/
 		}
@@ -281,7 +288,7 @@ static void ichardef(constant char *s)
 		{
 			if (cp >= chardef + sizeof(chardef))
 			{
-				error("chardef longer than 256", NULL_PARG);
+				error(LM(chardef_longer_than_256), NULL_PARG);
 				quit(QUIT_ERROR);
 				/*NOTREACHED*/
 			}
@@ -298,7 +305,7 @@ static void ichardef(constant char *s)
  * Define a charset, given a charset name.
  * The valid charset names are listed in the "charsets" array.
  */
-static int icharset(constant char *name, int no_error)
+static int icharset(constant char *name, lbool no_error)
 {
 	struct charset *p;
 	struct cs_alias *a;
@@ -334,7 +341,7 @@ static int icharset(constant char *name, int no_error)
 	}
 
 	if (!no_error) {
-		error("invalid charset name", NULL_PARG);
+		error(LM(invalid_charset_name), NULL_PARG);
 		quit(QUIT_ERROR);
 	}
 	return (0);
@@ -346,9 +353,9 @@ static int icharset(constant char *name, int no_error)
  */
 static void ilocale(void)
 {
-	int c;
+	size_t c;
 
-	for (c = 0;  c < (int) sizeof(chardef);  c++)
+	for (c = 0;  c < sizeof(chardef);  c++)
 	{
 		if (isprint(c))
 			chardef[c] = 0;
@@ -404,7 +411,7 @@ static void set_charset(void)
 	 * See if environment variable LESSCHARSET is defined.
 	 */
 	s = lgetenv("LESSCHARSET");
-	if (icharset(s, 0))
+	if (icharset(s, FALSE))
 		return;
 
 	/*
@@ -422,13 +429,21 @@ static void set_charset(void)
 	/*
 	 * Try using the codeset name as the charset name.
 	 */
-	s = nl_langinfo(CODESET);
-	if (icharset(s, 1))
-		return;
+#if LESSTEST
+	/*
+	 * Don't check nl_langinfo in lesstest mode; charset should come
+	 * only from environment variables, not from the system locale.
+	 */
+	if (0) /* {{ unfortunately it's too early to use is_lesstest }} */
+#endif
+	{
+		s = nl_langinfo(CODESET);
+		if (icharset(s, TRUE))
+			return;
+	}
 #endif
 #endif
 
-#if HAVE_STRSTR
 	/*
 	 * Check whether LC_ALL, LC_CTYPE or LANG look like UTF-8 is used.
 	 */
@@ -438,10 +453,9 @@ static void set_charset(void)
 	{
 		if (   strstr(s, "UTF-8") != NULL || strstr(s, "utf-8") != NULL
 		    || strstr(s, "UTF8")  != NULL || strstr(s, "utf8")  != NULL)
-			if (icharset("utf-8", 1))
+			if (icharset("utf-8", TRUE))
 				return;
 	}
-#endif
 
 #if HAVE_LOCALE
 	/*
@@ -452,12 +466,12 @@ static void set_charset(void)
 #else
 #if MSDOS_COMPILER
 #if MSDOS_COMPILER==WIN32C
-	(void) icharset("utf-8", 1);
+	(void) icharset("utf-8", TRUE);
 #else
-	(void) icharset("dos", 1);
+	(void) icharset("dos", TRUE);
 #endif
 #else
-	(void) icharset("utf-8", 1);
+	(void) icharset("utf-8", TRUE);
 #endif
 #endif
 }
@@ -513,7 +527,7 @@ public constant char * prchar(LWCHAR c)
 	/* {{ Fixed buffer size means LESSBINFMT etc can be truncated. }} */
 	static char buf[MAX_PRCHAR_LEN+1];
 
-	c &= 0377; /*{{type-issue}}*/
+	c = (unsigned char) c; /* {{ parameter is interpreted as a byte }} */
 	if ((c < 128 || !utf_mode) && !control_char(c))
 		SNPRINTF1(buf, sizeof(buf), "%c", (int) c);
 	else if (c == ESC)
@@ -554,7 +568,7 @@ public constant char * prutfchar(LWCHAR ch)
 			SNPRINTF1(buf, sizeof(buf), "^%c", ((char) ch) ^ 0100);
 		else
 			SNPRINTF1(buf, sizeof(buf), binfmt, (char) ch);
-	} else if (is_ubin_char(ch))
+	} else if (is_ubin_char(ch) || is_omit_char(ch))
 	{
 		SNPRINTF1(buf, sizeof(buf), utfbinfmt, ch);
 	} else
@@ -571,20 +585,21 @@ public constant char * prutfchar(LWCHAR ch)
 /*
  * Get the length of a UTF-8 character in bytes.
  */
-public int utf_len(char ch)
+public int utf_len(char ach)
 {
-	if ((ch & 0x80) == 0)
+	unsigned char ch = (unsigned char) ach;
+	if (IS_ASCII_OCTET(ch))
 		return 1;
-	if ((ch & 0xE0) == 0xC0)
+	if (IS_UTF8_LEAD2(ch))
 		return 2;
-	if ((ch & 0xF0) == 0xE0)
+	if (IS_UTF8_LEAD3(ch))
 		return 3;
-	if ((ch & 0xF8) == 0xF0)
+	if (IS_UTF8_LEAD4(ch))
 		return 4;
 #if 0
-	if ((ch & 0xFC) == 0xF8)
+	if (IS_UTF8_LEAD5(ch))
 		return 5;
-	if ((ch & 0xFE) == 0xFC)
+	if (IS_UTF8_LEAD6(ch))
 		return 6;
 #endif
 	/* Invalid UTF-8 encoding. */
@@ -594,34 +609,36 @@ public int utf_len(char ch)
 /*
  * Does the parameter point to the lead byte of a well-formed UTF-8 character?
  */
-public lbool is_utf8_well_formed(constant char *ss, int slen)
+public lbool is_utf8_well_formed(constant char *ssa, int slen)
 {
 	int i;
 	int len;
-	unsigned char s0 = (unsigned char) ss[0];
+	constant unsigned char *ss = (constant unsigned char *) ssa;
+	unsigned char s0 = ss[0];
 
-	if (IS_UTF8_INVALID(s0))
-		return (FALSE);
+	if (IS_UTF8_LEAD5(s0) || IS_UTF8_LEAD6(s0) || IS_UTF8_INVALID(s0))
+		return (FALSE); /* invalid lead byte */
 
-	len = utf_len(ss[0]);
+	len = utf_len(s0);
 	if (len > slen)
-		return (FALSE);
+		return (FALSE); /* UTF-8 sequence doesn't fit in buffer */
 	if (len == 1)
 		return (TRUE);
 	if (len == 2)
 	{
 		if (s0 < 0xC2)
-			return (FALSE);
+			return (FALSE); /* overlong (fits in 1 byte) */
 	} else
 	{
+		/* mask = byte with len high-order bits set to 1, others 0 */
 		unsigned char mask = (unsigned char) (~((1 << (8-len)) - 1));
 		if (s0 == mask && (ss[1] & mask) == 0x80)
-			return (FALSE);
+			return (FALSE); /* overlong (fits in fewer bytes) */
 	}
 
 	for (i = 1;  i < len;  i++)
 		if (!IS_UTF8_TRAIL(ss[i]))
-			return (FALSE);
+			return (FALSE); /* not a continuation byte */
 	return (TRUE);
 }
 
@@ -634,7 +651,6 @@ public void utf_skip_to_lead(constant char **pp, constant char *limit)
 		++(*pp);
 	} while (*pp < limit && !IS_UTF8_LEAD((*pp)[0] & 0377) && !IS_ASCII_OCTET((*pp)[0]));
 }
-
 
 /*
  * Get the value of a UTF-8 character.
@@ -739,7 +755,8 @@ public void put_wchar(mutable char **pp, LWCHAR ch)
 }
 
 /*
- * Step forward or backward one character in a string.
+ * Step forward (dir > 0) or backward (dir < 0) one character in a string.
+ * If dir > 0, limit is end of string; if dir < 0, limit is start of string.
  */
 public LWCHAR step_charc(constant char **pp, signed int dir, constant char *limit)
 {
@@ -763,6 +780,7 @@ public LWCHAR step_charc(constant char **pp, signed int dir, constant char *limi
 			len = utf_len(*p);
 			if (p + len > limit || !is_utf8_well_formed(p, len))
 			{
+				/* Invalid UTF-8 sequence; just take the next byte as a character. */
 				ch = (LWCHAR) (unsigned char) *p++;
 			} else
 			{
@@ -781,6 +799,7 @@ public LWCHAR step_charc(constant char **pp, signed int dir, constant char *limi
 			len = utf_len(*--p);
 			if (p + len != *pp || !is_utf8_well_formed(p, len))
 			{
+				/* Invalid UTF-8 sequence; just take the next byte as a character. */
 				p = *pp - 1;
 				ch = (LWCHAR) (unsigned char) *p;
 			} else
@@ -827,6 +846,10 @@ DECLARE_RANGE_TABLE_START(fmt)
 #include "fmt.uni"
 DECLARE_RANGE_TABLE_END(fmt)
 
+DECLARE_RANGE_TABLE_START(omit)
+#include "omit.uni"
+DECLARE_RANGE_TABLE_END(omit)
+
 /* comb_table is special pairs, not ranges. */
 static struct wchar_range comb_table[] = {
 	{0x0644,0x0622}, {0x0644,0x0623}, {0x0644,0x0625}, {0x0644,0x0627},
@@ -857,6 +880,17 @@ static lbool is_in_table(LWCHAR ch, struct wchar_range_table *table)
 }
 
 /*
+ * Is a character in none of a set of specified user tables?
+ */
+static lbool not_user_defined(LWCHAR ch, struct wchar_range_table *tbl1, struct wchar_range_table *tbl2, struct wchar_range_table *tbl3)
+{
+	if (is_in_table(ch, tbl1)) return FALSE;
+	if (is_in_table(ch, tbl2)) return FALSE;
+	if (is_in_table(ch, tbl3)) return FALSE;
+	return TRUE;
+}
+
+/*
  * Is a character a UTF-8 composing character?
  * If a composing character follows any char, the two combine into one glyph.
  */
@@ -864,8 +898,9 @@ public lbool is_composing_char(LWCHAR ch)
 {
 	if (is_in_table(ch, &user_prt_table)) return FALSE;
 	return is_in_table(ch, &user_compose_table) ||
-	       is_in_table(ch, &compose_table) ||
-	       (bs_mode != BS_CONTROL && is_in_table(ch, &fmt_table));
+	       (is_in_table(ch, &compose_table) ||
+	       (bs_mode != BS_CONTROL && is_in_table(ch, &fmt_table) &&
+            not_user_defined(ch, &user_prt_table, &user_ubin_table, &user_omit_table)));
 }
 
 /*
@@ -874,9 +909,11 @@ public lbool is_composing_char(LWCHAR ch)
 public lbool is_ubin_char(LWCHAR ch)
 {
 	if (is_in_table(ch, &user_prt_table)) return FALSE;
+	if (ch > MAX_UNICODE) return TRUE;
 	return is_in_table(ch, &user_ubin_table) ||
-	       is_in_table(ch, &ubin_table) ||
-	       (bs_mode == BS_CONTROL && is_in_table(ch, &fmt_table));
+	       (is_in_table(ch, &ubin_table) ||
+	       (bs_mode == BS_CONTROL && is_in_table(ch, &fmt_table) &&
+            not_user_defined(ch, &user_prt_table, &user_compose_table, &user_omit_table)));
 }
 
 /*
@@ -885,7 +922,18 @@ public lbool is_ubin_char(LWCHAR ch)
 public lbool is_wide_char(LWCHAR ch)
 {
 	return is_in_table(ch, &user_wide_table) ||
-	       is_in_table(ch, &wide_table);
+	       (is_in_table(ch, &wide_table) &&
+            not_user_defined(ch, &user_compose_table, &user_ubin_table, &user_omit_table));
+}
+
+/*
+ * Is this an omittable character?
+ */
+public lbool is_omit_char(LWCHAR ch)
+{
+	return is_in_table(ch, &user_omit_table) ||
+	       (is_in_table(ch, &omit_table) &&
+            not_user_defined(ch, &user_prt_table, &user_compose_table, &user_ubin_table));
 }
 
 /*
@@ -905,4 +953,3 @@ public lbool is_combining_char(LWCHAR ch1, LWCHAR ch2)
 	}
 	return FALSE;
 }
-

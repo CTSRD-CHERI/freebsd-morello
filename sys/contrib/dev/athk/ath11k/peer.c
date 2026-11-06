@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 /*
  * Copyright (c) 2018-2019 The Linux Foundation. All rights reserved.
- * Copyright (c) 2021-2022 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2023 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include "core.h"
@@ -125,7 +125,7 @@ void ath11k_peer_map_event(struct ath11k_base *ab, u8 vdev_id, u16 peer_id,
 	spin_lock_bh(&ab->base_lock);
 	peer = ath11k_peer_find(ab, vdev_id, mac_addr);
 	if (!peer) {
-		peer = kzalloc(sizeof(*peer), GFP_ATOMIC);
+		peer = kzalloc_obj(*peer, GFP_ATOMIC);
 		if (!peer)
 			goto exit;
 
@@ -446,7 +446,7 @@ int ath11k_peer_create(struct ath11k *ar, struct ath11k_vif *arvif,
 	peer->sec_type_grp = HAL_ENCRYPT_TYPE_OPEN;
 
 	if (sta) {
-		arsta = (struct ath11k_sta *)sta->drv_priv;
+		arsta = ath11k_sta_to_arsta(sta);
 		arsta->tcl_metadata |= FIELD_PREP(HTT_TCL_META_DATA_TYPE, 0) |
 				       FIELD_PREP(HTT_TCL_META_DATA_PEER_ID,
 						  peer->peer_id);

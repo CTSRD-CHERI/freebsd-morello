@@ -25,7 +25,7 @@
 .\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 .\" SUCH DAMAGE.
 .\"
-.Dd March 30, 2021
+.Dd September 22, 2026
 .Dt STAT 2
 .Os
 .Sh NAME
@@ -157,7 +157,7 @@ and into which information is placed concerning the file.
 The fields of
 .Vt "struct stat"
 related to the file system are:
-.Bl -tag -width ".Va st_nlink"
+.Bl -tag -width ".Va st_bsdflags"
 .It Va st_dev
 Numeric ID of the device containing the file.
 .It Va st_ino
@@ -169,6 +169,11 @@ Flags enabled for the file.
 See
 .Xr chflags 2
 for the list of flags and their description.
+.It Va st_rdev
+Numeric ID of the device referenced by the file, if the file is a
+character or block special; otherwise unspecified.
+.It Va st_bsdflags
+Miscellaneous file flags (see below).
 .El
 .Pp
 The
@@ -260,9 +265,23 @@ File size in bytes.
 .It Va st_blksize
 Optimal I/O block size for the file.
 .It Va st_blocks
-Actual number of blocks allocated for the file in 512-byte units.
+Actual number of blocks allocated for the file.
+.Pp
+For files located on non-synthetic filesystems, the block size is 512 bytes.
 As short symbolic links are stored in the inode, this number may
 be zero.
+.Pp
+For file descriptors referencing specific non-file objects,
+the field is type-specific.
+.Pp
+For POSIX shared memory segments
+.Pq see Xr shm_open 2 ,
+the block size is 512 bytes.
+For older versions of
+.Fx
+.Pq before 15.2 and 16.0
+the block size was equal to the platform page size
+.Pq Xr getpagesize 2 .
 .El
 .Pp
 The access-related fields of
@@ -292,7 +311,7 @@ has these bits:
 #define S_IFWHT  0160000  /* whiteout */
 #define S_ISUID  0004000  /* set user id on execution */
 #define S_ISGID  0002000  /* set group id on execution */
-#define S_ISVTX  0001000  /* save swapped text even after use */
+#define S_ISVTX  0001000  /* sticky(7) bit is set */
 #define S_IRWXU  0000700  /* RWX mask for owner */
 #define S_IRUSR  0000400  /* read permission, owner */
 #define S_IWUSR  0000200  /* write permission, owner */
@@ -338,6 +357,19 @@ Test for a whiteout.
 .Pp
 The macros evaluate to a non-zero value if the test is true
 or to the value 0 if the test is false.
+.Pp
+The
+.Va st_bsdflags
+field contains the following flags, defined in
+.In sys/stat.h :
+.Bl -tag -width indent
+.It Dv SFBSD_NAMEDATTR
+The file is a named attribute or a named attribute directory.
+.It Dv SFBSD_MNTPOINT
+The file is a mount point.
+The reported file attributes describe the root node of the file system
+mounted on it.
+.El
 .Sh RETURN VALUES
 .Rv -std
 .Sh COMPATIBILITY
@@ -465,6 +497,12 @@ system calls are expected to conform to
 The
 .Fn fstatat
 system call follows The Open Group Extended API Set 2 specification.
+.Pp
+The
+.Va st_bsdflags
+field is a non-portable
+.Fx Ns -only
+extension.
 .Sh HISTORY
 The
 .Fn stat

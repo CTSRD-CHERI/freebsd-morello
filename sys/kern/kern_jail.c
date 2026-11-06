@@ -36,18 +36,22 @@
 
 #include <sys/param.h>
 #include <sys/types.h>
+#include <sys/ctype.h>
 #include <sys/kernel.h>
 #include <sys/systm.h>
 #include <sys/errno.h>
+#include <sys/file.h>
 #include <sys/sysproto.h>
 #include <sys/malloc.h>
 #include <sys/osd.h>
 #include <sys/priv.h>
 #include <sys/proc.h>
 #include <sys/epoch.h>
+#include <sys/event.h>
 #include <sys/taskqueue.h>
 #include <sys/fcntl.h>
 #include <sys/jail.h>
+#include <sys/jaildesc.h>
 #include <sys/linker.h>
 #include <sys/lock.h>
 #include <sys/mman.h>
@@ -76,11 +80,15 @@
 #endif /* DDB */
 
 #include <security/mac/mac_framework.h>
+#include <security/mac/mac_policy.h>
+#include <security/mac/mac_syscalls.h>
 
 #define	PRISON0_HOSTUUID_MODULE	"hostuuid"
 
 MALLOC_DEFINE(M_PRISON, "prison", "Prison structures");
+#ifdef RACCT
 static MALLOC_DEFINE(M_PRISON_RACCT, "prison_racct", "Prison racct structures");
+#endif
 
 /* Keep struct prison prison0 and some code in kern_jail_set() readable. */
 #ifdef INET
@@ -149,12 +157,15 @@ int	lastdeadid = 0;
 
 static int get_next_prid(struct prison **insprp);
 static int get_next_deadid(struct prison **insprp);
-static int do_jail_attach(struct thread *td, struct prison *pr, int drflags);
+static int do_jail_attach(struct thread *td, struct prison *pr, int *drflagsp);
+static int prison_attach_thread_single(struct thread *td);
+static void prison_attach_thread_single_end(struct thread *td);
 static void prison_complete(void *context, int pending);
 static void prison_deref(struct prison *pr, int flags);
 static void prison_deref_kill(struct prison *pr, struct prisonlist *freeprison);
 static int prison_lock_xlock(struct prison *pr, int flags);
-static void prison_cleanup(struct prison *pr);
+static void prison_cleanup_locked(struct prison *pr);
+static void prison_cleanup_unlocked(struct prison *pr);
 static void prison_free_not_last(struct prison *pr);
 static void prison_proc_free_not_last(struct prison *pr);
 static void prison_proc_relink(struct prison *opr, struct prison *npr,
@@ -167,6 +178,7 @@ static void prison_racct_attach(struct prison *pr);
 static void prison_racct_modify(struct prison *pr);
 static void prison_racct_detach(struct prison *pr);
 #endif
+static void prison_knote(struct prison *pr, long hint);
 
 /* Flags for prison_deref */
 #define	PD_DEREF	0x01	/* Decrement pr_ref */
@@ -184,26 +196,26 @@ static void prison_racct_detach(struct prison *pr);
  * terminating entry.
  */
 static struct bool_flags pr_flag_bool[] = {
-	{"persist", "nopersist", PR_PERSIST},
+	{JAIL_PARAM_PERSIST, JAIL_PARAM_NOPERSIST, PR_PERSIST},
 #ifdef INET
-	{"ip4.saddrsel", "ip4.nosaddrsel", PR_IP4_SADDRSEL},
+	{JAIL_PARAM_IP4_SADDRSEL, JAIL_PARAM_IP4_NOSADDRSEL, PR_IP4_SADDRSEL},
 #endif
 #ifdef INET6
-	{"ip6.saddrsel", "ip6.nosaddrsel", PR_IP6_SADDRSEL},
+	{JAIL_PARAM_IP6_SADDRSEL, JAIL_PARAM_IP6_NOSADDRSEL, PR_IP6_SADDRSEL},
 #endif
 };
 const size_t pr_flag_bool_size = sizeof(pr_flag_bool);
 
 static struct jailsys_flags pr_flag_jailsys[] = {
-	{"host", 0, PR_HOST},
+	{JAIL_PARAM_HOST, 0, PR_HOST},
 #ifdef VIMAGE
-	{"vnet", 0, PR_VNET},
+	{JAIL_PARAM_VNET, 0, PR_VNET},
 #endif
 #ifdef INET
-	{"ip4", PR_IP4_USER, PR_IP4_USER},
+	{JAIL_PARAM_IP4, PR_IP4_USER, PR_IP4_USER},
 #endif
 #ifdef INET6
-	{"ip6", PR_IP6_USER, PR_IP6_USER},
+	{JAIL_PARAM_IP6, PR_IP6_USER, PR_IP6_USER},
 #endif
 };
 const size_t pr_flag_jailsys_size = sizeof(pr_flag_jailsys);
@@ -214,30 +226,44 @@ const size_t pr_flag_jailsys_size = sizeof(pr_flag_jailsys);
  * with an atomic check of the flag values.
  */
 static struct bool_flags pr_flag_allow[NBBY * NBPW] = {
-	{"allow.set_hostname", "allow.noset_hostname", PR_ALLOW_SET_HOSTNAME},
-	{"allow.sysvipc", "allow.nosysvipc", PR_ALLOW_SYSVIPC},
-	{"allow.raw_sockets", "allow.noraw_sockets", PR_ALLOW_RAW_SOCKETS},
-	{"allow.chflags", "allow.nochflags", PR_ALLOW_CHFLAGS},
-	{"allow.mount", "allow.nomount", PR_ALLOW_MOUNT},
-	{"allow.quotas", "allow.noquotas", PR_ALLOW_QUOTAS},
-	{"allow.socket_af", "allow.nosocket_af", PR_ALLOW_SOCKET_AF},
-	{"allow.mlock", "allow.nomlock", PR_ALLOW_MLOCK},
-	{"allow.reserved_ports", "allow.noreserved_ports",
+	{JAIL_PARAM_ALLOW_SET_HOSTNAME, JAIL_PARAM_ALLOW_NOSET_HOSTNAME,
+	 PR_ALLOW_SET_HOSTNAME},
+	{JAIL_PARAM_ALLOW_SYSVIPC, JAIL_PARAM_ALLOW_NOSYSVIPC,
+	 PR_ALLOW_SYSVIPC},
+	{JAIL_PARAM_ALLOW_RAW_SOCKETS, JAIL_PARAM_ALLOW_NORAW_SOCKETS,
+	 PR_ALLOW_RAW_SOCKETS},
+	{JAIL_PARAM_ALLOW_CHFLAGS, JAIL_PARAM_ALLOW_NOCHFLAGS,
+	 PR_ALLOW_CHFLAGS},
+	{JAIL_PARAM_ALLOW_MOUNT, JAIL_PARAM_ALLOW_NOMOUNT, PR_ALLOW_MOUNT},
+	{JAIL_PARAM_ALLOW_QUOTAS, JAIL_PARAM_ALLOW_NOQUOTAS, PR_ALLOW_QUOTAS},
+	{JAIL_PARAM_ALLOW_SOCKET_AF, JAIL_PARAM_ALLOW_NOSOCKET_AF,
+	 PR_ALLOW_SOCKET_AF},
+	{JAIL_PARAM_ALLOW_MLOCK, JAIL_PARAM_ALLOW_NOMLOCK, PR_ALLOW_MLOCK},
+	{JAIL_PARAM_ALLOW_RESERVED_PORTS, JAIL_PARAM_ALLOW_NORESERVED_PORTS,
 	 PR_ALLOW_RESERVED_PORTS},
-	{"allow.read_msgbuf", "allow.noread_msgbuf", PR_ALLOW_READ_MSGBUF},
-	{"allow.unprivileged_proc_debug", "allow.nounprivileged_proc_debug",
+	{JAIL_PARAM_ALLOW_READ_MSGBUF, JAIL_PARAM_ALLOW_NOREAD_MSGBUF,
+	 PR_ALLOW_READ_MSGBUF},
+	{JAIL_PARAM_ALLOW_UNPRIV_DEBUG, JAIL_PARAM_ALLOW_NOUNPRIV_DEBUG,
 	 PR_ALLOW_UNPRIV_DEBUG},
-	{"allow.suser", "allow.nosuser", PR_ALLOW_SUSER},
+	{JAIL_PARAM_ALLOW_SUSER, JAIL_PARAM_ALLOW_NOSUSER, PR_ALLOW_SUSER},
 #ifdef VIMAGE
-	{"allow.nfsd", "allow.nonfsd", PR_ALLOW_NFSD},
+	{JAIL_PARAM_ALLOW_NFSD, JAIL_PARAM_ALLOW_NONFSD, PR_ALLOW_NFSD},
 #endif
-	{"allow.extattr", "allow.noextattr", PR_ALLOW_EXTATTR},
-	{"allow.adjtime", "allow.noadjtime", PR_ALLOW_ADJTIME},
-	{"allow.settime", "allow.nosettime", PR_ALLOW_SETTIME},
-	{"allow.routing", "allow.norouting", PR_ALLOW_ROUTING},
-	{"allow.unprivileged_parent_tampering",
-	    "allow.nounprivileged_parent_tampering",
+	{JAIL_PARAM_ALLOW_EXTATTR, JAIL_PARAM_ALLOW_NOEXTATTR,
+	 PR_ALLOW_EXTATTR},
+	{JAIL_PARAM_ALLOW_ADJTIME, JAIL_PARAM_ALLOW_NOADJTIME,
+	 PR_ALLOW_ADJTIME},
+	{JAIL_PARAM_ALLOW_SETTIME, JAIL_PARAM_ALLOW_NOSETTIME,
+	 PR_ALLOW_SETTIME},
+	{JAIL_PARAM_ALLOW_ROUTING, JAIL_PARAM_ALLOW_NOROUTING,
+	 PR_ALLOW_ROUTING},
+	{JAIL_PARAM_ALLOW_UNPRIV_PARENT_TAMPER,
+	    JAIL_PARAM_ALLOW_NOUNPRIV_PARENT_TAMPER,
 	    PR_ALLOW_UNPRIV_PARENT_TAMPER},
+#ifdef AUDIT
+	{JAIL_PARAM_ALLOW_SETAUDIT, JAIL_PARAM_ALLOW_NOSETAUDIT,
+	 PR_ALLOW_SETAUDIT},
+#endif
 };
 static unsigned pr_allow_all = PR_ALLOW_ALL_STATIC;
 const size_t pr_flag_allow_size = sizeof(pr_flag_allow);
@@ -265,8 +291,17 @@ prison0_init(void)
 	uint8_t *file, *data;
 	size_t size;
 	char buf[sizeof(prison0.pr_hostuuid)];
+#ifdef MAC
+	int error __diagused;
+#endif
 	bool valid;
 
+#ifdef MAC
+	error = mac_prison_init(&prison0, M_WAITOK);
+	MPASS(error == 0);
+
+	mtx_unlock(&prison0.pr_mtx);
+#endif
 	prison0.pr_cpuset = cpuset_ref(thread0.td_cpuset);
 	prison0.pr_osreldate = osreldate;
 	strlcpy(prison0.pr_osrelease, osrelease, sizeof(prison0.pr_osrelease));
@@ -419,8 +454,8 @@ kern_jail(struct thread *td, struct jail *j)
 			    strlen(optiov[opt.uio_iovcnt].iov_base) + 1;
 			opt.uio_iovcnt += 2;
 		}
-		optiov[opt.uio_iovcnt].iov_base = "enforce_statfs";
-		optiov[opt.uio_iovcnt].iov_len = sizeof("enforce_statfs");
+		optiov[opt.uio_iovcnt].iov_base = JAIL_PARAM_ENFORCE_STATFS;
+		optiov[opt.uio_iovcnt].iov_len = sizeof(JAIL_PARAM_ENFORCE_STATFS);
 		opt.uio_iovcnt++;
 		enforce_statfs = jail_default_enforce_statfs;
 		optiov[opt.uio_iovcnt].iov_base = &enforce_statfs;
@@ -459,8 +494,8 @@ kern_jail(struct thread *td, struct jail *j)
 	u_ip6 = (struct in6_addr *)(u_name + MAXHOSTNAMELEN);
 #endif
 #endif
-	optiov[opt.uio_iovcnt].iov_base = "path";
-	optiov[opt.uio_iovcnt].iov_len = sizeof("path");
+	optiov[opt.uio_iovcnt].iov_base = JAIL_PARAM_PATH;
+	optiov[opt.uio_iovcnt].iov_len = sizeof(JAIL_PARAM_PATH);
 	opt.uio_iovcnt++;
 	optiov[opt.uio_iovcnt].iov_base = u_path;
 	error = copyinstr(j->path, u_path, MAXPATHLEN,
@@ -470,8 +505,8 @@ kern_jail(struct thread *td, struct jail *j)
 		return (error);
 	}
 	opt.uio_iovcnt++;
-	optiov[opt.uio_iovcnt].iov_base = "host.hostname";
-	optiov[opt.uio_iovcnt].iov_len = sizeof("host.hostname");
+	optiov[opt.uio_iovcnt].iov_base = JAIL_PARAM_HOST_HOSTNAME;
+	optiov[opt.uio_iovcnt].iov_len = sizeof(JAIL_PARAM_HOST_HOSTNAME);
 	opt.uio_iovcnt++;
 	optiov[opt.uio_iovcnt].iov_base = u_hostname;
 	error = copyinstr(j->hostname, u_hostname, MAXHOSTNAMELEN,
@@ -482,8 +517,8 @@ kern_jail(struct thread *td, struct jail *j)
 	}
 	opt.uio_iovcnt++;
 	if (j->jailname != NULL) {
-		optiov[opt.uio_iovcnt].iov_base = "name";
-		optiov[opt.uio_iovcnt].iov_len = sizeof("name");
+		optiov[opt.uio_iovcnt].iov_base = JAIL_PARAM_NAME;
+		optiov[opt.uio_iovcnt].iov_len = sizeof(JAIL_PARAM_NAME);
 		opt.uio_iovcnt++;
 		optiov[opt.uio_iovcnt].iov_base = u_name;
 		error = copyinstr(j->jailname, u_name, MAXHOSTNAMELEN,
@@ -495,8 +530,8 @@ kern_jail(struct thread *td, struct jail *j)
 		opt.uio_iovcnt++;
 	}
 #ifdef INET
-	optiov[opt.uio_iovcnt].iov_base = "ip4.addr";
-	optiov[opt.uio_iovcnt].iov_len = sizeof("ip4.addr");
+	optiov[opt.uio_iovcnt].iov_base = JAIL_PARAM_IP4_ADDR;
+	optiov[opt.uio_iovcnt].iov_len = sizeof(JAIL_PARAM_IP4_ADDR);
 	opt.uio_iovcnt++;
 	optiov[opt.uio_iovcnt].iov_base = u_ip4;
 	optiov[opt.uio_iovcnt].iov_len = ip4s * sizeof(struct in_addr);
@@ -512,8 +547,8 @@ kern_jail(struct thread *td, struct jail *j)
 	opt.uio_iovcnt++;
 #endif
 #ifdef INET6
-	optiov[opt.uio_iovcnt].iov_base = "ip6.addr";
-	optiov[opt.uio_iovcnt].iov_len = sizeof("ip6.addr");
+	optiov[opt.uio_iovcnt].iov_base = JAIL_PARAM_IP6_ADDR;
+	optiov[opt.uio_iovcnt].iov_len = sizeof(JAIL_PARAM_IP6_ADDR);
 	opt.uio_iovcnt++;
 	optiov[opt.uio_iovcnt].iov_base = u_ip6;
 	optiov[opt.uio_iovcnt].iov_len = j->ip6s * sizeof(struct in6_addr);
@@ -541,17 +576,25 @@ kern_jail(struct thread *td, struct jail *j)
 int
 sys_jail_set(struct thread *td, struct jail_set_args *uap)
 {
+	return (user_jail_set(td, uap->iovp, uap->iovcnt, uap->flags,
+	    copyinuio));
+}
+
+int
+user_jail_set(struct thread *td, struct iovec *iovp,
+    unsigned int iovcnt, int flags, copyinuio_t *copyinuio_f)
+{
 	struct uio *auio;
 	int error;
 
 	/* Check that we have an even number of iovecs. */
-	if (uap->iovcnt & 1)
+	if (iovcnt & 1)
 		return (EINVAL);
 
-	error = copyinuio(uap->iovp, uap->iovcnt, &auio);
+	error = copyinuio_f(iovp, iovcnt, &auio);
 	if (error)
 		return (error);
-	error = kern_jail_set(td, auio, uap->flags);
+	error = kern_jail_set(td, auio, flags);
 	freeuio(auio);
 	return (error);
 }
@@ -985,6 +1028,7 @@ prison_ip_cnt(const struct prison *pr, const pr_family_t af)
 int
 kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 {
+	struct file *jfp_out;
 	struct nameidata nd;
 #ifdef INET
 	struct prison_ip *ip4;
@@ -995,6 +1039,7 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 	struct vfsopt *opt;
 	struct vfsoptlist *opts;
 	struct prison *pr, *deadpr, *dinspr, *inspr, *mypr, *ppr, *tpr;
+	struct ucred *jdcred;
 	struct vnode *root;
 	char *domain, *errmsg, *host, *name, *namelc, *p, *path, *uuid;
 	char *g_path, *osrelstr;
@@ -1005,10 +1050,14 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 #endif
 	unsigned long hid;
 	size_t namelen, onamelen, pnamelen;
+#ifdef MAC
+	void *mac_set_prison_data = NULL;
+	int gotmaclabel;
+#endif
 	int created, cuflags, descend, drflags, enforce;
 	int error, errmsg_len, errmsg_pos;
 	int gotchildmax, gotenforce, gothid, gotrsnum, gotslevel;
-	int deadid, jid, jsys, len, level;
+	int deadid, jfd_in, jfd_out, jfd_pos, jid, jsys, len, level;
 	int childmax, osreldt, rsnum, slevel;
 #ifdef INET
 	int ip4s;
@@ -1018,22 +1067,39 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 	int ip6s;
 	bool redo_ip6;
 #endif
+	bool maybe_changed;
 	uint64_t pr_allow, ch_allow, pr_flags, ch_flags;
 	uint64_t pr_allow_diff;
 	unsigned tallow;
 	char numbuf[12];
 
-	error = priv_check(td, PRIV_JAIL_SET);
-	if (!error && (flags & JAIL_ATTACH))
-		error = priv_check(td, PRIV_JAIL_ATTACH);
-	if (error)
-		return (error);
 	mypr = td->td_ucred->cr_prison;
-	if ((flags & JAIL_CREATE) && mypr->pr_childmax == 0)
+	if (((flags & (JAIL_CREATE | JAIL_AT_DESC)) == JAIL_CREATE) &&
+	    mypr->pr_childmax == 0)
 		return (EPERM);
 	if (flags & ~JAIL_SET_MASK)
 		return (EINVAL);
+	if ((flags & (JAIL_USE_DESC | JAIL_AT_DESC)) ==
+	    (JAIL_USE_DESC | JAIL_AT_DESC))
+		return (EINVAL);
 
+	/* Only let a single thread in the process try to attach at a time. */
+	if (flags & JAIL_ATTACH) {
+		error = prison_attach_thread_single(td);
+		if (error != 0)
+			return (error);
+	}
+
+#ifdef INET
+	ip4 = NULL;
+#endif
+#ifdef INET6
+	ip6 = NULL;
+#endif
+	g_path = NULL;
+	jfp_out = NULL;
+	jfd_out = -1;
+	prison_hold(mypr);
 	/*
 	 * Check all the parameters before committing to anything.  Not all
 	 * errors can be caught early, but we may as well try.  Also, this
@@ -1045,15 +1111,10 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 	 *     than duplicate it under a different name.
 	 */
 	error = vfs_buildopts(optuio, &opts);
-	if (error)
-		return (error);
-#ifdef INET
-	ip4 = NULL;
-#endif
-#ifdef INET6
-	ip6 = NULL;
-#endif
-	g_path = NULL;
+	if (error) {
+		opts = NULL;
+		goto done_free;
+	}
 
 	cuflags = flags & (JAIL_CREATE | JAIL_UPDATE);
 	if (!cuflags) {
@@ -1062,13 +1123,72 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 		goto done_errmsg;
 	}
 
-	error = vfs_copyopt(opts, "jid", &jid, sizeof(jid));
+	error = vfs_copyopt(opts, JAIL_PARAM_DESC, &jfd_in, sizeof(jfd_in));
+	if (error == ENOENT) {
+		if (flags & (JAIL_USE_DESC | JAIL_AT_DESC | JAIL_GET_DESC |
+		    JAIL_OWN_DESC)) {
+			vfs_opterror(opts, "missing desc");
+			goto done_errmsg;
+		}
+		jfd_in = -1;
+	} else if (error != 0)
+		goto done_free;
+	else {
+		if (!(flags & (JAIL_USE_DESC | JAIL_AT_DESC | JAIL_GET_DESC |
+		    JAIL_OWN_DESC))) {
+			error = EINVAL;
+			vfs_opterror(opts, "unexpected desc");
+			goto done_errmsg;
+		}
+		if (flags & JAIL_AT_DESC) {
+			/*
+			 * Look up and create jails based on the
+			 * descriptor's prison.
+			 */
+			struct prison *jdpr;
+
+			error = jaildesc_find(td, jfd_in, &jdpr, NULL);
+			if (error != 0) {
+				vfs_opterror(opts, error == ENOENT ?
+				    "descriptor to dead jail" :
+				    "not a jail descriptor");
+				goto done_errmsg;
+			}
+			prison_free(mypr);
+			mypr = jdpr;
+			if ((flags & JAIL_CREATE) && mypr->pr_childmax == 0) {
+				error = EPERM;
+				goto done_free;
+			}
+		}
+		if (flags & (JAIL_GET_DESC | JAIL_OWN_DESC)) {
+			/* Allocate a jail descriptor to return later. */
+			error = jaildesc_alloc(td, &jfp_out, &jfd_out,
+				flags & JAIL_OWN_DESC);
+			if (error)
+				goto done_free;
+		}
+	}
+
+	/*
+	 * Delay the permission check if using a jail descriptor,
+	 * until we get the descriptor's credentials.
+	 */
+	if (!(flags & JAIL_USE_DESC)) {
+		error = priv_check(td, PRIV_JAIL_SET);
+		if (error == 0 && (flags & JAIL_ATTACH))
+			error = priv_check(td, PRIV_JAIL_ATTACH);
+		if (error)
+			goto done_free;
+	}
+
+	error = vfs_copyopt(opts, JAIL_PARAM_JID, &jid, sizeof(jid));
 	if (error == ENOENT)
 		jid = 0;
 	else if (error != 0)
 		goto done_free;
 
-	error = vfs_copyopt(opts, "securelevel", &slevel, sizeof(slevel));
+	error = vfs_copyopt(opts, JAIL_PARAM_SECURELEVEL, &slevel, sizeof(slevel));
 	if (error == ENOENT)
 		gotslevel = 0;
 	else if (error != 0)
@@ -1077,7 +1197,7 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 		gotslevel = 1;
 
 	error =
-	    vfs_copyopt(opts, "children.max", &childmax, sizeof(childmax));
+	    vfs_copyopt(opts, JAIL_PARAM_CHILDREN_MAX, &childmax, sizeof(childmax));
 	if (error == ENOENT)
 		gotchildmax = 0;
 	else if (error != 0)
@@ -1085,7 +1205,8 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 	else
 		gotchildmax = 1;
 
-	error = vfs_copyopt(opts, "enforce_statfs", &enforce, sizeof(enforce));
+	error = vfs_copyopt(opts, JAIL_PARAM_ENFORCE_STATFS, &enforce,
+	    sizeof(enforce));
 	if (error == ENOENT)
 		gotenforce = 0;
 	else if (error != 0)
@@ -1096,7 +1217,7 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 	} else
 		gotenforce = 1;
 
-	error = vfs_copyopt(opts, "devfs_ruleset", &rsnum, sizeof(rsnum));
+	error = vfs_copyopt(opts, JAIL_PARAM_DEVFS_RULESET, &rsnum, sizeof(rsnum));
 	if (error == ENOENT)
 		gotrsnum = 0;
 	else if (error != 0)
@@ -1177,7 +1298,7 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 	}
 	ch_allow |= pr_allow;
 
-	error = vfs_getopt(opts, "name", (void **)&name, &len);
+	error = vfs_getopt(opts, JAIL_PARAM_NAME, (void **)&name, &len);
 	if (error == ENOENT)
 		name = NULL;
 	else if (error != 0)
@@ -1193,7 +1314,7 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 		}
 	}
 
-	error = vfs_getopt(opts, "host.hostname", (void **)&host, &len);
+	error = vfs_getopt(opts, JAIL_PARAM_HOST_HOSTNAME, (void **)&host, &len);
 	if (error == ENOENT)
 		host = NULL;
 	else if (error != 0)
@@ -1211,7 +1332,7 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 		}
 	}
 
-	error = vfs_getopt(opts, "host.domainname", (void **)&domain, &len);
+	error = vfs_getopt(opts, JAIL_PARAM_HOST_DOMAINNAME, (void **)&domain, &len);
 	if (error == ENOENT)
 		domain = NULL;
 	else if (error != 0)
@@ -1229,7 +1350,7 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 		}
 	}
 
-	error = vfs_getopt(opts, "host.hostuuid", (void **)&uuid, &len);
+	error = vfs_getopt(opts, JAIL_PARAM_HOST_HOSTUUID, (void **)&uuid, &len);
 	if (error == ENOENT)
 		uuid = NULL;
 	else if (error != 0)
@@ -1251,11 +1372,11 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 	if (SV_PROC_FLAG(td->td_proc, SV_ILP32)) {
 		uint32_t hid32;
 
-		error = vfs_copyopt(opts, "host.hostid", &hid32, sizeof(hid32));
+		error = vfs_copyopt(opts, JAIL_PARAM_HOST_HOSTID, &hid32, sizeof(hid32));
 		hid = hid32;
 	} else
 #endif
-		error = vfs_copyopt(opts, "host.hostid", &hid, sizeof(hid));
+		error = vfs_copyopt(opts, JAIL_PARAM_HOST_HOSTID, &hid, sizeof(hid));
 	if (error == ENOENT)
 		gothid = 0;
 	else if (error != 0)
@@ -1266,8 +1387,19 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 		pr_flags |= PR_HOST;
 	}
 
+#ifdef MAC
+	/* Process the mac.label vfsopt */
+	error = mac_set_prison_prepare(td, opts, &mac_set_prison_data);
+	if (error == ENOENT)
+		gotmaclabel = 0;
+	else if (error != 0)
+		goto done_errmsg;
+	else
+		gotmaclabel = 1;
+#endif
+
 #ifdef INET
-	error = vfs_getopt(opts, "ip4.addr", &op, &ip4s);
+	error = vfs_getopt(opts, JAIL_PARAM_IP4_ADDR, &op, &ip4s);
 	if (error == ENOENT)
 		ip4s = 0;
 	else if (error != 0)
@@ -1295,7 +1427,7 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 #endif
 
 #ifdef INET6
-	error = vfs_getopt(opts, "ip6.addr", &op, &ip6s);
+	error = vfs_getopt(opts, JAIL_PARAM_IP6_ADDR, &op, &ip6s);
 	if (error == ENOENT)
 		ip6s = 0;
 	else if (error != 0)
@@ -1331,7 +1463,7 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 	}
 #endif
 
-	error = vfs_getopt(opts, "osrelease", (void **)&osrelstr, &len);
+	error = vfs_getopt(opts, JAIL_PARAM_OSRELEASE, (void **)&osrelstr, &len);
 	if (error == ENOENT)
 		osrelstr = NULL;
 	else if (error != 0)
@@ -1356,7 +1488,7 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 		}
 	}
 
-	error = vfs_copyopt(opts, "osreldate", &osreldt, sizeof(osreldt));
+	error = vfs_copyopt(opts, JAIL_PARAM_OSRELDATE, &osreldt, sizeof(osreldt));
 	if (error == ENOENT)
 		osreldt = 0;
 	else if (error != 0)
@@ -1376,7 +1508,7 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 	}
 
 	root = NULL;
-	error = vfs_getopt(opts, "path", (void **)&path, &len);
+	error = vfs_getopt(opts, JAIL_PARAM_PATH, (void **)&path, &len);
 	if (error == ENOENT)
 		path = NULL;
 	else if (error != 0)
@@ -1422,6 +1554,7 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 	pr = NULL;
 	inspr = NULL;
 	deadpr = NULL;
+	maybe_changed = false;
 	if (cuflags == JAIL_CREATE && jid == 0 && name != NULL) {
 		namelc = strrchr(name, '.');
 		jid = strtoul(namelc != NULL ? namelc + 1 : name, &p, 10);
@@ -1436,7 +1569,45 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 		error = EAGAIN;
 		goto done_deref;
 	}
-	if (jid != 0) {
+	if (flags & JAIL_USE_DESC) {
+		/* Get the jail from its descriptor. */
+		error = jaildesc_find(td, jfd_in, &pr, &jdcred);
+		if (error) {
+			vfs_opterror(opts, error == ENOENT ?
+			    "descriptor to dead jail" :
+			    "not a jail descriptor");
+			goto done_deref;
+		}
+		drflags |= PD_DEREF;
+		error = priv_check_cred(jdcred, PRIV_JAIL_SET);
+		if (error == 0 && (flags & JAIL_ATTACH))
+			error = priv_check_cred(jdcred, PRIV_JAIL_ATTACH);
+		crfree(jdcred);
+		if (error)
+			goto done_deref;
+		mtx_lock(&pr->pr_mtx);
+		drflags |= PD_LOCKED;
+		if (cuflags == JAIL_CREATE) {
+			error = EEXIST;
+			vfs_opterror(opts, "jail %d already exists",
+			    pr->pr_id);
+			goto done_deref;
+		}
+		if (!prison_isalive(pr)) {
+			/* While a jid can be resurrected, the prison
+			 * itself cannot.
+			 */
+			error = ENOENT;
+			vfs_opterror(opts, "jail %d is dying", pr->pr_id);
+			goto done_deref;
+		}
+		if (jid != 0 && jid != pr->pr_id) {
+			error = EINVAL;
+			vfs_opterror(opts, "cannot change jid");
+			goto done_deref;
+		}
+		jid = pr->pr_id;
+	} else if (jid != 0) {
 		if (jid < 0) {
 			error = EINVAL;
 			vfs_opterror(opts, "negative jid");
@@ -1570,7 +1741,7 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 			}
 		}
 	}
-	/* Update: must provide a jid or name. */
+	/* Update: must provide a desc, jid, or name. */
 	else if (cuflags == JAIL_UPDATE && pr == NULL) {
 		error = ENOENT;
 		vfs_opterror(opts, "update specified no jail");
@@ -1580,6 +1751,11 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 	/* If there's no prison to update, create a new one and link it in. */
 	created = pr == NULL;
 	if (created) {
+#ifdef MAC
+		error = mac_prison_check_create(td->td_ucred, opts, flags);
+		if (error != 0)
+			goto done_deref;
+#endif
 		for (tpr = mypr; tpr != NULL; tpr = tpr->pr_parent)
 			if (tpr->pr_childcount >= tpr->pr_childmax) {
 				error = EPERM;
@@ -1643,13 +1819,14 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 		LIST_INSERT_HEAD(&ppr->pr_children, pr, pr_sibling);
 		for (tpr = ppr; tpr != NULL; tpr = tpr->pr_parent)
 			tpr->pr_childcount++;
+		pr->pr_klist = knlist_alloc(&pr->pr_mtx);
 
 		/* Set some default values, and inherit some from the parent. */
 		if (namelc == NULL)
 			namelc = "";
 		if (path == NULL) {
 			path = "/";
-			root = mypr->pr_root;
+			root = ppr->pr_root;
 			vref(root);
 		}
 		strlcpy(pr->pr_hostuuid, DEFAULT_HOSTUUID, HOSTUUIDLEN);
@@ -1715,15 +1892,29 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 		if (error)
 			goto done_deref;
 
+#ifdef MAC
+		error = mac_prison_init(pr, M_WAITOK);
+		MPASS(error == 0);
+
+		mtx_assert(&pr->pr_mtx, MA_OWNED);
+#else
 		mtx_lock(&pr->pr_mtx);
+#endif
 		drflags |= PD_LOCKED;
 	} else {
 		/*
 		 * Grab a reference for existing prisons, to ensure they
 		 * continue to exist for the duration of the call.
 		 */
-		prison_hold(pr);
-		drflags |= PD_DEREF;
+		if (!(drflags & PD_DEREF)) {
+			prison_hold(pr);
+			drflags |= PD_DEREF;
+		}
+#ifdef MAC
+		error = mac_prison_check_set(td->td_ucred, pr, opts, flags);
+		if (error != 0)
+			goto done_deref;
+#endif
 #if defined(VIMAGE) && (defined(INET) || defined(INET6))
 		if ((pr->pr_flags & PR_VNET) &&
 		    (ch_flags & (PR_IP4_USER | PR_IP6_USER))) {
@@ -1880,6 +2071,7 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 			goto done_deref;
 		}
 	}
+	maybe_changed = true;
 
 	/* Set the parameters of the prison. */
 #ifdef INET
@@ -2039,6 +2231,17 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 		}
 	}
 	pr->pr_flags = (pr->pr_flags & ~ch_flags) | pr_flags;
+
+#ifdef MAC
+	/* Apply any request MAC label before we let modules do their work. */
+	if (gotmaclabel) {
+		error = mac_set_prison_core(td, pr, mac_set_prison_data);
+		if (error) {
+			vfs_opterror(opts, "mac relabel denied");
+			goto done_deref;
+		}
+	}
+#endif
 	mtx_unlock(&pr->pr_mtx);
 	drflags &= ~PD_LOCKED;
 	/*
@@ -2112,15 +2315,34 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 	 * reference via persistence, or is about to gain one via attachment.
 	 */
 	if (created) {
-		drflags = prison_lock_xlock(pr, drflags);
+		sx_assert(&allprison_lock, SX_XLOCKED);
+		prison_knote(ppr, NOTE_JAIL_CHILD | pr->pr_id);
+#ifdef MAC
+		/*
+		 * Note that mac_prison_created() assumes that it's called in a
+		 * sleepable context.
+		 */
+		mac_prison_created(td->td_ucred, pr);
+#endif
+		mtx_lock(&pr->pr_mtx);
+		drflags |= PD_LOCKED;
 		pr->pr_state = PRISON_STATE_ALIVE;
 	}
 
-	/* Attach this process to the prison if requested. */
+	/*
+	 * Attach this process to the prison if requested.  This will
+	 * unlock allprison_lock, meaning changes are now user-visible.
+	 */
 	if (flags & JAIL_ATTACH) {
-		error = do_jail_attach(td, pr,
-		    prison_lock_xlock(pr, drflags & PD_LOCK_FLAGS));
-		drflags &= ~(PD_LOCKED | PD_LIST_XLOCKED);
+#ifdef MAC
+		error = mac_prison_check_attach(td->td_ucred, pr);
+		if (error != 0) {
+			vfs_opterror(opts,
+			    "attach operation denied by MAC policy");
+			goto done_deref;
+		}
+#endif
+		error = do_jail_attach(td, pr, &drflags);
 		if (error) {
 			vfs_opterror(opts, "attach failed");
 			goto done_deref;
@@ -2146,10 +2368,37 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 		printf("Warning jail jid=%d: mountd/nfsd requires a separate"
 		   " file system\n", pr->pr_id);
 
+	/*
+	 * Now that the prison is fully created without error, set the
+	 * jail descriptor if one was requested.  This is the only
+	 * parameter that is returned to the caller (except the error
+	 * message).
+	 */
+	if (jfd_out >= 0) {
+		if (!(drflags & PD_LOCKED)) {
+			mtx_lock(&pr->pr_mtx);
+			drflags |= PD_LOCKED;
+		}
+		jfd_pos = 2 * vfs_getopt_pos(opts, JAIL_PARAM_DESC) + 1;
+		if (optuio->uio_segflg == UIO_SYSSPACE)
+			*(int*)optuio->uio_iov[jfd_pos].iov_base = jfd_out;
+		else
+			(void)copyout(&jfd_out,
+			    optuio->uio_iov[jfd_pos].iov_base, sizeof(jfd_out));
+		jaildesc_set_prison(jfp_out, pr);
+	}
+
 	drflags &= ~PD_KILL;
 	td->td_retval[0] = pr->pr_id;
 
  done_deref:
+	/*
+	 * Report changes to kevent.  This can happen even if the
+	 * system call fails, as changes might have been made before
+	 * the failure.
+	 */
+	if (maybe_changed && !created)
+		prison_knote(pr, NOTE_JAIL_SET);
 	/* Release any temporary prison holds and/or locks. */
 	if (pr != NULL)
 		prison_deref(pr, drflags);
@@ -2162,9 +2411,9 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
  done_errmsg:
 	if (error) {
 		/* Write the error message back to userspace. */
-		if (vfs_getopt(opts, "errmsg", (void **)&errmsg,
+		if (vfs_getopt(opts, JAIL_PARAM_ERRMSG, (void **)&errmsg,
 		    &errmsg_len) == 0 && errmsg_len > 0) {
-			errmsg_pos = 2 * vfs_getopt_pos(opts, "errmsg") + 1;
+			errmsg_pos = 2 * vfs_getopt_pos(opts, JAIL_PARAM_ERRMSG) + 1;
 			if (optuio->uio_segflg == UIO_SYSSPACE)
 				bcopy(errmsg,
 				    optuio->uio_iov[errmsg_pos].iov_base,
@@ -2176,15 +2425,28 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 		}
 	}
  done_free:
+	/* Clean up other resources. */
 #ifdef INET
 	prison_ip_free(ip4);
 #endif
 #ifdef INET6
 	prison_ip_free(ip6);
 #endif
+#ifdef MAC
+	if (mac_set_prison_data != NULL)
+		mac_set_prison_finish(td, error == 0, mac_set_prison_data);
+#endif
+	if (jfp_out != NULL)
+		fdrop(jfp_out, td);
+	if (error && jfd_out >= 0)
+		(void)kern_close(td, jfd_out);
 	if (g_path != NULL)
 		free(g_path, M_TEMP);
-	vfs_freeopts(opts);
+	if (opts != NULL)
+		vfs_freeopts(opts);
+	prison_free(mypr);
+	if (flags & JAIL_ATTACH)
+		prison_attach_thread_single_end(td);
 	return (error);
 }
 
@@ -2307,20 +2569,28 @@ get_next_deadid(struct prison **dinsprp)
 int
 sys_jail_get(struct thread *td, struct jail_get_args *uap)
 {
+	return (user_jail_get(td, uap->iovp, uap->iovcnt, uap->flags,
+	    copyinuio, updateiov));
+}
+
+int
+user_jail_get(struct thread *td, struct iovec *iovp,
+    unsigned int iovcnt, int flags, copyinuio_t *copyinuio_f,
+    updateiov_t *updateiov_f)
+{
 	struct uio *auio;
 	int error;
 
 	/* Check that we have an even number of iovecs. */
-	if (uap->iovcnt & 1)
+	if (iovcnt & 1)
 		return (EINVAL);
 
-	error = copyinuio(uap->iovp, uap->iovcnt, &auio);
+	error = copyinuio_f(iovp, iovcnt, &auio);
 	if (error)
 		return (error);
-	error = kern_jail_get(td, auio, uap->flags);
+	error = kern_jail_get(td, auio, flags);
 	if (error == 0)
-		error = copyout(auio->uio_iov, uap->iovp,
-		    uap->iovcnt * sizeof(struct iovec));
+		error = updateiov_f(auio, iovp);
 	freeuio(auio);
 	return (error);
 }
@@ -2329,31 +2599,95 @@ int
 kern_jail_get(struct thread *td, struct uio *optuio, int flags)
 {
 	struct bool_flags *bf;
+	struct file *jfp_out;
 	struct jailsys_flags *jsf;
 	struct prison *pr, *mypr;
 	struct vfsopt *opt;
 	struct vfsoptlist *opts;
 	char *errmsg, *name;
 	int drflags, error, errmsg_len, errmsg_pos, i, jid, len, pos;
+	int jfd_in, jfd_out;
 	unsigned f;
 
 	if (flags & ~JAIL_GET_MASK)
+		return (EINVAL);
+	if ((flags & (JAIL_USE_DESC | JAIL_AT_DESC)) ==
+	    (JAIL_USE_DESC | JAIL_AT_DESC))
 		return (EINVAL);
 
 	/* Get the parameter list. */
 	error = vfs_buildopts(optuio, &opts);
 	if (error)
 		return (error);
-	errmsg_pos = vfs_getopt_pos(opts, "errmsg");
+	errmsg_pos = vfs_getopt_pos(opts, JAIL_PARAM_ERRMSG);
 	mypr = td->td_ucred->cr_prison;
+	prison_hold(mypr);
 	pr = NULL;
+	jfp_out = NULL;
+	jfd_out = -1;
 
 	/*
-	 * Find the prison specified by one of: lastjid, jid, name.
+	 * Find the prison specified by one of: desc, lastjid, jid, name.
 	 */
 	sx_slock(&allprison_lock);
 	drflags = PD_LIST_SLOCKED;
-	error = vfs_copyopt(opts, "lastjid", &jid, sizeof(jid));
+
+	error = vfs_copyopt(opts, JAIL_PARAM_DESC, &jfd_in, sizeof(jfd_in));
+	if (error == ENOENT) {
+		if (flags & (JAIL_AT_DESC | JAIL_GET_DESC | JAIL_OWN_DESC)) {
+			vfs_opterror(opts, "missing desc");
+			goto done;
+		}
+	} else if (error == 0) {
+		if (!(flags & (JAIL_USE_DESC | JAIL_AT_DESC | JAIL_GET_DESC |
+		    JAIL_OWN_DESC))) {
+			error = EINVAL;
+			vfs_opterror(opts, "unexpected desc");
+			goto done;
+		}
+		if (flags & (JAIL_GET_DESC | JAIL_OWN_DESC)) {
+			/*
+			 * Allocate a jail descriptor to return later.
+			 * This must happen before the JAIL_USE_DESC
+			 * lookup below, which jumps to found_prison.
+			 */
+			error = jaildesc_alloc(td, &jfp_out, &jfd_out,
+			    flags & JAIL_OWN_DESC);
+			if (error)
+				goto done;
+		}
+		if (flags & JAIL_USE_DESC) {
+			/* Get the jail from its descriptor. */
+			error = jaildesc_find(td, jfd_in, &pr, NULL);
+			if (error) {
+				vfs_opterror(opts, error == ENOENT ?
+				    "descriptor to dead jail" :
+				    "not a jail descriptor");
+				goto done;
+			}
+			drflags |= PD_DEREF;
+			mtx_lock(&pr->pr_mtx);
+			drflags |= PD_LOCKED;
+			goto found_prison;
+		}
+		if (flags & JAIL_AT_DESC) {
+			/* Look up jails based on the descriptor's prison. */
+			struct prison *jdpr;
+
+			error = jaildesc_find(td, jfd_in, &jdpr, NULL);
+			if (error != 0) {
+				vfs_opterror(opts, error == ENOENT ?
+				    "descriptor to dead jail" :
+				    "not a jail descriptor");
+				goto done;
+			}
+			prison_free(mypr);
+			mypr = jdpr;
+		}
+	} else
+		goto done;
+
+	error = vfs_copyopt(opts, JAIL_PARAM_LASTJID, &jid, sizeof(jid));
 	if (error == 0) {
 		TAILQ_FOREACH(pr, &allprison, pr_list) {
 			if (pr->pr_id > jid &&
@@ -2361,7 +2695,29 @@ kern_jail_get(struct thread *td, struct uio *optuio, int flags)
 			    prison_ischild(mypr, pr)) {
 				mtx_lock(&pr->pr_mtx);
 				drflags |= PD_LOCKED;
+#ifdef MAC
+				/*
+				 * We special-case this one check because we
+				 * don't want MAC to break jail enumeration.  We
+				 * need to just move on to the next accessible
+				 * and alive prison.
+				 */
+				error = mac_prison_check_get(td->td_ucred, pr,
+				    opts, flags);
+				if (error != 0) {
+					mtx_unlock(&pr->pr_mtx);
+					drflags &= ~PD_LOCKED;
+					continue;
+				}
+
+				/*
+				 * Avoid potentially expensive trip back into
+				 * the MAC framework.
+				 */
+				goto found_prison_nomac_alive;
+#else
 				goto found_prison;
+#endif
 			}
 		}
 		error = ENOENT;
@@ -2370,19 +2726,12 @@ kern_jail_get(struct thread *td, struct uio *optuio, int flags)
 	} else if (error != ENOENT)
 		goto done;
 
-	error = vfs_copyopt(opts, "jid", &jid, sizeof(jid));
+	error = vfs_copyopt(opts, JAIL_PARAM_JID, &jid, sizeof(jid));
 	if (error == 0) {
 		if (jid != 0) {
 			pr = prison_find_child(mypr, jid);
 			if (pr != NULL) {
 				drflags |= PD_LOCKED;
-				if (!(prison_isalive(pr) ||
-				    (flags & JAIL_DYING))) {
-					error = ENOENT;
-					vfs_opterror(opts, "jail %d is dying",
-					    jid);
-					goto done;
-				}
 				goto found_prison;
 			}
 			error = ENOENT;
@@ -2392,7 +2741,7 @@ kern_jail_get(struct thread *td, struct uio *optuio, int flags)
 	} else if (error != ENOENT)
 		goto done;
 
-	error = vfs_getopt(opts, "name", (void **)&name, &len);
+	error = vfs_getopt(opts, JAIL_PARAM_NAME, (void **)&name, &len);
 	if (error == 0) {
 		if (len == 0 || name[len - 1] != '\0') {
 			error = EINVAL;
@@ -2401,12 +2750,6 @@ kern_jail_get(struct thread *td, struct uio *optuio, int flags)
 		pr = prison_find_name(mypr, name);
 		if (pr != NULL) {
 			drflags |= PD_LOCKED;
-			if (!(prison_isalive(pr) || (flags & JAIL_DYING))) {
-				error = ENOENT;
-				vfs_opterror(opts, "jail \"%s\" is dying",
-				    name);
-				goto done;
-			}
 			goto found_prison;
 		}
 		error = ENOENT;
@@ -2420,78 +2763,107 @@ kern_jail_get(struct thread *td, struct uio *optuio, int flags)
 	goto done;
 
  found_prison:
+#ifdef MAC
+	error = mac_prison_check_get(td->td_ucred, pr, opts, flags);
+	if (error != 0)
+		goto done;
+#endif
+	if (!(prison_isalive(pr) || (flags & JAIL_DYING))) {
+		error = ENOENT;
+		if (pr->pr_name[0] != '0' && isdigit(pr->pr_name[0])) {
+			vfs_opterror(opts, "jail %d is dying",
+			    pr->pr_id);
+		} else {
+			vfs_opterror(opts, "jail \"%s\" (%d) is dying",
+			    pr->pr_name, pr->pr_id);
+		}
+		goto done;
+	}
+#ifdef MAC
+ found_prison_nomac_alive:
+#endif
 	/* Get the parameters of the prison. */
-	prison_hold(pr);
-	drflags |= PD_DEREF;
+	if (!(drflags & PD_DEREF)) {
+		prison_hold(pr);
+		drflags |= PD_DEREF;
+	}
 	td->td_retval[0] = pr->pr_id;
-	error = vfs_setopt(opts, "jid", &pr->pr_id, sizeof(pr->pr_id));
+	if (jfd_out >= 0) {
+		error = vfs_setopt(opts, JAIL_PARAM_DESC, &jfd_out, sizeof(jfd_out));
+		if (error != 0 && error != ENOENT)
+			goto done;
+		jaildesc_set_prison(jfp_out, pr);
+	}
+	error = vfs_setopt(opts, JAIL_PARAM_JID, &pr->pr_id, sizeof(pr->pr_id));
 	if (error != 0 && error != ENOENT)
 		goto done;
 	i = (pr->pr_parent == mypr) ? 0 : pr->pr_parent->pr_id;
-	error = vfs_setopt(opts, "parent", &i, sizeof(i));
+	error = vfs_setopt(opts, JAIL_PARAM_PARENT, &i, sizeof(i));
 	if (error != 0 && error != ENOENT)
 		goto done;
-	error = vfs_setopts(opts, "name", prison_name(mypr, pr));
+	error = vfs_setopts(opts, JAIL_PARAM_NAME, prison_name(mypr, pr));
 	if (error != 0 && error != ENOENT)
 		goto done;
-	error = vfs_setopt(opts, "cpuset.id", &pr->pr_cpuset->cs_id,
+	error = vfs_setopt(opts, JAIL_PARAM_CPUSET_ID, &pr->pr_cpuset->cs_id,
 	    sizeof(pr->pr_cpuset->cs_id));
 	if (error != 0 && error != ENOENT)
 		goto done;
-	error = vfs_setopts(opts, "path", prison_path(mypr, pr));
+	error = vfs_setopts(opts, JAIL_PARAM_PATH, prison_path(mypr, pr));
 	if (error != 0 && error != ENOENT)
 		goto done;
 #ifdef INET
-	error = vfs_setopt_part(opts, "ip4.addr", pr->pr_addrs[PR_INET]->pr_ip,
+	error = vfs_setopt_part(opts, JAIL_PARAM_IP4_ADDR,
+	    pr->pr_addrs[PR_INET]->pr_ip,
 	    pr->pr_addrs[PR_INET] ? pr->pr_addrs[PR_INET]->ips *
 	    pr_families[PR_INET].size : 0 );
 	if (error != 0 && error != ENOENT)
 		goto done;
 #endif
 #ifdef INET6
-	error = vfs_setopt_part(opts, "ip6.addr", pr->pr_addrs[PR_INET6]->pr_ip,
+	error = vfs_setopt_part(opts, JAIL_PARAM_IP6_ADDR,
+	    pr->pr_addrs[PR_INET6]->pr_ip,
 	    pr->pr_addrs[PR_INET6] ? pr->pr_addrs[PR_INET6]->ips *
 	    pr_families[PR_INET6].size : 0 );
 	if (error != 0 && error != ENOENT)
 		goto done;
 #endif
-	error = vfs_setopt(opts, "securelevel", &pr->pr_securelevel,
+	error = vfs_setopt(opts, JAIL_PARAM_SECURELEVEL, &pr->pr_securelevel,
 	    sizeof(pr->pr_securelevel));
 	if (error != 0 && error != ENOENT)
 		goto done;
-	error = vfs_setopt(opts, "children.cur", &pr->pr_childcount,
+	error = vfs_setopt(opts, JAIL_PARAM_CHILDREN_CUR, &pr->pr_childcount,
 	    sizeof(pr->pr_childcount));
 	if (error != 0 && error != ENOENT)
 		goto done;
-	error = vfs_setopt(opts, "children.max", &pr->pr_childmax,
+	error = vfs_setopt(opts, JAIL_PARAM_CHILDREN_MAX, &pr->pr_childmax,
 	    sizeof(pr->pr_childmax));
 	if (error != 0 && error != ENOENT)
 		goto done;
-	error = vfs_setopts(opts, "host.hostname", pr->pr_hostname);
+	error = vfs_setopts(opts, JAIL_PARAM_HOST_HOSTNAME, pr->pr_hostname);
 	if (error != 0 && error != ENOENT)
 		goto done;
-	error = vfs_setopts(opts, "host.domainname", pr->pr_domainname);
+	error = vfs_setopts(opts, JAIL_PARAM_HOST_DOMAINNAME, pr->pr_domainname);
 	if (error != 0 && error != ENOENT)
 		goto done;
-	error = vfs_setopts(opts, "host.hostuuid", pr->pr_hostuuid);
+	error = vfs_setopts(opts, JAIL_PARAM_HOST_HOSTUUID, pr->pr_hostuuid);
 	if (error != 0 && error != ENOENT)
 		goto done;
 #ifdef COMPAT_FREEBSD32
 	if (SV_PROC_FLAG(td->td_proc, SV_ILP32)) {
 		uint32_t hid32 = pr->pr_hostid;
 
-		error = vfs_setopt(opts, "host.hostid", &hid32, sizeof(hid32));
+		error = vfs_setopt(opts, JAIL_PARAM_HOST_HOSTID, &hid32, sizeof(hid32));
 	} else
 #endif
-	error = vfs_setopt(opts, "host.hostid", &pr->pr_hostid,
+	error = vfs_setopt(opts, JAIL_PARAM_HOST_HOSTID, &pr->pr_hostid,
 	    sizeof(pr->pr_hostid));
 	if (error != 0 && error != ENOENT)
 		goto done;
-	error = vfs_setopt(opts, "enforce_statfs", &pr->pr_enforce_statfs,
+	error = vfs_setopt(opts, JAIL_PARAM_ENFORCE_STATFS, &pr->pr_enforce_statfs,
 	    sizeof(pr->pr_enforce_statfs));
 	if (error != 0 && error != ENOENT)
 		goto done;
-	error = vfs_setopt(opts, "devfs_ruleset", &pr->pr_devfs_rsnum,
+	error = vfs_setopt(opts, JAIL_PARAM_DEVFS_RULESET, &pr->pr_devfs_rsnum,
 	    sizeof(pr->pr_devfs_rsnum));
 	if (error != 0 && error != ENOENT)
 		goto done;
@@ -2532,24 +2904,37 @@ kern_jail_get(struct thread *td, struct uio *optuio, int flags)
 			goto done;
 	}
 	i = !prison_isalive(pr);
-	error = vfs_setopt(opts, "dying", &i, sizeof(i));
+	error = vfs_setopt(opts, JAIL_PARAM_DYING, &i, sizeof(i));
 	if (error != 0 && error != ENOENT)
 		goto done;
 	i = !i;
-	error = vfs_setopt(opts, "nodying", &i, sizeof(i));
+	error = vfs_setopt(opts, JAIL_PARAM_NODYING, &i, sizeof(i));
 	if (error != 0 && error != ENOENT)
 		goto done;
-	error = vfs_setopt(opts, "osreldate", &pr->pr_osreldate,
+	error = vfs_setopt(opts, JAIL_PARAM_OSRELDATE, &pr->pr_osreldate,
 	    sizeof(pr->pr_osreldate));
 	if (error != 0 && error != ENOENT)
 		goto done;
-	error = vfs_setopts(opts, "osrelease", pr->pr_osrelease);
+	error = vfs_setopts(opts, JAIL_PARAM_OSRELEASE, pr->pr_osrelease);
 	if (error != 0 && error != ENOENT)
 		goto done;
 
-	/* Get the module parameters. */
+#ifdef MAC
+	/*
+	 * We get the MAC label last because we'll let the MAC framework drop
+	 * pr_mtx to externalize the label.
+	 */
+	error = mac_get_prison(td, pr, opts);
+	mtx_assert(&pr->pr_mtx, MA_NOTOWNED);
+	drflags &= ~PD_LOCKED;
+	if (error != 0 && error != ENOENT)
+		goto done;
+#else
 	mtx_unlock(&pr->pr_mtx);
 	drflags &= ~PD_LOCKED;
+#endif
+
+	/* Get the module parameters. */
 	error = osd_jail_call(pr, PR_METHOD_GET, opts);
 	if (error)
 		goto done;
@@ -2603,9 +2988,16 @@ kern_jail_get(struct thread *td, struct uio *optuio, int flags)
 		prison_deref(pr, drflags);
 	else if (drflags & PD_LIST_SLOCKED)
 		sx_sunlock(&allprison_lock);
+	else if (drflags & PD_LIST_XLOCKED)
+		sx_xunlock(&allprison_lock);
+	/* Clean up other resources. */
+	if (jfp_out != NULL)
+		(void)fdrop(jfp_out, td);
+	if (error && jfd_out >= 0)
+		(void)kern_close(td, jfd_out);
 	if (error && errmsg_pos >= 0) {
 		/* Write the error message back to userspace. */
-		vfs_getopt(opts, "errmsg", (void **)&errmsg, &errmsg_len);
+		vfs_getopt(opts, JAIL_PARAM_ERRMSG, (void **)&errmsg, &errmsg_len);
 		errmsg_pos = 2 * errmsg_pos + 1;
 		if (errmsg_len > 0) {
 			if (optuio->uio_segflg == UIO_SYSSPACE)
@@ -2619,6 +3011,7 @@ kern_jail_get(struct thread *td, struct uio *optuio, int flags)
 		}
 	}
 	vfs_freeopts(opts);
+	prison_free(mypr);
 	return (error);
 }
 
@@ -2643,14 +3036,60 @@ sys_jail_remove(struct thread *td, struct jail_remove_args *uap)
 		sx_xunlock(&allprison_lock);
 		return (EINVAL);
 	}
-	if (!prison_isalive(pr)) {
-		/* Silently ignore already-dying prisons. */
+#ifdef MAC
+	error = mac_prison_check_remove(td->td_ucred, pr);
+	if (error != 0) {
 		mtx_unlock(&pr->pr_mtx);
 		sx_xunlock(&allprison_lock);
-		return (0);
+		return (error);
 	}
-	prison_deref(pr, PD_KILL | PD_LOCKED | PD_LIST_XLOCKED);
+#endif
+	prison_hold(pr);
+	prison_remove(pr);
 	return (0);
+}
+
+/*
+ * struct jail_remove_jd_args {
+ *	int fd;
+ * };
+ */
+int
+sys_jail_remove_jd(struct thread *td, struct jail_remove_jd_args *uap)
+{
+	struct prison *pr;
+	struct ucred *jdcred;
+	int error;
+
+	error = jaildesc_find(td, uap->fd, &pr, &jdcred);
+	if (error)
+		return (error);
+	error = priv_check_cred(jdcred, PRIV_JAIL_REMOVE);
+	crfree(jdcred);
+#ifdef MAC
+	if (error == 0)
+		error = mac_prison_check_remove(td->td_ucred, pr);
+#endif
+	if (error) {
+		prison_free(pr);
+		return (error);
+	}
+	sx_xlock(&allprison_lock);
+	mtx_lock(&pr->pr_mtx);
+	prison_remove(pr);
+	return (0);
+}
+
+/*
+ * Begin the removal process for a prison.  The allprison lock should
+ * be held exclusively, and the prison should be both locked and held.
+ */
+void
+prison_remove(struct prison *pr)
+{
+	sx_assert(&allprison_lock, SA_XLOCKED);
+	mtx_assert(&pr->pr_mtx, MA_OWNED);
+	prison_deref(pr, PD_KILL | PD_DEREF | PD_LOCKED | PD_LIST_XLOCKED);
 }
 
 /*
@@ -2662,59 +3101,124 @@ int
 sys_jail_attach(struct thread *td, struct jail_attach_args *uap)
 {
 	struct prison *pr;
-	int error;
+	int drflags, error;
 
 	error = priv_check(td, PRIV_JAIL_ATTACH);
 	if (error)
 		return (error);
+	/* Only let a single thread in the process try to attach at a time. */
+	error = prison_attach_thread_single(td);
+	if (error != 0)
+		return (error);
 
 	sx_slock(&allprison_lock);
+	drflags = PD_LIST_SLOCKED;
 	pr = prison_find_child(td->td_ucred->cr_prison, uap->jid);
 	if (pr == NULL) {
-		sx_sunlock(&allprison_lock);
-		return (EINVAL);
+		error = EINVAL;
+		goto done;
 	}
+	drflags |= PD_LOCKED;
+
+#ifdef MAC
+	error = mac_prison_check_attach(td->td_ucred, pr);
+	if (error != 0)
+		goto done;
+#endif
 
 	/* Do not allow a process to attach to a prison that is not alive. */
 	if (!prison_isalive(pr)) {
-		mtx_unlock(&pr->pr_mtx);
-		sx_sunlock(&allprison_lock);
-		return (EINVAL);
+		error = EINVAL;
+		goto done;
 	}
 
-	return (do_jail_attach(td, pr, PD_LOCKED | PD_LIST_SLOCKED));
+	error = do_jail_attach(td, pr, &drflags);
+
+ done:
+	prison_deref(pr, drflags);
+	prison_attach_thread_single_end(td);
+	return (error);
 }
 
+/*
+ * struct jail_attach_jd_args {
+ *	int fd;
+ * };
+ */
+int
+sys_jail_attach_jd(struct thread *td, struct jail_attach_jd_args *uap)
+{
+	struct prison *pr;
+	struct ucred *jdcred;
+	int drflags, error;
+
+	/* Only let a single thread in the process try to attach at a time. */
+	error = prison_attach_thread_single(td);
+	if (error != 0)
+		return (error);
+
+	sx_slock(&allprison_lock);
+	drflags = PD_LIST_SLOCKED;
+	pr = NULL;
+	error = jaildesc_find(td, uap->fd, &pr, &jdcred);
+	if (error)
+		goto done;
+	drflags |= PD_DEREF;
+	error = priv_check_cred(jdcred, PRIV_JAIL_ATTACH);
+#ifdef MAC
+	if (error == 0)
+		error = mac_prison_check_attach(td->td_ucred, pr);
+#endif
+	crfree(jdcred);
+	if (error)
+		goto done;
+
+	/* Do not allow a process to attach to a prison that is not alive. */
+	if (!prison_isalive(pr)) {
+		error = EINVAL;
+		goto done;
+	}
+
+	error = do_jail_attach(td, pr, &drflags);
+
+ done:
+	prison_deref(pr, drflags);
+	prison_attach_thread_single_end(td);
+	return (error);
+}
+
+/*
+ * Attach the current process to a prison.  On entry, the allprison
+ * lock should be at least shared.  On exit, both it and the prison
+ * itself will be unlocked, which will be refelected in *drflagsp.
+ */
 static int
-do_jail_attach(struct thread *td, struct prison *pr, int drflags)
+do_jail_attach(struct thread *td, struct prison *pr, int *drflagsp)
 {
 	struct proc *p;
 	struct ucred *newcred, *oldcred;
-	int error;
+	int drflags, error;
 
-	mtx_assert(&pr->pr_mtx, MA_OWNED);
 	sx_assert(&allprison_lock, SX_LOCKED);
-	drflags &= PD_LOCK_FLAGS;
+	KASSERT(prison_isvalid(pr), ("Attaching to invalid prison %p", pr));
 	/*
-	 * XXX: Note that there is a slight race here if two threads
-	 * in the same privileged process attempt to attach to two
-	 * different jails at the same time.  It is important for
-	 * user processes not to do this, or they might end up with
-	 * a process root from one prison, but attached to the jail
-	 * of another.
+	 * Note the caller's locking state, but gain and track our own
+	 * references.  The caller will see that locks have been
+	 * dropped (which isn't true now, but will be after OSD calls).
 	 */
 	prison_hold(pr);
 	refcount_acquire(&pr->pr_uref);
-	drflags |= PD_DEREF | PD_DEUREF;
-	mtx_unlock(&pr->pr_mtx);
-	drflags &= ~PD_LOCKED;
+	drflags = PD_DEREF | PD_DEUREF | (*drflagsp & PD_LOCK_FLAGS);
+	*drflagsp &= PD_OP_FLAGS;
 
 	/* Let modules do whatever they need to prepare for attaching. */
-	error = osd_jail_call(pr, PR_METHOD_ATTACH, td);
-	if (error) {
-		prison_deref(pr, drflags);
-		return (error);
+	if (drflags & PD_LOCKED) {
+		mtx_unlock(&pr->pr_mtx);
+		drflags &= ~PD_LOCKED;
 	}
+	error = osd_jail_call(pr, PR_METHOD_ATTACH, td);
+	if (error)
+		goto e_revert_osd;
 	sx_unlock(&allprison_lock);
 	drflags &= ~(PD_LIST_SLOCKED | PD_LIST_XLOCKED);
 
@@ -2741,12 +3245,19 @@ do_jail_attach(struct thread *td, struct prison *pr, int drflags)
 	PROC_LOCK(p);
 	oldcred = crcopysafe(p, newcred);
 	newcred->cr_prison = pr;
-	proc_set_cred(p, newcred);
-	setsugid(p);
 #ifdef RACCT
 	racct_proc_ucred_changed(p, oldcred, newcred);
+#endif
+#ifdef RCTL
 	crhold(newcred);
 #endif
+	/*
+	 * Takes over 'newcred''s reference, so 'newcred' must not be used
+	 * besides this point except on RCTL where we took an additional
+	 * reference above.
+	 */
+	proc_set_cred(p, newcred);
+	setsugid(p);
 	PROC_UNLOCK(p);
 #ifdef RCTL
 	rctl_proc_ucred_changed(p, newcred);
@@ -2755,6 +3266,14 @@ do_jail_attach(struct thread *td, struct prison *pr, int drflags)
 	prison_proc_relink(oldcred->cr_prison, pr, p);
 	prison_deref(oldcred->cr_prison, drflags);
 	crfree(oldcred);
+	prison_knote(pr, NOTE_JAIL_ATTACH | td->td_proc->p_pid);
+#ifdef MAC
+	/*
+	 * Note that mac_prison_attached() assumes that it's called in a
+	 * sleepable context.
+	 */
+	mac_prison_attached(td->td_ucred, pr, td->td_proc);
+#endif
 
 	/*
 	 * If the prison was killed while changing credentials, die along
@@ -2771,12 +3290,51 @@ do_jail_attach(struct thread *td, struct prison *pr, int drflags)
  e_unlock:
 	VOP_UNLOCK(pr->pr_root);
  e_revert_osd:
-	/* Tell modules this thread is still in its old jail after all. */
-	sx_slock(&allprison_lock);
-	drflags |= PD_LIST_SLOCKED;
+	/* Tell modules this process is still in its old jail after all. */
+	if (!(drflags & (PD_LIST_SLOCKED | PD_LIST_XLOCKED))) {
+		sx_slock(&allprison_lock);
+		drflags |= PD_LIST_SLOCKED;
+	}
 	(void)osd_jail_call(td->td_ucred->cr_prison, PR_METHOD_ATTACH, td);
 	prison_deref(pr, drflags);
 	return (error);
+}
+
+/*
+ * Only one thread in a process should try to attach to a jail, or
+ * they might end up with a process root from one prison, but attached
+ * to the jail of another.  Enforce this by making the process run in
+ * single-threaded mode for the duration of the system call, which
+ * also prevents other related calls such as chroot.
+ */
+static int
+prison_attach_thread_single(struct thread *td)
+{
+	struct proc *p;
+	int error;
+
+	error = 0;
+	p = td->td_proc;
+	if ((atomic_load_int(&p->p_flag) & P_HADTHREADS) != 0) {
+		PROC_LOCK(p);
+		if (thread_single(p, SINGLE_BOUNDARY))
+			error = ERESTART;
+		PROC_UNLOCK(p);
+	}
+	return (error);
+}
+
+static void
+prison_attach_thread_single_end(struct thread *td)
+{
+	struct proc *p;
+
+	p = td->td_proc;
+	if ((atomic_load_int(&p->p_flag) & P_HADTHREADS) != 0) {
+		PROC_LOCK(p);
+		thread_single_end(p, SINGLE_BOUNDARY);
+		PROC_UNLOCK(p);
+	}
 }
 
 /*
@@ -2894,14 +3452,11 @@ prison_hold_locked(struct prison *pr)
 void
 prison_hold(struct prison *pr)
 {
-#ifdef INVARIANTS
-	int was_valid = refcount_acquire_if_not_zero(&pr->pr_ref);
+	u_int old __diagused;
 
-	KASSERT(was_valid,
-	    ("Trying to hold dead prison %p (jid=%d).", pr, pr->pr_id));
-#else
-	refcount_acquire(&pr->pr_ref);
-#endif
+	old = refcount_acquire(&pr->pr_ref);
+	KASSERT(old > 0,
+	    ("cannot hold a non-alive prison (jid=%d)", pr->pr_id));
 }
 
 /*
@@ -2940,19 +3495,12 @@ prison_free(struct prison *pr)
 static void
 prison_free_not_last(struct prison *pr)
 {
-#ifdef INVARIANTS
-	int lastref;
+	bool released __diagused;
 
-	KASSERT(refcount_load(&pr->pr_ref) > 0,
-	    ("Trying to free dead prison %p (jid=%d).",
-	     pr, pr->pr_id));
-	lastref = refcount_release(&pr->pr_ref);
-	KASSERT(!lastref,
+	released = refcount_release(&pr->pr_ref);
+	KASSERT(!released,
 	    ("prison_free_not_last freed last ref on prison %p (jid=%d).",
 	     pr, pr->pr_id));
-#else
-	refcount_release(&pr->pr_ref);
-#endif
 }
 
 /*
@@ -2967,14 +3515,11 @@ prison_free_not_last(struct prison *pr)
 void
 prison_proc_hold(struct prison *pr)
 {
-#ifdef INVARIANTS
-	int was_alive = refcount_acquire_if_not_zero(&pr->pr_uref);
+	u_int old __diagused;
 
-	KASSERT(was_alive,
-	    ("Cannot add a process to a non-alive prison (jid=%d)", pr->pr_id));
-#else
-	refcount_acquire(&pr->pr_uref);
-#endif
+	old = refcount_acquire(&pr->pr_uref);
+	KASSERT(old > 0,
+	    ("cannot add a process to a non-alive prison (jid=%d)", pr->pr_id));
 }
 
 /*
@@ -2991,8 +3536,6 @@ prison_proc_free(struct prison *pr)
 	 * This allows assurance that a locked prison will remain alive
 	 * until it is unlocked.
 	 */
-	KASSERT(refcount_load(&pr->pr_uref) > 0,
-	    ("Trying to kill a process in a dead prison (jid=%d)", pr->pr_id));
 	if (!refcount_release_if_not_last(&pr->pr_uref)) {
 		/*
 		 * Don't remove the last user reference in this context,
@@ -3154,12 +3697,17 @@ prison_deref(struct prison *pr, int flags)
 			/* Kill the prison and its descendents. */
 			KASSERT(pr != &prison0,
 			    ("prison_deref trying to kill prison0"));
-			if (!(flags & PD_DEREF)) {
-				prison_hold(pr);
-				flags |= PD_DEREF;
+			if (!prison_isalive(pr)) {
+				/* Silently ignore already-dying prisons. */
+				flags &= ~PD_KILL;
+			} else {
+				if (!(flags & PD_DEREF)) {
+					prison_hold(pr);
+					flags |= PD_DEREF;
+				}
+				flags = prison_lock_xlock(pr, flags);
+				prison_deref_kill(pr, &freeprison);
 			}
-			flags = prison_lock_xlock(pr, flags);
-			prison_deref_kill(pr, &freeprison);
 		}
 		if (flags & PD_DEUREF) {
 			/* Drop a user reference. */
@@ -3182,9 +3730,10 @@ prison_deref(struct prison *pr, int flags)
 					    refcount_load(&prison0.pr_uref) > 0,
 					    ("prison0 pr_uref=0"));
 					pr->pr_state = PRISON_STATE_DYING;
+					prison_cleanup_locked(pr);
 					mtx_unlock(&pr->pr_mtx);
 					flags &= ~PD_LOCKED;
-					prison_cleanup(pr);
+					prison_cleanup_unlocked(pr);
 				}
 			}
 		}
@@ -3194,8 +3743,10 @@ prison_deref(struct prison *pr, int flags)
 			 * that need to be killed, either in this prison or its
 			 * descendants.
 			 */
-			if (refcount_load(&pr->pr_uref) > 0)
+			if (refcount_load(&pr->pr_uref) > 0) {
 				killpr = pr;
+				flags &= ~PD_DEREF;
+			}
 			/* Make sure the parent prison doesn't get killed. */
 			flags &= ~PD_KILL;
 		}
@@ -3219,6 +3770,16 @@ prison_deref(struct prison *pr, int flags)
 					KASSERT(
 					    refcount_load(&prison0.pr_ref) != 0,
 					    ("prison0 pr_ref=0"));
+#ifdef MAC
+					/*
+					 * The MAC framework will call into any
+					 * policies that want to hook
+					 * prison_destroy_label, so ideally we
+					 * call this prior to any final state
+					 * invalidation to be safe.
+					 */
+					mac_prison_destroy(pr);
+#endif
 					pr->pr_state = PRISON_STATE_INVALID;
 					TAILQ_REMOVE(&allprison, pr, pr_list);
 					LIST_REMOVE(pr, pr_sibling);
@@ -3255,8 +3816,10 @@ prison_deref(struct prison *pr, int flags)
 		sx_xunlock(&allprison_lock);
 
 	/* Kill any processes attached to a killed prison. */
-	if (killpr != NULL)
+	if (killpr != NULL) {
 		prison_proc_iterate(killpr, prison_kill_processes_cb, NULL);
+		prison_free(killpr);
+	}
 
 	/*
 	 * Finish removing any unreferenced prisons, which couldn't happen
@@ -3327,8 +3890,9 @@ prison_deref_kill(struct prison *pr, struct prisonlist *freeprison)
 		}
 		if (!(cpr->pr_flags & PR_REMOVE))
 			continue;
-		prison_cleanup(cpr);
+		prison_cleanup_unlocked(cpr);
 		mtx_lock(&cpr->pr_mtx);
+		prison_cleanup_locked(cpr);
 		cpr->pr_flags &= ~PR_REMOVE;
 		if (cpr->pr_flags & PR_PERSIST) {
 			cpr->pr_flags &= ~PR_PERSIST;
@@ -3363,8 +3927,9 @@ prison_deref_kill(struct prison *pr, struct prisonlist *freeprison)
 	if (rpr != NULL)
 		LIST_REMOVE(rpr, pr_sibling);
 
-	prison_cleanup(pr);
+	prison_cleanup_unlocked(pr);
 	mtx_lock(&pr->pr_mtx);
+	prison_cleanup_locked(pr);
 	if (pr->pr_flags & PR_PERSIST) {
 		pr->pr_flags &= ~PR_PERSIST;
 		prison_proc_free_not_last(pr);
@@ -3411,10 +3976,22 @@ prison_lock_xlock(struct prison *pr, int flags)
 
 /*
  * Release a prison's resources when it starts dying (when the last user
- * reference is dropped, or when it is killed).
+ * reference is dropped, or when it is killed).  Two functions are called,
+ * for work that requires a locked prison or an unlocked one.
  */
 static void
-prison_cleanup(struct prison *pr)
+prison_cleanup_locked(struct prison *pr)
+{
+	sx_assert(&allprison_lock, SA_XLOCKED);
+	mtx_assert(&pr->pr_mtx, MA_OWNED);
+	prison_knote(pr, NOTE_JAIL_REMOVE);
+	knlist_detach(pr->pr_klist);
+	jaildesc_prison_cleanup(pr);
+	pr->pr_klist = NULL;
+}
+
+static void
+prison_cleanup_unlocked(struct prison *pr)
 {
 	sx_assert(&allprison_lock, SA_XLOCKED);
 	mtx_assert(&pr->pr_mtx, MA_NOTOWNED);
@@ -3784,11 +4361,14 @@ prison_enforce_statfs(struct ucred *cred, struct mount *mp, struct statfs *sp)
 	if (pr->pr_enforce_statfs == 0)
 		return;
 	if (prison_canseemount(cred, mp) != 0) {
+		bzero(&sp->f_fsid, sizeof(sp->f_fsid));
 		bzero(sp->f_mntonname, sizeof(sp->f_mntonname));
 		strlcpy(sp->f_mntonname, "[restricted]",
 		    sizeof(sp->f_mntonname));
 		return;
 	}
+	if (pr->pr_enforce_statfs > 1)
+		bzero(&sp->f_fsid, sizeof(sp->f_fsid));
 	if (pr->pr_root->v_mount == mp) {
 		/*
 		 * Clear current buffer data, so we are sure nothing from
@@ -3894,6 +4474,7 @@ prison_priv_check(struct ucred *cred, int priv)
 	case PRIV_NET_SETIFVNET:
 	case PRIV_NET_SETIFFIB:
 	case PRIV_NET_OVPN:
+	case PRIV_NET_GENEVE:
 	case PRIV_NET_ME:
 	case PRIV_NET_WG:
 
@@ -3969,8 +4550,8 @@ prison_priv_check(struct ucred *cred, int priv)
 		 * Allow ktrace privileges for root in jail.
 		 */
 	case PRIV_KTRACE:
+		return (0);
 
-#if 0
 		/*
 		 * Allow jailed processes to configure audit identity and
 		 * submit audit records (login, etc).  In the future we may
@@ -3979,6 +4560,11 @@ prison_priv_check(struct ucred *cred, int priv)
 		 */
 	case PRIV_AUDIT_GETAUDIT:
 	case PRIV_AUDIT_SETAUDIT:
+		if (cred->cr_prison->pr_allow & PR_ALLOW_SETAUDIT)
+			return (0);
+		else
+			return (EPERM);
+#if 0
 	case PRIV_AUDIT_SUBMIT:
 #endif
 
@@ -4241,6 +4827,21 @@ prison_priv_check(struct ucred *cred, int priv)
 		else
 			return (EPERM);
 
+	case PRIV_VMM_CREATE:
+	case PRIV_VMM_DESTROY:
+		/*
+		 * Jailed root can create and destroy VMs; the vmm module
+		 * additionally checks for the allow.vmm flag.
+		 */
+		return (0);
+
+	case PRIV_VMM_PPTDEV:
+		/*
+		 * Allow jailed root to manage passthrough devices.  vmm(4) also
+		 * checks for the dynamically added allow.vmm_ppt.
+		 */
+		return (0);
+
 	default:
 		/*
 		 * In all remaining cases, deny the privilege request.  This
@@ -4486,6 +5087,10 @@ sysctl_jail_default_allow(SYSCTL_HANDLER_ARGS)
 	return (0);
 }
 
+/*
+ * Do not add more here. Use SYSCTL_JAIL_PARAM (allow flags for jails)
+ * instead.
+ */
 SYSCTL_PROC(_security_jail, OID_AUTO, set_hostname_allowed,
     CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_MPSAFE,
     NULL, PR_ALLOW_SET_HOSTNAME, sysctl_jail_default_allow, "I",
@@ -4513,7 +5118,7 @@ SYSCTL_PROC(_security_jail, OID_AUTO, mount_allowed,
 SYSCTL_PROC(_security_jail, OID_AUTO, mlock_allowed,
     CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_MPSAFE,
     NULL, PR_ALLOW_MLOCK, sysctl_jail_default_allow, "I",
-    "Processes in jail can lock/unlock physical pages in memory");
+    "Processes in jail can lock/unlock physical pages in memory (deprecated)");
 
 static int
 sysctl_jail_default_level(SYSCTL_HANDLER_ARGS)
@@ -4657,6 +5262,11 @@ SYSCTL_JAIL_PARAM(_host, hostid, CTLTYPE_ULONG | CTLFLAG_RW,
 SYSCTL_JAIL_PARAM_NODE(cpuset, "Jail cpuset");
 SYSCTL_JAIL_PARAM(_cpuset, id, CTLTYPE_INT | CTLFLAG_RD, "I", "Jail cpuset ID");
 
+#ifdef MAC
+SYSCTL_JAIL_PARAM_STRUCT(_mac, label, CTLFLAG_RW, sizeof(struct mac),
+    "S,mac", "Jail MAC label");
+#endif
+
 #ifdef INET
 SYSCTL_JAIL_PARAM_SYS_NODE(ip4, CTLFLAG_RDTUN,
     "Jail IPv4 address virtualization");
@@ -4715,6 +5325,10 @@ SYSCTL_JAIL_PARAM(_allow, settime, CTLTYPE_INT | CTLFLAG_RW,
     "B", "Jail may set system time");
 SYSCTL_JAIL_PARAM(_allow, routing, CTLTYPE_INT | CTLFLAG_RW,
     "B", "Jail may modify routing table");
+#ifdef AUDIT
+SYSCTL_JAIL_PARAM(_allow, setaudit, CTLTYPE_INT | CTLFLAG_RW,
+    "B", "Jail may set and get audit session state");
+#endif
 
 SYSCTL_JAIL_PARAM_SUBNODE(allow, mount, "Jail mount/unmount permission flags");
 SYSCTL_JAIL_PARAM(_allow_mount, , CTLTYPE_INT | CTLFLAG_RW,
@@ -5038,6 +5652,23 @@ prison_racct_detach(struct prison *pr)
 	pr->pr_prison_racct = NULL;
 }
 #endif /* RACCT */
+
+/*
+ * Submit a knote for a prison, locking if necessary.
+ */
+static void
+prison_knote(struct prison *pr, long hint)
+{
+	int locked;
+
+	locked = mtx_owned(&pr->pr_mtx);
+	if (!locked)
+		mtx_lock(&pr->pr_mtx);
+	KNOTE_LOCKED(pr->pr_klist, hint);
+	jaildesc_knote(pr, hint);
+	if (!locked)
+		mtx_unlock(&pr->pr_mtx);
+}
 
 #ifdef DDB
 

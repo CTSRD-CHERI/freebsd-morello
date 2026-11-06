@@ -3,6 +3,10 @@ LOADER_MSDOS_SUPPORT?=	yes
 LOADER_UFS_SUPPORT?=	yes
 LOADER_CD9660_SUPPORT?=	no
 LOADER_EXT2FS_SUPPORT?=	no
+LOADER_GZ_SUPPORT?=     yes
+LOADER_BZIP2_SUPPORT?=  yes
+LOADER_XZ_SUPPORT?=     yes
+LOADER_MD_SUPPORT?=	yes
 
 .include <bsd.init.mk>
 
@@ -22,17 +26,23 @@ SRCS=	autoload.c \
 	bootinfo.c \
 	conf.c \
 	copy.c \
+	decompress.c \
 	efi_main.c \
 	framebuffer.c \
 	main.c \
+	memdisk.c \
 	self_reloc.c \
 	vers.c \
 	gfx_fb.c \
 	8x16.c
 
+SRCS+= acpi_detect.c
+.PATH: ${EFISRC}/acpica
+CFLAGS+=	-I${EFISRC}/acpica/include
+
 CFLAGS+=	-I${.CURDIR}/../loader
 .if ${MK_LOADER_ZFS} != "no"
-CFLAGS+=	-I${ZFSSRC}
+CFLAGS+=	-I${SAZFSSRC}
 CFLAGS+=        -I${SYSDIR}/contrib/openzfs/include
 CFLAGS+=        -I${SYSDIR}/contrib/openzfs/include/os/freebsd/zfs
 CFLAGS+=	-DEFI_ZFS_BOOT
@@ -41,14 +51,16 @@ HAVE_ZFS=	yes
 
 CFLAGS.bootinfo.c += -I$(SRCTOP)/sys/teken
 CFLAGS.bootinfo.c += -I${SRCTOP}/contrib/pnglite
+CFLAGS.decompress.c += ${ZLIB_CFLAGS} ${BZIP2_CFLAGS} ${ZSTD_CFLAGS} ${XZ_CFLAGS}
 CFLAGS.framebuffer.c += -I$(SRCTOP)/sys/teken
 CFLAGS.framebuffer.c += -I${SRCTOP}/contrib/pnglite
 CFLAGS.main.c += -I$(SRCTOP)/sys/teken
 CFLAGS.main.c += -I${SRCTOP}/contrib/pnglite
+CFLAGS.memdisk.c += -I${.OBJDIR}
 CFLAGS.gfx_fb.c += -I$(SRCTOP)/sys/teken
 CFLAGS.gfx_fb.c += -I${SRCTOP}/sys/cddl/contrib/opensolaris/common/lz4
 CFLAGS.gfx_fb.c += -I${SRCTOP}/contrib/pnglite
-CFLAGS.gfx_fb.c += -DHAVE_MEMCPY -I${SRCTOP}/sys/contrib/zlib
+CFLAGS.gfx_fb.c += ${ZLIB_CFLAGS}
 
 # We implement a slightly non-standard %S in that it always takes a
 # CHAR16 that's common in UEFI-land instead of a wchar_t. This only
@@ -56,15 +68,18 @@ CFLAGS.gfx_fb.c += -DHAVE_MEMCPY -I${SRCTOP}/sys/contrib/zlib
 # of a short. There's no good cast to use here so just ignore the
 # warnings for now.
 CWARNFLAGS.main.c+=	-Wno-format
+CWARNFLAGS.memdisk.c+=	-Wno-format
 
 .PATH: ${.CURDIR}/../loader
 .PATH: ${.CURDIR}/../loader/arch/${__arch}
 .include "${.CURDIR}/../loader/arch/${__arch}/Makefile.inc"
 
+CFLAGS+=	-Wall
 CFLAGS+=	-I${.CURDIR}
 CFLAGS+=	-I${.CURDIR}/arch/${__arch}
 CFLAGS+=	-I${EFISRC}/include
 CFLAGS+=	-I${EFISRC}/include/${__arch}
+CFLAGS+=	-I${EDK2INC}
 CFLAGS+=	-I${SYSDIR}/contrib/dev/acpica/include
 CFLAGS+=	-I${BOOTSRC}/i386/libi386
 CFLAGS+=	-DEFI

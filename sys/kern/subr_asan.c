@@ -241,7 +241,7 @@ kasan_shadow_Nbyte_fill(const void *addr, size_t size, uint8_t code)
 	shad = (void *)kasan_md_addr_to_shad((uintptr_t)addr);
 	size = size >> KASAN_SHADOW_SCALE_SHIFT;
 
-	__builtin_memset(shad, code, size);
+	memset_early(shad, code, size);
 }
 
 /*
@@ -297,8 +297,8 @@ kasan_mark(const void *addr, size_t size, size_t redzsize, uint8_t code)
 void
 kasan_thread_alloc(struct thread *td)
 {
-	if (td->td_kstack != 0) {
-		kasan_mark((void *)td->td_kstack, ptoa(td->td_kstack_pages),
+	if (td->td_kstack != NULL) {
+		kasan_mark(td->td_kstack, ptoa(td->td_kstack_pages),
 		    ptoa(td->td_kstack_pages), 0);
 	}
 }
@@ -761,7 +761,7 @@ kasan_casueword(volatile u_long *base, u_long oldval, u_long *oldvalp,
 #define	_ASAN_ATOMIC_FUNC_LOAD(name, type)				\
 	type kasan_atomic_load_##name(const volatile type *ptr)		\
 	{								\
-		kasan_shadow_check((uintptr_t)ptr, sizeof(type), true,	\
+		kasan_shadow_check((uintptr_t)ptr, sizeof(type), false,	\
 		    __RET_ADDR);					\
 		return (atomic_load_##name(ptr));			\
 	}
@@ -835,6 +835,7 @@ ASAN_ATOMIC_FUNC_TESTANDSET(32, uint32_t);
 ASAN_ATOMIC_FUNC_TESTANDSET(64, uint64_t);
 ASAN_ATOMIC_FUNC_TESTANDSET(int, u_int);
 ASAN_ATOMIC_FUNC_TESTANDSET(long, u_long);
+ASAN_ATOMIC_FUNC_TESTANDSET(acq_long, u_long);
 ASAN_ATOMIC_FUNC_TESTANDSET(ptr, uintptr_t);
 
 ASAN_ATOMIC_FUNC_SWAP(32, uint32_t);
@@ -1167,7 +1168,7 @@ __asan_handle_no_return(void)
 	void __asan_set_shadow_##byte(void *, size_t);			\
 	void __asan_set_shadow_##byte(void *addr, size_t size)		\
 	{								\
-		__builtin_memset((void *)addr, 0x##byte, size);		\
+		memset_early((void *)addr, 0x##byte, size);		\
 	}
 
 ASAN_SET_SHADOW(00);

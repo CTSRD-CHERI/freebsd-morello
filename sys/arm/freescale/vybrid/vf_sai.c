@@ -138,7 +138,7 @@ struct sc_info {
 	bus_space_tag_t		bst;
 	bus_space_handle_t	bsh;
 	device_t		dev;
-	struct mtx		*lock;
+	struct mtx		lock;
 	uint32_t		speed;
 	uint32_t		period;
 	void			*ih;
@@ -206,10 +206,10 @@ saimixer_init(struct snd_mixer *m)
 
 	mask = SOUND_MASK_PCM;
 
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	pcm_setflags(scp->dev, pcm_getflags(scp->dev) | SD_F_SOFTPCMVOL);
 	mix_setdevs(m, mask);
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 
 	return (0);
 }
@@ -252,14 +252,14 @@ saichan_init(kobj_t obj, void *devinfo, struct snd_dbuf *b,
 	scp = (struct sc_pcminfo *)devinfo;
 	sc = scp->sc;
 
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	ch = &scp->chan[0];
 	ch->dir = dir;
 	ch->run = 0;
 	ch->buffer = b;
 	ch->channel = c;
 	ch->parent = scp;
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 
 	if (sndbuf_setup(ch->buffer, sc->buf_base, sc->dma_size) != 0) {
 		device_printf(scp->dev, "Can't setup sndbuf.\n");
@@ -280,9 +280,9 @@ saichan_free(kobj_t obj, void *data)
 	device_printf(scp->dev, "saichan_free()\n");
 #endif
 
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	/* TODO: free channel buffer */
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 
 	return (0);
 }
@@ -367,9 +367,10 @@ saichan_setblocksize(kobj_t obj, void *data, uint32_t blocksize)
 	struct sc_pcminfo *scp = ch->parent;
 	struct sc_info *sc = scp->sc;
 
-	sndbuf_resize(ch->buffer, sc->dma_size / blocksize, blocksize);
+	if (sndbuf_resize(ch->buffer, sc->dma_size / blocksize, blocksize) != 0)
+		return (0);
 
-	sc->period = sndbuf_getblksz(ch->buffer);
+	sc->period = ch->buffer->blksz;
 	return (sc->period);
 }
 
@@ -513,7 +514,7 @@ saichan_trigger(kobj_t obj, void *data, int go)
 	struct sc_pcminfo *scp = ch->parent;
 	struct sc_info *sc = scp->sc;
 
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 
 	switch (go) {
 	case PCMTRIG_START:
@@ -532,7 +533,7 @@ saichan_trigger(kobj_t obj, void *data, int go)
 		break;
 	}
 
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 
 	return (0);
 }
@@ -691,11 +692,7 @@ sai_attach(device_t dev)
 	sc->sr = &rate_map[0];
 	sc->pos = 0;
 
-	sc->lock = snd_mtxcreate(device_get_nameunit(dev), "sai softc");
-	if (sc->lock == NULL) {
-		device_printf(dev, "Cant create mtx\n");
-		return (ENXIO);
-	}
+	mtx_init(&sc->lock, device_get_nameunit(dev), "sai softc", MTX_DEF);
 
 	if (bus_alloc_resources(dev, sai_spec, sc->res)) {
 		device_printf(dev, "could not allocate resources\n");
@@ -764,6 +761,8 @@ sai_attach(device_t dev)
 
 	pcm_init(dev, scp);
 
+	mixer_init(dev, &saimixer_class, scp);
+
 	scp->chnum = 0;
 	pcm_addchan(dev, PCMDIR_PLAY, &saichan_class, scp);
 	scp->chnum++;
@@ -774,8 +773,6 @@ sai_attach(device_t dev)
 		device_printf(dev, "Can't register pcm.\n");
 		return (ENXIO);
 	}
-
-	mixer_init(dev, &saimixer_class, scp);
 
 	setup_dma(scp);
 	setup_sai(sc);
@@ -796,5 +793,5 @@ static driver_t sai_pcm_driver = {
 };
 
 DRIVER_MODULE(sai, simplebus, sai_pcm_driver, 0, 0);
-MODULE_DEPEND(sai, sound, SOUND_MINVER, SOUND_PREFVER, SOUND_MAXVER);
+MODULE_DEPEND(sai, sound, 1, 1, 1);
 MODULE_VERSION(sai, 1);

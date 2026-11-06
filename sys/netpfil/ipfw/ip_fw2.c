@@ -67,6 +67,7 @@
 #include <net/route/nhop.h>
 #include <net/pfil.h>
 #include <net/vnet.h>
+#include <net/if_gif.h>
 #include <net/if_pfsync.h>
 
 #include <netpfil/pf/pf_mtag.h>
@@ -247,16 +248,9 @@ SYSEND
 #endif /* SYSCTL_NODE */
 
 /*
- * Some macros used in the various matching options.
  * L3HDR maps an ipv4 pointer into a layer3 header pointer of type T
- * Other macros just cast void * into the appropriate type
  */
 #define	L3HDR(T, ip)	((T *)((u_int32_t *)(ip) + (ip)->ip_hl))
-#define	TCP(p)		((struct tcphdr *)(p))
-#define	SCTP(p)		((struct sctphdr *)(p))
-#define	UDP(p)		((struct udphdr *)(p))
-#define	ICMP(p)		((struct icmphdr *)(p))
-#define	ICMP6(p)	((struct icmp6_hdr *)(p))
 
 static __inline int
 icmptype_match(struct icmphdr *icmp, ipfw_insn_u32 *cmd)
@@ -436,7 +430,6 @@ iface_match(struct ifnet *ifp, ipfw_insn_if *cmd, struct ip_fw_chain *chain,
 				return(1);
 		}
 	} else {
-#if !defined(USERSPACE) && defined(__FreeBSD__)	/* and OSX too ? */
 		struct ifaddr *ia;
 
 		NET_EPOCH_ASSERT();
@@ -448,7 +441,6 @@ iface_match(struct ifnet *ifp, ipfw_insn_if *cmd, struct ip_fw_chain *chain,
 			    (ia->ifa_addr))->sin_addr.s_addr)
 				return (1);	/* match */
 		}
-#endif /* __FreeBSD__ */
 	}
 	return(0);	/* no match, fail ... */
 }
@@ -477,9 +469,6 @@ iface_match(struct ifnet *ifp, ipfw_insn_if *cmd, struct ip_fw_chain *chain,
 static int
 verify_path(struct in_addr src, struct ifnet *ifp, u_int fib)
 {
-#if defined(USERSPACE) || !defined(__FreeBSD__)
-	return 0;
-#else
 	struct nhop_object *nh;
 
 	nh = fib4_lookup(fib, src, 0, NHR_NONE, 0);
@@ -506,7 +495,6 @@ verify_path(struct in_addr src, struct ifnet *ifp, u_int fib)
 
 	/* found valid route */
 	return 1;
-#endif /* __FreeBSD__ */
 }
 
 /*
@@ -779,7 +767,9 @@ static int
 flow6id_match(int curr_flow, ipfw_insn_u32 *cmd)
 {
 	int i;
-	for (i=0; i <= cmd->o.arg1; ++i)
+	/* Mask proto version and traffic class out before comparing flow-id */
+	curr_flow &= ntohl(IPV6_FLOWLABEL_MASK);
+	for (i=0; i < cmd->o.arg1; ++i)
 		if (curr_flow == cmd->d[i])
 			return 1;
 	return 0;
@@ -1105,15 +1095,6 @@ static int
 check_uidgid(ipfw_insn_u32 *insn, struct ip_fw_args *args, int *ugid_lookupp,
     struct ucred **uc)
 {
-#if defined(USERSPACE)
-	return 0;	// not supported in userspace
-#else
-#ifndef __FreeBSD__
-	/* XXX */
-	return cred_check(insn, proto, oif,
-	    dst_ip, dst_port, src_ip, src_port,
-	    (struct bsd_ucred *)uc, ugid_lookupp, ((struct mbuf *)inp)->m_skb);
-#else  /* FreeBSD */
 	struct in_addr src_ip, dst_ip;
 	struct inpcbinfo *pi;
 	struct ipfw_flow_id *id;
@@ -1210,8 +1191,6 @@ check_uidgid(ipfw_insn_u32 *insn, struct ip_fw_args *args, int *ugid_lookupp,
 	else if (insn->o.opcode == O_JAIL)
 		match = ((*uc)->cr_prison->pr_id == (int)insn->d[0]);
 	return (match);
-#endif /* __FreeBSD__ */
-#endif /* not supported in userspace */
 }
 
 /*
@@ -1308,7 +1287,7 @@ jump(struct ip_fw_chain *chain, struct ip_fw *f, uint32_t num,
 #define	TARG(k, f)	IP_FW_ARG_TABLEARG(chain, k, f)
 
 static inline int
-tvalue_match(struct ip_fw_chain *ch, const ipfw_insn_table *cmd,
+tvalue_match(struct ip_fw_chain *ch, const ipfw_insn_lookup *cmd,
     uint32_t tablearg)
 {
 	uint32_t tvalue;
@@ -1335,6 +1314,11 @@ tvalue_match(struct ip_fw_chain *ch, const ipfw_insn_table *cmd,
 	case TVALUE_NH4:
 		tvalue = TARG_VAL(ch, tablearg, nh4);
 		break;
+	case TVALUE_NH6:
+		if (F_LEN(&cmd->o) != F_INSN_SIZE(ipfw_insn_lookup))
+			return (0);
+		return (0 == memcmp(&TARG_VAL(ch, tablearg, nh6),
+		    &cmd->ip6, sizeof(struct in6_addr)));
 	case TVALUE_DSCP:
 		tvalue = TARG_VAL(ch, tablearg, dscp);
 		break;
@@ -1349,7 +1333,13 @@ tvalue_match(struct ip_fw_chain *ch, const ipfw_insn_table *cmd,
 		tvalue = TARG_VAL(ch, tablearg, tag);
 		break;
 	}
-	return (tvalue == cmd->value);
+	/*
+	 * XXX: compatibility layer, to be removed.
+	 * Match u32 values specified as ipfw_insn_table structure.
+	 */
+	if (F_LEN(&cmd->o) == F_INSN_SIZE(ipfw_insn_table))
+		return (tvalue == insntoc(cmd, table)->value);
+	return (tvalue == cmd->u32);
 }
 
 /*
@@ -1421,11 +1411,7 @@ ipfw_chk(struct ip_fw_args *args)
 	 * these types of constraints, as well as decrease contention
 	 * on pcb related locks.
 	 */
-#ifndef __FreeBSD__
-	struct bsd_ucred ucred_cache;
-#else
 	struct ucred *ucred_cache = NULL;
-#endif
 	uint32_t f_pos = 0;	/* index of current rule in the array */
 	int ucred_lookup = 0;
 	int retval = 0;
@@ -1449,6 +1435,7 @@ ipfw_chk(struct ip_fw_args *args)
 	 */
 	u_short offset = 0;
 	u_short ip6f_mf = 0;
+	u_short ehlen;
 
 	/*
 	 * Local copies of addresses. They are only valid if we have
@@ -1494,44 +1481,33 @@ ipfw_chk(struct ip_fw_args *args)
 
 	int done = 0;		/* flag to exit the outer loop */
 	IPFW_RLOCK_TRACKER;
+	bool locked = false;
 	bool mem;
 	bool need_send_reject = false;
 	int reject_code;
 	uint16_t reject_mtu;
 
 	if ((mem = (args->flags & IPFW_ARGS_LENMASK))) {
-		if (args->flags & IPFW_ARGS_ETHER) {
-			eh = (struct ether_header *)args->mem;
-			if (eh->ether_type == htons(ETHERTYPE_VLAN))
-				ip = (struct ip *)
-				    ((struct ether_vlan_header *)eh + 1);
-			else
-				ip = (struct ip *)(eh + 1);
-		} else {
-			eh = NULL;
-			ip = (struct ip *)args->mem;
-		}
+		eh = args->flags & IPFW_ARGS_ETHER ? args->mem : NULL;
 		pktlen = IPFW_ARGS_LENGTH(args->flags);
 		args->f_id.fib = args->ifp->if_fib;	/* best guess */
 	} else {
 		m = args->m;
 		if (m->m_flags & M_SKIP_FIREWALL || (! V_ipfw_vnet_ready))
 			return (IP_FW_PASS);	/* accept */
-		if (args->flags & IPFW_ARGS_ETHER) {
-	                /* We need some amount of data to be contiguous. */
-			if (m->m_len < min(m->m_pkthdr.len, max_protohdr) &&
-			    (args->m = m = m_pullup(m, min(m->m_pkthdr.len,
-			    max_protohdr))) == NULL)
-				goto pullup_failed;
-			eh = mtod(m, struct ether_header *);
-			ip = (struct ip *)(eh + 1);
-		} else {
-			eh = NULL;
-			ip = mtod(m, struct ip *);
-		}
+		eh = args->flags & IPFW_ARGS_ETHER ?
+		    mtod(m, struct ether_header *) : NULL;
 		pktlen = m->m_pkthdr.len;
 		args->f_id.fib = M_GETFIB(m); /* mbuf not altered */
 	}
+
+	if (eh != NULL) {
+		if (eh->ether_type == htons(ETHERTYPE_VLAN))
+			ehlen = sizeof(struct ether_vlan_header);
+		else
+			ehlen = sizeof(struct ether_header);
+	} else
+		ehlen = 0;
 
 	dst_ip.s_addr = 0;		/* make sure it is initialized */
 	src_ip.s_addr = 0;		/* make sure it is initialized */
@@ -1539,59 +1515,43 @@ ipfw_chk(struct ip_fw_args *args)
 
 	DYN_INFO_INIT(&dyn_info);
 /*
- * PULLUP_TO(len, p, T) makes sure that len + sizeof(T) is contiguous,
- * then it sets p to point at the offset "len" in the mbuf. WARNING: the
- * pointer might become stale after other pullups (but we never use it
- * this way).
+ * PULLUP(p) makes typed pointer 'p' point at contiguous memory sized to
+ * its type, that is offset 'hlen' bytes from the beginning of the packet
+ * The macro reads variables 'hlen', 'ehlen' and 'm' or 'args->mem' in the
+ * current scope.  If the macro does m_pullup(), the following current scope
+ * variables will be updated: 'm', 'args->m', 'eh', 'ip'.
  */
-#define	PULLUP_TO(_len, p, T)	PULLUP_LEN(_len, p, sizeof(T))
-#define	EHLEN	(eh != NULL ? ((char *)ip - (char *)eh) : 0)
-#define	_PULLUP_LOCKED(_len, p, T, unlock)			\
-do {								\
-	int x = (_len) + T + EHLEN;				\
-	if (mem) {						\
-		if (__predict_false(pktlen < x)) {		\
-			unlock;					\
-			goto pullup_failed;			\
-		}						\
-		p = (char *)args->mem + (_len) + EHLEN;		\
-	} else {						\
-		if (__predict_false((m)->m_len < x)) {		\
-			args->m = m = m_pullup(m, x);		\
-			if (m == NULL) {			\
-				unlock;				\
-				goto pullup_failed;		\
-			}					\
-		}						\
-		p = mtod(m, char *) + (_len) + EHLEN;		\
-	}							\
+#define	PULLUP(_p)		PULLUP_LEN((_p), sizeof(*(_p)))
+#define	PULLUP_TO(_p, _T)	PULLUP_LEN((_p), sizeof(_T))
+#define	PULLUP_LEN(_p, _size)						\
+do {									\
+	int _max = hlen + ehlen + (_size);				\
+	if (mem) {							\
+		if (__predict_false(pktlen < _max))			\
+			goto pullup_failed;				\
+		(_p) = (__typeof(_p))((char *)args->mem + hlen + ehlen);\
+	} else {							\
+		args->m = m = m_pullup(m, _max);			\
+		if (__predict_false((m == NULL)))			\
+			goto pullup_failed;				\
+		if (eh != NULL) {					\
+			eh = mtod(m, struct ether_header *);		\
+			ip = (struct ip *)(eh + 1);			\
+		} else							\
+			ip = mtod(m, struct ip *);			\
+		(_p) = (__typeof(_p))(mtod(m, char *) + hlen + ehlen);	\
+	}								\
 } while (0)
 
-#define	PULLUP_LEN(_len, p, T)	_PULLUP_LOCKED(_len, p, T, )
-#define	PULLUP_LEN_LOCKED(_len, p, T)	\
-    _PULLUP_LOCKED(_len, p, T, IPFW_PF_RUNLOCK(chain));	\
-    UPDATE_POINTERS()
-/*
- * In case pointers got stale after pullups, update them.
- */
-#define	UPDATE_POINTERS()					\
-do {								\
-	if (!mem) {						\
-		if (eh != NULL) {				\
-			eh = mtod(m, struct ether_header *);	\
-			ip = (struct ip *)(eh + 1);		\
-		} else						\
-			ip = mtod(m, struct ip *);		\
-		args->m = m;					\
-	}							\
-} while (0)
+	PULLUP(ip);
 
 	/* Identify IP packets and fill up variables. */
 	if (pktlen >= sizeof(struct ip6_hdr) &&
 	    (eh == NULL || eh->ether_type == htons(ETHERTYPE_IPV6)) &&
 	    ip->ip_v == 6) {
-		struct ip6_hdr *ip6 = (struct ip6_hdr *)ip;
+		struct ip6_hdr *ip6;
 
+		PULLUP(ip6);
 		is_ipv6 = 1;
 		args->flags |= IPFW_ARGS_IP6;
 		hlen = sizeof(struct ip6_hdr);
@@ -1599,56 +1559,70 @@ do {								\
 		/* Search extension headers to find upper layer protocols */
 		while (ulp == NULL && offset == 0) {
 			switch (proto) {
-			case IPPROTO_ICMPV6:
-				PULLUP_TO(hlen, ulp, struct icmp6_hdr);
+			case IPPROTO_ICMPV6: {
+				struct icmp6_hdr *icmp6;
+
+				PULLUP(icmp6);
 #ifdef INET6
-				icmp6_type = ICMP6(ulp)->icmp6_type;
+				icmp6_type = icmp6->icmp6_type;
 #endif
+				ulp = icmp6;
 				break;
+			}
+			case IPPROTO_TCP: {
+				struct tcphdr *tcp;
 
-			case IPPROTO_TCP:
-				PULLUP_TO(hlen, ulp, struct tcphdr);
-				dst_port = TCP(ulp)->th_dport;
-				src_port = TCP(ulp)->th_sport;
+				PULLUP(tcp);
+				dst_port = tcp->th_dport;
+				src_port = tcp->th_sport;
 				/* save flags for dynamic rules */
-				args->f_id._flags = tcp_get_flags(TCP(ulp));
+				args->f_id._flags = tcp_get_flags(tcp);
+				ulp = tcp;
 				break;
+			}
+			case IPPROTO_SCTP: {
+				struct sctphdr *sctp;
 
-			case IPPROTO_SCTP:
 				if (pktlen >= hlen + sizeof(struct sctphdr) +
 				    sizeof(struct sctp_chunkhdr) +
 				    offsetof(struct sctp_init, a_rwnd))
-					PULLUP_LEN(hlen, ulp,
+					PULLUP_LEN(sctp,
 					    sizeof(struct sctphdr) +
 					    sizeof(struct sctp_chunkhdr) +
 					    offsetof(struct sctp_init, a_rwnd));
 				else if (pktlen >= hlen + sizeof(struct sctphdr))
-					PULLUP_LEN(hlen, ulp, pktlen - hlen);
+					PULLUP_LEN(sctp, pktlen - hlen);
 				else
-					PULLUP_LEN(hlen, ulp,
-					    sizeof(struct sctphdr));
-				src_port = SCTP(ulp)->src_port;
-				dst_port = SCTP(ulp)->dest_port;
+					PULLUP(sctp);
+				src_port = sctp->src_port;
+				dst_port = sctp->dest_port;
+				ulp = sctp;
 				break;
-
+			}
 			case IPPROTO_UDP:
-			case IPPROTO_UDPLITE:
-				PULLUP_TO(hlen, ulp, struct udphdr);
-				dst_port = UDP(ulp)->uh_dport;
-				src_port = UDP(ulp)->uh_sport;
-				break;
+			case IPPROTO_UDPLITE: {
+				struct udphdr *udp;
 
-			case IPPROTO_HOPOPTS:	/* RFC 2460 */
-				PULLUP_TO(hlen, ulp, struct ip6_hbh);
+				PULLUP(udp);
+				dst_port = udp->uh_dport;
+				src_port = udp->uh_sport;
+				ulp = udp;
+				break;
+			}
+			case IPPROTO_HOPOPTS: {	/* RFC 2460 */
+				struct ip6_hbh *hbh;
+
+				PULLUP(hbh);
 				ext_hd |= EXT_HOPOPTS;
-				hlen += (((struct ip6_hbh *)ulp)->ip6h_len + 1) << 3;
-				proto = ((struct ip6_hbh *)ulp)->ip6h_nxt;
-				ulp = NULL;
+				hlen += (hbh->ip6h_len + 1) << 3;
+				proto = hbh->ip6h_nxt;
 				break;
+			}
+			case IPPROTO_ROUTING: {	/* RFC 2460 */
+				struct ip6_rthdr *rth;
 
-			case IPPROTO_ROUTING:	/* RFC 2460 */
-				PULLUP_TO(hlen, ulp, struct ip6_rthdr);
-				switch (((struct ip6_rthdr *)ulp)->ip6r_type) {
+				PULLUP(rth);
+				switch (rth->ip6r_type) {
 				case 0:
 					ext_hd |= EXT_RTHDR0;
 					break;
@@ -1659,27 +1633,25 @@ do {								\
 					if (V_fw_verbose)
 						printf("IPFW2: IPV6 - Unknown "
 						    "Routing Header type(%d)\n",
-						    ((struct ip6_rthdr *)
-						    ulp)->ip6r_type);
+						    rth->ip6r_type);
 					if (V_fw_deny_unknown_exthdrs)
 					    return (IP_FW_DENY);
 					break;
 				}
 				ext_hd |= EXT_ROUTING;
-				hlen += (((struct ip6_rthdr *)ulp)->ip6r_len + 1) << 3;
-				proto = ((struct ip6_rthdr *)ulp)->ip6r_nxt;
-				ulp = NULL;
+				hlen += (rth->ip6r_len + 1) << 3;
+				proto = rth->ip6r_nxt;
 				break;
+			}
+			case IPPROTO_FRAGMENT: { /* RFC 2460 */
+				struct ip6_frag *frag6;
 
-			case IPPROTO_FRAGMENT:	/* RFC 2460 */
-				PULLUP_TO(hlen, ulp, struct ip6_frag);
+				PULLUP(frag6);
 				ext_hd |= EXT_FRAGMENT;
 				hlen += sizeof (struct ip6_frag);
-				proto = ((struct ip6_frag *)ulp)->ip6f_nxt;
-				offset = ((struct ip6_frag *)ulp)->ip6f_offlg &
-					IP6F_OFF_MASK;
-				ip6f_mf = ((struct ip6_frag *)ulp)->ip6f_offlg &
-					IP6F_MORE_FRAG;
+				proto = frag6->ip6f_nxt;
+				offset = frag6->ip6f_offlg & IP6F_OFF_MASK;
+				ip6f_mf = frag6->ip6f_offlg & IP6F_MORE_FRAG;
 				if (V_fw_permit_single_frag6 == 0 &&
 				    offset == 0 && ip6f_mf == 0) {
 					if (V_fw_verbose)
@@ -1689,29 +1661,29 @@ do {								\
 					    return (IP_FW_DENY);
 					break;
 				}
-				args->f_id.extra =
-				    ntohl(((struct ip6_frag *)ulp)->ip6f_ident);
-				ulp = NULL;
+				args->f_id.extra = ntohl(frag6->ip6f_ident);
 				break;
+			}
+			case IPPROTO_DSTOPTS: {	/* RFC 2460 */
+				struct ip6_hbh *hbh;
 
-			case IPPROTO_DSTOPTS:	/* RFC 2460 */
-				PULLUP_TO(hlen, ulp, struct ip6_hbh);
+				PULLUP(hbh);
 				ext_hd |= EXT_DSTOPTS;
-				hlen += (((struct ip6_hbh *)ulp)->ip6h_len + 1) << 3;
-				proto = ((struct ip6_hbh *)ulp)->ip6h_nxt;
-				ulp = NULL;
+				hlen += (hbh->ip6h_len + 1) << 3;
+				proto = hbh->ip6h_nxt;
 				break;
+			}
+			case IPPROTO_AH: {	/* RFC 2402 */
+				struct ip6_ext *ext6;
 
-			case IPPROTO_AH:	/* RFC 2402 */
-				PULLUP_TO(hlen, ulp, struct ip6_ext);
+				PULLUP(ext6);
 				ext_hd |= EXT_AH;
-				hlen += (((struct ip6_ext *)ulp)->ip6e_len + 2) << 2;
-				proto = ((struct ip6_ext *)ulp)->ip6e_nxt;
-				ulp = NULL;
+				hlen += (ext6->ip6e_len + 2) << 2;
+				proto = ext6->ip6e_nxt;
 				break;
-
+			}
 			case IPPROTO_ESP:	/* RFC 2406 */
-				PULLUP_TO(hlen, ulp, uint32_t);	/* SPI, Seq# */
+				PULLUP_TO(ulp, uint32_t);	/* SPI, Seq# */
 				/* Anything past Seq# is variable length and
 				 * data past this ext. header is encrypted. */
 				ext_hd |= EXT_ESP;
@@ -1728,37 +1700,45 @@ do {								\
 
 			case IPPROTO_OSPFIGP:
 				/* XXX OSPF header check? */
-				PULLUP_TO(hlen, ulp, struct ip6_ext);
+				PULLUP_TO(ulp, struct ip6_ext);
 				break;
 
 			case IPPROTO_PIM:
 				/* XXX PIM header check? */
-				PULLUP_TO(hlen, ulp, struct pim);
+				PULLUP_TO(ulp, struct pim);
 				break;
 
 			case IPPROTO_GRE:	/* RFC 1701 */
 				/* XXX GRE header check? */
-				PULLUP_TO(hlen, ulp, struct grehdr);
+				PULLUP_TO(ulp, struct grehdr);
 				break;
 
-			case IPPROTO_CARP:
-				PULLUP_TO(hlen, ulp, offsetof(
+			case IPPROTO_CARP: {
+				struct carp_header *carp;
+
+				PULLUP_TO(carp, offsetof(
 				    struct carp_header, carp_counter));
-				if (CARP_ADVERTISEMENT !=
-				    ((struct carp_header *)ulp)->carp_type)
+				if (CARP_ADVERTISEMENT != carp->carp_type)
 					return (IP_FW_DENY);
+				ulp = carp;
 				break;
-
+			}
 			case IPPROTO_IPV6:	/* RFC 2893 */
-				PULLUP_TO(hlen, ulp, struct ip6_hdr);
+				PULLUP_TO(ulp, struct ip6_hdr);
 				break;
 
 			case IPPROTO_IPV4:	/* RFC 2893 */
-				PULLUP_TO(hlen, ulp, struct ip);
+				PULLUP_TO(ulp, struct ip);
+				break;
+
+			case IPPROTO_ETHERIP:	/* RFC 3378 */
+				PULLUP_LEN(ulp,
+				    sizeof(struct etherip_header) +
+				    sizeof(struct ether_header));
 				break;
 
 			case IPPROTO_PFSYNC:
-				PULLUP_TO(hlen, ulp, struct pfsync_header);
+				PULLUP_TO(ulp, struct pfsync_header);
 				break;
 
 			default:
@@ -1768,11 +1748,10 @@ do {								\
 					     proto, ext_hd);
 				if (V_fw_deny_unknown_exthdrs)
 				    return (IP_FW_DENY);
-				PULLUP_TO(hlen, ulp, struct ip6_ext);
+				PULLUP_TO(ulp, struct ip6_ext);
 				break;
 			} /*switch */
 		}
-		UPDATE_POINTERS();
 		ip6 = (struct ip6_hdr *)ip;
 		args->f_id.addr_type = 6;
 		args->f_id.src_ip6 = ip6->ip6_src;
@@ -1797,40 +1776,48 @@ do {								\
 
 		if (offset == 0) {
 			switch (proto) {
-			case IPPROTO_TCP:
-				PULLUP_TO(hlen, ulp, struct tcphdr);
-				dst_port = TCP(ulp)->th_dport;
-				src_port = TCP(ulp)->th_sport;
-				/* save flags for dynamic rules */
-				args->f_id._flags = tcp_get_flags(TCP(ulp));
-				break;
+			case IPPROTO_TCP: {
+				struct tcphdr *tcp;
 
-			case IPPROTO_SCTP:
+				PULLUP(tcp);
+				dst_port = tcp->th_dport;
+				src_port = tcp->th_sport;
+				/* save flags for dynamic rules */
+				args->f_id._flags = tcp_get_flags(tcp);
+				ulp = tcp;
+				break;
+			}
+			case IPPROTO_SCTP: {
+				struct sctphdr *sctp;
+
 				if (pktlen >= hlen + sizeof(struct sctphdr) +
 				    sizeof(struct sctp_chunkhdr) +
 				    offsetof(struct sctp_init, a_rwnd))
-					PULLUP_LEN(hlen, ulp,
+					PULLUP_LEN(sctp,
 					    sizeof(struct sctphdr) +
 					    sizeof(struct sctp_chunkhdr) +
 					    offsetof(struct sctp_init, a_rwnd));
 				else if (pktlen >= hlen + sizeof(struct sctphdr))
-					PULLUP_LEN(hlen, ulp, pktlen - hlen);
+					PULLUP_LEN(sctp, pktlen - hlen);
 				else
-					PULLUP_LEN(hlen, ulp,
-					    sizeof(struct sctphdr));
-				src_port = SCTP(ulp)->src_port;
-				dst_port = SCTP(ulp)->dest_port;
+					PULLUP(sctp);
+				src_port = sctp->src_port;
+				dst_port = sctp->dest_port;
+				ulp = sctp;
 				break;
-
+			}
 			case IPPROTO_UDP:
-			case IPPROTO_UDPLITE:
-				PULLUP_TO(hlen, ulp, struct udphdr);
-				dst_port = UDP(ulp)->uh_dport;
-				src_port = UDP(ulp)->uh_sport;
-				break;
+			case IPPROTO_UDPLITE: {
+				struct udphdr *udp;
 
+				PULLUP(udp);
+				dst_port = udp->uh_dport;
+				src_port = udp->uh_sport;
+				ulp = udp;
+				break;
+			}
 			case IPPROTO_ICMP:
-				PULLUP_TO(hlen, ulp, struct icmphdr);
+				PULLUP_TO(ulp, struct icmphdr);
 				//args->f_id.flags = ICMP(ulp)->icmp_type;
 				break;
 
@@ -1844,7 +1831,6 @@ do {								\
 			}
 		}
 
-		UPDATE_POINTERS();
 		args->f_id.addr_type = 4;
 		args->f_id.src_ip = ntohl(src_ip.s_addr);
 		args->f_id.dst_ip = ntohl(dst_ip.s_addr);
@@ -1854,7 +1840,6 @@ do {								\
 
 		args->f_id.addr_type = 1; /* XXX */
 	}
-#undef PULLUP_TO
 	pktlen = iplen < pktlen ? iplen: pktlen;
 
 	/* Properly initialize the rest of f_id */
@@ -1867,6 +1852,7 @@ do {								\
 		IPFW_PF_RUNLOCK(chain);
 		return (IP_FW_PASS);	/* accept */
 	}
+	locked = true;
 	if (args->flags & IPFW_ARGS_REF) {
 		/*
 		 * Packet has already been tagged as a result of a previous
@@ -1980,11 +1966,7 @@ do {								\
 					match = check_uidgid(
 						    (ipfw_insn_u32 *)cmd,
 						    args, &ucred_lookup,
-#ifdef __FreeBSD__
 						    &ucred_cache);
-#else
-						    (void *)&ucred_cache);
-#endif
 				break;
 
 			case O_RECV:
@@ -2090,135 +2072,15 @@ do {								\
 				break;
 
 			case O_IP_DST_LOOKUP:
-				if (IPFW_LOOKUP_TYPE(cmd) != LOOKUP_NONE) {
-				  void *pkey = NULL;
-				  uint32_t key, vidx;
-				  uint16_t keylen = 0; /* zero if can't match the packet */
-				  uint8_t lookup_type;
-
-				lookup_type = IPFW_LOOKUP_TYPE(cmd);
-
-				switch (lookup_type) {
-				case LOOKUP_DST_IP:
-				case LOOKUP_SRC_IP:
-					if (is_ipv4) {
-						keylen = sizeof(in_addr_t);
-						if (lookup_type == LOOKUP_DST_IP)
-							pkey = &dst_ip;
-						else
-							pkey = &src_ip;
-					} else if (is_ipv6) {
-						keylen = sizeof(struct in6_addr);
-						if (lookup_type == LOOKUP_DST_IP)
-							pkey = &args->f_id.dst_ip6;
-						else
-							pkey = &args->f_id.src_ip6;
-					} else /* only for L3 */
-						break;
-				case LOOKUP_DSCP:
-					if (is_ipv4)
-						key = ip->ip_tos >> 2;
-					else if (is_ipv6)
-						key = IPV6_DSCP(
-						    (struct ip6_hdr *)ip) >> 2;
-					else
-						break; /* only for L3 */
-
-					key &= 0x3f;
-					if (cmdlen == F_INSN_SIZE(ipfw_insn_table))
-						key &= insntod(cmd, table)->value;
-					pkey = &key;
-					keylen = sizeof(key);
-					break;
-				case LOOKUP_DST_PORT:
-				case LOOKUP_SRC_PORT:
-					/* only for L3 */
-					if (is_ipv6 == 0 && is_ipv4 == 0) {
-						break;
-					}
-					/* Skip fragments */
-					if (offset != 0) {
-						break;
-					}
-					/* Skip proto without ports */
-					if (proto != IPPROTO_TCP &&
-					    proto != IPPROTO_UDP &&
-					    proto != IPPROTO_UDPLITE &&
-					    proto != IPPROTO_SCTP)
-						break;
-					if (lookup_type == LOOKUP_DST_PORT)
-						key = dst_port;
-					else
-						key = src_port;
-					pkey = &key;
-					if (cmdlen == F_INSN_SIZE(ipfw_insn_table))
-						key &= insntod(cmd, table)->value;
-					keylen = sizeof(key);
-					break;
-				case LOOKUP_DST_MAC:
-				case LOOKUP_SRC_MAC:
-					/* only for L2 */
-					if ((args->flags & IPFW_ARGS_ETHER) == 0)
-						break;
-
-					pkey = lookup_type == LOOKUP_DST_MAC ?
-					    eh->ether_dhost : eh->ether_shost;
-					keylen = ETHER_ADDR_LEN;
-					break;
-#ifndef USERSPACE
-				case LOOKUP_UID:
-				case LOOKUP_JAIL:
-					check_uidgid(insntod(cmd, u32),
-					    args, &ucred_lookup,
-#ifdef __FreeBSD__
-					    &ucred_cache);
-					if (lookup_type == LOOKUP_UID)
-						key = ucred_cache->cr_uid;
-					else if (lookup_type == LOOKUP_JAIL)
-						key = ucred_cache->cr_prison->pr_id;
-#else /* !__FreeBSD__ */
-					    (void *)&ucred_cache);
-					if (lookup_type == LOOKUP_UID)
-						key = ucred_cache.uid;
-					else if (lookup_type == LOOKUP_JAIL)
-						key = ucred_cache.xid;
-#endif /* !__FreeBSD__ */
-					pkey = &key;
-					if (cmdlen == F_INSN_SIZE(ipfw_insn_table))
-						key &= insntod(cmd, table)->value;
-					keylen = sizeof(key);
-					break;
-#endif /* !USERSPACE */
-				case LOOKUP_MARK:
-					key = args->rule.pkt_mark;
-					if (cmdlen == F_INSN_SIZE(ipfw_insn_table))
-						key &= insntod(cmd, table)->value;
-					pkey = &key;
-					keylen = sizeof(key);
-					break;
-				case LOOKUP_RULENUM:
-					key = f->rulenum;
-					if (cmdlen == F_INSN_SIZE(ipfw_insn_table))
-						key &= insntod(cmd, table)->value;
-					pkey = &key;
-					keylen = sizeof(key);
-					break;
-				}
-				/* unknown key type */
-				if (keylen == 0)
-					break;
-				match = ipfw_lookup_table(chain,
-				    insntod(cmd, kidx)->kidx, keylen,
-				    pkey, &vidx);
-
-				if (match)
-					tablearg = vidx;
-				break;
-			}
-				/* LOOKUP_NONE */
-				/* FALLTHROUGH */
 			case O_IP_SRC_LOOKUP:
-			{
+				/*
+				 * XXX: compatibility layer, to be removed.
+				 * The following if and subsequent fallthrough
+				 * are here for backward opcode compatibility
+				 * used for lookup opcode until O_TABLE_LOOKUP
+				 * appeared.
+				 */
+				if (IPFW_LOOKUP_TYPE(cmd) == LOOKUP_NONE) {
 				void *pkey;
 				uint32_t vidx;
 				uint16_t keylen;
@@ -2242,15 +2104,161 @@ do {								\
 				    keylen, pkey, &vidx);
 				if (!match)
 					break;
-				if (cmdlen == F_INSN_SIZE(ipfw_insn_table)) {
+				if (IPFW_LOOKUP_MATCH_TVALUE(cmd) != 0) {
 					match = tvalue_match(chain,
-					    insntod(cmd, table), vidx);
+					    insntod(cmd, lookup), vidx);
 					if (!match)
 						break;
 				}
 				tablearg = vidx;
 				break;
-			}
+				}
+				/* FALLTHROUGH */
+			case O_TABLE_LOOKUP:
+			{
+				ipfw_insn_lookup key;
+				uint32_t vidx;
+				uint16_t keylen = 0; /* zero if can't match the packet */
+				uint8_t lookup_type;
+
+				lookup_type = IPFW_LOOKUP_TYPE(cmd);
+
+				switch (lookup_type) {
+				case LOOKUP_DST_IP:
+				case LOOKUP_DST_IP4:
+					if (is_ipv4) {
+						keylen = sizeof(in_addr_t);
+						key.ip4 = dst_ip;
+						break;
+					}
+					if (lookup_type == LOOKUP_DST_IP4)
+						break;
+					/* FALLTHOUGH */
+				case LOOKUP_DST_IP6:
+					if (is_ipv6 == 0)
+						break;
+					keylen = sizeof(struct in6_addr);
+					key.ip6 = args->f_id.dst_ip6;
+					break;
+				case LOOKUP_SRC_IP:
+				case LOOKUP_SRC_IP4:
+					if (is_ipv4) {
+						keylen = sizeof(in_addr_t);
+						key.ip4 = src_ip;
+						break;
+					}
+					if (lookup_type == LOOKUP_SRC_IP4)
+						break;
+					/* FALLTHOUGH */
+				case LOOKUP_SRC_IP6:
+					if (is_ipv6 == 0)
+						break;
+					keylen = sizeof(struct in6_addr);
+					key.ip6 = args->f_id.src_ip6;
+					break;
+				case LOOKUP_DSCP:
+					if (is_ipv4)
+						key.u32 = ip->ip_tos >> 2;
+					else if (is_ipv6)
+						key.u32 = IPV6_DSCP(
+						    (struct ip6_hdr *)ip) >> 2;
+					else
+						break; /* only for L3 */
+
+					keylen = sizeof(key.u32);
+					key.u32 &= 0x3f;
+					break;
+				case LOOKUP_DST_PORT:
+				case LOOKUP_SRC_PORT:
+					/* only for L3 */
+					if (is_ipv6 == 0 && is_ipv4 == 0) {
+						break;
+					}
+					/* Skip fragments */
+					if (offset != 0) {
+						break;
+					}
+					/* Skip proto without ports */
+					if (proto != IPPROTO_TCP &&
+					    proto != IPPROTO_UDP &&
+					    proto != IPPROTO_UDPLITE &&
+					    proto != IPPROTO_SCTP)
+						break;
+					if (lookup_type == LOOKUP_DST_PORT)
+						key.u32 = dst_port;
+					else
+						key.u32 = src_port;
+					keylen = sizeof(key.u32);
+					break;
+				case LOOKUP_DST_MAC:
+					/* only for L2 */
+					if ((args->flags & IPFW_ARGS_ETHER) == 0)
+						break;
+					keylen = ETHER_ADDR_LEN;
+					memcpy(key.mac, eh->ether_dhost,
+					    sizeof(key.mac));
+					break;
+				case LOOKUP_SRC_MAC:
+					/* only for L2 */
+					if ((args->flags & IPFW_ARGS_ETHER) == 0)
+						break;
+					keylen = ETHER_ADDR_LEN;
+					memcpy(key.mac, eh->ether_shost,
+					    sizeof(key.mac));
+					break;
+				case LOOKUP_UID:
+				case LOOKUP_JAIL:
+					check_uidgid(insntod(cmd, u32),
+					    args, &ucred_lookup,
+					    &ucred_cache);
+					if (lookup_type == LOOKUP_UID)
+						key.u32 = ucred_cache->cr_uid;
+					else if (lookup_type == LOOKUP_JAIL)
+						key.u32 = ucred_cache->cr_prison->pr_id;
+					keylen = sizeof(key.u32);
+					break;
+				case LOOKUP_MARK:
+					key.u32 = args->rule.pkt_mark;
+					keylen = sizeof(key.u32);
+					break;
+				case LOOKUP_RULENUM:
+					key.u32 = f->rulenum;
+					keylen = sizeof(key.u32);
+					break;
+				}
+				/* unknown key type */
+				if (keylen == 0)
+					break;
+
+				if (IPFW_LOOKUP_MASKING(cmd) == 0) {
+					/* no masking needed */
+				} else if (cmdlen ==
+				    F_INSN_SIZE(ipfw_insn_table)) {
+					/*
+					 * XXX: compatibility layer,
+					 * to be removed.
+					 */
+					key.u32 &= insntod(cmd, table)->value;
+				} else {
+					key.__mask64[0] &=
+					    insntod(cmd, lookup)->__mask64[0];
+					key.__mask64[1] &=
+					    insntod(cmd, lookup)->__mask64[1];
+				}
+
+				match = ipfw_lookup_table(chain,
+				    insntod(cmd, kidx)->kidx, keylen,
+				    key.__mask64, &vidx);
+
+				if (!match)
+					break;
+				/*
+				 * XXX should we support check for value
+				 * simultaneously with masked lookup?
+				 */
+				tablearg = vidx;
+				break;
+			} /* O_TABLE_LOOKUP */
 
 			case O_MAC_SRC_LOOKUP:
 			case O_MAC_DST_LOOKUP:
@@ -2273,9 +2281,9 @@ do {								\
 				    keylen, pkey, &vidx);
 				if (!match)
 					break;
-				if (cmdlen == F_INSN_SIZE(ipfw_insn_table)) {
+				if (IPFW_LOOKUP_MATCH_TVALUE(cmd) != 0) {
 					match = tvalue_match(chain,
-					    insntod(cmd, table), vidx);
+					    insntod(cmd, lookup), vidx);
 					if (!match)
 						break;
 				}
@@ -2292,9 +2300,9 @@ do {								\
 				    &args->f_id, &vidx);
 				if (!match)
 					break;
-				if (cmdlen == F_INSN_SIZE(ipfw_insn_table))
+				if (IPFW_LOOKUP_MATCH_TVALUE(cmd) != 0)
 					match = tvalue_match(chain,
-					    insntod(cmd, table), vidx);
+					    insntod(cmd, lookup), vidx);
 				if (match)
 					tablearg = vidx;
 				break;
@@ -2389,16 +2397,17 @@ do {								\
 				break;
 
 			case O_ICMPTYPE:
-				match = (offset == 0 && proto==IPPROTO_ICMP &&
-				    icmptype_match(ICMP(ulp), (ipfw_insn_u32 *)cmd) );
+				match = (offset == 0 && proto == IPPROTO_ICMP &&
+				    icmptype_match((struct icmphdr *)ulp,
+				    (ipfw_insn_u32 *)cmd));
 				break;
 
 #ifdef INET6
 			case O_ICMP6TYPE:
 				match = is_ipv6 && offset == 0 &&
-				    proto==IPPROTO_ICMPV6 &&
+				    proto == IPPROTO_ICMPV6 &&
 				    icmp6type_match(
-					ICMP6(ulp)->icmp6_type,
+					((struct icmp6_hdr *)ulp)->icmp6_type,
 					(ipfw_insn_u32 *)cmd);
 				break;
 #endif /* INET6 */
@@ -2477,7 +2486,7 @@ do {								\
 
 			case O_TCPDATALEN:
 				if (proto == IPPROTO_TCP && offset == 0) {
-				    struct tcphdr *tcp;
+				    struct tcphdr *tcp = ulp;
 				    uint16_t x;
 				    uint16_t *p;
 				    int i;
@@ -2498,7 +2507,6 @@ do {								\
 				    } else
 #endif /* INET6 */
 					    x = iplen - (ip->ip_hl << 2);
-				    tcp = TCP(ulp);
 				    x -= tcp->th_off << 2;
 				    if (cmdlen == 1) {
 					match = (cmd->arg1 == x);
@@ -2519,39 +2527,42 @@ do {								\
 				 * the full compliment of all 12 flags.
 				 */
 				match = (proto == IPPROTO_TCP && offset == 0 &&
-				    flags_match(cmd, tcp_get_flags(TCP(ulp))));
+				    flags_match(cmd,
+				    tcp_get_flags((struct tcphdr *)ulp)));
 				break;
 
 			case O_TCPOPTS:
-				if (proto == IPPROTO_TCP && offset == 0 && ulp){
-					PULLUP_LEN_LOCKED(hlen, ulp,
-					    (TCP(ulp)->th_off << 2));
-					match = tcpopts_match(TCP(ulp), cmd);
+				if (proto == IPPROTO_TCP && offset == 0) {
+					struct tcphdr *tcp = ulp;
+
+					PULLUP_LEN(tcp, tcp->th_off << 2);
+					ulp = tcp;
+					match = tcpopts_match(tcp, cmd);
 				}
 				break;
 
 			case O_TCPSEQ:
 				match = (proto == IPPROTO_TCP && offset == 0 &&
 				    ((ipfw_insn_u32 *)cmd)->d[0] ==
-					TCP(ulp)->th_seq);
+					((struct tcphdr *)ulp)->th_seq);
 				break;
 
 			case O_TCPACK:
 				match = (proto == IPPROTO_TCP && offset == 0 &&
 				    ((ipfw_insn_u32 *)cmd)->d[0] ==
-					TCP(ulp)->th_ack);
+					((struct tcphdr *)ulp)->th_ack);
 				break;
 
 			case O_TCPMSS:
 				if (proto == IPPROTO_TCP &&
-				    (args->f_id._flags & TH_SYN) != 0 &&
-				    ulp != NULL) {
+				    (args->f_id._flags & TH_SYN) != 0) {
+					struct tcphdr *tcp = ulp;
 					uint16_t mss, *p;
 					int i;
 
-					PULLUP_LEN_LOCKED(hlen, ulp,
-					    (TCP(ulp)->th_off << 2));
-					if ((tcpopts_parse(TCP(ulp), &mss) &
+					PULLUP_LEN(tcp, tcp->th_off << 2);
+					ulp = tcp;
+					if ((tcpopts_parse(tcp, &mss) &
 					    IP_FW_TCPOPT_MSS) == 0)
 						break;
 					if (cmdlen == 1) {
@@ -2573,7 +2584,7 @@ do {								\
 				    uint16_t *p;
 				    int i;
 
-				    x = ntohs(TCP(ulp)->th_win);
+				    x = ntohs(((struct tcphdr *)ulp)->th_win);
 				    if (cmdlen == 1) {
 					match = (cmd->arg1 == x);
 					break;
@@ -2590,7 +2601,7 @@ do {								\
 				/* reject packets which have SYN only */
 				/* XXX should i also check for TH_ACK ? */
 				match = (proto == IPPROTO_TCP && offset == 0 &&
-				    (tcp_get_flags(TCP(ulp)) &
+				    (tcp_get_flags((struct tcphdr *)ulp) &
 				     (TH_RST | TH_ACK | TH_SYN)) != TH_SYN);
 				break;
 
@@ -2776,7 +2787,6 @@ do {								\
 				break;
 
 			case O_SOCKARG:	{
-#ifndef USERSPACE	/* not supported in userspace */
 				struct inpcb *inp = args->inp;
 				struct inpcbinfo *pi;
 				bool inp_locked = false;
@@ -2827,7 +2837,6 @@ do {								\
 					if (inp_locked)
 						INP_RUNLOCK(inp);
 				}
-#endif /* !USERSPACE */
 				break;
 			}
 
@@ -3185,7 +3194,7 @@ do {								\
 				 */
 				if (hlen > 0 && is_ipv4 && offset == 0 &&
 				    (proto != IPPROTO_ICMP ||
-				     is_icmp_query(ICMP(ulp))) &&
+				     is_icmp_query((struct icmphdr *)ulp)) &&
 				    !(m->m_flags & (M_BCAST|M_MCAST)) &&
 				    !IN_MULTICAST(ntohl(dst_ip.s_addr))) {
 					KASSERT(!need_send_reject,
@@ -3477,7 +3486,8 @@ do {								\
 
 		}	/* end of inner loop, scan opcodes */
 #undef PULLUP_LEN
-#undef PULLUP_LEN_LOCKED
+#undef PULLUP_TO
+#undef PULLUP
 
 		if (done)
 			break;
@@ -3512,13 +3522,13 @@ do {								\
 			send_reject(args, reject_code, reject_mtu,
 				    iplen, ip);
 	}
-#ifdef __FreeBSD__
 	if (ucred_cache != NULL)
 		crfree(ucred_cache);
-#endif
 	return (retval);
 
 pullup_failed:
+	if (locked)
+		IPFW_PF_RUNLOCK(chain);
 	if (V_fw_verbose)
 		printf("ipfw: pullup failed\n");
 	return (IP_FW_DENY);
@@ -3571,11 +3581,9 @@ sysctl_ipfw_tables_sets(SYSCTL_HANDLER_ARGS)
 /*
  * Stuff that must be initialised only on boot or module load
  */
-static int
+static void
 ipfw_init(void)
 {
-	int error = 0;
-
 	/*
  	 * Only print out this stuff the first time around,
 	 * when called from the sysinit code.
@@ -3620,7 +3628,6 @@ ipfw_init(void)
 	ipfw_init_sopt_handler();
 	ipfw_init_obj_rewriter();
 	ipfw_iface_init();
-	return (error);
 }
 
 /*
@@ -3663,6 +3670,7 @@ vnet_ipfw_init(const void *unused)
 #ifdef IPFIREWALL_NAT
 	LIST_INIT(&chain->nat);
 #endif
+	RB_INIT(&chain->taps);
 
 	/* Init shared services hash table */
 	ipfw_init_srv(chain);
@@ -3688,7 +3696,7 @@ vnet_ipfw_init(const void *unused)
 	rule->cmd[0].len = 1;
 	rule->cmd[0].opcode = default_to_accept ? O_ACCEPT : O_DENY;
 	chain->default_rule = rule;
-	ipfw_add_protected_rule(chain, rule, 0);
+	ipfw_add_protected_rule(chain, rule);
 
 	ipfw_eaction_init(chain, first);
 	ipfw_init_skipto_cache(chain);
@@ -3727,29 +3735,26 @@ vnet_ipfw_uninit(const void *unused)
 
 	V_ipfw_vnet_ready = 0; /* tell new callers to go away */
 	/*
-	 * disconnect from ipv4, ipv6, layer2 and sockopt.
-	 * Then grab, release and grab again the WLOCK so we make
-	 * sure the update is propagated and nobody will be in.
+	 * Disconnect from ipv4, ipv6, layer2 and sockopt.  pfil(9) hook
+	 * removal is synchronized by the net epoch, but our destructors
+	 * free the memory immediately, thus we need for the epoch sections
+	 * to complete.
 	 */
 	ipfw_detach_hooks();
 	V_ip_fw_ctl_ptr = NULL;
+	NET_EPOCH_WAIT();
 
 	last = IS_DEFAULT_VNET(curvnet) ? 1 : 0;
 
 	IPFW_UH_WLOCK(chain);
-	IPFW_UH_WUNLOCK(chain);
 
 	ipfw_dyn_uninit(0);	/* run the callout_drain */
 
-	IPFW_UH_WLOCK(chain);
-
 	reap = NULL;
-	IPFW_WLOCK(chain);
 	for (i = 0; i < chain->n_rules; i++)
 		ipfw_reap_add(chain, &reap, chain->map[i]);
 	free(chain->map, M_IPFW);
 	ipfw_destroy_skipto_cache(chain);
-	IPFW_WUNLOCK(chain);
 	IPFW_UH_WUNLOCK(chain);
 	ipfw_destroy_tables(chain, last);
 	ipfw_eaction_uninit(chain, last);
@@ -3764,39 +3769,19 @@ vnet_ipfw_uninit(const void *unused)
 	return (0);
 }
 
-/*
- * Module event handler.
- * In general we have the choice of handling most of these events by the
- * event handler or by the (VNET_)SYS(UN)INIT handlers. I have chosen to
- * use the SYSINIT handlers as they are more capable of expressing the
- * flow of control during module and vnet operations, so this is just
- * a skeleton. Note there is no SYSINIT equivalent of the module
- * SHUTDOWN handler, but we don't have anything to do in that case anyhow.
- */
 static int
 ipfw_modevent(module_t mod, int type, void *unused)
 {
-	int err = 0;
-
 	switch (type) {
 	case MOD_LOAD:
-		/* Called once at module load or
-	 	 * system boot if compiled in. */
-		break;
-	case MOD_QUIESCE:
-		/* Called before unload. May veto unloading. */
+		ipfw_init();
 		break;
 	case MOD_UNLOAD:
-		/* Called during unload. */
-		break;
-	case MOD_SHUTDOWN:
-		/* Called during system shutdown. */
-		break;
-	default:
-		err = EOPNOTSUPP;
+		ipfw_destroy();
 		break;
 	}
-	return err;
+
+	return (0);
 }
 
 static moduledata_t ipfwmod = {
@@ -3805,13 +3790,7 @@ static moduledata_t ipfwmod = {
 	0
 };
 
-/* Define startup order. */
-#define	IPFW_SI_SUB_FIREWALL	SI_SUB_PROTO_FIREWALL
-#define	IPFW_MODEVENT_ORDER	(SI_ORDER_ANY - 255) /* On boot slot in here. */
-#define	IPFW_MODULE_ORDER	(IPFW_MODEVENT_ORDER + 1) /* A little later. */
-#define	IPFW_VNET_ORDER		(IPFW_MODEVENT_ORDER + 2) /* Later still. */
-
-DECLARE_MODULE(ipfw, ipfwmod, IPFW_SI_SUB_FIREWALL, IPFW_MODEVENT_ORDER);
+DECLARE_MODULE(ipfw, ipfwmod, SI_SUB_PROTO_FIREWALL, SI_ORDER_FIRST);
 FEATURE(ipfw_ctl3, "ipfw new sockopt calls");
 MODULE_VERSION(ipfw, 3);
 /* should declare some dependencies here */
@@ -3820,19 +3799,7 @@ MODULE_VERSION(ipfw, 3);
  * Starting up. Done in order after ipfwmod() has been called.
  * VNET_SYSINIT is also called for each existing vnet and each new vnet.
  */
-SYSINIT(ipfw_init, IPFW_SI_SUB_FIREWALL, IPFW_MODULE_ORDER,
-	    ipfw_init, NULL);
-VNET_SYSINIT(vnet_ipfw_init, IPFW_SI_SUB_FIREWALL, IPFW_VNET_ORDER,
-	    vnet_ipfw_init, NULL);
-
-/*
- * Closing up shop. These are done in REVERSE ORDER, but still
- * after ipfwmod() has been called. Not called on reboot.
- * VNET_SYSUNINIT is also called for each exiting vnet as it exits.
- * or when the module is unloaded.
- */
-SYSUNINIT(ipfw_destroy, IPFW_SI_SUB_FIREWALL, IPFW_MODULE_ORDER,
-	    ipfw_destroy, NULL);
-VNET_SYSUNINIT(vnet_ipfw_uninit, IPFW_SI_SUB_FIREWALL, IPFW_VNET_ORDER,
-	    vnet_ipfw_uninit, NULL);
-/* end of file */
+VNET_SYSINIT(vnet_ipfw_init, SI_SUB_PROTO_FIREWALL, SI_ORDER_SECOND,
+    vnet_ipfw_init, NULL);
+VNET_SYSUNINIT(vnet_ipfw_uninit, SI_SUB_PROTO_FIREWALL, SI_ORDER_SECOND,
+    vnet_ipfw_uninit, NULL);

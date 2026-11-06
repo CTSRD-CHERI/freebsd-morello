@@ -1,6 +1,6 @@
 /*-
- * Copyright (c) 2020-2025 The FreeBSD Foundation
- * Copyright (c) 2021-2023 Bjoern A. Zeeb
+ * Copyright (c) 2020-2026 The FreeBSD Foundation
+ * Copyright (c) 2021-2025 Bjoern A. Zeeb
  *
  * This software was developed by Björn Zeeb under sponsorship from
  * the FreeBSD Foundation.
@@ -47,13 +47,11 @@
 #include <linux/ktime.h>
 #include <linux/compiler.h>
 
-#include "opt_wlan.h"
-
-/* Currently this is only used for wlan so we can depend on that. */
-#if defined(IEEE80211_DEBUG) && !defined(SKB_DEBUG)
-#define	SKB_DEBUG
-#endif
-
+/*
+ * At least the net/intel-irdma-kmod port pulls this header in; likely through
+ * if_ether.h (see PR289268).  This means we no longer can rely on
+ * IEEE80211_DEBUG (opt_wlan.h) to automatically set SKB_DEBUG.
+ */
 /* #define	SKB_DEBUG */
 
 #ifdef SKB_DEBUG
@@ -76,9 +74,9 @@ extern int linuxkpi_debug_skb;
     if (linuxkpi_debug_skb & DSKB_TRACE)				\
 	printf("SKB_TRACE %s:%d %p, %p\n", __func__, __LINE__, _s, _p)
 #define	SKB_TRACE_FMT(_s, _fmt, ...)					\
-   if (linuxkpi_debug_skb & DSKB_TRACE)					\
+    if ((linuxkpi_debug_skb & DSKB_TRACE) != 0)				\
 	printf("SKB_TRACE %s:%d %p " _fmt "\n", __func__, __LINE__, _s,	\
-	    __VA_ARGS__)
+	    ##__VA_ARGS__)
 #else
 #define	SKB_TODO()		do { } while(0)
 #define	SKB_IMPROVE(...)	do { } while(0)
@@ -120,7 +118,7 @@ enum sk_checksum_flags {
 	CHECKSUM_NONE			= 0x00,
 	CHECKSUM_UNNECESSARY		= 0x01,
 	CHECKSUM_PARTIAL		= 0x02,
-	CHECKSUM_COMPLETE		= 0x04,
+	CHECKSUM_COMPLETE		= 0x03,
 };
 
 struct skb_frag {
@@ -170,7 +168,7 @@ struct sk_buff {
 		};
 	};
 	uint16_t		protocol;
-	uint8_t			ip_summed;
+	uint8_t			ip_summed;		/* 2 bit only. */
 	/* uint8_t */
 
 	/* "Scratch" area for layers to store metadata. */
@@ -184,6 +182,7 @@ struct sk_buff {
 	uint16_t		qmap;		/* queue mapping */
 	uint16_t		_flags;		/* Internal flags. */
 #define	_SKB_FLAGS_SKBEXTFRAG	0x0001
+#define	_SKB_PP_RECYCLE		0x0010
 	uint16_t		l3hdroff;	/* network header offset from *head */
 	uint16_t		l4hdroff;	/* transport header offset from *head */
 	uint16_t		mac_header;	/* offset of mac_header */
@@ -210,6 +209,8 @@ struct sk_buff *linuxkpi_build_skb(void *, size_t);
 void linuxkpi_kfree_skb(struct sk_buff *);
 
 struct sk_buff *linuxkpi_skb_copy(const struct sk_buff *, gfp_t);
+
+int lkpi___skb_linearize(struct sk_buff *);
 
 /* -------------------------------------------------------------------------- */
 
@@ -263,6 +264,7 @@ static inline void
 dev_kfree_skb(struct sk_buff *skb)
 {
 	SKB_TRACE(skb);
+	SKB_IMPROVE("Need to be able to deal with page_pool");
 	kfree_skb(skb);
 }
 
@@ -438,7 +440,7 @@ skb_put_data(struct sk_buff *skb, const void *buf, size_t len)
 
 /* skb_put() + filling with zeros. */
 static inline void *
-skb_put_zero(struct sk_buff *skb, size_t len)
+__skb_put_zero(struct sk_buff *skb, size_t len)
 {
 	void *s;
 
@@ -446,6 +448,12 @@ skb_put_zero(struct sk_buff *skb, size_t len)
 	s = skb_put(skb, len);
 	memset(s, '\0', len);
 	return (s);
+}
+
+static inline void *
+skb_put_zero(struct sk_buff *skb, size_t len)
+{
+	return (__skb_put_zero(skb, len));
 }
 
 /*
@@ -655,6 +663,8 @@ __skb_unlink(struct sk_buff *skb, struct sk_buff_head *q)
 	WRITE_ONCE(q->qlen, q->qlen - 1);
 	p = skb->prev;
 	n = skb->next;
+	KASSERT(p != NULL && n != NULL,
+	    ("%s: skb %p q %p p %p n %p\n", __func__, skb, q, p, n));
 	WRITE_ONCE(n->prev, p);
 	WRITE_ONCE(p->next, n);
 	skb->prev = skb->next = NULL;
@@ -772,7 +782,7 @@ ___skb_queue_splice(const struct sk_buff_head *from,
 }
 
 static inline void
-skb_queue_splice_init(struct sk_buff_head *from, struct sk_buff_head *to)
+skb_queue_splice(const struct sk_buff_head *from, struct sk_buff_head *to)
 {
 
 	SKB_TRACE2(from, to);
@@ -782,6 +792,13 @@ skb_queue_splice_init(struct sk_buff_head *from, struct sk_buff_head *to)
 
 	___skb_queue_splice(from, (struct sk_buff *)to, to->next);
 	to->qlen += from->qlen;
+}
+
+static inline void
+skb_queue_splice_init(struct sk_buff_head *from, struct sk_buff_head *to)
+{
+
+	skb_queue_splice(from, to);
 	__skb_queue_head_init(from);
 }
 
@@ -965,9 +982,7 @@ skb_network_header(struct sk_buff *skb)
 static inline int
 __skb_linearize(struct sk_buff *skb)
 {
-	SKB_TRACE(skb);
-	SKB_TODO();
-	return (-ENXIO);
+	return (lkpi___skb_linearize(skb));
 }
 
 static inline int
@@ -1132,9 +1147,13 @@ napi_consume_skb(struct sk_buff *skb, int budget)
 static inline struct sk_buff *
 napi_build_skb(void *data, size_t len)
 {
+	struct sk_buff *skb;
 
-	SKB_TODO();
-	return (NULL);
+	SKB_IMPROVE("len and all needs fixing likely");
+
+	skb = linuxkpi_build_skb(data, len);
+	SKB_TRACE(skb);
+	return (skb);
 }
 
 static inline uint32_t
@@ -1149,8 +1168,7 @@ static inline void
 skb_mark_for_recycle(struct sk_buff *skb)
 {
 	SKB_TRACE(skb);
-	/* page_pool */
-	SKB_TODO();
+	skb->_flags |= _SKB_PP_RECYCLE;
 }
 
 static inline int
@@ -1160,6 +1178,9 @@ skb_cow_head(struct sk_buff *skb, unsigned int headroom)
 	SKB_TODO();
 	return (-1);
 }
+
+/* Misplaced here really but sock comes from skbuff. */
+#define	sk_pacing_shift_update(sock, n)
 
 #define	SKB_WITH_OVERHEAD(_s)						\
 	(_s) - ALIGN(sizeof(struct skb_shared_info), CACHE_LINE_SIZE)

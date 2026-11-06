@@ -67,7 +67,7 @@ static	void sta_vattach(struct ieee80211vap *);
 static	void sta_beacon_miss(struct ieee80211vap *);
 static	int sta_newstate(struct ieee80211vap *, enum ieee80211_state, int);
 static	int sta_input(struct ieee80211_node *, struct mbuf *,
-	    const struct ieee80211_rx_stats *, int, int);
+	    const struct ieee80211_rx_stats *, net80211_rssi_t, int);
 static void sta_recv_mgmt(struct ieee80211_node *, struct mbuf *,
 	    int subtype, const struct ieee80211_rx_stats *, int rssi, int nf);
 static void sta_recv_ctl(struct ieee80211_node *, struct mbuf *, int subtype);
@@ -530,7 +530,7 @@ doprint(struct ieee80211vap *vap, int subtype)
  */
 static int
 sta_input(struct ieee80211_node *ni, struct mbuf *m,
-    const struct ieee80211_rx_stats *rxs, int rssi, int nf)
+    const struct ieee80211_rx_stats *rxs, net80211_rssi_t rssi, int nf)
 {
 	struct ieee80211vap *vap = ni->ni_vap;
 	struct ieee80211com *ic = ni->ni_ic;
@@ -657,8 +657,7 @@ sta_input(struct ieee80211_node *ni, struct mbuf *m,
 	switch (type) {
 	case IEEE80211_FC0_TYPE_DATA:
 		hdrspace = ieee80211_hdrspace(ic, wh);
-		if (m->m_len < hdrspace &&
-		    (m = m_pullup(m, hdrspace)) == NULL) {
+		if ((m = m_pullup(m, hdrspace)) == NULL) {
 			IEEE80211_DISCARD_MAC(vap, IEEE80211_MSG_ANY,
 			    ni->ni_macaddr, NULL,
 			    "data too short: expecting %u", hdrspace);
@@ -1011,7 +1010,7 @@ sta_auth_open(struct ieee80211_node *ni, struct ieee80211_frame *wh,
 		vap->iv_stats.is_rx_bad_auth++;
 		return;
 	}
-	if (status != 0) {
+	if (status != IEEE80211_STATUS_SUCCESS) {
 		IEEE80211_NOTE(vap, IEEE80211_MSG_DEBUG | IEEE80211_MSG_AUTH,
 		    ni, "open auth failed (reason %d)", status);
 		vap->iv_stats.is_rx_auth_fail++;
@@ -1100,7 +1099,7 @@ sta_auth_shared(struct ieee80211_node *ni, struct ieee80211_frame *wh,
 			IEEE80211_FREE(ni->ni_challenge, M_80211_NODE);
 			ni->ni_challenge = NULL;
 		}
-		if (status != 0) {
+		if (status != IEEE80211_STATUS_SUCCESS) {
 			IEEE80211_NOTE_FRAME(vap,
 			    IEEE80211_MSG_DEBUG | IEEE80211_MSG_AUTH, wh,
 			    "shared key auth failed (reason %d)", status);
@@ -1766,7 +1765,12 @@ sta_recv_mgmt(struct ieee80211_node *ni, struct mbuf *m0, int subtype,
 		frm += 2;
 		status = le16toh(*(uint16_t *)frm);
 		frm += 2;
-		if (status != 0) {
+		if (status != IEEE80211_STATUS_SUCCESS) {
+			/*
+			 * See ieee80211_tx_mgt_cb() for state handling.  This
+			 * essentially provokes a timeout bouncing us back to
+			 * State 1 instead of dealing with it properly.
+			 */
 			IEEE80211_NOTE_MAC(vap, IEEE80211_MSG_ASSOC,
 			    wh->i_addr2, "%sassoc failed (reason %d)",
 			    ISREASSOC(subtype) ?  "re" : "", status);
@@ -1934,7 +1938,7 @@ sta_recv_mgmt(struct ieee80211_node *ni, struct mbuf *m0, int subtype,
 		    vap->iv_flags&IEEE80211_F_USEPROT ? ", protection" : "",
 		    ni->ni_flags & IEEE80211_NODE_QOS ? ", QoS" : "",
 		    ni->ni_flags & IEEE80211_NODE_HT ?
-			(ni->ni_chw == IEEE80211_STA_RX_BW_40 ? ", HT40" : ", HT20") : "",
+			(ni->ni_chw == NET80211_STA_RX_BW_40 ? ", HT40" : ", HT20") : "",
 		    ni->ni_flags & IEEE80211_NODE_AMPDU ? " (+AMPDU)" : "",
 		    ni->ni_flags & IEEE80211_NODE_AMSDU ? " (+AMSDU)" : "",
 		    ni->ni_flags & IEEE80211_NODE_MIMO_RTS ? " (+SMPS-DYN)" :

@@ -54,6 +54,7 @@
 #include <machine/cpufunc.h>
 #include <machine/md_var.h>
 #include <machine/specialreg.h>
+#include <x86/cputypes.h>
 #include <x86/ucode.h>
 
 static d_open_t cpuctl_open;
@@ -245,6 +246,39 @@ cpuctl_do_cpuid(int cpu, cpuctl_cpuid_args_t *data, struct thread *td)
 	return (error);
 }
 
+static bool cpuctl_ibs_present;
+
+static void
+cpuctl_ibs_detect(void)
+{
+	cpuctl_ibs_present = (cpu_vendor_id == CPU_VENDOR_AMD ||
+	    cpu_vendor_id == CPU_VENDOR_HYGON) &&
+	    (amd_feature2 & AMDID2_IBS) != 0;
+}
+
+/* Let nmi_handle_intr() claim an IBS NMI orphaned by the write. */
+static int
+cpuctl_wrmsr(u_int msr, uint64_t val)
+{
+	int ret;
+
+	MPASS(curthread->td_critnest > 0);
+	if (!cpuctl_ibs_present)
+		return (wrmsr_safe(msr, val));
+	switch (msr) {
+	case MSR_AMD_IBS_FETCH_CTL:
+	case MSR_AMD_IBS_OP_CTL:
+	case MSR_AMD_IBS_OP_CTL2:
+	case MSR_AMD_IBS_FETCH_CTL2:
+		x86_ibs_ctl_write_begin();
+		ret = wrmsr_safe(msr, val);
+		x86_ibs_ctl_write_end();
+		return (ret);
+	default:
+		return (wrmsr_safe(msr, val));
+	}
+}
+
 /*
  * Actually perform MSR operations.
  */
@@ -276,18 +310,20 @@ cpuctl_do_msr(int cpu, cpuctl_msr_args_t *data, u_long cmd, struct thread *td)
 		data->data = 0;
 		ret = rdmsr_safe(data->msr, &data->data);
 	} else if (cmd == CPUCTL_WRMSR) {
-		ret = wrmsr_safe(data->msr, data->data);
+		critical_enter();
+		ret = cpuctl_wrmsr(data->msr, data->data);
+		critical_exit();
 	} else if (cmd == CPUCTL_MSRSBIT) {
 		critical_enter();
 		ret = rdmsr_safe(data->msr, &reg);
 		if (ret == 0)
-			ret = wrmsr_safe(data->msr, reg | data->data);
+			ret = cpuctl_wrmsr(data->msr, reg | data->data);
 		critical_exit();
 	} else if (cmd == CPUCTL_MSRCBIT) {
 		critical_enter();
 		ret = rdmsr_safe(data->msr, &reg);
 		if (ret == 0)
-			ret = wrmsr_safe(data->msr, reg & ~data->data);
+			ret = cpuctl_wrmsr(data->msr, reg & ~data->data);
 		critical_exit();
 	} else
 		panic("[cpuctl,%d]: unknown operation requested: %lu",
@@ -344,7 +380,7 @@ ucode_intel_load_rv(void *arg)
 
 	d = arg;
 	if (PCPU_GET(cpuid) == d->cpu)
-		d->ret = ucode_intel_load(d->ptr, true, NULL, NULL);
+		d->ret = ucode_intel_load(d->ptr, SAFE, NULL, NULL);
 }
 
 static int
@@ -402,19 +438,20 @@ out:
  * its workings.
  */
 static void
-amd_ucode_wrmsr(void *ucode_ptr)
+amd_ucode_wrmsr(void *arg)
 {
+	struct ucode_update_data *d = arg;
 	uint32_t tmp[4];
 
-	wrmsr_safe(MSR_K8_UCODE_UPDATE, (uintptr_t)ucode_ptr);
+	if (PCPU_GET(cpuid) == d->cpu)
+		d->ret = wrmsr_safe(MSR_K8_UCODE_UPDATE, (uintptr_t)d->ptr);
 	do_cpuid(0, tmp);
 }
 
 static int
 update_amd(int cpu, cpuctl_update_args_t *args, struct thread *td)
 {
-	void *ptr;
-	int ret;
+	struct ucode_update_data d = { .cpu = cpu };
 
 	if (args->size == 0 || args->data == NULL) {
 		DPRINTF("[cpuctl,%d]: zero-sized firmware image", __LINE__);
@@ -430,18 +467,17 @@ update_amd(int cpu, cpuctl_update_args_t *args, struct thread *td)
 	 * malloc(9) always returns the pointer aligned at least on
 	 * the size of the allocation.
 	 */
-	ptr = malloc(args->size + 16, M_CPUCTL, M_ZERO | M_WAITOK);
-	if (copyin(args->data, ptr, args->size) != 0) {
+	d.ptr = malloc(args->size + 16, M_CPUCTL, M_ZERO | M_WAITOK);
+	if (copyin(args->data, d.ptr, args->size) != 0) {
 		DPRINTF("[cpuctl,%d]: copyin %p->%p of %zd bytes failed",
 		    __LINE__, args->data, ptr, args->size);
-		ret = EFAULT;
+		d.ret = EFAULT;
 		goto fail;
 	}
-	smp_rendezvous(NULL, amd_ucode_wrmsr, NULL, ptr);
-	ret = 0;
+	smp_rendezvous(NULL, amd_ucode_wrmsr, NULL, &d);
 fail:
-	free(ptr, M_CPUCTL);
-	return (ret);
+	free(d.ptr, M_CPUCTL);
+	return (d.ret);
 }
 
 static int
@@ -574,6 +610,7 @@ cpuctl_modevent(module_t mod __unused, int type, void *data __unused)
 
 	switch(type) {
 	case MOD_LOAD:
+		cpuctl_ibs_detect();
 		if (bootverbose)
 			printf("cpuctl: access to MSR registers/cpuid info.\n");
 		cpuctl_devs = malloc(sizeof(*cpuctl_devs) * (mp_maxid + 1), M_CPUCTL,

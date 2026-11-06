@@ -32,7 +32,9 @@
 #if !defined(ENGINE_REQUIREMENTS_HPP)
 #define ENGINE_REQUIREMENTS_HPP
 
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "model/metadata_fwd.hpp"
 #include "utils/config/tree_fwd.hpp"
@@ -43,6 +45,32 @@ namespace engine {
 
 std::string check_reqs(const model::metadata&, const utils::config::tree&,
                        const std::string&, const utils::fs::path&);
+
+/// Abstract interface of a requirement checker.
+class reqs_checker {
+public:
+    /// Constructor.
+    reqs_checker() {}
+
+    /// Destructor.
+    virtual ~reqs_checker() {}
+
+    /// Run the checker.
+    virtual std::string exec(const model::metadata&,
+                             const utils::config::tree&,
+                             const std::string&,
+                             const utils::fs::path&) const = 0;
+};
+
+/// Register an extra requirement checker.
+///
+/// \param checker A requirement checker.
+void register_reqs_checker(const std::shared_ptr< reqs_checker > checker);
+
+/// Returns the list of registered extra requirement checkers.
+///
+/// \return A vector of pointers to extra requirement checkers.
+std::vector< std::shared_ptr< reqs_checker > > reqs_checkers();
 
 
 }  // namespace engine

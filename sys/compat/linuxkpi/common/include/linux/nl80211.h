@@ -1,5 +1,6 @@
 /*-
  * Copyright (c) 2020-2024 The FreeBSD Foundation
+ * Copyright (c) 2026 Bjoern A. Zeeb
  *
  * This software was developed by Björn Zeeb under sponsorship from
  * the FreeBSD Foundation.
@@ -50,6 +51,7 @@ enum nl80211_feature_flags {
 	NL80211_FEATURE_WFA_TPC_IE_IN_PROBES		= BIT(15),
 	NL80211_FEATURE_AP_SCAN				= BIT(16),
 	NL80211_FEATURE_ACTIVE_MONITOR			= BIT(17),
+	NL80211_FEATURE_SAE				= BIT(18),
 };
 
 enum nl80211_pmsr_ftm_failure_flags {
@@ -85,6 +87,7 @@ enum nl80211_reg_rule_flags {
 	NL80211_RRF_NO_6GHZ_AFC_CLIENT			= BIT(15),
 	NL80211_RRF_PSD					= BIT(16),
 	NL80211_RRF_ALLOW_6GHZ_VLP_AP			= BIT(17),
+	NL80211_RRF_ALLOW_20MHZ_ACTIVITY		= BIT(18),
 };
 #define	NL80211_RRF_NO_HT40	(NL80211_RRF_NO_HT40MINUS|NL80211_RRF_NO_HT40PLUS)
 
@@ -432,6 +435,19 @@ enum nl80211_user_reg_hint_type {
 
 enum nl80211_hidden_ssid {
 	NL80211_HIDDEN_SSID_NOT_IN_USE,
+};
+
+enum nl80211_external_auth_action {
+	NL80211_EXTERNAL_AUTH_START,
+};
+
+enum nl80211_rxmgmt_flags {
+	NL80211_RXMGMT_FLAG_EXTERNAL_AUTH	= BIT(1),
+};
+
+enum nl80211_radar_event {
+	NL80211_RADAR_CAC_FINISHED,
+	NL80211_RADAR_CAC_STARTED,
 };
 
 #define	NL80211_TKIP_DATA_OFFSET_TX_MIC_KEY	16

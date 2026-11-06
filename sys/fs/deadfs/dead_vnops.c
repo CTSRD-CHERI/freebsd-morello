@@ -55,6 +55,9 @@ struct vop_vector dead_vnodeops = {
 	.vop_bmap =		VOP_EBADF,
 	.vop_close =		dead_close,
 	.vop_create =		VOP_PANIC,
+	.vop_delayed_setsize =	VOP_NULL,
+	.vop_fplookup_symlink =	VOP_EOPNOTSUPP,
+	.vop_fplookup_vexec =	VOP_EOPNOTSUPP,
 	.vop_getattr =		VOP_EBADF,
 	.vop_getwritemount =	dead_getwritemount,
 	.vop_inactive =		VOP_NULL,
@@ -78,8 +81,6 @@ struct vop_vector dead_vnodeops = {
 	.vop_vptocnp =		VOP_EBADF,
 	.vop_unset_text =	dead_unset_text,
 	.vop_write =		dead_write,
-	.vop_fplookup_vexec =	VOP_EOPNOTSUPP,
-	.vop_fplookup_symlink =	VOP_EOPNOTSUPP,
 };
 VFS_VOP_VECTOR_REGISTER(dead_vnodeops);
 
@@ -122,18 +123,18 @@ dead_read(struct vop_read_args *ap)
 {
 
 	/*
-	 * Return EOF for tty devices, EIO for others
+	 * Return EOF for tty devices, ENXIO for others
 	 */
-	if ((ap->a_vp->v_vflag & VV_ISTTY) == 0)
-		return (EIO);
-	return (0);
+	if (ap->a_vp->v_vflag & VV_ISTTY)
+		return (0);
+	return (ENXIO);
 }
 
 int
 dead_write(struct vop_write_args *ap)
 {
 
-	return (EIO);
+	return (ENXIO);
 }
 
 int

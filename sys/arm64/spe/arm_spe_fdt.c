@@ -29,8 +29,6 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/cdefs.h>
-
 #include <sys/param.h>
 #include <sys/bus.h>
 #include <sys/kernel.h>
@@ -47,13 +45,13 @@
 static device_probe_t arm_spe_fdt_probe;
 
 static struct ofw_compat_data compat_data[] = {
-	{"arm,statistical-profiling-extension-v1",	true},
-	{NULL,						false},
+	{"arm,statistical-profiling-extension-v1",      true},
+	{NULL,                                          false},
 };
 
 static device_method_t arm_spe_fdt_methods[] = {
 	/* Device interface */
-	DEVMETHOD(device_probe,		arm_spe_fdt_probe),
+	DEVMETHOD(device_probe,         arm_spe_fdt_probe),
 
 	DEVMETHOD_END,
 };
@@ -62,8 +60,6 @@ DEFINE_CLASS_1(spe, arm_spe_fdt_driver, arm_spe_fdt_methods,
     sizeof(struct arm_spe_softc), arm_spe_driver);
 
 DRIVER_MODULE(spe, simplebus, arm_spe_fdt_driver, 0, 0);
-MODULE_DEPEND(spe, hwt, 1, 1, 1);
-MODULE_VERSION(spe, 1);
 
 static int
 arm_spe_fdt_probe(device_t dev)
@@ -77,4 +73,3 @@ arm_spe_fdt_probe(device_t dev)
 	device_set_desc(dev, "ARM Statistical Profiling Extension");
 	return (BUS_PROBE_DEFAULT);
 }
-

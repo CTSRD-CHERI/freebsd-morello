@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: CDDL-1.0
 include $(srcdir)/%D%/zed.d/Makefile.am
 
 zed_CFLAGS  = $(AM_CFLAGS)
@@ -37,10 +38,8 @@ zed_SOURCES = \
 zed_LDADD = \
 	libzfs.la \
 	libzfs_core.la \
-	libnvpair.la \
-	libuutil.la
+	libnvpair.la
 
 zed_LDADD += -lrt $(LIBATOMIC_LIBS) $(LIBUDEV_LIBS) $(LIBUUID_LIBS)
-zed_LDFLAGS = -pthread
 
 dist_noinst_DATA += %D%/agents/README.md

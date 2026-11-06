@@ -48,12 +48,26 @@
 #include <err.h>
 
 #include "pfctl.h"
+#include "pfctl_parser.h"
 
 #define BUF_SIZE 256
 
 extern int dev;
 
 static int	 pfr_next_token(char buf[BUF_SIZE], FILE *);
+
+struct pfr_ktablehead	pfr_ktables = { 0 };
+RB_GENERATE(pfr_ktablehead, pfr_ktable, pfrkt_tree, pfr_ktable_compare);
+
+int
+pfr_ktable_compare(struct pfr_ktable *p, struct pfr_ktable *q)
+{
+	int d;
+
+	if ((d = strncmp(p->pfrkt_name, q->pfrkt_name, PF_TABLE_NAME_SIZE)))
+		return (d);
+	return (strcmp(p->pfrkt_anchor, q->pfrkt_anchor));
+}
 
 static void
 pfr_report_error(struct pfr_table *tbl, struct pfioc_table *io,
@@ -146,11 +160,11 @@ pfr_del_addrs(struct pfr_table *tbl, struct pfr_addr *addr, int size,
 
 int
 pfr_set_addrs(struct pfr_table *tbl, struct pfr_addr *addr, int size,
-    int *size2, int *nadd, int *ndel, int *nchange, int flags)
+    int *nadd, int *ndel, int *nchange, int flags)
 {
 	int ret;
 
-	ret = pfctl_table_set_addrs(dev, tbl, addr, size, size2, nadd, ndel,
+	ret = pfctl_table_set_addrs_h(pfh, tbl, addr, size, nadd, ndel,
 	    nchange, flags);
 	if (ret) {
 		errno = ret;
@@ -165,7 +179,7 @@ pfr_get_addrs(struct pfr_table *tbl, struct pfr_addr *addr, int *size,
 {
 	int ret;
 
-	ret = pfctl_table_get_addrs(dev, tbl, addr, size, flags);
+	ret = pfctl_table_get_addrs_h(pfh, tbl, addr, size, flags);
 	if (ret) {
 		errno = ret;
 		return (-1);
@@ -177,24 +191,13 @@ int
 pfr_get_astats(struct pfr_table *tbl, struct pfr_astats *addr, int *size,
     int flags)
 {
-	struct pfioc_table io;
+	int ret;
 
-	if (tbl == NULL || size == NULL || *size < 0 ||
-	    (*size && addr == NULL)) {
-		errno = EINVAL;
+	ret = pfctl_get_astats(pfh, tbl, addr, size, flags);
+	if (ret) {
+		errno = ret;
 		return (-1);
 	}
-	bzero(&io, sizeof io);
-	io.pfrio_flags = flags;
-	io.pfrio_table = *tbl;
-	io.pfrio_buffer = addr;
-	io.pfrio_esize = sizeof(*addr);
-	io.pfrio_size = *size;
-	if (ioctl(dev, DIOCRGETASTATS, &io)) {
-		pfr_report_error(tbl, &io, "get astats from");
-		return (-1);
-	}
-	*size = io.pfrio_size;
 	return (0);
 }
 
@@ -202,76 +205,31 @@ int
 pfr_clr_astats(struct pfr_table *tbl, struct pfr_addr *addr, int size,
     int *nzero, int flags)
 {
-	struct pfioc_table io;
+	int ret;
 
-	if (size < 0 || !tbl || (size && !addr)) {
-		errno = EINVAL;
-		return (-1);
-	}
-	bzero(&io, sizeof io);
-	io.pfrio_flags = flags;
-	io.pfrio_table = *tbl;
-	io.pfrio_buffer = addr;
-	io.pfrio_esize = sizeof(*addr);
-	io.pfrio_size = size;
-	if (ioctl(dev, DIOCRCLRASTATS, &io) == -1)
-		return (-1);
-	if (nzero)
-		*nzero = io.pfrio_nzero;
-	return (0);
+	ret = pfctl_clr_astats(pfh, tbl, addr, size, nzero, flags);
+	if (ret != 0)
+		errno = ret;
+
+	return (ret);
 }
 
 int
 pfr_tst_addrs(struct pfr_table *tbl, struct pfr_addr *addr, int size,
     int *nmatch, int flags)
 {
-	struct pfioc_table io;
+	int ret;
 
 	if (tbl == NULL || size < 0 || (size && addr == NULL)) {
 		errno = EINVAL;
 		return (-1);
 	}
-	bzero(&io, sizeof io);
-	io.pfrio_flags = flags;
-	io.pfrio_table = *tbl;
-	io.pfrio_buffer = addr;
-	io.pfrio_esize = sizeof(*addr);
-	io.pfrio_size = size;
-	if (ioctl(dev, DIOCRTSTADDRS, &io)) {
-		pfr_report_error(tbl, &io, "test addresses in");
-		return (-1);
-	}
-	if (nmatch)
-		*nmatch = io.pfrio_nmatch;
-	return (0);
-}
 
-int
-pfr_ina_define(struct pfr_table *tbl, struct pfr_addr *addr, int size,
-    int *nadd, int *naddr, int ticket, int flags)
-{
-	struct pfioc_table io;
+	ret = pfctl_test_addrs(pfh, tbl, addr, size, nmatch, flags);
+	if (ret != 0)
+		errno = ret;
 
-	if (tbl == NULL || size < 0 || (size && addr == NULL)) {
-		errno = EINVAL;
-		return (-1);
-	}
-	bzero(&io, sizeof io);
-	io.pfrio_flags = flags;
-	io.pfrio_table = *tbl;
-	io.pfrio_buffer = addr;
-	io.pfrio_esize = sizeof(*addr);
-	io.pfrio_size = size;
-	io.pfrio_ticket = ticket;
-	if (ioctl(dev, DIOCRINADEFINE, &io)) {
-		pfr_report_error(tbl, &io, "define inactive set table");
-		return (-1);
-	}
-	if (nadd != NULL)
-		*nadd = io.pfrio_nadd;
-	if (naddr != NULL)
-		*naddr = io.pfrio_naddr;
-	return (0);
+	return (ret);
 }
 
 /* interface management code */

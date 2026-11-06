@@ -240,6 +240,8 @@ struct pci_quirk {
 #define	PCI_QUIRK_DISABLE_MSIX	5 /* MSI-X doesn't work */
 #define	PCI_QUIRK_MSI_INTX_BUG	6 /* PCIM_CMD_INTxDIS disables MSI */
 #define	PCI_QUIRK_REALLOC_BAR	7 /* Can't allocate memory at the default address */
+#define	PCI_QUIRK_DISABLE_FLR	8 /* Function-Level Reset (FLR) not working. */
+#define	PCI_QUIRK_ENABLE_FLR	9 /* FLR works but is not advertised. */
 	int	arg1;
 	int	arg2;
 };
@@ -319,6 +321,19 @@ static const struct pci_quirk pci_quirks[] = {
 	 * expected place.
 	 */
 	{ 0x98741002, PCI_QUIRK_REALLOC_BAR,	0, 	0 },
+
+	/*
+	 * The Intel 82599 VF implements FLR without advertising it; see
+	 * 82599 Specification Update, erratum 35.
+	 */
+	{ 0x10ed8086, PCI_QUIRK_ENABLE_FLR,	0,	0 },
+
+	/*
+	 * With some MediaTek mt76 WiFi FLR does not work despite advertised.
+	 */
+	{ 0x061614c3, PCI_QUIRK_DISABLE_FLR,	0,	0 }, /* mt76 7922 */
+
+	/* end of table */
 	{ 0 }
 };
 
@@ -428,6 +443,16 @@ static bool pci_enable_mps_tune = true;
 SYSCTL_BOOL(_hw_pci, OID_AUTO, enable_mps_tune, CTLFLAG_RWTUN,
     &pci_enable_mps_tune, 1,
     "Enable tuning of MPS(maximum payload size)." );
+
+static int pci_mps_limit;
+SYSCTL_INT(_hw_pci, OID_AUTO, mps_limit, CTLFLAG_RDTUN, &pci_mps_limit, 0,
+    "Limit PCIe MPS to this many bytes (power of two from 128 to 4096)");
+static bool pci_mps_limit_warned;
+
+static bool pci_mps_enforce;
+SYSCTL_BOOL(_hw_pci, OID_AUTO, mps_enforce, CTLFLAG_RDTUN,
+    &pci_mps_enforce, 0,
+    "Disable PCIe endpoints with an MPS incompatible with their shared path");
 
 static bool pci_intx_reroute = true;
 SYSCTL_BOOL(_hw_pci, OID_AUTO, intx_reroute, CTLFLAG_RWTUN,
@@ -789,6 +814,9 @@ pci_fill_devinfo(device_t pcib, device_t bus, int d, int b, int s, int f,
 	devlist_entry->conf.pc_subclass = cfg->subclass;
 	devlist_entry->conf.pc_progif = cfg->progif;
 	devlist_entry->conf.pc_revid = cfg->revid;
+
+	devlist_entry->conf.pc_secbus = cfg->bridge.br_secbus;
+	devlist_entry->conf.pc_subbus = cfg->bridge.br_subbus;
 
 	pci_numdevs++;
 	pci_generation++;
@@ -2301,10 +2329,9 @@ pci_set_max_read_req(device_t dev, int size)
 	if (size > 4096)
 		size = 4096;
 	size = (1 << (fls(size) - 1));
-	val = pci_read_config(dev, cap + PCIER_DEVICE_CTL, 2);
-	val &= ~PCIEM_CTL_MAX_READ_REQUEST;
-	val |= (fls(size) - 8) << 12;
-	pci_write_config(dev, cap + PCIER_DEVICE_CTL, val, 2);
+	val = (fls(size) - 8) << 12;
+	pcie_adjust_config(dev, PCIER_DEVICE_CTL,
+	    PCIEM_CTL_MAX_READ_REQUEST, val, 2);
 	return (size);
 }
 
@@ -2348,6 +2375,7 @@ pcie_adjust_config(device_t dev, int reg, uint32_t mask, uint32_t value,
     int width)
 {
 	struct pci_devinfo *dinfo = device_get_ivars(dev);
+	uint16_t *saved;
 	uint32_t old, new;
 	int cap;
 
@@ -2362,6 +2390,22 @@ pcie_adjust_config(device_t dev, int reg, uint32_t mask, uint32_t value,
 	new = old & ~mask;
 	new |= (value & mask);
 	pci_write_config(dev, cap + reg, new, width);
+	/* Apply only the requested policy bits to the saved restore image. */
+	if (width == 2) {
+		saved = NULL;
+		switch (reg) {
+		case PCIER_DEVICE_CTL:
+			saved = &dinfo->cfg.pcie.pcie_device_ctl;
+			break;
+		case PCIER_ROOT_CTL:
+			saved = &dinfo->cfg.pcie.pcie_root_ctl;
+			break;
+		}
+		if (saved != NULL) {
+			*saved &= ~(uint16_t)mask;
+			*saved |= (uint16_t)(value & mask);
+		}
+	}
 	return (old);
 }
 
@@ -2986,6 +3030,25 @@ pci_has_pm(device_t dev)
 	return (cfg->pp.pp_location != 0);
 }
 
+bool
+pci_has_pme(device_t dev, int state)
+{
+	static const uint16_t pme_mask[PCI_POWERSTATE_COUNT] = {
+		[PCI_POWERSTATE_D0] = PCIM_PCAP_D0PME,
+		[PCI_POWERSTATE_D1] = PCIM_PCAP_D1PME,
+		[PCI_POWERSTATE_D2] = PCIM_PCAP_D2PME,
+		[PCI_POWERSTATE_D3_HOT] = PCIM_PCAP_D3PME_HOT,
+		[PCI_POWERSTATE_D3_COLD] = PCIM_PCAP_D3PME_COLD,
+	};
+	struct pci_devinfo *dinfo = device_get_ivars(dev);
+	pcicfgregs *cfg = &dinfo->cfg;
+
+	if (state < PCI_POWERSTATE_D0 || state > PCI_POWERSTATE_MAX)
+		return (false);
+	return (cfg->pp.pp_location != 0 &&
+	    (cfg->pp.pp_cap & pme_mask[state]) != 0);
+}
+
 /*
  * Some convenience functions for PCI device drivers.
  */
@@ -3473,7 +3536,7 @@ pci_add_map(device_t bus, device_t dev, int reg, struct resource_list *rl,
 	 * driver for this device will later inherit this resource in
 	 * pci_alloc_resource().
 	 */
-	res = resource_list_reserve(rl, bus, dev, type, &reg, start, end, count,
+	res = resource_list_reserve(rl, bus, dev, type, reg, start, end, count,
 	    flags);
 	if ((pci_do_realloc_bars
 		|| pci_has_quirk(pci_get_devid(dev), PCI_QUIRK_REALLOC_BAR))
@@ -3486,7 +3549,7 @@ pci_add_map(device_t bus, device_t dev, int reg, struct resource_list *rl,
 		 */
 		resource_list_delete(rl, type, reg);
 		resource_list_add(rl, type, reg, 0, ~0, count);
-		res = resource_list_reserve(rl, bus, dev, type, &reg, 0, ~0,
+		res = resource_list_reserve(rl, bus, dev, type, reg, 0, ~0,
 		    count, flags);
 	}
 	if (res == NULL) {
@@ -3545,11 +3608,11 @@ pci_ata_maps(device_t bus, device_t dev, struct resource_list *rl, int force,
 	} else {
 		rid = PCIR_BAR(0);
 		resource_list_add(rl, type, rid, 0x1f0, 0x1f7, 8);
-		(void)resource_list_reserve(rl, bus, dev, type, &rid, 0x1f0,
+		(void)resource_list_reserve(rl, bus, dev, type, rid, 0x1f0,
 		    0x1f7, 8, 0);
 		rid = PCIR_BAR(1);
 		resource_list_add(rl, type, rid, 0x3f6, 0x3f6, 1);
-		(void)resource_list_reserve(rl, bus, dev, type, &rid, 0x3f6,
+		(void)resource_list_reserve(rl, bus, dev, type, rid, 0x3f6,
 		    0x3f6, 1, 0);
 	}
 	if (progif & PCIP_STORAGE_IDE_MODESEC) {
@@ -3560,11 +3623,11 @@ pci_ata_maps(device_t bus, device_t dev, struct resource_list *rl, int force,
 	} else {
 		rid = PCIR_BAR(2);
 		resource_list_add(rl, type, rid, 0x170, 0x177, 8);
-		(void)resource_list_reserve(rl, bus, dev, type, &rid, 0x170,
+		(void)resource_list_reserve(rl, bus, dev, type, rid, 0x170,
 		    0x177, 8, 0);
 		rid = PCIR_BAR(3);
 		resource_list_add(rl, type, rid, 0x376, 0x376, 1);
-		(void)resource_list_reserve(rl, bus, dev, type, &rid, 0x376,
+		(void)resource_list_reserve(rl, bus, dev, type, rid, 0x376,
 		    0x376, 1, 0);
 	}
 	pci_add_map(bus, dev, PCIR_BAR(4), rl, force,
@@ -3745,7 +3808,7 @@ xhci_early_takeover(device_t self)
 	struct resource *res;
 	uint32_t cparams;
 	uint32_t eec;
-	uint8_t eecp;
+	uint32_t eecp;
 	uint8_t bios_sem;
 	uint8_t offs;
 	int rid;
@@ -3756,7 +3819,7 @@ xhci_early_takeover(device_t self)
 	if (res == NULL)
 		return;
 
-	cparams = bus_read_4(res, XHCI_HCSPARAMS0);
+	cparams = bus_read_4(res, XHCI_HCCPARAMS1);
 
 	eec = -1;
 
@@ -3807,7 +3870,7 @@ pci_reserve_secbus(device_t bus, device_t dev, pcicfgregs *cfg,
 	struct resource *res;
 	char *cp;
 	rman_res_t start, end, count;
-	int rid, sec_bus, sec_reg, sub_bus, sub_reg, sup_bus;
+	int sec_bus, sec_reg, sub_bus, sub_reg, sup_bus;
 
 	switch (cfg->hdrtype & PCIM_HDRTYPE) {
 	case PCIM_HDRTYPE_BRIDGE:
@@ -3887,8 +3950,7 @@ pci_reserve_secbus(device_t bus, device_t dev, pcicfgregs *cfg,
 		if (pci_clear_buses)
 			goto clear;
 
-		rid = 0;
-		res = resource_list_reserve(rl, bus, dev, PCI_RES_BUS, &rid,
+		res = resource_list_reserve(rl, bus, dev, PCI_RES_BUS, 0,
 		    start, end, count, 0);
 		if (res != NULL)
 			return;
@@ -3906,7 +3968,7 @@ clear:
 }
 
 static struct resource *
-pci_alloc_secbus(device_t dev, device_t child, int *rid, rman_res_t start,
+pci_alloc_secbus(device_t dev, device_t child, int rid, rman_res_t start,
     rman_res_t end, rman_res_t count, u_int flags)
 {
 	struct pci_devinfo *dinfo;
@@ -3931,16 +3993,16 @@ pci_alloc_secbus(device_t dev, device_t child, int *rid, rman_res_t start,
 		return (NULL);
 	}
 
-	if (*rid != 0)
+	if (rid != 0)
 		return (NULL);
 
-	if (resource_list_find(rl, PCI_RES_BUS, *rid) == NULL)
-		resource_list_add(rl, PCI_RES_BUS, *rid, start, end, count);
-	if (!resource_list_reserved(rl, PCI_RES_BUS, *rid)) {
+	if (resource_list_find(rl, PCI_RES_BUS, rid) == NULL)
+		resource_list_add(rl, PCI_RES_BUS, rid, start, end, count);
+	if (!resource_list_reserved(rl, PCI_RES_BUS, rid)) {
 		res = resource_list_reserve(rl, dev, child, PCI_RES_BUS, rid,
 		    start, end, count, flags & ~RF_ACTIVE);
 		if (res == NULL) {
-			resource_list_delete(rl, PCI_RES_BUS, *rid);
+			resource_list_delete(rl, PCI_RES_BUS, rid);
 			device_printf(child, "allocating %ju bus%s failed\n",
 			    count, count == 1 ? "" : "es");
 			return (NULL);
@@ -4098,7 +4160,7 @@ pci_add_resources_ea(device_t bus, device_t dev, int alloc_iov)
 			continue;
 
 		resource_list_add(rl, type, rid, start, end, count);
-		res = resource_list_reserve(rl, bus, dev, type, &rid, start, end, count,
+		res = resource_list_reserve(rl, bus, dev, type, rid, start, end, count,
 		    flags);
 		if (res == NULL) {
 			resource_list_delete(rl, type, rid);
@@ -4271,6 +4333,7 @@ pci_add_children(device_t dev, int domain, int busno)
 		for (f = first_func; f <= pcifunchigh; f++)
 			pci_identify_function(pcib, dev, domain, busno, s, f);
 	}
+	pcie_reconcile_link_mps(dev);
 #undef REG
 }
 
@@ -4371,9 +4434,22 @@ pci_rescan_method(device_t dev)
 
 #ifdef PCI_IOV
 device_t
+pci_iov_get_pf(device_t dev)
+{
+	struct pci_devinfo *dinfo;
+
+	dinfo = device_get_ivars(dev);
+	if (dinfo == NULL || (dinfo->cfg.flags & PCICFG_VF) == 0 ||
+	    dinfo->cfg.iov == NULL)
+		return (NULL);
+	return (dinfo->cfg.iov->iov_pf);
+}
+
+device_t
 pci_add_iov_child(device_t bus, device_t pf, uint16_t rid, uint16_t vid,
     uint16_t did)
 {
+	struct pci_devinfo *pf_dinfo;
 	struct pci_devinfo *vf_dinfo;
 	device_t pcib;
 	int busno, slot, func;
@@ -4385,6 +4461,11 @@ pci_add_iov_child(device_t bus, device_t pf, uint16_t rid, uint16_t vid,
 	vf_dinfo = pci_fill_devinfo(pcib, bus, pci_get_domain(pcib), busno,
 	    slot, func, vid, did);
 
+	/* Make the VF-to-PF relationship available to child-added callbacks. */
+	pf_dinfo = device_get_ivars(pf);
+	KASSERT(pf_dinfo->cfg.iov != NULL,
+	    ("SR-IOV PF %s has no IOV state", device_get_nameunit(pf)));
+	vf_dinfo->cfg.iov = pf_dinfo->cfg.iov;
 	vf_dinfo->cfg.flags |= PCICFG_VF;
 	pci_add_child(bus, vf_dinfo);
 
@@ -4398,45 +4479,385 @@ pci_create_iov_child_method(device_t bus, device_t pf, uint16_t rid,
 
 	return (pci_add_iov_child(bus, pf, rid, vid, did));
 }
+#else
+device_t
+pci_iov_get_pf(device_t dev __unused)
+{
+
+	return (NULL);
+}
 #endif
 
+static int
+pcie_mps_bytes(uint16_t mps)
+{
+
+	return (128 << (mps >> 5));
+}
+
+static bool
+pcie_mps_limit_value(uint16_t *mps)
+{
+
+	if (pci_mps_limit == 0)
+		return (false);
+	if (pci_mps_limit < 128 || pci_mps_limit > 4096 ||
+	    !powerof2(pci_mps_limit)) {
+		if (!pci_mps_limit_warned) {
+			printf("pci: invalid hw.pci.mps_limit=%d; ignoring\n",
+			    pci_mps_limit);
+			pci_mps_limit_warned = true;
+		}
+		return (false);
+	}
+	*mps = (fls(pci_mps_limit) - 8) << 5;
+	return (true);
+}
+
+/* Return the smallest configured MPS above dev, if the walk reaches a root. */
+static bool
+pcie_path_mps(device_t dev, uint16_t *mpsp)
+{
+	struct pci_devinfo *dinfo;
+	device_t bus, pcib, start;
+	uint16_t mps;
+	bool found;
+
+	start = dev;
+	found = false;
+	for (;;) {
+		bus = device_get_parent(dev);
+		if (bus == NULL)
+			break;
+		pcib = device_get_parent(bus);
+		if (pcib == NULL || !is_pci_device(pcib))
+			break;
+		/*
+		 * A PCI function may expose a host bridge for a synthetic PCI
+		 * domain.  Its Device Control belongs to the parent domain and
+		 * does not describe an upstream link in the synthetic hierarchy.
+		 */
+		if (pci_get_domain(pcib) != pci_get_domain(dev))
+			break;
+		dinfo = device_get_ivars(pcib);
+		if (dinfo->cfg.pcie.pcie_location != 0) {
+			mps = pcie_read_config(pcib, PCIER_DEVICE_CTL, 2) &
+			    PCIEM_CTL_MAX_PAYLOAD;
+			if (!found || mps < *mpsp)
+				*mpsp = mps;
+			found = true;
+			if (dinfo->cfg.pcie.pcie_type == PCIEM_TYPE_ROOT_PORT)
+				return (true);
+		}
+		dev = pcib;
+	}
+	if (found && bootverbose)
+		device_printf(start,
+		    "PCIe MPS path walk did not reach a Root Port\n");
+	return (false);
+}
+
+static bool
+pcie_mps_first_warning(device_t dev)
+{
+	struct pci_devinfo *dinfo;
+
+	dinfo = device_get_ivars(dev);
+	if ((dinfo->cfg.flags & PCICFG_MPS_WARNED) != 0)
+		return (false);
+	dinfo->cfg.flags |= PCICFG_MPS_WARNED;
+	return (true);
+}
+
+static void
+pcie_mps_conflict(device_t dev, uint16_t path_mps, uint16_t max_mps)
+{
+
+	if (!pcie_mps_first_warning(dev))
+		return;
+	device_printf(dev,
+	    "maximum supported MPS %d is below configured path MPS %d; "
+	    "cannot safely retune the shared ancestor hierarchy\n",
+	    pcie_mps_bytes(max_mps), pcie_mps_bytes(path_mps));
+}
+
+static bool
+pcie_mps_is_bridge(struct pci_devinfo *dinfo)
+{
+	uint8_t hdrtype;
+
+	hdrtype = dinfo->cfg.hdrtype & PCIM_HDRTYPE;
+	return (hdrtype == PCIM_HDRTYPE_BRIDGE ||
+	    hdrtype == PCIM_HDRTYPE_CARDBUS);
+}
+
+static void
+pcie_mps_active_conflict(device_t dev, uint16_t path_mps,
+    uint16_t device_mps)
+{
+	struct pci_devinfo *dinfo;
+	const char *action;
+
+	if (!pcie_mps_first_warning(dev))
+		return;
+	dinfo = device_get_ivars(dev);
+	if (pci_mps_enforce && !pcie_mps_is_bridge(dinfo))
+		action = "disabling device";
+	else
+		action = "leaving device unchanged";
+	device_printf(dev,
+	    "configured MPS %d does not match path MPS %d while bus "
+	    "mastering is enabled; %s\n", pcie_mps_bytes(device_mps),
+	    pcie_mps_bytes(path_mps), action);
+}
+
+static void
+pcie_mps_mark_unreconciled(device_t dev)
+{
+	struct pci_devinfo *dinfo;
+	uint16_t cmd;
+
+	dinfo = device_get_ivars(dev);
+	if ((dinfo->cfg.flags & PCICFG_MPS_UNRECONCILED) != 0)
+		return;
+	dinfo->cfg.flags |= PCICFG_MPS_UNRECONCILED;
+	if (!pci_mps_enforce)
+		return;
+	if (pcie_mps_is_bridge(dinfo)) {
+		device_printf(dev,
+		    "not disabled by hw.pci.mps_enforce because it is a bridge\n");
+		return;
+	}
+	cmd = pci_read_config(dev, PCIR_COMMAND, 2);
+	cmd &= ~(PCIM_CMD_PORTEN | PCIM_CMD_MEMEN | PCIM_CMD_BUSMASTEREN);
+	pci_write_config(dev, PCIR_COMMAND, cmd, 2);
+	dinfo->cfg.cmdreg = cmd;
+	device_disable(dev);
+	device_printf(dev,
+	    "disabled because its MPS cannot be safely configured\n");
+}
+
+static void
+pcie_mps_unreconciled(device_t dev, uint16_t path_mps, uint16_t max_mps)
+{
+
+	pcie_mps_conflict(dev, path_mps, max_mps);
+	pcie_mps_mark_unreconciled(dev);
+}
+
+static void
+pcie_mps_active_unreconciled(device_t dev, uint16_t path_mps,
+    uint16_t device_mps)
+{
+
+	pcie_mps_active_conflict(dev, path_mps, device_mps);
+	pcie_mps_mark_unreconciled(dev);
+}
+
+static void
+pcie_mps_mark_link_unreconciled(device_t *devlist, int count,
+    uint16_t path_mps,
+    bool all)
+{
+	struct pci_devinfo *dinfo;
+	device_t child;
+	uint16_t mmps;
+	int i;
+
+	for (i = 0; i < count; i++) {
+		child = devlist[i];
+		dinfo = device_get_ivars(child);
+		if ((dinfo->cfg.flags & (PCICFG_VF |
+		    PCICFG_MPS_UNRECONCILED)) != 0 ||
+		    dinfo->cfg.pcie.pcie_location == 0)
+			continue;
+		if (all) {
+			pcie_mps_mark_unreconciled(child);
+			continue;
+		}
+		mmps = (pcie_read_config(child, PCIER_DEVICE_CAP, 2) &
+		    PCIEM_CAP_MAX_PAYLOAD) << 5;
+		if (mmps < path_mps)
+			pcie_mps_unreconciled(child, path_mps, mmps);
+	}
+}
+
 /*
- * For PCIe device set Max_Payload_Size to match PCIe root's.
+ * Tune a function discovered by rescan or hot-add against the established
+ * path.  Never change a shared upstream port here: doing so requires
+ * quiescing every driver and draining all outstanding transactions in the
+ * hierarchy.  Cold enumeration is reconciled by pcie_reconcile_link_mps().
  */
 static void
 pcie_setup_mps(device_t dev)
 {
-	struct pci_devinfo *dinfo = device_get_ivars(dev);
-	device_t root;
-	uint16_t rmps, mmps, mps;
+	struct pci_devinfo *dinfo;
+	device_t bus;
+	uint16_t mmps, mps, path_mps;
 
+	dinfo = device_get_ivars(dev);
+	/*
+	 * PCIe r4.0, sec 9.3.5.4 defines the VF MPS and MRRS fields as
+	 * Reserved and Preserved, with the PF settings applying to the VF.
+	 * Do not use the VF's hardwired value to configure the shared path.
+	 */
+	if ((dinfo->cfg.flags & PCICFG_VF) != 0)
+		return;
 	if (dinfo->cfg.pcie.pcie_location == 0)
 		return;
-	root = pci_find_pcie_root_port(dev);
-	if (root == NULL)
+
+	/* Cold enumeration is reconciled one complete link at a time. */
+	bus = device_get_parent(dev);
+	if (!device_is_attached(bus))
 		return;
-	/* Check whether the MPS is already configured. */
-	rmps = pcie_read_config(root, PCIER_DEVICE_CTL, 2) &
-	    PCIEM_CTL_MAX_PAYLOAD;
-	mps = pcie_read_config(dev, PCIER_DEVICE_CTL, 2) &
-	    PCIEM_CTL_MAX_PAYLOAD;
-	if (mps == rmps)
+	path_mps = 0;
+	if (!pcie_path_mps(dev, &path_mps))
 		return;
-	/* Check whether the device is capable of the root's MPS. */
+
 	mmps = (pcie_read_config(dev, PCIER_DEVICE_CAP, 2) &
 	    PCIEM_CAP_MAX_PAYLOAD) << 5;
-	if (rmps > mmps) {
-		/*
-		 * The device is unable to handle root's MPS.  Limit root.
-		 * XXX: We should traverse through all the tree, applying
-		 * it to all the devices.
-		 */
-		pcie_adjust_config(root, PCIER_DEVICE_CTL,
-		    PCIEM_CTL_MAX_PAYLOAD, mmps, 2);
-	} else {
-		pcie_adjust_config(dev, PCIER_DEVICE_CTL,
-		    PCIEM_CTL_MAX_PAYLOAD, rmps, 2);
+	if (path_mps > mmps) {
+		pcie_mps_unreconciled(dev, path_mps, mmps);
+		return;
 	}
+	mps = pcie_read_config(dev, PCIER_DEVICE_CTL, 2) &
+	    PCIEM_CTL_MAX_PAYLOAD;
+	if (mps == path_mps)
+		return;
+	if ((pci_read_config(dev, PCIR_COMMAND, 2) &
+	    PCIM_CMD_BUSMASTEREN) != 0) {
+		pcie_mps_active_unreconciled(dev, path_mps, mps);
+		return;
+	}
+	pcie_adjust_config(dev, PCIER_DEVICE_CTL, PCIEM_CTL_MAX_PAYLOAD,
+	    path_mps, 2);
+}
+
+/*
+ * Reconcile a newly enumerated link before attaching any child drivers.  A
+ * Root Port may be lowered because its complete downstream hierarchy is still
+ * idle.  A late reduction below a switch is not propagated through ancestors,
+ * since sibling subtrees may already be active.
+ */
+void
+pcie_reconcile_link_mps(device_t bus)
+{
+	struct pci_devinfo *dinfo, *upinfo;
+	device_t child, limiting, pcib, *devlist;
+	uint16_t cap_target, lmps, mmps, mps, target, up_mmps, up_mps;
+	int count, error, i;
+	bool limit_requested;
+
+	if (!pci_enable_mps_tune)
+		return;
+	/* Shared-path tuning is only safe before this bus attaches children. */
+	if (device_is_attached(bus))
+		return;
+	pcib = device_get_parent(bus);
+	if (!is_pci_device(pcib))
+		return;
+	/*
+	 * A PCI function may provide a host bridge into a separate domain,
+	 * as Intel VMD does.  Do not treat the function's host-facing PCIe
+	 * Device Control as the upstream end of a link in the child domain.
+	 */
+	if (pci_get_domain(pcib) != pcib_get_domain(bus))
+		return;
+	upinfo = device_get_ivars(pcib);
+	if (upinfo->cfg.pcie.pcie_location == 0)
+		return;
+	error = device_get_children(bus, &devlist, &count);
+	if (error != 0)
+		return;
+
+	up_mps = pcie_read_config(pcib, PCIER_DEVICE_CTL, 2) &
+	    PCIEM_CTL_MAX_PAYLOAD;
+	cap_target = up_mps;
+	limiting = NULL;
+	up_mmps = (pcie_read_config(pcib, PCIER_DEVICE_CAP, 2) &
+	    PCIEM_CAP_MAX_PAYLOAD) << 5;
+	if (cap_target > up_mmps) {
+		cap_target = up_mmps;
+		limiting = pcib;
+	}
+	/*
+	 * Firmware may leave Bus Master Enable set after handoff.  Since no
+	 * child driver has attached during this cold pass, it is not a proxy
+	 * for a live FreeBSD consumer.
+	 */
+	for (i = 0; i < count; i++) {
+		child = devlist[i];
+		dinfo = device_get_ivars(child);
+		if ((dinfo->cfg.flags & (PCICFG_VF |
+		    PCICFG_MPS_UNRECONCILED)) != 0 ||
+		    dinfo->cfg.pcie.pcie_location == 0)
+			continue;
+		mmps = (pcie_read_config(child, PCIER_DEVICE_CAP, 2) &
+		    PCIEM_CAP_MAX_PAYLOAD) << 5;
+		if (cap_target > mmps) {
+			cap_target = mmps;
+			limiting = child;
+		}
+	}
+	target = cap_target;
+	limit_requested = pcie_mps_limit_value(&lmps) && up_mps > lmps;
+	if (limit_requested && target > lmps)
+		target = lmps;
+
+	/*
+	 * Do not lower one link below a switch without also reconciling every
+	 * ancestor and sibling subtree.  Recursive newbus attachment may already
+	 * have made another subtree live, so leave the established path intact.
+	 */
+	if (target < up_mps &&
+	    upinfo->cfg.pcie.pcie_type != PCIEM_TYPE_ROOT_PORT) {
+		if (cap_target < up_mps)
+			pcie_mps_conflict(limiting, up_mps, cap_target);
+		if (limit_requested) {
+			device_printf(pcib,
+			    "cannot apply hw.pci.mps_limit=%d below a switch "
+			    "without retuning the shared ancestor hierarchy; "
+			    "leaving path MPS %d unchanged\n",
+			    pci_mps_limit, pcie_mps_bytes(up_mps));
+		}
+		pcie_mps_mark_link_unreconciled(devlist, count, up_mps,
+		    up_mps > up_mmps);
+		/* Keep compatible functions at the established path MPS. */
+		target = up_mps;
+	}
+	/* Lower downstream producers before lowering the shared Root Port. */
+	for (i = 0; i < count; i++) {
+		child = devlist[i];
+		dinfo = device_get_ivars(child);
+		if ((dinfo->cfg.flags & (PCICFG_VF |
+		    PCICFG_MPS_UNRECONCILED)) != 0 ||
+		    dinfo->cfg.pcie.pcie_location == 0)
+			continue;
+		mps = pcie_read_config(child, PCIER_DEVICE_CTL, 2) &
+		    PCIEM_CTL_MAX_PAYLOAD;
+		if (mps > target)
+			pcie_adjust_config(child, PCIER_DEVICE_CTL,
+			    PCIEM_CTL_MAX_PAYLOAD, target, 2);
+	}
+	if (up_mps > target)
+		pcie_adjust_config(pcib, PCIER_DEVICE_CTL,
+		    PCIEM_CTL_MAX_PAYLOAD, target, 2);
+
+	/* Raise idle children only after the upstream port is configured. */
+	for (i = 0; i < count; i++) {
+		child = devlist[i];
+		dinfo = device_get_ivars(child);
+		if ((dinfo->cfg.flags & (PCICFG_VF |
+		    PCICFG_MPS_UNRECONCILED)) != 0 ||
+		    dinfo->cfg.pcie.pcie_location == 0)
+			continue;
+		mps = pcie_read_config(child, PCIER_DEVICE_CTL, 2) &
+		    PCIEM_CTL_MAX_PAYLOAD;
+		if (mps < target)
+			pcie_adjust_config(child, PCIER_DEVICE_CTL,
+			    PCIEM_CTL_MAX_PAYLOAD, target, 2);
+	}
+	free(devlist, M_TEMP);
 }
 
 static void
@@ -4444,16 +4865,12 @@ pci_add_child_clear_aer(device_t dev, struct pci_devinfo *dinfo)
 {
 	int aer;
 	uint32_t r;
-	uint16_t r2;
 
 	if (dinfo->cfg.pcie.pcie_location != 0 &&
 	    dinfo->cfg.pcie.pcie_type == PCIEM_TYPE_ROOT_PORT) {
-		r2 = pci_read_config(dev, dinfo->cfg.pcie.pcie_location +
-		    PCIER_ROOT_CTL, 2);
-		r2 &= ~(PCIEM_ROOT_CTL_SERR_CORR |
-		    PCIEM_ROOT_CTL_SERR_NONFATAL | PCIEM_ROOT_CTL_SERR_FATAL);
-		pci_write_config(dev, dinfo->cfg.pcie.pcie_location +
-		    PCIER_ROOT_CTL, r2, 2);
+		r = PCIEM_ROOT_CTL_SERR_CORR |
+		    PCIEM_ROOT_CTL_SERR_NONFATAL | PCIEM_ROOT_CTL_SERR_FATAL;
+		pcie_adjust_config(dev, PCIER_ROOT_CTL, r, 0, 2);
 	}
 	if (pci_find_extcap(dev, PCIZ_AER, &aer) == 0) {
 		r = pci_read_config(dev, aer + PCIR_AER_UC_STATUS, 4);
@@ -4505,12 +4922,9 @@ pci_add_child_clear_aer(device_t dev, struct pci_devinfo *dinfo)
 		    PCIM_AER_COR_HEADER_LOG_OVFLOW);
 		pci_write_config(dev, aer + PCIR_AER_COR_MASK, r, 4);
 
-		r = pci_read_config(dev, dinfo->cfg.pcie.pcie_location +
-		    PCIER_DEVICE_CTL, 2);
-		r |=  PCIEM_CTL_COR_ENABLE | PCIEM_CTL_NFER_ENABLE |
+		r = PCIEM_CTL_COR_ENABLE | PCIEM_CTL_NFER_ENABLE |
 		    PCIEM_CTL_FER_ENABLE | PCIEM_CTL_URR_ENABLE;
-		pci_write_config(dev, dinfo->cfg.pcie.pcie_location +
-		    PCIER_DEVICE_CTL, r, 2);
+		pcie_adjust_config(dev, PCIER_DEVICE_CTL, r, r, 2);
 	}
 }
 
@@ -4552,6 +4966,192 @@ pci_probe(device_t dev)
 	/* Allow other subclasses to override this driver. */
 	return (BUS_PROBE_GENERIC);
 }
+
+#ifdef PCI_IOV
+/*
+ * Compute the maximum PCI bus number needed for the currently configured VFs.
+ */
+static int
+pci_iov_max_vf_bus_cur(device_t pf, int iov_pos, uint16_t num_vfs,
+    int *max_bus)
+{
+	uint64_t last_rid;
+	uint32_t pf_rid;
+	uint16_t rid_offset, rid_stride;
+
+	pf_rid = pci_get_rid(pf);
+	rid_offset = pci_read_config(pf, iov_pos + PCIR_SRIOV_VF_OFF, 2);
+	rid_stride = pci_read_config(pf, iov_pos + PCIR_SRIOV_VF_STRIDE, 2);
+	if (rid_offset == 0 || (num_vfs > 1 && rid_stride == 0))
+		return (EINVAL);
+	last_rid = (uint64_t)pf_rid + rid_offset +
+	    (uint64_t)(num_vfs - 1) * rid_stride;
+	if (last_rid > UINT16_MAX)
+		return (ERANGE);
+	*max_bus = MAX(*max_bus, PCI_RID2BUS(last_rid));
+	return (0);
+}
+
+/*
+ * First VF Offset and VF Stride may change with NumVFs.  Probe every valid
+ * NumVFs value while VF Enable is clear and return the largest VF bus.
+ */
+static int
+pci_iov_max_vf_bus(device_t pf, int iov_pos, int *max_bus)
+{
+	uint16_t ctl, num_vfs, original_num_vfs, total_vfs;
+	int error, pf_max_bus;
+
+	total_vfs = pci_read_config(pf, iov_pos + PCIR_SRIOV_TOTAL_VFS, 2);
+	if (total_vfs == 0 || total_vfs == UINT16_MAX)
+		return (0);
+
+	ctl = pci_read_config(pf, iov_pos + PCIR_SRIOV_CTL, 2);
+	original_num_vfs = pci_read_config(pf,
+	    iov_pos + PCIR_SRIOV_NUM_VFS, 2);
+	pf_max_bus = pci_get_bus(pf);
+	error = 0;
+
+	if ((ctl & PCIM_SRIOV_VF_EN) != 0) {
+		/* NumVFs is writable only while VF Enable is clear. */
+		num_vfs = original_num_vfs;
+		if (num_vfs == 0 || num_vfs > total_vfs)
+			return (EINVAL);
+		return (pci_iov_max_vf_bus_cur(pf, iov_pos, num_vfs, max_bus));
+	}
+
+	for (num_vfs = total_vfs; num_vfs != 0; num_vfs--) {
+		pci_write_config(pf, iov_pos + PCIR_SRIOV_NUM_VFS,
+		    num_vfs, 2);
+		error = pci_iov_max_vf_bus_cur(pf, iov_pos, num_vfs,
+		    &pf_max_bus);
+		if (error != 0)
+			break;
+	}
+	pci_write_config(pf, iov_pos + PCIR_SRIOV_NUM_VFS,
+	    original_num_vfs, 2);
+	if (error == 0)
+		*max_bus = MAX(*max_bus, pf_max_bus);
+	return (error);
+}
+
+/*
+ * Reserve bus numbers required by VFs after the bus has identified all of
+ * its children, but before their drivers attach.  This is best effort;
+ * pci_iov.c retains a runtime allocation path for configurations that cannot
+ * be sized during boot.
+ */
+void
+pci_reserve_iov_buses(device_t dev, int busno)
+{
+	struct pci_iov_bus_group {
+		bool		have_iov;
+		bool		vfs_enabled;
+		bool		ctl_changed;
+		device_t	lowest_pf;
+		int		lowest_iov_pos;
+		uint16_t	saved_ctl;
+	} groups[PCI_SLOTMAX + 1], *group;
+	device_t child, pcib, *devlist;
+	struct pci_softc *sc;
+	rman_res_t start;
+	uint16_t ctl;
+	int devcount, error, group_slot, i, iov_pos, max_bus, slot;
+	bool ari, have_iov;
+
+	pcib = device_get_parent(dev);
+	sc = device_get_softc(dev);
+	max_bus = busno;
+	ari = PCIB_ARI_ENABLED(pcib);
+	bzero(groups, sizeof(groups));
+	have_iov = false;
+	error = device_get_children(dev, &devlist, &devcount);
+	if (error != 0)
+		return;
+	for (i = 0; i < devcount; i++) {
+		child = devlist[i];
+		if (pci_find_extcap(child, PCIZ_SRIOV, &iov_pos) != 0 ||
+		    PCI_EXTCAP_VER(pci_read_config(child, iov_pos, 4)) != 1)
+			continue;
+		slot = pci_get_slot(child);
+		MPASS(!ari || slot == 0);
+		group_slot = ari ? 0 : slot;
+		group = &groups[group_slot];
+		ctl = pci_read_config(child, iov_pos + PCIR_SRIOV_CTL, 2);
+		if ((ctl & PCIM_SRIOV_VF_EN) != 0)
+			group->vfs_enabled = true;
+		if (!group->have_iov || pci_get_function(child) <
+		    pci_get_function(group->lowest_pf)) {
+			group->have_iov = true;
+			have_iov = true;
+			group->lowest_pf = child;
+			group->lowest_iov_pos = iov_pos;
+		}
+	}
+	if (!have_iov) {
+		free(devlist, M_TEMP);
+		return;
+	}
+
+	/*
+	 * The ARI Hierarchy bit is writable only in the lowest-numbered PF
+	 * and controls the VF routing layout for all PFs on the device.
+	 * Temporarily enable it while sizing an ARI hierarchy whose VFs are
+	 * not already active.
+	 */
+	if (ari) {
+		group = &groups[0];
+		MPASS(group->have_iov);
+		group->saved_ctl = pci_read_config(group->lowest_pf,
+		    group->lowest_iov_pos + PCIR_SRIOV_CTL, 2);
+		ctl = group->saved_ctl;
+		ctl |= PCIM_SRIOV_ARI_EN;
+		group->ctl_changed = !group->vfs_enabled &&
+		    ctl != group->saved_ctl;
+		if (group->ctl_changed)
+			pci_write_config(group->lowest_pf,
+			    group->lowest_iov_pos + PCIR_SRIOV_CTL, ctl, 2);
+	}
+
+	for (i = 0; i < devcount; i++) {
+		child = devlist[i];
+		if (pci_find_extcap(child, PCIZ_SRIOV, &iov_pos) != 0 ||
+		    PCI_EXTCAP_VER(pci_read_config(child, iov_pos, 4)) != 1)
+			continue;
+		slot = pci_get_slot(child);
+		MPASS(!ari || slot == 0);
+		group = &groups[ari ? 0 : slot];
+		ctl = pci_read_config(child, iov_pos + PCIR_SRIOV_CTL, 2);
+		if (group->vfs_enabled && (ctl & PCIM_SRIOV_VF_EN) == 0)
+			continue;
+		error = pci_iov_max_vf_bus(child, iov_pos, &max_bus);
+		if (error != 0 && bootverbose)
+			device_printf(child,
+			    "cannot size SR-IOV function: %d\n", error);
+	}
+	if (ari && groups[0].ctl_changed) {
+		group = &groups[0];
+		pci_write_config(group->lowest_pf,
+		    group->lowest_iov_pos + PCIR_SRIOV_CTL,
+		    group->saved_ctl, 2);
+	}
+	free(devlist, M_TEMP);
+
+	start = rman_get_start(sc->sc_bus);
+	if (max_bus <= rman_get_end(sc->sc_bus))
+		return;
+	error = bus_adjust_resource(dev, sc->sc_bus, start, max_bus);
+	if (error != 0) {
+		device_printf(dev,
+		    "failed to reserve bus numbers %ju-%d for SR-IOV: %d\n",
+		    (uintmax_t)start, max_bus, error);
+		return;
+	}
+	if (bootverbose)
+		device_printf(dev, "reserved bus numbers %ju-%d for SR-IOV\n",
+		    (uintmax_t)start, max_bus);
+}
+#endif
 
 int
 pci_attach_common(device_t dev)
@@ -4595,6 +5195,9 @@ pci_attach(device_t dev)
 	domain = pcib_get_domain(dev);
 	busno = pcib_get_bus(dev);
 	pci_add_children(dev, domain, busno);
+#ifdef PCI_IOV
+	pci_reserve_iov_buses(dev, busno);
+#endif
 	bus_attach_children(dev);
 	return (0);
 }
@@ -5498,7 +6101,7 @@ DB_SHOW_COMMAND_FLAGS(pciregs, db_pci_dump, DB_CMD_MEMSAFE)
 #endif /* DDB */
 
 struct resource *
-pci_reserve_map(device_t dev, device_t child, int type, int *rid,
+pci_reserve_map(device_t dev, device_t child, int type, int rid,
     rman_res_t start, rman_res_t end, rman_res_t count, u_int num,
     u_int flags)
 {
@@ -5513,10 +6116,10 @@ pci_reserve_map(device_t dev, device_t child, int type, int *rid,
 	res = NULL;
 
 	/* If rid is managed by EA, ignore it */
-	if (pci_ea_is_enabled(child, *rid))
+	if (pci_ea_is_enabled(child, rid))
 		goto out;
 
-	pm = pci_find_bar(child, *rid);
+	pm = pci_find_bar(child, rid);
 	if (pm != NULL) {
 		/* This is a BAR that we failed to allocate earlier. */
 		mapsize = pm->pm_size;
@@ -5530,28 +6133,28 @@ pci_reserve_map(device_t dev, device_t child, int type, int *rid,
 		 * have a atapci device in legacy mode and it fails
 		 * here, that other code is broken.
 		 */
-		pci_read_bar(child, *rid, &map, &testval, NULL);
+		pci_read_bar(child, rid, &map, &testval, NULL);
 
 		/*
 		 * Determine the size of the BAR and ignore BARs with a size
 		 * of 0.  Device ROM BARs use a different mask value.
 		 */
-		if (PCIR_IS_BIOS(&dinfo->cfg, *rid))
+		if (PCIR_IS_BIOS(&dinfo->cfg, rid))
 			mapsize = pci_romsize(testval);
 		else
 			mapsize = pci_mapsize(testval);
 		if (mapsize == 0)
 			goto out;
-		pm = pci_add_bar(child, *rid, map, mapsize);
+		pm = pci_add_bar(child, rid, map, mapsize);
 	}
 
-	if (PCI_BAR_MEM(map) || PCIR_IS_BIOS(&dinfo->cfg, *rid)) {
+	if (PCI_BAR_MEM(map) || PCIR_IS_BIOS(&dinfo->cfg, rid)) {
 		if (type != SYS_RES_MEMORY) {
 			if (bootverbose)
 				device_printf(dev,
 				    "child %s requested type %d for rid %#x,"
 				    " but the BAR says it is an memio\n",
-				    device_get_nameunit(child), type, *rid);
+				    device_get_nameunit(child), type, rid);
 			goto out;
 		}
 	} else {
@@ -5560,7 +6163,7 @@ pci_reserve_map(device_t dev, device_t child, int type, int *rid,
 				device_printf(dev,
 				    "child %s requested type %d for rid %#x,"
 				    " but the BAR says it is an ioport\n",
-				    device_get_nameunit(child), type, *rid);
+				    device_get_nameunit(child), type, rid);
 			goto out;
 		}
 	}
@@ -5582,20 +6185,20 @@ pci_reserve_map(device_t dev, device_t child, int type, int *rid,
 	 * Allocate enough resource, and then write back the
 	 * appropriate BAR for that resource.
 	 */
-	resource_list_add(rl, type, *rid, start, end, count);
+	resource_list_add(rl, type, rid, start, end, count);
 	res = resource_list_reserve(rl, dev, child, type, rid, start, end,
 	    count, flags & ~RF_ACTIVE);
 	if (res == NULL) {
-		resource_list_delete(rl, type, *rid);
+		resource_list_delete(rl, type, rid);
 		device_printf(child,
 		    "%#jx bytes of rid %#x res %d failed (%#jx, %#jx).\n",
-		    count, *rid, type, start, end);
+		    count, rid, type, start, end);
 		goto out;
 	}
 	if (bootverbose)
 		device_printf(child,
 		    "Lazy allocation of %#jx bytes rid %#x type %d at %#jx\n",
-		    count, *rid, type, rman_get_start(res));
+		    count, rid, type, rman_get_start(res));
 
 	/* Disable decoding via the CMD register before updating the BAR */
 	cmd = pci_read_config(child, PCIR_COMMAND, 2);
@@ -5612,7 +6215,7 @@ out:
 }
 
 struct resource *
-pci_alloc_multi_resource(device_t dev, device_t child, int type, int *rid,
+pci_alloc_multi_resource(device_t dev, device_t child, int type, int rid,
     rman_res_t start, rman_res_t end, rman_res_t count, u_long num,
     u_int flags)
 {
@@ -5637,7 +6240,7 @@ pci_alloc_multi_resource(device_t dev, device_t child, int type, int *rid,
 		 * Can't alloc legacy interrupt once MSI messages have
 		 * been allocated.
 		 */
-		if (*rid == 0 && (cfg->msi.msi_alloc > 0 ||
+		if (rid == 0 && (cfg->msi.msi_alloc > 0 ||
 		    cfg->msix.msix_alloc > 0))
 			return (NULL);
 
@@ -5646,7 +6249,7 @@ pci_alloc_multi_resource(device_t dev, device_t child, int type, int *rid,
 		 * routed and is deserving of an interrupt, try to
 		 * assign it one.
 		 */
-		if (*rid == 0 && !PCI_INTERRUPT_VALID(cfg->intline) &&
+		if (rid == 0 && !PCI_INTERRUPT_VALID(cfg->intline) &&
 		    (cfg->intpin != 0))
 			pci_assign_interrupt(dev, child, 0);
 		break;
@@ -5658,7 +6261,7 @@ pci_alloc_multi_resource(device_t dev, device_t child, int type, int *rid,
 		 * tree.
 		 */
 		if (cfg->hdrtype == PCIM_HDRTYPE_BRIDGE) {
-			switch (*rid) {
+			switch (rid) {
 			case PCIR_IOBASEL_1:
 			case PCIR_MEMBASE_1:
 			case PCIR_PMBASEL_1:
@@ -5671,7 +6274,7 @@ pci_alloc_multi_resource(device_t dev, device_t child, int type, int *rid,
 			}
 		}
 		/* Reserve resources for this BAR if needed. */
-		rle = resource_list_find(rl, type, *rid);
+		rle = resource_list_find(rl, type, rid);
 		if (rle == NULL) {
 			res = pci_reserve_map(dev, child, type, rid, start, end,
 			    count, num, flags);
@@ -5684,7 +6287,7 @@ pci_alloc_multi_resource(device_t dev, device_t child, int type, int *rid,
 }
 
 struct resource *
-pci_alloc_resource(device_t dev, device_t child, int type, int *rid,
+pci_alloc_resource(device_t dev, device_t child, int type, int rid,
     rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
 {
 #ifdef PCI_IOV
@@ -6335,7 +6938,9 @@ pci_cfg_restore(device_t dev, struct pci_devinfo *dinfo)
 		pci_resume_msix(dev);
 
 #ifdef PCI_IOV
-	if (dinfo->cfg.iov != NULL)
+	/* The SR-IOV capability is implemented only by PFs. */
+	if (dinfo->cfg.iov != NULL &&
+	    (dinfo->cfg.flags & PCICFG_VF) == 0)
 		pci_iov_cfg_restore(dev, dinfo);
 #endif
 }
@@ -6451,7 +7056,9 @@ pci_cfg_save(device_t dev, struct pci_devinfo *dinfo, int setstate)
 		pci_cfg_save_pcix(dev, dinfo);
 
 #ifdef PCI_IOV
-	if (dinfo->cfg.iov != NULL)
+	/* The SR-IOV capability is implemented only by PFs. */
+	if (dinfo->cfg.iov != NULL &&
+	    (dinfo->cfg.flags & PCICFG_VF) == 0)
 		pci_iov_cfg_save(dev, dinfo);
 #endif
 
@@ -6525,11 +7132,9 @@ device_t
 pci_find_pcie_root_port(device_t dev)
 {
 	struct pci_devinfo *dinfo;
-	devclass_t pci_class;
 	device_t pcib, bus;
 
-	pci_class = devclass_find("pci");
-	KASSERT(device_get_devclass(device_get_parent(dev)) == pci_class,
+	KASSERT(is_pci_device(dev),
 	    ("%s: non-pci device %s", __func__, device_get_nameunit(dev)));
 
 	/*
@@ -6545,11 +7150,7 @@ pci_find_pcie_root_port(device_t dev)
 		KASSERT(pcib != NULL, ("%s: null bridge of %s", __func__,
 		    device_get_nameunit(bus)));
 
-		/*
-		 * pcib's parent must be a PCI bus for this to be a
-		 * PCI-PCI bridge.
-		 */
-		if (device_get_devclass(device_get_parent(pcib)) != pci_class)
+		if (!is_pci_device(pcib))
 			return (NULL);
 
 		dinfo = device_get_ivars(pcib);
@@ -6711,6 +7312,28 @@ pcie_apei_error(device_t dev, int sev, uint8_t *aerp)
 }
 
 /*
+ * Return true if the device supports FLR, taking both its advertised
+ * capability and the PCI quirk policy into account.
+ */
+bool
+pcie_flr_supported(device_t dev)
+{
+	struct pci_devinfo *dinfo = device_get_ivars(dev);
+	int cap;
+
+	cap = dinfo->cfg.pcie.pcie_location;
+	if (cap == 0)
+		return (false);
+
+	if (!(pci_read_config(dev, cap + PCIER_DEVICE_CAP, 4) & PCIEM_CAP_FLR) &&
+	    !pci_has_quirk(pci_get_devid(dev), PCI_QUIRK_ENABLE_FLR))
+		return (false);
+	if (pci_has_quirk(pci_get_devid(dev), PCI_QUIRK_DISABLE_FLR))
+		return (false);
+	return (true);
+}
+
+/*
  * Perform a Function Level Reset (FLR) on a device.
  *
  * This function first waits for any pending transactions to complete
@@ -6718,8 +7341,8 @@ pcie_apei_error(device_t dev, int sev, uint8_t *aerp)
  * still pending, the function will return false without attempting a
  * reset.
  *
- * If dev is not a PCI-express function or does not support FLR, this
- * function returns false.
+ * If dev is not a PCI-express function, or neither advertises FLR nor
+ * has a quirk enabling FLR, this function returns false.
  *
  * Note that no registers are saved or restored.  The caller is
  * responsible for saving and restoring any registers including
@@ -6734,12 +7357,10 @@ pcie_flr(device_t dev, u_int max_delay, bool force)
 	int compl_delay;
 	int cap;
 
-	cap = dinfo->cfg.pcie.pcie_location;
-	if (cap == 0)
+	if (!pcie_flr_supported(dev))
 		return (false);
 
-	if (!(pci_read_config(dev, cap + PCIER_DEVICE_CAP, 4) & PCIEM_CAP_FLR))
-		return (false);
+	cap = dinfo->cfg.pcie.pcie_location;
 
 	/*
 	 * Disable busmastering to prevent generation of new
@@ -6979,6 +7600,17 @@ pci_print_faulted_dev(void)
 			}
 		}
 	}
+}
+
+bool
+is_pci_device(device_t dev)
+{
+	devclass_t pci_class;
+
+	if (device_get_parent(dev) == NULL)
+		return (false);
+	pci_class = devclass_find("pci");
+	return (device_get_devclass(device_get_parent(dev)) == pci_class);
 }
 
 #ifdef DDB

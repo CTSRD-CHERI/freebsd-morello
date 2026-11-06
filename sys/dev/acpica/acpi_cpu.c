@@ -92,6 +92,7 @@ struct acpi_cpu_softc {
     int			 cpu_non_c2;	/* Index of lowest non-C2 state. */
     int			 cpu_non_c3;	/* Index of lowest non-C3 state. */
     u_int		 cpu_cx_stats[MAX_CX_STATES];/* Cx usage history. */
+    uint64_t		 cpu_cx_duration[MAX_CX_STATES];/* Cx cumulative sleep */
     /* Values for sysctl. */
     struct sysctl_ctx_list cpu_sysctl_ctx;
     struct sysctl_oid	*cpu_sysctl_tree;
@@ -139,9 +140,6 @@ struct acpi_cpu_device {
 
 #define	CPUDEV_DEVICE_ID	"ACPI0007"
 
-/* Knob to disable acpi_cpu devices */
-bool acpi_cpu_disabled = false;
-
 /* Platform hardware resource information. */
 static uint32_t		 cpu_smi_cmd;	/* Value to write to SMI_CMD. */
 static uint8_t		 cpu_cst_cnt;	/* Indicate we are _CST aware. */
@@ -165,6 +163,8 @@ static int	acpi_cpu_suspend(device_t dev);
 static int	acpi_cpu_resume(device_t dev);
 static int	acpi_pcpu_get_id(device_t dev, uint32_t acpi_id,
 		    u_int *cpu_id);
+static void	acpi_cpu_madt_handler(ACPI_SUBTABLE_HEADER *entry, void *arg);
+static bool	acpi_cpu_enabled_in_madt(uint32_t acpi_id);
 static struct resource_list *acpi_cpu_get_rlist(device_t dev, device_t child);
 static device_t	acpi_cpu_add_child(device_t dev, u_int order, const char *name,
 		    int unit);
@@ -185,6 +185,7 @@ static void	acpi_cpu_quirks(void);
 static void	acpi_cpu_quirks_piix4(void);
 static int	acpi_cpu_usage_sysctl(SYSCTL_HANDLER_ARGS);
 static int	acpi_cpu_usage_counters_sysctl(SYSCTL_HANDLER_ARGS);
+static int	acpi_cpu_duration_counters_sysctl(SYSCTL_HANDLER_ARGS);
 static int	acpi_cpu_set_cx_lowest(struct acpi_cpu_softc *sc);
 static int	acpi_cpu_cx_lowest_sysctl(SYSCTL_HANDLER_ARGS);
 static int	acpi_cpu_global_cx_lowest_sysctl(SYSCTL_HANDLER_ARGS);
@@ -237,7 +238,7 @@ acpi_cpu_probe(device_t dev)
     ACPI_STATUS		   status;
     ACPI_OBJECT_TYPE	   type;
 
-    if (acpi_disabled("cpu") || acpi_cpu_disabled)
+    if (acpi_disabled("cpu"))
 	return (ENXIO);
     type = acpi_get_type(dev);
     if (type != ACPI_TYPE_PROCESSOR && type != ACPI_TYPE_DEVICE)
@@ -285,9 +286,10 @@ acpi_cpu_probe(device_t dev)
 	}
     }
     if (acpi_pcpu_get_id(dev, acpi_id, &cpu_id) != 0) {
-	if (bootverbose && (type != ACPI_TYPE_PROCESSOR || acpi_id != 255))
-	    printf("ACPI: Processor %s (ACPI ID %u) ignored\n",
-		acpi_name(acpi_get_handle(dev)), acpi_id);
+	if (bootverbose && (type != ACPI_TYPE_PROCESSOR || acpi_id != 255) &&
+	    acpi_cpu_enabled_in_madt(acpi_id))
+	    printf("ACPI: Processor %s (ACPI ID %u) enabled but not online, "
+		"ignored\n", acpi_name(handle), acpi_id);
 	return (ENXIO);
     }
 
@@ -314,7 +316,6 @@ acpi_cpu_attach(device_t dev)
     struct acpi_cpu_softc *sc;
     struct acpi_softc	  *acpi_sc;
     ACPI_STATUS		   status;
-    u_int		   features;
     int			   cpu_id, drv_count, i;
     driver_t 		  **drivers;
     uint32_t		   cap_set[3];
@@ -418,6 +419,8 @@ acpi_cpu_attach(device_t dev)
     if (devclass_get_drivers(device_get_devclass(dev), &drivers,
 	&drv_count) == 0) {
 	for (i = 0; i < drv_count; i++) {
+	    u_int features = 0;
+
 	    if (ACPI_GET_FEATURES(drivers[i], &features) == 0)
 		sc->cpu_features |= features;
 	}
@@ -584,6 +587,62 @@ acpi_pcpu_get_id(device_t dev, uint32_t acpi_id, u_int *cpu_id)
     return (ESRCH);
 }
 
+struct acpi_cpu_madt_check {
+    uint32_t	acpi_id;
+    bool	enabled;
+};
+
+static void
+acpi_cpu_madt_handler(ACPI_SUBTABLE_HEADER *entry, void *arg)
+{
+    struct acpi_cpu_madt_check *check = arg;
+    uint32_t id, flags;
+
+    switch (entry->Type) {
+    case ACPI_MADT_TYPE_LOCAL_APIC:
+	id = ((ACPI_MADT_LOCAL_APIC *)entry)->ProcessorId;
+	flags = ((ACPI_MADT_LOCAL_APIC *)entry)->LapicFlags;
+	break;
+    case ACPI_MADT_TYPE_LOCAL_X2APIC:
+	id = ((ACPI_MADT_LOCAL_X2APIC *)entry)->Uid;
+	flags = ((ACPI_MADT_LOCAL_X2APIC *)entry)->LapicFlags;
+	break;
+    case ACPI_MADT_TYPE_GENERIC_INTERRUPT:
+	id = ((ACPI_MADT_GENERIC_INTERRUPT *)entry)->Uid;
+	flags = ((ACPI_MADT_GENERIC_INTERRUPT *)entry)->Flags;
+	break;
+    case ACPI_MADT_TYPE_RINTC:
+	id = ((ACPI_MADT_RINTC *)entry)->Uid;
+	flags = ((ACPI_MADT_RINTC *)entry)->Flags;
+	break;
+    default:
+	return;
+    }
+    if (id == check->acpi_id && (flags & ACPI_MADT_ENABLED) != 0)
+	check->enabled = true;
+}
+
+static bool
+acpi_cpu_enabled_in_madt(uint32_t acpi_id)
+{
+    static ACPI_TABLE_MADT *madt;
+    struct acpi_cpu_madt_check check = {
+	.acpi_id = acpi_id,
+    };
+    ACPI_TABLE_HEADER *hdr;
+
+    if (madt == NULL) {
+	if (ACPI_FAILURE(AcpiGetTable(ACPI_SIG_MADT, 1, &hdr)))
+	    return (false);
+	madt = (ACPI_TABLE_MADT *)hdr;
+	/* Retain the table reference for subsequent processor probes. */
+    }
+
+    acpi_walk_subtables(madt + 1,
+	(char *)madt + madt->Header.Length, acpi_cpu_madt_handler, &check);
+    return (check.enabled);
+}
+
 static struct resource_list *
 acpi_cpu_get_rlist(device_t dev, device_t child)
 {
@@ -730,7 +789,7 @@ acpi_cpu_generic_cx_probe(struct acpi_cpu_softc *sc)
     if (AcpiGbl_FADT.C2Latency <= 100) {
 	gas.Address = sc->cpu_p_blk + 4;
 	cx_ptr->res_rid = 0;
-	acpi_bus_alloc_gas(sc->cpu_dev, &cx_ptr->res_type, &cx_ptr->res_rid,
+	acpi_bus_alloc_gas(sc->cpu_dev, &cx_ptr->res_type, cx_ptr->res_rid,
 	    &gas, &cx_ptr->p_lvlx, RF_SHAREABLE);
 	if (cx_ptr->p_lvlx != NULL) {
 	    cx_ptr->type = ACPI_STATE_C2;
@@ -747,7 +806,7 @@ acpi_cpu_generic_cx_probe(struct acpi_cpu_softc *sc)
     if (AcpiGbl_FADT.C3Latency <= 1000 && !(cpu_quirks & CPU_QUIRK_NO_C3)) {
 	gas.Address = sc->cpu_p_blk + 5;
 	cx_ptr->res_rid = 1;
-	acpi_bus_alloc_gas(sc->cpu_dev, &cx_ptr->res_type, &cx_ptr->res_rid,
+	acpi_bus_alloc_gas(sc->cpu_dev, &cx_ptr->res_type, cx_ptr->res_rid,
 	    &gas, &cx_ptr->p_lvlx, RF_SHAREABLE);
 	if (cx_ptr->p_lvlx != NULL) {
 	    cx_ptr->type = ACPI_STATE_C3;
@@ -924,7 +983,7 @@ acpi_cpu_cx_cst(struct acpi_cpu_softc *sc)
 	{
 	    cx_ptr->res_rid = sc->cpu_cx_count;
 	    acpi_PkgGas(sc->cpu_dev, pkg, 0, &cx_ptr->res_type,
-		&cx_ptr->res_rid, &cx_ptr->p_lvlx, RF_SHAREABLE);
+		cx_ptr->res_rid, &cx_ptr->p_lvlx, RF_SHAREABLE);
 	    if (cx_ptr->p_lvlx) {
 		cx_ptr->do_mwait = false;
 		ACPI_DEBUG_PRINT((ACPI_DB_INFO,
@@ -1055,6 +1114,12 @@ acpi_cpu_startup_cx(struct acpi_cpu_softc *sc)
 	"cx_usage_counters", CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_MPSAFE,
 	(void *)sc, 0, acpi_cpu_usage_counters_sysctl, "A",
 	"Cx sleep state counters");
+    SYSCTL_ADD_PROC(&sc->cpu_sysctl_ctx,
+        SYSCTL_CHILDREN(device_get_sysctl_tree(sc->cpu_dev)), OID_AUTO,
+	"cx_duration_counters", CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_MPSAFE,
+	(void *)sc, 0, acpi_cpu_duration_counters_sysctl, "A",
+	"Cx sleep duration cumulative time");
+
 #if defined(__i386__) || defined(__amd64__)
     SYSCTL_ADD_PROC(&sc->cpu_sysctl_ctx,
         SYSCTL_CHILDREN(device_get_sysctl_tree(sc->cpu_dev)), OID_AUTO,
@@ -1168,6 +1233,7 @@ acpi_cpu_idle(sbintime_t sbt)
 	if (!cx_next->do_mwait && curthread->td_critnest == 0)
 		end_time = min(end_time, 500000 / hz);
 	sc->cpu_prev_sleep = (sc->cpu_prev_sleep * 3 + end_time) / 4;
+	sc->cpu_cx_duration[cx_next_idx] += end_time;
 	return;
     }
 
@@ -1224,6 +1290,7 @@ acpi_cpu_idle(sbintime_t sbt)
     else
 	end_time = ((end_ticks - start_ticks) << 20) / cpu_tickrate();
     sc->cpu_prev_sleep = (sc->cpu_prev_sleep * 3 + end_time) / 4;
+    sc->cpu_cx_duration[cx_next_idx] += end_time;
 }
 #endif
 
@@ -1407,6 +1474,26 @@ acpi_cpu_usage_counters_sysctl(SYSCTL_HANDLER_ARGS)
 	sbuf_delete(&sb);
 	return (error);
 }
+
+static int
+acpi_cpu_duration_counters_sysctl(SYSCTL_HANDLER_ARGS)
+{
+	struct acpi_cpu_softc *sc = (struct acpi_cpu_softc *)arg1;
+	struct sbuf	 sb;
+	char		 buf[128];
+	int		 error, i;
+
+	sbuf_new_for_sysctl(&sb, buf, sizeof(buf), req);
+	for (i = 0; i < sc->cpu_cx_count; i++) {
+		if (i > 0)
+			sbuf_putc(&sb, ' ');
+		sbuf_printf(&sb, "%ju", (uintmax_t) sc->cpu_cx_duration[i]);
+	}
+	error = sbuf_finish(&sb);
+	sbuf_delete(&sb);
+	return (error);
+}
+
 
 #if defined(__i386__) || defined(__amd64__)
 static int

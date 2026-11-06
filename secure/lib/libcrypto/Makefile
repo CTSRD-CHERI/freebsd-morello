@@ -1,12 +1,14 @@
 SHLIBDIR?=	/lib
-.if !defined(LIBCRYPTO_WITHOUT_SUBDIRS)
+.if !defined(LIBCRYPTO_WITHOUT_SUBDIRS) && !defined(BOOTSTRAPPING)
 SUBDIR=		engines modules
+.endif
+.ifdef BOOTSTRAPPING
+CFLAGS+=	-DOPENSSL_NO_SCTP
 .endif
 
 .include <bsd.own.mk>
 .include <src.opts.mk>
 
-PACKAGE=	openssl-lib
 LIB=		crypto
 SHLIB_MAJOR=	35
 VERSION_MAP=	${.CURDIR}/Version.map
@@ -56,7 +58,7 @@ SRCS+=	mem_clr.c
 # aes
 SRCS+=	aes_cfb.c aes_ecb.c aes_ige.c aes_misc.c aes_ofb.c aes_wrap.c
 .if defined(ASM_aarch64)
-SRCS+=	aes_cbc.c aes_core.c aesv8-armx.S vpaes-armv8.S
+SRCS+=	aes_cbc.c aes_core.c aesv8-armx.S bsaes-armv8.S vpaes-armv8.S
 ACFLAGS.aesv8-armx.S=	-march=armv8-a+crypto
 .elif defined(ASM_amd64)
 SRCS+=	aes-x86_64.S aesni-mb-x86_64.S aesni-sha1-x86_64.S aesni-sha256-x86_64.S
@@ -89,7 +91,7 @@ SRCS+=	x_bignum.c x_info.c x_int64.c x_long.c x_pkey.c x_sig.c x_spki.c
 SRCS+=	x_val.c
 
 # async
-SRCS+=	async.c async_err.c async_posix.c async_wait.c
+SRCS+=	async.c async_err.c async_null.c async_posix.c async_wait.c async_win.c
 
 # bf
 SRCS+=	bf_cfb64.c bf_ecb.c bf_ofb64.c bf_prefix.c bf_readbuff.c bf_skey.c
@@ -222,7 +224,11 @@ SRCS+=	dsa_gen.c dsa_key.c dsa_lib.c dsa_meth.c dsa_ossl.c dsa_pmeth.c
 SRCS+=	dsa_prn.c dsa_sign.c dsa_vrf.c
 
 # dso
+SRCS+=	dso_dl.c
 SRCS+=	dso_dlfcn.c dso_err.c dso_lib.c
+SRCS+=	dso_openssl.c
+SRCS+=	dso_vms.c
+SRCS+=	dso_win32.c
 
 # ec
 SRCS+=	curve25519.c curve448.c curve448_tables.c ec2_oct.c ec2_smpl.c
@@ -289,7 +295,7 @@ SRCS+=	ffc_params.c ffc_params_generate.c ffc_params_validate.c
 SRCS+=	hashtable.c hashfunc.c
 
 # hmac
-SRCS+=	hmac.c hmac_s390x.c
+SRCS+=	hmac.c
 
 # hpke
 SRCS+=	hpke_util.c hpke.c
@@ -308,7 +314,9 @@ SRCS+=	md4_dgst.c md4_one.c
 
 # md5
 SRCS+=	md5_dgst.c md5_one.c md5_sha1.c
-.if defined(ASM_amd64)
+.if defined(ASM_aarch64)
+SRCS+=	md5-aarch64.S
+.elif defined(ASM_amd64)
 SRCS+=	md5-x86_64.S
 .elif defined(ASM_i386)
 SRCS+=	md5-586.S
@@ -393,13 +401,14 @@ SRCS+=	provider_seeding.c provider_util.c securitycheck.c
 SRCS+=	securitycheck_default.c
 
 # providers/common/der
+# der_digests_gen.c, der_dsa_key.c and der_ec_key.c are not listed: nothing in
+# libcrypto references them, and upstream's linker drops them from libcommon.a.
 SRCS+=	der_rsa_gen.c der_rsa_key.c der_rsa_sig.c
-SRCS+=	der_digests_gen.c
 SRCS+=	der_ml_dsa_gen.c der_ml_dsa_key.c
 SRCS+=	der_wrap_gen.c
 SRCS+=	der_slh_dsa_gen.c der_slh_dsa_key.c
-SRCS+=	der_dsa_gen.c der_dsa_key.c der_dsa_sig.c
-SRCS+=	der_ec_gen.c der_ec_key.c der_ec_sig.c
+SRCS+=	der_dsa_gen.c der_dsa_sig.c
+SRCS+=	der_ec_gen.c der_ec_sig.c
 SRCS+=	der_ecx_gen.c der_ecx_key.c
 
 # providers/implementations/asymciphers
@@ -422,17 +431,10 @@ SRCS+=	cipher_aes_xts_fips.c
 SRCS+=	cipher_aes_gcm_siv.c cipher_aes_gcm_siv_hw.c \
 	cipher_aes_gcm_siv_polyval.c
 SRCS+=	cipher_aes_siv.c cipher_aes_siv_hw.c
-SRCS+=	cipher_blowfish.c cipher_blowfish_hw.c
 SRCS+=	cipher_camellia.c cipher_camellia_hw.c
-SRCS+=	cipher_cast5.c cipher_cast5_hw.c
 SRCS+=	cipher_chacha20.c cipher_chacha20_hw.c
 SRCS+=	cipher_chacha20_poly1305.c cipher_chacha20_poly1305_hw.c
-SRCS+=	cipher_des.c cipher_des_hw.c
-SRCS+=	cipher_desx.c cipher_desx_hw.c
 SRCS+=	cipher_null.c
-SRCS+=	cipher_rc4.c cipher_rc4_hw.c
-SRCS+=	cipher_rc4_hmac_md5.c cipher_rc4_hmac_md5_hw.c
-SRCS+=	cipher_seed.c cipher_seed_hw.c
 SRCS+=	cipher_tdes.c cipher_tdes_common.c cipher_tdes_hw.c
 SRCS+=	cipher_tdes_default.c cipher_tdes_default_hw.c \
 	cipher_tdes_wrap.c cipher_tdes_wrap_hw.c
@@ -440,12 +442,10 @@ SRCS+=	cipher_tdes_default.c cipher_tdes_default_hw.c \
 # providers/implementations/digests
 SRCS+=	digestcommon.c
 SRCS+=	blake2_prov.c blake2b_prov.c blake2s_prov.c
-SRCS+=	md4_prov.c
 SRCS+=	md5_prov.c md5_sha1_prov.c
 SRCS+=	null_prov.c
 SRCS+=	ripemd_prov.c
 SRCS+=	sha2_prov.c sha3_prov.c
-SRCS+=	wp_prov.c
 
 # providers/implementations/encode_decode
 SRCS+=	decode_der2key.c decode_epki2pki.c decode_msblob2key.c decode_pvk2key.c
@@ -461,8 +461,8 @@ SRCS+=	kdf_exch.c
 
 # providers/implementations/kdfs
 SRCS+=	argon2.c hkdf.c hmacdrbg_kdf.c kbkdf.c krb5kdf.c
-SRCS+=	pbkdf1.c pbkdf2.c pbkdf2_fips.c
-SRCS+=	pkcs12kdf.c pvkkdf.c scrypt.c sskdf.c sshkdf.c tls1_prf.c x942kdf.c
+SRCS+=	pbkdf2.c pbkdf2_fips.c
+SRCS+=	pkcs12kdf.c scrypt.c sskdf.c sshkdf.c tls1_prf.c x942kdf.c
 
 # providers/implementations/kem
 SRCS+=	ec_kem.c ecx_kem.c kem_util.c ml_kem_kem.c mlx_kem.c rsa_kem.c
@@ -482,6 +482,7 @@ SRCS+=	siphash_prov.c
 # providers/implementations/rands
 SRCS+=	drbg.c drbg_ctr.c drbg_hash.c drbg_hmac.c test_rng.c
 SRCS+=	seed_src.c
+SRCS+=	seed_src_jitter.c
 
 # providers/implementations/rands/seeding
 SRCS+=	rand_cpu_x86.c rand_tsc.c rand_unix.c rand_win.c
@@ -497,8 +498,11 @@ SRCS+=	aes_skmgmt.c generic.c
 SRCS+=	file_store.c file_store_any2obj.c
 
 # rand
-SRCS+=	prov_seed.c rand_deprecated.c rand_egd.c rand_err.c rand_lib.c
+SRCS+=	prov_seed.c rand_deprecated.c rand_err.c rand_lib.c
 SRCS+=	rand_meth.c rand_pool.c rand_uniform.c randfile.c
+
+# rbtree
+SRCS+=	rbtree.c
 
 # rc2
 SRCS+=	rc2_cbc.c rc2_ecb.c rc2_skey.c rc2cfb64.c rc2ofb64.c
@@ -571,7 +575,10 @@ SRCS+=	store_err.c store_init.c store_lib.c store_meth.c store_register.c
 SRCS+=	store_result.c store_strings.c
 
 # thread
-SRCS+=	api.c arch.c arch/thread_win.c arch/thread_posix.c arch/thread_none.c internal.c
+SRCS+=	api.c arch.c internal.c
+SRCS+=	thread_none.c
+SRCS+=	thread_posix.c
+SRCS+=	thread_win.c
 
 # ts
 SRCS+=	ts_asn1.c ts_conf.c ts_err.c ts_lib.c ts_req_print.c ts_req_utils.c
@@ -618,13 +625,23 @@ SRCS+=	x509type.c
 
 INCS=	aes.h asn1.h asn1err.h asn1t.h async.h asyncerr.h bio.h
 INCS+=	bioerr.h blowfish.h bn.h bnerr.h buffer.h buffererr.h byteorder.h camellia.h
-INCS+=	cast.h cmac.h cmp.h cmp_util.h cmperr.h cms.h cmserr.h comp.h comperr.h conf.h conf_api.h
+INCS+=	cast.h cmac.h cmp.h cmp_util.h cmperr.h cms.h cmserr.h comp.h comperr.h conf.h
 INCS+=	conferr.h configuration.h conftypes.h core.h core_dispatch.h core_names.h core_object.h
 INCS+=	crmf.h crmferr.h crypto.h cryptoerr.h cryptoerr_legacy.h ct.h cterr.h
-INCS+=	decoder.h decodererr.h des.h dh.h dherr.h dsa.h
-INCS+=	dsaerr.h dtls1.h e_os2.h e_ostime.h ebcdic.h ec.h ecdh.h ecdsa.h ecerr.h encoder.h encodererr.h
+INCS+=	decoder.h decodererr.h
+INCS+=	der_digests.h
+INCS+=	der_dsa.h
+INCS+=	der_ec.h
+INCS+=	der_ecx.h
+INCS+=	der_ml_dsa.h
+INCS+=	der_rsa.h
+INCS+=	der_slh_dsa.h
+INCS+=	der_wrap.h
+INCS+=	des.h dh.h dherr.h dsa.h
+INCS+=	dsaerr.h
+INCS+=	dtls1.h e_os2.h e_ostime.h ebcdic.h ec.h ecdh.h ecdsa.h ecerr.h encoder.h encodererr.h
 INCS+=	engine.h engineerr.h err.h ess.h esserr.h evp.h evperr.h fips_names.h fipskey.h hmac.h hpke.h http.h httperr.h idea.h indicator.h
-INCS+=	kdf.h kdferr.h lhash.h macros.h md2.h md4.h md5.h mdc2.h modes.h obj_mac.h
+INCS+=	kdf.h kdferr.h lhash.h macros.h md2.h md4.h md5.h mdc2.h ml_kem.h modes.h obj_mac.h
 INCS+=	objects.h objectserr.h ocsp.h ocsperr.h opensslconf.h opensslv.h
 INCS+=	ossl_typ.h param_build.h params.h pem.h pem2.h pemerr.h pkcs12.h pkcs12err.h pkcs7.h
 INCS+=	pkcs7err.h prov_ssl.h proverr.h provider.h quic.h rand.h randerr.h rc2.h rc4.h rc5.h ripemd.h
@@ -647,10 +664,11 @@ _cmd1=/%%NO_ASM%%/d
 .else
 _cmd1=s/%%NO_ASM%%//
 .endif
-.if ${MK_OPENSSL_KTLS} != "no"
+.if ${MK_OPENSSL_KTLS} != "no" && !defined(BOOTSTRAPPING)
 _cmd2=/%%NO_KTLS%%/d
 .else
 _cmd2=s/%%NO_KTLS%%//
+CFLAGS+= -DOPENSSL_NO_KTLS
 .endif
 
 buildinf.h: Makefile
@@ -670,13 +688,10 @@ buildasm cleanasm:
 	    ${.TARGET:S/build/all/:S/asm$//}
 .endfor
 
-.include <bsd.lib.mk>
+HAS_TESTS=	yes
+SUBDIR.${MK_TESTS}=	tests
 
-.if ${MACHINE} == "powerpc"
-# Work around "relocation R_PPC_GOT16 out of range" errors
-PICFLAG=	-fPIC
-.endif
-PICFLAG+=	-DOPENSSL_PIC
+.include <bsd.lib.mk>
 
 .if defined(ASM_${MACHINE_CPUARCH})
 .PATH:	${SRCTOP}/sys/crypto/openssl/${MACHINE_CPUARCH}
@@ -743,6 +758,7 @@ PICFLAG+=	-DOPENSSL_PIC
 	${LCRYPTO_SRC}/crypto/poly1305 \
 	${LCRYPTO_SRC}/crypto/property \
 	${LCRYPTO_SRC}/crypto/rand \
+	${LCRYPTO_SRC}/crypto/rbtree \
 	${LCRYPTO_SRC}/crypto/rc2 \
 	${LCRYPTO_SRC}/crypto/rc4 \
 	${LCRYPTO_SRC}/crypto/rc5 \
@@ -759,6 +775,7 @@ PICFLAG+=	-DOPENSSL_PIC
 	${LCRYPTO_SRC}/crypto/stack \
 	${LCRYPTO_SRC}/crypto/store \
 	${LCRYPTO_SRC}/crypto/thread \
+	${LCRYPTO_SRC}/crypto/thread/arch \
 	${LCRYPTO_SRC}/crypto/ts \
 	${LCRYPTO_SRC}/crypto/txt_db \
 	${LCRYPTO_SRC}/crypto/ui \
@@ -768,6 +785,7 @@ PICFLAG+=	-DOPENSSL_PIC
 	${LCRYPTO_SRC}/providers \
 	${LCRYPTO_SRC}/providers/common \
 	${LCRYPTO_SRC}/providers/common/der \
+	${LCRYPTO_SRC}/providers/common/include/prov \
 	${LCRYPTO_SRC}/providers/implementations/asymciphers \
 	${LCRYPTO_SRC}/providers/implementations/ciphers \
 	${LCRYPTO_SRC}/providers/implementations/digests \
@@ -784,4 +802,4 @@ PICFLAG+=	-DOPENSSL_PIC
 	${LCRYPTO_SRC}/providers/implementations/storemgmt \
 	${LCRYPTO_SRC}/ssl \
 	${LCRYPTO_SRC}/ssl/record \
-	${LCRYPTO_SRC}/ssl/record/methods
+	${LCRYPTO_SRC}/ssl/record/methods \

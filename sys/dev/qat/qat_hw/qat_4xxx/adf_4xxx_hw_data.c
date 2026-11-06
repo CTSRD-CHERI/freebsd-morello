@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
-/* Copyright(c) 2007-2025 Intel Corporation */
+/* Copyright(c) 2007-2026 Intel Corporation */
 #include <linux/iopoll.h>
 #include <adf_accel_devices.h>
 #include <adf_cfg.h>
@@ -86,17 +86,17 @@ struct adf_enabled_services {
 	u16 rng_to_svc_msk;
 };
 
-static struct adf_enabled_services adf_4xxx_svcs[] =
-    { { "dc", ADF_4XXX_DC },
-      { "sym", ADF_4XXX_SYM },
-      { "asym", ADF_4XXX_ASYM },
-      { "dc;asym", ADF_4XXX_ASYM_DC },
-      { "asym;dc", ADF_4XXX_ASYM_DC },
-      { "sym;dc", ADF_4XXX_SYM_DC },
-      { "dc;sym", ADF_4XXX_SYM_DC },
-      { "asym;sym", ADF_4XXX_ASYM_SYM },
-      { "sym;asym", ADF_4XXX_ASYM_SYM },
-      { "cy", ADF_4XXX_ASYM_SYM } };
+static struct adf_enabled_services adf_4xxx_svcs[] = {
+	{ "dc", ADF_4XXX_DC },
+	{ "sym", ADF_4XXX_SYM },
+	{ "asym", ADF_4XXX_ASYM },
+	{ "dc;asym", ADF_4XXX_ASYM_DC },
+	{ "asym;dc", ADF_4XXX_ASYM_DC },
+	{ "sym;dc", ADF_4XXX_SYM_DC },
+	{ "dc;sym", ADF_4XXX_SYM_DC },
+	{ "asym;sym", ADF_4XXX_ASYM_SYM },
+	{ "sym;asym", ADF_4XXX_ASYM_SYM }
+};
 
 static struct adf_hw_device_class adf_4xxx_class = {
 	.name = ADF_4XXX_DEVICE_NAME,
@@ -110,7 +110,7 @@ get_accel_mask(struct adf_accel_dev *accel_dev)
 	return ADF_4XXX_ACCELERATORS_MASK;
 }
 
-static u32
+static u64
 get_ae_mask(struct adf_accel_dev *accel_dev)
 {
 	u32 fusectl4 = accel_dev->hw_device->fuses;
@@ -164,7 +164,7 @@ get_num_aes(struct adf_hw_device_data *self)
 	if (!self || !self->ae_mask)
 		return 0;
 
-	return hweight32(self->ae_mask);
+	return hweight64(self->ae_mask);
 }
 
 static u32
@@ -536,8 +536,8 @@ adf_exit_accel_units(struct adf_accel_dev *accel_dev)
 }
 
 static const char *
-get_obj_name(struct adf_accel_dev *accel_dev,
-	     enum adf_accel_unit_services service)
+get_obj_name_4xxx(struct adf_accel_dev *accel_dev,
+		  enum adf_accel_unit_services service)
 {
 	switch (service) {
 	case ADF_ACCEL_ASYM:
@@ -553,17 +553,35 @@ get_obj_name(struct adf_accel_dev *accel_dev,
 	}
 }
 
+static const char *
+get_obj_name_402xx(struct adf_accel_dev *accel_dev,
+		   enum adf_accel_unit_services service)
+{
+	switch (service) {
+	case ADF_ACCEL_ASYM:
+		return ADF_402XX_ASYM_OBJ;
+	case ADF_ACCEL_CRYPTO:
+		return ADF_402XX_SYM_OBJ;
+	case ADF_ACCEL_COMPRESSION:
+		return ADF_402XX_DC_OBJ;
+	case ADF_ACCEL_ADMIN:
+		return ADF_402XX_ADMIN_OBJ;
+	default:
+		return NULL;
+	}
+}
+
 static uint32_t
 get_objs_num(struct adf_accel_dev *accel_dev)
 {
 	return ADF_4XXX_MAX_OBJ;
 }
 
-static uint32_t
+static uint64_t
 get_obj_cfg_ae_mask(struct adf_accel_dev *accel_dev,
 		    enum adf_accel_unit_services service)
 {
-	u32 ae_mask = 0;
+	u64 ae_mask = 0;
 	struct adf_hw_device_data *hw_data = accel_dev->hw_device;
 	u32 num_au = hw_data->get_num_accel_units(hw_data);
 	struct adf_accel_unit *accel_unit = accel_dev->au_info->au;
@@ -636,7 +654,7 @@ adf_get_dc_extcapabilities(struct adf_accel_dev *accel_dev, u32 *capabilities)
 	u8 i;
 	struct adf_hw_device_data *hw_data = accel_dev->hw_device;
 	u8 num_au = hw_data->get_num_accel_units(hw_data);
-	u32 first_dc_ae = 0;
+	u64 first_dc_ae = 0;
 
 	for (i = 0; i < num_au; i++) {
 		if (accel_dev->au_info->au[i].services &
@@ -665,13 +683,13 @@ adf_get_dc_extcapabilities(struct adf_accel_dev *accel_dev, u32 *capabilities)
 
 static int
 adf_get_fw_status(struct adf_accel_dev *accel_dev,
-		  u8 *major,
-		  u8 *minor,
-		  u8 *patch)
+		  u16 *major,
+		  u16 *minor,
+		  u32 *patch)
 {
 	struct icp_qat_fw_init_admin_req req;
 	struct icp_qat_fw_init_admin_resp resp;
-	u32 ae_mask = 1;
+	u64 ae_mask = 1;
 
 	memset(&req, 0, sizeof(req));
 	memset(&resp, 0, sizeof(resp));
@@ -694,8 +712,8 @@ adf_4xxx_send_admin_init(struct adf_accel_dev *accel_dev)
 	struct icp_qat_fw_init_admin_req req;
 	struct icp_qat_fw_init_admin_resp resp;
 	struct adf_hw_device_data *hw_data = accel_dev->hw_device;
-	u32 ae_mask = hw_data->ae_mask;
-	u32 admin_ae_mask = hw_data->admin_ae_mask;
+	u64 ae_mask = hw_data->ae_mask;
+	u64 admin_ae_mask = hw_data->admin_ae_mask;
 	u8 num_au = hw_data->get_num_accel_units(hw_data);
 	u8 i;
 	u32 dc_capabilities = 0;
@@ -788,7 +806,7 @@ get_au_by_ae(struct adf_accel_dev *accel_dev, int ae_num)
 		return NULL;
 
 	for (i = 0; i < ADF_4XXX_MAX_ACCELUNITS; i++)
-		if (accel_unit[i].ae_mask & BIT(ae_num))
+		if (accel_unit[i].ae_mask & BIT_ULL(ae_num))
 			return &accel_unit[i];
 
 	return NULL;
@@ -871,7 +889,7 @@ adf_get_arbiter_mapping(struct adf_accel_dev *accel_dev,
 	struct adf_hw_device_data *hw_device = accel_dev->hw_device;
 
 	for (i = 1; i < ADF_4XXX_MAX_ACCELENGINES; i++) {
-		if (~hw_device->ae_mask & (1 << i))
+		if (~hw_device->ae_mask & (1ULL << i))
 			thrd_to_arb_map[i] = 0;
 	}
 	adf_4xxx_cfg_gen_dispatch_arbiter(accel_dev, thrd_to_arb_map_gen);
@@ -982,8 +1000,23 @@ adf_init_hw_data_4xxx(struct adf_hw_device_data *hw_data, u32 id)
 	hw_data->clock_frequency = ADF_4XXX_AE_FREQ;
 	hw_data->get_sku = get_sku;
 	hw_data->heartbeat_ctr_num = ADF_NUM_HB_CNT_PER_AE;
-	hw_data->fw_name = ADF_4XXX_FW;
-	hw_data->fw_mmp_name = ADF_4XXX_MMP;
+	switch (id) {
+	case ADF_402XX_PCI_DEVICE_ID:
+		hw_data->fw_name = ADF_402XX_FW;
+		hw_data->fw_mmp_name = ADF_402XX_MMP;
+		hw_data->asym_ae_active_thd_mask = DEFAULT_4XXX_ASYM_AE_MASK;
+		break;
+	case ADF_401XX_PCI_DEVICE_ID:
+		hw_data->fw_name = ADF_4XXX_FW;
+		hw_data->fw_mmp_name = ADF_4XXX_MMP;
+		hw_data->asym_ae_active_thd_mask = DEFAULT_401XX_ASYM_AE_MASK;
+		break;
+
+	default:
+		hw_data->fw_name = ADF_4XXX_FW;
+		hw_data->fw_mmp_name = ADF_4XXX_MMP;
+		hw_data->asym_ae_active_thd_mask = DEFAULT_4XXX_ASYM_AE_MASK;
+	}
 	hw_data->init_admin_comms = adf_init_admin_comms;
 	hw_data->exit_admin_comms = adf_exit_admin_comms;
 	hw_data->send_admin_init = adf_4xxx_send_admin_init;
@@ -1002,7 +1035,13 @@ adf_init_hw_data_4xxx(struct adf_hw_device_data *hw_data, u32 id)
 	hw_data->get_ring_svc_map_data = get_ring_svc_map_data;
 	hw_data->admin_ae_mask = ADF_4XXX_ADMIN_AE_MASK;
 	hw_data->get_objs_num = get_objs_num;
-	hw_data->get_obj_name = get_obj_name;
+	switch (id) {
+	case ADF_402XX_PCI_DEVICE_ID:
+		hw_data->get_obj_name = get_obj_name_402xx;
+		break;
+	default:
+		hw_data->get_obj_name = get_obj_name_4xxx;
+	}
 	hw_data->get_obj_cfg_ae_mask = get_obj_cfg_ae_mask;
 	hw_data->get_service_type = adf_4xxx_get_service_type;
 	hw_data->set_msix_rttable = set_msix_default_rttable;
@@ -1021,15 +1060,6 @@ adf_init_hw_data_4xxx(struct adf_hw_device_data *hw_data, u32 id)
 	hw_data->measure_clock = measure_clock;
 	hw_data->query_storage_cap = 1;
 	hw_data->ring_pair_reset = adf_gen4_ring_pair_reset;
-
-	switch (id) {
-	case ADF_401XX_PCI_DEVICE_ID:
-		hw_data->asym_ae_active_thd_mask = DEFAULT_401XX_ASYM_AE_MASK;
-		break;
-	case ADF_4XXX_PCI_DEVICE_ID:
-	default:
-		hw_data->asym_ae_active_thd_mask = DEFAULT_4XXX_ASYM_AE_MASK;
-	}
 
 	adf_gen4_init_hw_csr_info(&hw_data->csr_info);
 	adf_gen4_init_pf_pfvf_ops(&hw_data->csr_info.pfvf_ops);

@@ -974,7 +974,8 @@ ipf_nat_ioctl(ipf_main_softc_t *softc, caddr_t data, ioctlcmd_t cmd,
 	int mode, int uid, void *ctx)
 {
 	ipf_nat_softc_t *softn = softc->ipf_nat_soft;
-	int error = 0, ret, arg, getlock;
+	int error = 0, ret, arg, getlock, interr;
+	int interr_tbl[3] = { 60077, 60081, 60078 };
 	ipnat_t *nat, *nt, *n;
 	ipnat_t natd;
 	SPL_INT(s);
@@ -1027,6 +1028,16 @@ ipf_nat_ioctl(ipf_main_softc_t *softc, caddr_t data, ioctlcmd_t cmd,
 				error = EINVAL;
 				goto done;
 			}
+			if (sizeof(natd) + natd.in_namelen != natd.in_size) {
+				IPFERROR(60080);
+				error = EINVAL;
+				goto done;
+			}
+			if (natd.in_namelen < 0 || natd.in_namelen > softc->ipf_max_namelen) {
+				IPFERROR(60082);
+				error = EINVAL;
+				goto done;
+			}
 			KMALLOCS(nt, ipnat_t *, natd.in_size);
 			if (nt == NULL) {
 				IPFERROR(60070);
@@ -1039,6 +1050,32 @@ ipf_nat_ioctl(ipf_main_softc_t *softc, caddr_t data, ioctlcmd_t cmd,
 			if (error)
 				goto done;
 			nat = nt;
+		}
+
+		/*
+		 * Validate the incoming ipnat_t.
+		 */
+		if ((interr = ipf_check_names_string(nat->in_names, nat->in_namelen, nat->in_ifnames[0])) != 0) {
+			IPFERROR(interr_tbl[interr-1]);
+			error = EINVAL;
+			goto done;
+		}
+		if (nat->in_ifnames[0] != nat->in_ifnames[1]) {
+			if ((interr = ipf_check_names_string(nat->in_names, nat->in_namelen, nat->in_ifnames[1])) != 0) {
+				IPFERROR(interr_tbl[interr-1]);
+				error = EINVAL;
+				goto done;
+			}
+		}
+		if ((interr = ipf_check_names_string(nat->in_names, nat->in_namelen, nat->in_plabel)) != 0) {
+			IPFERROR(interr_tbl[interr-1]);
+			error = EINVAL;
+			goto done;
+		}
+		if ((interr = ipf_check_names_string(nat->in_names, nat->in_namelen, nat->in_pconfig)) != 0) {
+			IPFERROR(interr_tbl[interr-1]);
+			error = EINVAL;
+			goto done;
 		}
 
 		/*
@@ -1300,6 +1337,7 @@ ipf_nat_ioctl(ipf_main_softc_t *softc, caddr_t data, ioctlcmd_t cmd,
 		error = ipf_proxy_ioctl(softc, data, cmd, mode, ctx);
 		break;
 
+#ifdef IPFILTER_IPFS
 	case SIOCSTLCK :
 		if (!(mode & FWRITE)) {
 			IPFERROR(60015);
@@ -1335,6 +1373,7 @@ ipf_nat_ioctl(ipf_main_softc_t *softc, caddr_t data, ioctlcmd_t cmd,
 			error = EACCES;
 		}
 		break;
+#endif /* IPFILTER_IPFS */
 
 	case SIOCGENITER :
 	    {
@@ -1642,7 +1681,7 @@ ipf_nat_siocdelnat(ipf_main_softc_t *softc, ipf_nat_softc_t *softn, ipnat_t *n,
 	}
 }
 
-
+#ifdef IPFILTER_IPFS
 /* ------------------------------------------------------------------------ */
 /* Function:    ipf_nat_getsz                                               */
 /* Returns:     int - 0 == success, != 0 is the error value.                */
@@ -1771,6 +1810,7 @@ ipf_nat_getent(ipf_main_softc_t *softc, caddr_t data, int getlock)
 		IPFERROR(60029);
 		return (ENOMEM);
 	}
+	bzero(ipn, ipns.ipn_dsize);
 
 	if (getlock) {
 		READ_ENTER(&softc->ipf_nat);
@@ -2209,6 +2249,7 @@ junkput:
 	}
 	return (error);
 }
+#endif /* IPFILTER_IPFS */
 
 
 /* ------------------------------------------------------------------------ */
@@ -5106,7 +5147,7 @@ ipf_nat_out(fr_info_t *fin, nat_t *nat, int natadd, u_32_t nflags)
 		ip_fillid(ip, V_ip_random_id);
 		s2 = ntohs(ip->ip_id);
 
-		s1 = ip->ip_len;
+		s1 = ntohs(ip->ip_len);
 		ip->ip_len = ntohs(ip->ip_len);
 		ip->ip_len += fin->fin_plen;
 		ip->ip_len = htons(ip->ip_len);
@@ -5766,14 +5807,13 @@ ipf_nat_expire(ipf_main_softc_t *softc)
 	ipf_nat_softc_t *softn = softc->ipf_nat_soft;
 	ipftq_t *ifq, *ifqnext;
 	ipftqent_t *tqe, *tqn;
-	int i;
 	SPL_INT(s);
 
 	SPL_NET(s);
 	WRITE_ENTER(&softc->ipf_nat);
-	for (ifq = softn->ipf_nat_tcptq, i = 0; ifq != NULL;
+	for (ifq = softn->ipf_nat_tcptq; ifq != NULL;
 	     ifq = ifq->ifq_next) {
-		for (tqn = ifq->ifq_head; ((tqe = tqn) != NULL); i++) {
+		for (tqn = ifq->ifq_head; (tqe = tqn) != NULL;) {
 			if (tqe->tqe_die > softc->ipf_ticks)
 				break;
 			tqn = tqe->tqe_next;
@@ -5782,7 +5822,7 @@ ipf_nat_expire(ipf_main_softc_t *softc)
 	}
 
 	for (ifq = softn->ipf_nat_utqe; ifq != NULL; ifq = ifq->ifq_next) {
-		for (tqn = ifq->ifq_head; ((tqe = tqn) != NULL); i++) {
+		for (tqn = ifq->ifq_head; (tqe = tqn) != NULL;) {
 			if (tqe->tqe_die > softc->ipf_ticks)
 				break;
 			tqn = tqe->tqe_next;

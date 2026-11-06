@@ -1,0 +1,123 @@
+#!/bin/sh
+
+# PROVIDE: virtual_oss
+# REQUIRE: NETWORKING kld ldconfig
+# BEFORE: LOGIN
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="virtual_oss"
+desc="virtual_oss device manager"
+rcvar="${name}_enable"
+
+command="/usr/sbin/${name}"
+command_args="-B"
+
+load_rc_config "$name"
+start_precmd="${name}_precmd"
+start_cmd="${name}_start"
+stop_cmd="${name}_stop"
+status_cmd="${name}_status"
+
+required_modules="cuse"
+
+pidpath="/var/run/${name}"
+
+default_unit=$(sysctl -n hw.snd.default_unit 2> /dev/null)
+virtual_oss_default_args="\
+	-S \
+	-C 2 \
+	-c 2 \
+	-r 48000 \
+	-b 24 \
+	-s 8ms \
+	-i 8 \
+	-f /dev/dsp${default_unit} \
+	-d dsp \
+	-l dsp.loop \
+	-t ${virtual_oss_default_control_device}"
+
+# Default (dsp) virtual_oss config.
+: "${virtual_oss_dsp:="${virtual_oss_default_args}"}"
+
+virtual_oss_pids()
+{
+	pids=$(pgrep -d ' ' ${name})
+	pids=${pids% }
+	printf '%s\n' "${pids}"
+}
+
+virtual_oss_precmd()
+{
+	/usr/bin/install -d -m 0755 -o root "${pidpath}"
+}
+
+start_instance()
+{
+	config="$1"
+	instance_args=$(eval "echo \$virtual_oss_${config}")
+	if [ -z "${instance_args}" ]; then
+		warn "no such config: ${config}"
+	else
+		startmsg -n "Starting virtual_oss config: ${config}: "
+		${command} \
+			${command_args} \
+			-D "${pidpath}/${config}.pid" \
+			${instance_args}
+		startmsg "done"
+	fi
+}
+
+stop_instance()
+{
+	config="$1"
+	instance_args=$(eval "echo \$virtual_oss_${config}")
+	if [ -z "${instance_args}" ]; then
+		warn "no such config: ${config}"
+	else
+		pidfile="${pidpath}/${config}.pid"
+		if [ ! -f "${pidfile}" ]; then
+			warn "not running: ${config}"
+		else
+			pid="$(cat "${pidfile}")"
+			startmsg -n "Stopping virtual_oss config: ${config}: "
+			kill "${pid}"
+			pwait "${pid}"
+			rm -f "${pidfile}"
+			startmsg "done"
+		fi
+	fi
+}
+
+virtual_oss_start()
+{
+	configs="$1"
+	[ -z "${configs}" ] && configs="${virtual_oss_configs}"
+	for config in ${configs}; do
+		start_instance "${config}"
+	done
+}
+
+virtual_oss_stop()
+{
+	configs="$1"
+	[ -z "${configs}" ] && configs="${virtual_oss_configs}"
+	for config in ${configs}; do
+		stop_instance "${config}"
+	done
+}
+
+virtual_oss_status()
+{
+	pids=$(virtual_oss_pids)
+
+	if [ "${pids}" ]; then
+		echo "${name} is running as pid ${pids}."
+	else
+		echo "${name} is not running."
+		return 1
+	fi
+}
+
+run_rc_command "$@"

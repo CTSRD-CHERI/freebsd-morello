@@ -125,6 +125,20 @@ struct pmclog_callchain {
 #define	PMC_CALLCHAIN_TO_CPUFLAGS(CPU,FLAGS)	\
 	(((CPU) << 16) | ((FLAGS) & 0xFFFF))
 
+/*
+ * If the multipart flag is set, then pl_pc contains multiple data types.  The
+ * first 8 bytes is a header made up of a 1 byte type and 1 byte length that
+ * describes the use of the remaining pl_pc array.
+ */
+
+#define PMC_MULTIPART_HEADER_LENGTH	8
+#define PMC_MULTIPART_HEADER_ENTRIES	4
+
+#define	PMC_CC_MULTIPART_NONE		0
+#define	PMC_CC_MULTIPART_CALLCHAIN	1
+#define	PMC_CC_MULTIPART_IBS_FETCH	2
+#define	PMC_CC_MULTIPART_IBS_OP		3
+
 struct pmclog_closelog {
 	PMCLOG_ENTRY_HEADER
 };
@@ -145,7 +159,13 @@ struct pmclog_initialize {
 struct pmclog_map_in {
 	PMCLOG_ENTRY_HEADER
 	uint32_t		pl_pid;
-	uint32_t		pl_pad;
+	union {
+		uint32_t	pl_u;
+		struct {
+			uint8_t	pl_pageshift;
+			uint8_t	pl_pad[3];
+		};
+	};
 	uintfptr_t		pl_start;	/* 8 byte aligned */
 	char			pl_pathname[PATH_MAX];
 } __packed;

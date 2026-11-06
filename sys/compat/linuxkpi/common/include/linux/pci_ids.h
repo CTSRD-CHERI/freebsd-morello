@@ -37,6 +37,7 @@
 #define	PCI_CLASS_DISPLAY_OTHER		0x0380
 
 #define	PCI_BASE_CLASS_BRIDGE		0x06
+#define	PCI_CLASS_BRIDGE_HOST		0x0600
 #define	PCI_CLASS_BRIDGE_ISA		0x0601
 
 #define	PCI_CLASS_ACCELERATOR_PROCESSING	0x1200
@@ -44,6 +45,7 @@
 
 /* XXX We should really generate these and use them throughout the tree. */
 
+#define	PCI_VENDOR_ID_AMD		0x1022
 #define	PCI_VENDOR_ID_APPLE		0x106b
 #define	PCI_VENDOR_ID_ASUSTEK		0x1043
 #define	PCI_VENDOR_ID_ASMEDIA		0x1b21

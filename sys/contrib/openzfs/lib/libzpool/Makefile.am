@@ -1,8 +1,10 @@
+# SPDX-License-Identifier: CDDL-1.0
+include $(srcdir)/%D%/include/Makefile.am
+
 libzpool_la_CFLAGS  = $(AM_CFLAGS) $(KERNEL_CFLAGS) $(LIBRARY_CFLAGS)
 libzpool_la_CFLAGS += $(ZLIB_CFLAGS)
 
 libzpool_la_CPPFLAGS  = $(AM_CPPFLAGS) $(LIBZPOOL_CPPFLAGS)
-libzpool_la_CPPFLAGS += -I$(srcdir)/include/os/@ac_system_l@/zfs
 libzpool_la_CPPFLAGS += -DLIB_ZPOOL_BUILD
 
 lib_LTLIBRARIES += libzpool.la
@@ -12,13 +14,13 @@ dist_libzpool_la_SOURCES = \
 	%D%/abd_os.c \
 	%D%/arc_os.c \
 	%D%/kernel.c \
-	%D%/taskq.c \
 	%D%/util.c \
 	%D%/vdev_label_os.c \
+	%D%/zfs_file_os.c \
 	%D%/zfs_racct.c \
 	%D%/zfs_debug.c
 
-nodist_libzpool_la_SOURCES = \
+ZCP_SOURCES = \
 	module/lua/lapi.c \
 	module/lua/lauxlib.c \
 	module/lua/lbaselib.c \
@@ -44,8 +46,14 @@ nodist_libzpool_la_SOURCES = \
 	module/lua/lvm.c \
 	module/lua/lzio.c \
 	\
-	module/os/linux/zfs/zio_crypt.c \
-	\
+	module/zfs/zcp.c \
+	module/zfs/zcp_get.c \
+	module/zfs/zcp_global.c \
+	module/zfs/zcp_iter.c \
+	module/zfs/zcp_set.c \
+	module/zfs/zcp_synctask.c
+
+nodist_libzpool_la_SOURCES = \
 	module/zcommon/cityhash.c \
 	module/zcommon/simd_stat.c \
 	module/zcommon/zfeature_common.c \
@@ -73,7 +81,6 @@ nodist_libzpool_la_SOURCES = \
 	module/zfs/bpobj.c \
 	module/zfs/bptree.c \
 	module/zfs/bqueue.c \
-	module/zfs/btree.c \
 	module/zfs/brt.c \
 	module/zfs/dbuf.c \
 	module/zfs/dbuf_stats.c \
@@ -118,7 +125,6 @@ nodist_libzpool_la_SOURCES = \
 	module/zfs/multilist.c \
 	module/zfs/objlist.c \
 	module/zfs/pathname.c \
-	module/zfs/range_tree.c \
 	module/zfs/refcount.c \
 	module/zfs/rrwlock.c \
 	module/zfs/sa.c \
@@ -135,6 +141,7 @@ nodist_libzpool_la_SOURCES = \
 	module/zfs/space_map.c \
 	module/zfs/space_reftree.c \
 	module/zfs/txg.c \
+	module/zfs/u8_textprep.c \
 	module/zfs/uberblock.c \
 	module/zfs/unique.c \
 	module/zfs/vdev.c \
@@ -165,14 +172,10 @@ nodist_libzpool_la_SOURCES = \
 	module/zfs/vdev_root.c \
 	module/zfs/vdev_trim.c \
 	module/zfs/zap.c \
+	module/zfs/zap_fat.c \
+	module/zfs/zap_impl.c \
 	module/zfs/zap_leaf.c \
 	module/zfs/zap_micro.c \
-	module/zfs/zcp.c \
-	module/zfs/zcp_get.c \
-	module/zfs/zcp_global.c \
-	module/zfs/zcp_iter.c \
-	module/zfs/zcp_set.c \
-	module/zfs/zcp_synctask.c \
 	module/zfs/zfeature.c \
 	module/zfs/zfs_byteswap.c \
 	module/zfs/zfs_chksum.c \
@@ -180,6 +183,7 @@ nodist_libzpool_la_SOURCES = \
 	module/zfs/zfs_crrd.c \
 	module/zfs/zfs_fm.c \
 	module/zfs/zfs_fuid.c \
+	module/zfs/zfs_impl.c \
 	module/zfs/zfs_ratelimit.c \
 	module/zfs/zfs_rlock.c \
 	module/zfs/zfs_sa.c \
@@ -188,21 +192,36 @@ nodist_libzpool_la_SOURCES = \
 	module/zfs/zio.c \
 	module/zfs/zio_checksum.c \
 	module/zfs/zio_compress.c \
+	module/zfs/zio_crypt.c \
+	module/zfs/zio_crypt_os_icp.c \
 	module/zfs/zio_inject.c \
 	module/zfs/zle.c \
 	module/zfs/zrlock.c \
 	module/zfs/zthr.c
 
+if ZCP_ENABLED
+nodist_libzpool_la_SOURCES += \
+	$(ZCP_SOURCES)
+endif
+
+# Special case:
+#
+# We need to include btree.c and range_tree.c as SOURCES rather than
+# LIBADD'ing them.  This is because  LIBADD'ing them will add their symbols to
+# the libzpool API, which we do not want at this time.
+nodist_libzpool_la_SOURCES += \
+	module/zfs/btree.c \
+	module/zfs/range_tree.c
+
 libzpool_la_LIBADD = \
 	libicp.la \
-	libunicode.la \
 	libnvpair.la \
 	libzstd.la \
 	libzutil.la
 
 libzpool_la_LIBADD += $(LIBCLOCK_GETTIME) $(ZLIB_LIBS) -lm
 
-libzpool_la_LDFLAGS = -pthread
+libzpool_la_LDFLAGS = -version-info 7:0:0
 
 if !ASAN_ENABLED
 libzpool_la_LDFLAGS += -Wl,-z,defs
@@ -211,8 +230,6 @@ endif
 if BUILD_FREEBSD
 libzpool_la_LIBADD += -lgeom
 endif
-
-libzpool_la_LDFLAGS += -version-info 6:0:0
 
 if TARGET_CPU_POWERPC
 module/zfs/libzpool_la-vdev_raidz_math_powerpc_altivec.$(OBJEXT) : CFLAGS += -maltivec

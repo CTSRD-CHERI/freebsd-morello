@@ -1,24 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License, Version 1.0 only
- * (the "License").  You may not use this file except in compliance
- * with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
@@ -28,6 +17,24 @@
 #ifndef _LIBSPL_SYS_CRED_H
 #define	_LIBSPL_SYS_CRED_H
 
+#include <sys/stat.h>
+
+/*
+ * Credentials
+ */
+
 typedef struct cred cred_t;
+
+extern uid_t crgetuid(cred_t *cr);
+extern uid_t crgetruid(cred_t *cr);
+extern gid_t crgetgid(cred_t *cr);
+extern int crgetngroups(cred_t *cr);
+extern gid_t *crgetgroups(cred_t *cr);
+
+#define	kcred		NULL
+#define	CRED()		NULL
+
+#define	crhold(cr)	((void)cr)
+#define	crfree(cr)	((void)cr)
 
 #endif

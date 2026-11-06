@@ -187,7 +187,7 @@ static device_method_t cxgb_port_methods[] = {
 	DEVMETHOD(device_probe,		cxgb_port_probe),
 	DEVMETHOD(device_attach,	cxgb_port_attach),
 	DEVMETHOD(device_detach,	cxgb_port_detach),
-	{ 0, 0 }
+	DEVMETHOD_END
 };
 
 static driver_t cxgb_port_driver = {
@@ -2201,7 +2201,7 @@ cxgb_get_counter(if_t ifp, ift_counter c)
 		drops = 0;
 		if (sc->flags & FULL_INIT_DONE) {
 			for (i = pi->first_qset; i < pi->first_qset + pi->nqsets; i++)
-				drops += sc->sge.qs[i].txq[TXQ_ETH].txq_mr->br_drops;
+				drops += buf_ring_drops(sc->sge.qs[i].txq[TXQ_ETH].txq_mr);
 		}
 
 		return (drops);

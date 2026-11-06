@@ -81,7 +81,7 @@
 #include <sys/mount.h>
 #include <sys/sysctl.h>
 #include <sys/fcntl.h>
-#define EXTERR_CATEGORY EXTERR_CAT_FUSE
+#define EXTERR_CATEGORY EXTERR_CAT_FUSE_VFS
 #include <sys/exterrvar.h>
 
 #include "fuse.h"
@@ -278,13 +278,13 @@ fuse_vfsop_fhtovp(struct mount *mp, struct fid *fhp, int flags,
 
 	error = VFS_VGET(mp, ffhp->nid, LK_EXCLUSIVE, &nvp);
 	if (error) {
-		*vpp = NULLVP;
+		*vpp = NULL;
 		return (error);
 	}
 	fvdat = VTOFUD(nvp);
 	if (fvdat->generation != ffhp->gen ) {
 		vput(nvp);
-		*vpp = NULLVP;
+		*vpp = NULL;
 		return (ESTALE);
 	}
 	*vpp = nvp;
@@ -337,6 +337,7 @@ fuse_vfsop_mount(struct mount *mp)
 	FUSE_FLAGOPT(push_symlinks_in, FSESS_PUSH_SYMLINKS_IN);
 	FUSE_FLAGOPT(default_permissions, FSESS_DEFAULT_PERMISSIONS);
 	FUSE_FLAGOPT(intr, FSESS_INTR);
+	FUSE_FLAGOPT(auto_unmount, FSESS_AUTO_UNMOUNT);
 
 	(void)vfs_scanopt(opts, "max_read=", "%u", &max_read);
 	(void)vfs_scanopt(opts, "linux_errnos", "%d", &linux_errnos);
@@ -600,6 +601,8 @@ fuse_vfsop_vget(struct mount *mp, ino_t ino, int flags, struct vnode **vpp)
 	error = fuse_vnode_get(mp, feo, nodeid, NULL, vpp, NULL, vtyp);
 	if (error)
 		goto out;
+	/* for last_local_modify and fuse_internal_cache_attrs */
+	ASSERT_VOP_ELOCKED(*vpp, __func__);
 	fvdat = VTOFUD(*vpp);
 
 	if (timespeccmp(&now, &fvdat->last_local_modify, >)) {
@@ -624,10 +627,37 @@ fuse_vfsop_root(struct mount *mp, int lkflags, struct vnode **vpp)
 	int err = 0;
 
 	if (data->vroot != NULL) {
+		if (!(data->dataflags & FSESS_INITED)) {
+			/* Block all operations until init completes */
+			FUSE_LOCK();
+			if (data->dataflags & FSESS_INITED) {
+				/* We must've just gotten initialized */
+				FUSE_UNLOCK();
+			} else {
+				err = msleep(&data->ticketer, &fuse_mtx,
+				    PCATCH | PDROP, "fu_ini",
+				    data->daemon_timeout * hz);
+				if (err) {
+					/*
+					 * The daemon didn't initialize on
+					 * time.  Mark it as dead.  Most vnops
+					 * will fail as a result, but VFS_ROOT
+					 * must still succeed for the sake of
+					 * unmount.
+					 */
+					fdata_set_dead(data);
+				}
+			}
+		}
 		err = vget(data->vroot, lkflags);
 		if (err == 0)
 			*vpp = data->vroot;
 	} else {
+		/*
+		 * Get a vnode for the root.  Note that this step can happen
+		 * straight from sys_nmount, before INIT is complete.
+		 */
+
 		err = fuse_vnode_get(mp, NULL, FUSE_ROOT_ID, NULL, vpp, NULL,
 		    VDIR);
 		if (err == 0) {
@@ -664,6 +694,10 @@ fuse_vfsop_statfs(struct mount *mp, struct statfs *sbp)
 
 	data = fuse_get_mpdata(mp);
 
+	/*
+	 * We must fake the statfs data before initialization completes,
+	 * because nmount itself calls VFS_STATFS.
+	 */
 	if (!(data->dataflags & FSESS_INITED))
 		goto fake;
 

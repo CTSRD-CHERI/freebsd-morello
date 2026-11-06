@@ -35,30 +35,49 @@
  * CPU device support.
  */
 
-#define CPU_IVAR_PCPU		1
-#define CPU_IVAR_NOMINAL_MHZ	2
-#define CPU_IVAR_CPUID_SIZE	3
-#define CPU_IVAR_CPUID		4
+enum {
+	CPU_IVAR_PCPU = BUS_IVARS_PRIVATE,
+	CPU_IVAR_NOMINAL_MHZ,
+	CPU_IVAR_CPUID_SIZE,
+	CPU_IVAR_CPUID
+};
 
-static __inline struct pcpu *cpu_get_pcpu(device_t dev)
+static __inline struct pcpu *
+cpu_get_pcpu(device_t dev)
 {
 	uintptr_t v = 0;
+
 	BUS_READ_IVAR(device_get_parent(dev), dev, CPU_IVAR_PCPU, &v);
 	return ((struct pcpu *)v);
 }
 
-static __inline int32_t cpu_get_nominal_mhz(device_t dev)
+/*
+ * Assumes the parent bus sets the CPU_IVAR_PCPU instance variable, which most
+ * CPU buses do.  A panic will ensue if not the case.  Calling devices should
+ * check for that condition (most probably in their attach function).
+ */
+static __inline u_int
+cpu_get_pcpuid(device_t dev)
+{
+	return (cpu_get_pcpu(dev)->pc_cpuid);
+}
+
+static __inline int32_t
+cpu_get_nominal_mhz(device_t dev)
 {
 	uintptr_t v = 0;
+
 	if (BUS_READ_IVAR(device_get_parent(dev), dev,
 	    CPU_IVAR_NOMINAL_MHZ, &v) != 0)
 		return (-1);
 	return ((int32_t)v);
 }
 
-static __inline const uint32_t *cpu_get_cpuid(device_t dev, size_t *count)
+static __inline const uint32_t *
+cpu_get_cpuid(device_t dev, size_t *count)
 {
 	uintptr_t v = 0;
+
 	if (BUS_READ_IVAR(device_get_parent(dev), dev,
 	    CPU_IVAR_CPUID_SIZE, &v) != 0)
 		return (NULL);
@@ -124,10 +143,10 @@ TAILQ_HEAD(cf_level_lst, cf_level);
  * state. It is probably a bug to not combine this with "info only"
  */
 #define CPUFREQ_TYPE_MASK	0xffff
-#define CPUFREQ_TYPE_RELATIVE	(1<<0)
-#define CPUFREQ_TYPE_ABSOLUTE	(1<<1)
-#define CPUFREQ_FLAG_INFO_ONLY	(1<<16)
-#define CPUFREQ_FLAG_UNCACHED	(1<<17)
+#define CPUFREQ_TYPE_RELATIVE	(1 << 0)
+#define CPUFREQ_TYPE_ABSOLUTE	(1 << 1)
+#define CPUFREQ_FLAG_INFO_ONLY	(1 << 16)
+#define CPUFREQ_FLAG_UNCACHED	(1 << 17)
 
 /*
  * When setting a level, the caller indicates the priority of this request.
@@ -162,7 +181,7 @@ int	cpufreq_settings_changed(device_t dev);
  * The new level and the result of the change (0 is success) is passed in.
  * If the driver wishes to revoke the change from cpufreq_pre_change, it
  * stores a non-zero error code in the result parameter and the change will
- * not be made.  If the post-change eventhandler gets a non-zero result, 
+ * not be made.  If the post-change eventhandler gets a non-zero result,
  * no change was made and the previous level remains in effect.  If a change
  * is revoked, the post-change eventhandler is still called with the error
  * value supplied by the revoking driver.  This gives listeners who cached

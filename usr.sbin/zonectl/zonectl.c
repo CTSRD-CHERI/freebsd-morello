@@ -288,11 +288,21 @@ zonectl_print_rz(struct disk_zone_report *report, zone_output_flags out_flags,
 	for (i = 0; i < report->entries_filled; i++) {
 		entry = &report->entries[i];
 
-		printf("%#*jx, %*ju, %#*jx, ", field_widths[ZONE_FW_START],
+		printf("%#*jx, %*ju, ", field_widths[ZONE_FW_START],
 		    (uintmax_t)entry->zone_start_lba,
 		    field_widths[ZONE_FW_LEN],
-		    (uintmax_t)entry->zone_length, field_widths[ZONE_FW_WP],
-		    (uintmax_t)entry->write_pointer_lba);
+		    (uintmax_t)entry->zone_length);
+		if (DISK_ZONE_WP_INVALID(entry->zone_condition)) {
+			/*
+			 * The zone has no write pointer, which really means
+			 * "N/A".  Report it as -1, even though the field is
+			 * technically unsigned, to save space.
+			 */
+			printf("%*d, ", field_widths[ZONE_FW_WP], -1);
+		} else {
+			printf("%#*jx, ", field_widths[ZONE_FW_WP],
+			    (uintmax_t)entry->write_pointer_lba);
+		}
 
 		switch (entry->zone_type) {
 		case DISK_ZONE_TYPE_CONVENTIONAL:

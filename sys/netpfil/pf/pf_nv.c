@@ -505,6 +505,7 @@ int
 pf_nvrule_to_krule(const nvlist_t *nvl, struct pf_krule *rule)
 {
 	int error = 0;
+	uint8_t tmp;
 
 #define	ERROUT(x)	ERROUT_FUNCTION(errout, x)
 
@@ -610,8 +611,10 @@ pf_nvrule_to_krule(const nvlist_t *nvl, struct pf_krule *rule)
 	PFNV_CHK(pf_nvuint8(nvl, "keep_state", &rule->keep_state));
 	PFNV_CHK(pf_nvuint8(nvl, "af", &rule->af));
 	PFNV_CHK(pf_nvuint8(nvl, "proto", &rule->proto));
-	PFNV_CHK(pf_nvuint8(nvl, "type", &rule->type));
-	PFNV_CHK(pf_nvuint8(nvl, "code", &rule->code));
+	PFNV_CHK(pf_nvuint8(nvl, "type", &tmp));
+	rule->type = tmp;
+	PFNV_CHK(pf_nvuint8(nvl, "code", &tmp));
+	rule->code = tmp;
 	PFNV_CHK(pf_nvuint8(nvl, "flags", &rule->flags));
 	PFNV_CHK(pf_nvuint8(nvl, "flagset", &rule->flagset));
 	PFNV_CHK(pf_nvuint8(nvl, "min_ttl", &rule->min_ttl));
@@ -681,7 +684,7 @@ error:
 }
 
 nvlist_t *
-pf_krule_to_nvrule(struct pf_krule *rule)
+pf_krule_to_nvrule(const struct pf_krule *rule)
 {
 	nvlist_t *nvl, *tmp;
 	u_int64_t src_nodes_total = 0;
@@ -729,12 +732,12 @@ pf_krule_to_nvrule(struct pf_krule *rule)
 	nvlist_destroy(tmp);
 
 	nvlist_add_number(nvl, "evaluations",
-	    pf_counter_u64_fetch(&rule->evaluations));
+	    counter_u64_fetch(rule->evaluations));
 	for (int i = 0; i < 2; i++) {
 		nvlist_append_number_array(nvl, "packets",
-		    pf_counter_u64_fetch(&rule->packets[i]));
+		    counter_u64_fetch(rule->packets[i]));
 		nvlist_append_number_array(nvl, "bytes",
-		    pf_counter_u64_fetch(&rule->bytes[i]));
+		    counter_u64_fetch(rule->bytes[i]));
 	}
 	nvlist_add_number(nvl, "timestamp", pf_get_timestamp(rule));
 

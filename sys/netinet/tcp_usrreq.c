@@ -35,7 +35,6 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/cdefs.h>
 #include "opt_ddb.h"
 #include "opt_inet.h"
 #include "opt_inet6.h"
@@ -75,6 +74,7 @@
 #include <netinet/in.h>
 #include <netinet/in_kdtrace.h>
 #include <netinet/in_pcb.h>
+#include <netinet/in_rss.h>
 #include <netinet/in_systm.h>
 #include <netinet/in_var.h>
 #include <netinet/ip.h>
@@ -82,6 +82,7 @@
 #ifdef INET6
 #include <netinet/ip6.h>
 #include <netinet6/in6_pcb.h>
+#include <netinet6/in6_rss.h>
 #include <netinet6/ip6_var.h>
 #include <netinet6/scope6_var.h>
 #endif
@@ -204,10 +205,11 @@ tcp_usr_detach(struct socket *so)
 
 	tp = intotcpcb(inp);
 
-	KASSERT(inp->inp_flags & INP_DROPPED ||
+	KASSERT(tp->t_flags & TF_DISCONNECTED ||
 	    tp->t_state < TCPS_SYN_SENT,
-	    ("%s: inp %p not dropped or embryonic", __func__, inp));
+	    ("%s: inp %p not disconnected or embryonic", __func__, inp));
 
+	TCPSTATES_DEC(tp->t_state);
 	tcp_discardcb(tp);
 	in_pcbfree(inp);
 }
@@ -219,19 +221,16 @@ tcp_usr_detach(struct socket *so)
 static int
 tcp_usr_bind(struct socket *so, struct sockaddr *nam, struct thread *td)
 {
-	int error = 0;
-	struct inpcb *inp;
-	struct tcpcb *tp;
+	struct inpcb *inp = sotoinpcb(so);
+	struct tcpcb *tp = intotcpcb(inp);
 	struct sockaddr_in *sinp;
+	int error = 0;
 
-	inp = sotoinpcb(so);
-	KASSERT(inp != NULL, ("tcp_usr_bind: inp == NULL"));
 	INP_WLOCK(inp);
-	if (inp->inp_flags & INP_DROPPED) {
+	if (__predict_false(tp->t_flags & TF_DISCONNECTED)) {
 		INP_WUNLOCK(inp);
 		return (EINVAL);
 	}
-	tp = intotcpcb(inp);
 
 	sinp = (struct sockaddr_in *)nam;
 	if (nam->sa_family != AF_INET) {
@@ -258,10 +257,8 @@ tcp_usr_bind(struct socket *so, struct sockaddr *nam, struct thread *td)
 		error = EAFNOSUPPORT;
 		goto out;
 	}
-	INP_HASH_WLOCK(&V_tcbinfo);
 	error = in_pcbbind(inp, sinp, V_tcp_bind_all_fibs ? 0 : INPBIND_FIB,
 	    td->td_ucred);
-	INP_HASH_WUNLOCK(&V_tcbinfo);
 out:
 	tcp_bblog_pru(tp, PRU_BIND, error);
 	TCP_PROBE2(debug__user, tp, PRU_BIND);
@@ -275,20 +272,17 @@ out:
 static int
 tcp6_usr_bind(struct socket *so, struct sockaddr *nam, struct thread *td)
 {
-	int error = 0;
-	struct inpcb *inp;
-	struct tcpcb *tp;
+	struct inpcb *inp = sotoinpcb(so);
+	struct tcpcb *tp = intotcpcb(inp);
 	struct sockaddr_in6 *sin6;
+	int error = 0;
 	u_char vflagsav;
 
-	inp = sotoinpcb(so);
-	KASSERT(inp != NULL, ("tcp6_usr_bind: inp == NULL"));
 	INP_WLOCK(inp);
-	if (inp->inp_flags & INP_DROPPED) {
+	if (__predict_false(tp->t_flags & TF_DISCONNECTED)) {
 		INP_WUNLOCK(inp);
 		return (EINVAL);
 	}
-	tp = intotcpcb(inp);
 
 	vflagsav = inp->inp_vflag;
 
@@ -310,7 +304,6 @@ tcp6_usr_bind(struct socket *so, struct sockaddr *nam, struct thread *td)
 		goto out;
 	}
 
-	INP_HASH_WLOCK(&V_tcbinfo);
 	inp->inp_vflag &= ~INP_IPV4;
 	inp->inp_vflag |= INP_IPV6;
 #ifdef INET
@@ -323,20 +316,17 @@ tcp6_usr_bind(struct socket *so, struct sockaddr *nam, struct thread *td)
 			in6_sin6_2_sin(&sin, sin6);
 			if (IN_MULTICAST(ntohl(sin.sin_addr.s_addr))) {
 				error = EAFNOSUPPORT;
-				INP_HASH_WUNLOCK(&V_tcbinfo);
 				goto out;
 			}
 			inp->inp_vflag |= INP_IPV4;
 			inp->inp_vflag &= ~INP_IPV6;
 			error = in_pcbbind(inp, &sin, 0, td->td_ucred);
-			INP_HASH_WUNLOCK(&V_tcbinfo);
 			goto out;
 		}
 	}
 #endif
 	error = in6_pcbbind(inp, sin6, V_tcp_bind_all_fibs ? 0 : INPBIND_FIB,
 	    td->td_ucred);
-	INP_HASH_WUNLOCK(&V_tcbinfo);
 out:
 	if (error != 0)
 		inp->inp_vflag = vflagsav;
@@ -354,19 +344,16 @@ out:
 static int
 tcp_usr_listen(struct socket *so, int backlog, struct thread *td)
 {
-	struct inpcb *inp;
-	struct tcpcb *tp;
+	struct inpcb *inp = sotoinpcb(so);
+	struct tcpcb *tp = intotcpcb(inp);
 	int error = 0;
 	bool already_listening;
 
-	inp = sotoinpcb(so);
-	KASSERT(inp != NULL, ("tcp_usr_listen: inp == NULL"));
 	INP_WLOCK(inp);
-	if (inp->inp_flags & INP_DROPPED) {
+	if (__predict_false(tp->t_flags & TF_DISCONNECTED)) {
 		INP_WUNLOCK(inp);
 		return (EINVAL);
 	}
-	tp = intotcpcb(inp);
 
 	SOCK_LOCK(so);
 	already_listening = SOLISTENING(so);
@@ -376,10 +363,8 @@ tcp_usr_listen(struct socket *so, int backlog, struct thread *td)
 		goto out;
 	}
 	if (inp->inp_lport == 0) {
-		INP_HASH_WLOCK(&V_tcbinfo);
 		error = in_pcbbind(inp, NULL,
 		    V_tcp_bind_all_fibs ? 0 : INPBIND_FIB, td->td_ucred);
-		INP_HASH_WUNLOCK(&V_tcbinfo);
 	}
 	if (error == 0) {
 		tcp_state_change(tp, TCPS_LISTEN);
@@ -395,10 +380,11 @@ tcp_usr_listen(struct socket *so, int backlog, struct thread *td)
 	if (already_listening)
 		goto out;
 
-	if (error == 0)
+	if (error == 0) {
 		in_pcblisten(inp);
-	if (tp->t_flags & TF_FASTOPEN)
-		tp->t_tfo_pending = tcp_fastopen_alloc_counter();
+		if (tp->t_flags & TF_FASTOPEN)
+			tp->t_tfo_pending = tcp_fastopen_alloc_counter();
+	}
 
 out:
 	tcp_bblog_pru(tp, PRU_LISTEN, error);
@@ -412,20 +398,17 @@ out:
 static int
 tcp6_usr_listen(struct socket *so, int backlog, struct thread *td)
 {
-	struct inpcb *inp;
-	struct tcpcb *tp;
+	struct inpcb *inp = sotoinpcb(so);
+	struct tcpcb *tp = intotcpcb(inp);
 	u_char vflagsav;
 	int error = 0;
 	bool already_listening;
 
-	inp = sotoinpcb(so);
-	KASSERT(inp != NULL, ("tcp6_usr_listen: inp == NULL"));
 	INP_WLOCK(inp);
-	if (inp->inp_flags & INP_DROPPED) {
+	if (__predict_false(tp->t_flags & TF_DISCONNECTED)) {
 		INP_WUNLOCK(inp);
 		return (EINVAL);
 	}
-	tp = intotcpcb(inp);
 
 	vflagsav = inp->inp_vflag;
 
@@ -436,7 +419,6 @@ tcp6_usr_listen(struct socket *so, int backlog, struct thread *td)
 		SOCK_UNLOCK(so);
 		goto out;
 	}
-	INP_HASH_WLOCK(&V_tcbinfo);
 	if (inp->inp_lport == 0) {
 		inp->inp_vflag &= ~INP_IPV4;
 		if ((inp->inp_flags & IN6P_IPV6_V6ONLY) == 0)
@@ -444,7 +426,6 @@ tcp6_usr_listen(struct socket *so, int backlog, struct thread *td)
 		error = in6_pcbbind(inp, NULL,
 		    V_tcp_bind_all_fibs ? 0 : INPBIND_FIB, td->td_ucred);
 	}
-	INP_HASH_WUNLOCK(&V_tcbinfo);
 	if (error == 0) {
 		tcp_state_change(tp, TCPS_LISTEN);
 		solisten_proto(so, backlog);
@@ -459,12 +440,11 @@ tcp6_usr_listen(struct socket *so, int backlog, struct thread *td)
 	if (already_listening)
 		goto out;
 
-	if (error == 0)
+	if (error == 0) {
 		in_pcblisten(inp);
-	if (tp->t_flags & TF_FASTOPEN)
-		tp->t_tfo_pending = tcp_fastopen_alloc_counter();
-
-	if (error != 0)
+		if (tp->t_flags & TF_FASTOPEN)
+			tp->t_tfo_pending = tcp_fastopen_alloc_counter();
+	} else
 		inp->inp_vflag = vflagsav;
 
 out:
@@ -487,19 +467,16 @@ static int
 tcp_usr_connect(struct socket *so, struct sockaddr *nam, struct thread *td)
 {
 	struct epoch_tracker et;
-	int error = 0;
-	struct inpcb *inp;
-	struct tcpcb *tp;
+	struct inpcb *inp = sotoinpcb(so);
+	struct tcpcb *tp = intotcpcb(inp);
 	struct sockaddr_in *sinp;
+	int error = 0;
 
-	inp = sotoinpcb(so);
-	KASSERT(inp != NULL, ("tcp_usr_connect: inp == NULL"));
 	INP_WLOCK(inp);
-	if (inp->inp_flags & INP_DROPPED) {
+	if (__predict_false(tp->t_flags & TF_DISCONNECTED)) {
 		INP_WUNLOCK(inp);
 		return (ECONNREFUSED);
 	}
-	tp = intotcpcb(inp);
 
 	sinp = (struct sockaddr_in *)nam;
 	if (nam->sa_family != AF_INET) {
@@ -555,21 +532,18 @@ static int
 tcp6_usr_connect(struct socket *so, struct sockaddr *nam, struct thread *td)
 {
 	struct epoch_tracker et;
-	int error = 0;
-	struct inpcb *inp;
-	struct tcpcb *tp;
+	struct inpcb *inp = sotoinpcb(so);
+	struct tcpcb *tp = intotcpcb(inp);
 	struct sockaddr_in6 *sin6;
+	int error = 0;
 	u_int8_t incflagsav;
 	u_char vflagsav;
 
-	inp = sotoinpcb(so);
-	KASSERT(inp != NULL, ("tcp6_usr_connect: inp == NULL"));
 	INP_WLOCK(inp);
-	if (inp->inp_flags & INP_DROPPED) {
+	if (__predict_false(tp->t_flags & TF_DISCONNECTED)) {
 		INP_WUNLOCK(inp);
 		return (ECONNREFUSED);
 	}
-	tp = intotcpcb(inp);
 
 	vflagsav = inp->inp_vflag;
 	incflagsav = inp->inp_inc.inc_flags;
@@ -724,18 +698,15 @@ out:
 static int
 tcp_usr_accept(struct socket *so, struct sockaddr *sa)
 {
-	struct inpcb *inp;
-	struct tcpcb *tp;
+	struct inpcb *inp = sotoinpcb(so);
+	struct tcpcb *tp = intotcpcb(inp);
 	int error = 0;
 
-	inp = sotoinpcb(so);
-	KASSERT(inp != NULL, ("tcp_usr_accept: inp == NULL"));
 	INP_WLOCK(inp);
-	if (inp->inp_flags & INP_DROPPED) {
+	if (__predict_false(tp->t_flags & TF_DISCONNECTED)) {
 		INP_WUNLOCK(inp);
 		return (ECONNABORTED);
 	}
-	tp = intotcpcb(inp);
 
 	if (so->so_state & SS_ISDISCONNECTED)
 		error = ECONNABORTED;
@@ -758,18 +729,15 @@ tcp_usr_accept(struct socket *so, struct sockaddr *sa)
 static int
 tcp6_usr_accept(struct socket *so, struct sockaddr *sa)
 {
-	struct inpcb *inp;
-	struct tcpcb *tp;
+	struct inpcb *inp = sotoinpcb(so);
+	struct tcpcb *tp = intotcpcb(inp);
 	int error = 0;
 
-	inp = sotoinpcb(so);
-	KASSERT(inp != NULL, ("tcp6_usr_accept: inp == NULL"));
 	INP_WLOCK(inp);
-	if (inp->inp_flags & INP_DROPPED) {
+	if (__predict_false(tp->t_flags & TF_DISCONNECTED)) {
 		INP_WUNLOCK(inp);
 		return (ECONNABORTED);
 	}
-	tp = intotcpcb(inp);
 
 	if (so->so_state & SS_ISDISCONNECTED) {
 		error = ECONNABORTED;
@@ -841,7 +809,7 @@ tcp_usr_shutdown(struct socket *so, enum shutdown_how how)
 		 * return ECONNRESEST for SHUT_RD as well?
 		 */
 		INP_WLOCK(inp);
-		if (inp->inp_flags & INP_DROPPED) {
+		if (tp->t_flags & TF_DISCONNECTED) {
 			INP_WUNLOCK(inp);
 			return (ECONNRESET);
 		}
@@ -867,18 +835,16 @@ static int
 tcp_usr_rcvd(struct socket *so, int flags)
 {
 	struct epoch_tracker et;
-	struct inpcb *inp;
-	struct tcpcb *tp;
+	struct inpcb *inp = sotoinpcb(so);
+	struct tcpcb *tp = intotcpcb(inp);
 	int outrv = 0, error = 0;
 
-	inp = sotoinpcb(so);
-	KASSERT(inp != NULL, ("tcp_usr_rcvd: inp == NULL"));
 	INP_WLOCK(inp);
-	if (inp->inp_flags & INP_DROPPED) {
+	if (__predict_false(tp->t_flags & TF_DISCONNECTED)) {
+		/* XXXGL: how could this happen?! */
 		INP_WUNLOCK(inp);
 		return (ECONNRESET);
 	}
-	tp = intotcpcb(inp);
 
 	NET_EPOCH_ENTER(et);
 	/*
@@ -916,9 +882,8 @@ tcp_usr_send(struct socket *so, int flags, struct mbuf *m,
     struct sockaddr *nam, struct mbuf *control, struct thread *td)
 {
 	struct epoch_tracker et;
-	int error = 0;
-	struct inpcb *inp;
-	struct tcpcb *tp;
+	struct inpcb *inp = sotoinpcb(so);
+	struct tcpcb *tp = intotcpcb(inp);
 #ifdef INET
 #ifdef INET6
 	struct sockaddr_in sin;
@@ -929,20 +894,18 @@ tcp_usr_send(struct socket *so, int flags, struct mbuf *m,
 	struct sockaddr_in6 *sin6;
 	int isipv6;
 #endif
+	int error = 0;
 	u_int8_t incflagsav;
 	u_char vflagsav;
 	bool restoreflags;
 
-	inp = sotoinpcb(so);
-	KASSERT(inp != NULL, ("tcp_usr_send: inp == NULL"));
 	INP_WLOCK(inp);
-	if (inp->inp_flags & INP_DROPPED) {
+	if (__predict_false(tp->t_flags & TF_DISCONNECTED)) {
 		if (m != NULL && (flags & PRUS_NOTREADY) == 0)
 			m_freem(m);
 		INP_WUNLOCK(inp);
 		return (ECONNRESET);
 	}
-	tp = intotcpcb(inp);
 
 	vflagsav = inp->inp_vflag;
 	incflagsav = inp->inp_inc.inc_flags;
@@ -1120,8 +1083,7 @@ tcp_usr_send(struct socket *so, int flags, struct mbuf *m,
 			if (tp->t_fbyte_out && tp->t_fbyte_in)
 				tp->t_flags2 |= TF2_FBYTES_COMPLETE;
 		}
-		if (!(inp->inp_flags & INP_DROPPED) &&
-		    !(flags & PRUS_NOTREADY)) {
+		if (!(flags & PRUS_NOTREADY)) {
 			if (flags & PRUS_MORETOCOME)
 				tp->t_flags |= TF_MORETOCOME;
 			error = tcp_output_nodrop(tp);
@@ -1231,18 +1193,16 @@ static int
 tcp_usr_ready(struct socket *so, struct mbuf *m, int count)
 {
 	struct epoch_tracker et;
-	struct inpcb *inp;
-	struct tcpcb *tp;
+	struct inpcb *inp = sotoinpcb(so);
+	struct tcpcb *tp = intotcpcb(inp);
 	int error;
 
-	inp = sotoinpcb(so);
 	INP_WLOCK(inp);
-	if (inp->inp_flags & INP_DROPPED) {
+	if (__predict_false(tp->t_flags & TF_DISCONNECTED)) {
 		INP_WUNLOCK(inp);
 		mb_free_notready(m, count);
 		return (ECONNRESET);
 	}
-	tp = intotcpcb(inp);
 
 	SOCK_SENDBUF_LOCK(so);
 	error = sbready(&so->so_snd, m, count);
@@ -1264,30 +1224,23 @@ tcp_usr_ready(struct socket *so, struct mbuf *m, int count)
 static void
 tcp_usr_abort(struct socket *so)
 {
-	struct inpcb *inp;
-	struct tcpcb *tp;
 	struct epoch_tracker et;
-
-	inp = sotoinpcb(so);
-	KASSERT(inp != NULL, ("tcp_usr_abort: inp == NULL"));
-
-	NET_EPOCH_ENTER(et);
-	INP_WLOCK(inp);
-	KASSERT(inp->inp_socket != NULL,
-	    ("tcp_usr_abort: inp_socket == NULL"));
+	struct inpcb *inp = sotoinpcb(so);
+	struct tcpcb *tp = intotcpcb(inp);
 
 	/*
 	 * If we still have full TCP state, and we're not dropped, drop.
 	 */
-	if (!(inp->inp_flags & INP_DROPPED)) {
-		tp = intotcpcb(inp);
+	NET_EPOCH_ENTER(et);
+	INP_WLOCK(inp);
+	if (!(tp->t_flags & TF_DISCONNECTED)) {
 		tp = tcp_drop(tp, ECONNABORTED);
 		if (tp == NULL)
 			goto dropped;
 		tcp_bblog_pru(tp, PRU_ABORT, 0);
 		TCP_PROBE2(debug__user, tp, PRU_ABORT);
 	}
-	if (!(inp->inp_flags & INP_DROPPED)) {
+	if (!(tp->t_flags & TF_DISCONNECTED)) {
 		soref(so);
 		inp->inp_flags |= INP_SOCKREF;
 	}
@@ -1302,24 +1255,17 @@ dropped:
 static void
 tcp_usr_close(struct socket *so)
 {
-	struct inpcb *inp;
-	struct tcpcb *tp;
 	struct epoch_tracker et;
-
-	inp = sotoinpcb(so);
-	KASSERT(inp != NULL, ("tcp_usr_close: inp == NULL"));
-
-	NET_EPOCH_ENTER(et);
-	INP_WLOCK(inp);
-	KASSERT(inp->inp_socket != NULL,
-	    ("tcp_usr_close: inp_socket == NULL"));
+	struct inpcb *inp = sotoinpcb(so);
+	struct tcpcb *tp = intotcpcb(inp);
 
 	/*
 	 * If we are still connected and we're not dropped, initiate
 	 * a disconnect.
 	 */
-	if (!(inp->inp_flags & INP_DROPPED)) {
-		tp = intotcpcb(inp);
+	NET_EPOCH_ENTER(et);
+	INP_WLOCK(inp);
+	if (!(tp->t_flags & TF_DISCONNECTED)) {
 		if (tp->t_state != TCPS_TIME_WAIT) {
 			tp->t_flags |= TF_CLOSED;
 			tcp_disconnect(tp);
@@ -1327,7 +1273,7 @@ tcp_usr_close(struct socket *so)
 			TCP_PROBE2(debug__user, tp, PRU_CLOSE);
 		}
 	}
-	if (!(inp->inp_flags & INP_DROPPED)) {
+	if (!(tp->t_flags & TF_DISCONNECTED)) {
 		soref(so);
 		inp->inp_flags |= INP_SOCKREF;
 	}
@@ -1359,18 +1305,16 @@ tcp_pru_options_support(struct tcpcb *tp, int flags)
 static int
 tcp_usr_rcvoob(struct socket *so, struct mbuf *m, int flags)
 {
+	struct inpcb *inp = sotoinpcb(so);
+	struct tcpcb *tp = intotcpcb(inp);
 	int error = 0;
-	struct inpcb *inp;
-	struct tcpcb *tp;
 
-	inp = sotoinpcb(so);
-	KASSERT(inp != NULL, ("tcp_usr_rcvoob: inp == NULL"));
 	INP_WLOCK(inp);
-	if (inp->inp_flags & INP_DROPPED) {
+	if (__predict_false(tp->t_flags & TF_DISCONNECTED)) {
+		/* XXXGL: how could this happen?! */
 		INP_WUNLOCK(inp);
 		return (ECONNRESET);
 	}
-	tp = intotcpcb(inp);
 
 	error = tcp_pru_options_support(tp, PRUS_OOB);
 	if (error) {
@@ -1388,7 +1332,7 @@ tcp_usr_rcvoob(struct socket *so, struct mbuf *m, int flags)
 		goto out;
 	}
 	m->m_len = 1;
-	*mtod(m, caddr_t) = tp->t_iobc;
+	*mtod(m, char *) = tp->t_iobc;
 	if ((flags & MSG_PEEK) == 0)
 		tp->t_oobflags ^= (TCPOOB_HAVEDATA | TCPOOB_HADDATA);
 
@@ -1481,12 +1425,14 @@ tcp_connect(struct tcpcb *tp, struct sockaddr_in *sin, struct thread *td)
 	if (__predict_false((so->so_options & SO_REUSEPORT_LB) != 0))
 		return (EOPNOTSUPP);
 
-	INP_HASH_WLOCK(&V_tcbinfo);
 	error = in_pcbconnect(inp, sin, td->td_ucred);
-	INP_HASH_WUNLOCK(&V_tcbinfo);
 	if (error != 0)
 		return (error);
 
+	/* set the hash on the connection */
+	rss_proto_software_hash_v4(inp->inp_faddr, inp->inp_laddr,
+	    inp->inp_fport, inp->inp_lport, IPPROTO_TCP,
+	    &inp->inp_flowid, &inp->inp_flowtype);
 	/*
 	 * Compute window scaling to request:
 	 * Scale to fit into sweet spot.  See tcp_syncache.c.
@@ -1526,12 +1472,14 @@ tcp6_connect(struct tcpcb *tp, struct sockaddr_in6 *sin6, struct thread *td)
 	if (__predict_false((so->so_options & SO_REUSEPORT_LB) != 0))
 		return (EOPNOTSUPP);
 
-	INP_HASH_WLOCK(&V_tcbinfo);
 	error = in6_pcbconnect(inp, sin6, td->td_ucred, true);
-	INP_HASH_WUNLOCK(&V_tcbinfo);
 	if (error != 0)
 		return (error);
 
+	/* set the hash on the connection */
+	rss_proto_software_hash_v6(&inp->in6p_faddr,
+	    &inp->in6p_laddr, inp->inp_fport, inp->inp_lport, IPPROTO_TCP,
+	    &inp->inp_flowid, &inp->inp_flowtype);
 	/* Compute window scaling to request.  */
 	while (tp->request_r_scale < TCP_MAX_WINSHIFT &&
 	    (TCP_MAXWIN << tp->request_r_scale) < sb_max)
@@ -1641,15 +1589,15 @@ tcp_fill_info(const struct tcpcb *tp, struct tcp_info *ti)
  * socket option arguments.  When it re-acquires the lock after the copy, it
  * has to revalidate that the connection is still valid for the socket
  * option.
+ * XXXGL: review if this is really needed
  */
 #define INP_WLOCK_RECHECK_CLEANUP(inp, cleanup) do {			\
 	INP_WLOCK(inp);							\
-	if (inp->inp_flags & INP_DROPPED) {				\
+	if (tp->t_flags & TF_DISCONNECTED) {				\
 		INP_WUNLOCK(inp);					\
 		cleanup;						\
 		return (ECONNRESET);					\
 	}								\
-	tp = intotcpcb(inp);						\
 } while(0)
 #define INP_WLOCK_RECHECK(inp) INP_WLOCK_RECHECK_CLEANUP((inp), /* noop */)
 
@@ -1662,8 +1610,8 @@ tcp_ctloutput_set(struct inpcb *inp, struct sockopt *sopt)
 
 	MPASS(sopt->sopt_dir == SOPT_SET);
 	INP_WLOCK_ASSERT(inp);
-	KASSERT((inp->inp_flags & INP_DROPPED) == 0,
-	    ("inp_flags == %x", inp->inp_flags));
+	KASSERT((tp->t_flags & TF_DISCONNECTED) == 0,
+	    ("tp_flags == %x", tp->t_flags));
 	KASSERT(so != NULL, ("inp_socket == NULL"));
 
 	if (sopt->sopt_level != IPPROTO_TCP) {
@@ -1830,8 +1778,8 @@ tcp_ctloutput_get(struct inpcb *inp, struct sockopt *sopt)
 
 	MPASS(sopt->sopt_dir == SOPT_GET);
 	INP_WLOCK_ASSERT(inp);
-	KASSERT((inp->inp_flags & INP_DROPPED) == 0,
-	    ("inp_flags == %x", inp->inp_flags));
+	KASSERT((tp->t_flags & TF_DISCONNECTED) == 0,
+	    ("tp_flags == %x", tp->t_flags));
 	KASSERT(so != NULL, ("inp_socket == NULL"));
 
 	if (sopt->sopt_level != IPPROTO_TCP) {
@@ -1874,13 +1822,11 @@ tcp_ctloutput_get(struct inpcb *inp, struct sockopt *sopt)
 int
 tcp_ctloutput(struct socket *so, struct sockopt *sopt)
 {
-	struct	inpcb *inp;
-
-	inp = sotoinpcb(so);
-	KASSERT(inp != NULL, ("tcp_ctloutput: inp == NULL"));
+	struct inpcb *inp = sotoinpcb(so);
+	struct tcpcb *tp = intotcpcb(inp);
 
 	INP_WLOCK(inp);
-	if (inp->inp_flags & INP_DROPPED) {
+	if (__predict_false(tp->t_flags & TF_DISCONNECTED)) {
 		INP_WUNLOCK(inp);
 		return (ECONNRESET);
 	}
@@ -1908,7 +1854,7 @@ tcp_set_cc_mod(struct inpcb *inp, struct sockopt *sopt)
 {
 	struct cc_algo *algo;
 	void *ptr = NULL;
-	struct tcpcb *tp;
+	struct tcpcb *tp = intotcpcb(inp);
 	struct cc_var cc_mem;
 	char	buf[TCP_CA_NAME_MAX];
 	size_t mem_sz;
@@ -1958,7 +1904,7 @@ no_mem_needed:
 	 */
 	memset(&cc_mem, 0, sizeof(cc_mem));
 	INP_WLOCK(inp);
-	if (inp->inp_flags & INP_DROPPED) {
+	if (__predict_false(tp->t_flags & TF_DISCONNECTED)) {
 		INP_WUNLOCK(inp);
 		if (ptr)
 			free(ptr, M_CC_MEM);
@@ -1968,7 +1914,6 @@ no_mem_needed:
 		CC_LIST_RUNLOCK();
 		return (ECONNRESET);
 	}
-	tp = intotcpcb(inp);
 	if (ptr != NULL)
 		memset(ptr, 0, mem_sz);
 	cc_mem.tp = tp;
@@ -2034,8 +1979,8 @@ tcp_default_ctloutput(struct tcpcb *tp, struct sockopt *sopt)
 	size_t	len;
 
 	INP_WLOCK_ASSERT(inp);
-	KASSERT((inp->inp_flags & INP_DROPPED) == 0,
-	    ("inp_flags == %x", inp->inp_flags));
+	KASSERT((tp->t_flags & TF_DISCONNECTED) == 0,
+	    ("tp_flags == %x", tp->t_flags));
 	KASSERT(inp->inp_socket != NULL, ("inp_socket == NULL"));
 
 	switch (sopt->sopt_level) {
@@ -2456,7 +2401,6 @@ unlock_and_done:
 		break;
 
 	case SOPT_GET:
-		tp = intotcpcb(inp);
 		switch (sopt->sopt_name) {
 #if defined(IPSEC_SUPPORT) || defined(TCP_SIGNATURE)
 		case TCP_MD5SIG:
@@ -2641,11 +2585,10 @@ unhold:
 static void
 tcp_disconnect(struct tcpcb *tp)
 {
-	struct inpcb *inp = tptoinpcb(tp);
 	struct socket *so = tptosocket(tp);
 
 	NET_EPOCH_ASSERT();
-	INP_WLOCK_ASSERT(inp);
+	INP_WLOCK_ASSERT(tptoinpcb(tp));
 
 	/*
 	 * Neither tcp_close() nor tcp_drop() should return NULL, as the
@@ -2664,7 +2607,7 @@ tcp_disconnect(struct tcpcb *tp)
 		soisdisconnecting(so);
 		sbflush(&so->so_rcv);
 		tcp_usrclosed(tp);
-		if (!(inp->inp_flags & INP_DROPPED))
+		if (!(tp->t_flags & TF_DISCONNECTED))
 			/* Ignore stack's drop request, we already at it. */
 			(void)tcp_output_nodrop(tp);
 	}
@@ -2689,11 +2632,6 @@ tcp_usrclosed(struct tcpcb *tp)
 
 	switch (tp->t_state) {
 	case TCPS_LISTEN:
-#ifdef TCP_OFFLOAD
-		tcp_offload_listen_stop(tp);
-#endif
-		tcp_state_change(tp, TCPS_CLOSED);
-		/* FALLTHROUGH */
 	case TCPS_CLOSED:
 		tp = tcp_close(tp);
 		/*
@@ -2799,258 +2737,6 @@ db_print_tstate(int t_state)
 }
 
 static void
-db_print_tflags(u_int t_flags)
-{
-	int comma;
-
-	comma = 0;
-	if (t_flags & TF_ACKNOW) {
-		db_printf("%sTF_ACKNOW", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_DELACK) {
-		db_printf("%sTF_DELACK", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_NODELAY) {
-		db_printf("%sTF_NODELAY", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_NOOPT) {
-		db_printf("%sTF_NOOPT", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_SENTFIN) {
-		db_printf("%sTF_SENTFIN", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_REQ_SCALE) {
-		db_printf("%sTF_REQ_SCALE", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_RCVD_SCALE) {
-		db_printf("%sTF_RECVD_SCALE", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_REQ_TSTMP) {
-		db_printf("%sTF_REQ_TSTMP", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_RCVD_TSTMP) {
-		db_printf("%sTF_RCVD_TSTMP", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_SACK_PERMIT) {
-		db_printf("%sTF_SACK_PERMIT", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_NEEDSYN) {
-		db_printf("%sTF_NEEDSYN", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_NEEDFIN) {
-		db_printf("%sTF_NEEDFIN", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_NOPUSH) {
-		db_printf("%sTF_NOPUSH", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_PREVVALID) {
-		db_printf("%sTF_PREVVALID", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_WAKESOR) {
-		db_printf("%sTF_WAKESOR", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_GPUTINPROG) {
-		db_printf("%sTF_GPUTINPROG", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_MORETOCOME) {
-		db_printf("%sTF_MORETOCOME", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_SONOTCONN) {
-		db_printf("%sTF_SONOTCONN", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_LASTIDLE) {
-		db_printf("%sTF_LASTIDLE", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_RXWIN0SENT) {
-		db_printf("%sTF_RXWIN0SENT", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_FASTRECOVERY) {
-		db_printf("%sTF_FASTRECOVERY", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_WASFRECOVERY) {
-		db_printf("%sTF_WASFRECOVERY", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_SIGNATURE) {
-		db_printf("%sTF_SIGNATURE", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_FORCEDATA) {
-		db_printf("%sTF_FORCEDATA", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_TSO) {
-		db_printf("%sTF_TSO", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_TOE) {
-		db_printf("%sTF_TOE", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_CLOSED) {
-		db_printf("%sTF_CLOSED", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_SENTSYN) {
-		db_printf("%sTF_SENTSYN", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_LRD) {
-		db_printf("%sTF_LRD", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_CONGRECOVERY) {
-		db_printf("%sTF_CONGRECOVERY", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_WASCRECOVERY) {
-		db_printf("%sTF_WASCRECOVERY", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags & TF_FASTOPEN) {
-		db_printf("%sTF_FASTOPEN", comma ? ", " : "");
-		comma = 1;
-	}
-}
-
-static void
-db_print_tflags2(u_int t_flags2)
-{
-	int comma;
-
-	comma = 0;
-	if (t_flags2 & TF2_PLPMTU_BLACKHOLE) {
-		db_printf("%sTF2_PLPMTU_BLACKHOLE", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags2 & TF2_PLPMTU_PMTUD) {
-		db_printf("%sTF2_PLPMTU_PMTUD", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags2 & TF2_PLPMTU_MAXSEGSNT) {
-		db_printf("%sTF2_PLPMTU_MAXSEGSNT", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags2 & TF2_LOG_AUTO) {
-		db_printf("%sTF2_LOG_AUTO", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags2 & TF2_DROP_AF_DATA) {
-		db_printf("%sTF2_DROP_AF_DATA", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags2 & TF2_ECN_PERMIT) {
-		db_printf("%sTF2_ECN_PERMIT", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags2 & TF2_ECN_SND_CWR) {
-		db_printf("%sTF2_ECN_SND_CWR", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags2 & TF2_ECN_SND_ECE) {
-		db_printf("%sTF2_ECN_SND_ECE", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags2 & TF2_ACE_PERMIT) {
-		db_printf("%sTF2_ACE_PERMIT", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags2 & TF2_HPTS_CPU_SET) {
-		db_printf("%sTF2_HPTS_CPU_SET", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags2 & TF2_FBYTES_COMPLETE) {
-		db_printf("%sTF2_FBYTES_COMPLETE", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags2 & TF2_ECN_USE_ECT1) {
-		db_printf("%sTF2_ECN_USE_ECT1", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags2 & TF2_TCP_ACCOUNTING) {
-		db_printf("%sTF2_TCP_ACCOUNTING", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags2 & TF2_HPTS_CALLS) {
-		db_printf("%sTF2_HPTS_CALLS", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags2 & TF2_MBUF_L_ACKS) {
-		db_printf("%sTF2_MBUF_L_ACKS", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags2 & TF2_MBUF_ACKCMP) {
-		db_printf("%sTF2_MBUF_ACKCMP", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags2 & TF2_SUPPORTS_MBUFQ) {
-		db_printf("%sTF2_SUPPORTS_MBUFQ", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags2 & TF2_MBUF_QUEUE_READY) {
-		db_printf("%sTF2_MBUF_QUEUE_READY", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags2 & TF2_DONT_SACK_QUEUE) {
-		db_printf("%sTF2_DONT_SACK_QUEUE", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags2 & TF2_CANNOT_DO_ECN) {
-		db_printf("%sTF2_CANNOT_DO_ECN", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags2 & TF2_PROC_SACK_PROHIBIT) {
-		db_printf("%sTF2_PROC_SACK_PROHIBIT", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags2 & TF2_IPSEC_TSO) {
-		db_printf("%sTF2_IPSEC_TSO", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_flags2 & TF2_NO_ISS_CHECK) {
-		db_printf("%sTF2_NO_ISS_CHECK", comma ? ", " : "");
-		comma = 1;
-	}
-}
-
-static void
-db_print_toobflags(char t_oobflags)
-{
-	int comma;
-
-	comma = 0;
-	if (t_oobflags & TCPOOB_HAVEDATA) {
-		db_printf("%sTCPOOB_HAVEDATA", comma ? ", " : "");
-		comma = 1;
-	}
-	if (t_oobflags & TCPOOB_HADDATA) {
-		db_printf("%sTCPOOB_HADDATA", comma ? ", " : "");
-		comma = 1;
-	}
-}
-
-static void
 db_print_bblog_state(int state)
 {
 	switch (state) {
@@ -3088,13 +2774,20 @@ db_print_bblog_state(int state)
 }
 
 static void
-db_print_tcpcb(struct tcpcb *tp, const char *name, int indent, bool show_bblog)
+db_print_tcpcb(struct tcpcb *tp, const char *name, int indent, bool show_bblog,
+    bool show_inpcb, bool only_locked)
 {
+
+	if (only_locked && tp->t_inpcb.inp_lock.rw_lock == RW_UNLOCKED)
+		return;
 
 	db_print_indent(indent);
 	db_printf("%s at %p\n", name, tp);
 
 	indent += 2;
+
+	if (show_inpcb)
+		db_print_inpcb(tptoinpcb(tp), "t_inpcb", indent);
 
 	db_print_indent(indent);
 	db_printf("t_segq first: %p   t_segqlen: %d   t_dupacks: %d\n",
@@ -3110,14 +2803,10 @@ db_print_tcpcb(struct tcpcb *tp, const char *name, int indent, bool show_bblog)
 	db_printf(")\n");
 
 	db_print_indent(indent);
-	db_printf("t_flags: 0x%x (", tp->t_flags);
-	db_print_tflags(tp->t_flags);
-	db_printf(")\n");
+	db_printf("t_flags: 0x%b\n", tp->t_flags, TF_BITS);
 
 	db_print_indent(indent);
-	db_printf("t_flags2: 0x%x (", tp->t_flags2);
-	db_print_tflags2(tp->t_flags2);
-	db_printf(")\n");
+	db_printf("t_flags2: 0x%b\n", tp->t_flags2, TF2_BITS);
 
 	db_print_indent(indent);
 	db_printf("snd_una: 0x%08x   snd_max: 0x%08x   snd_nxt: 0x%08x\n",
@@ -3164,9 +2853,8 @@ db_print_tcpcb(struct tcpcb *tp, const char *name, int indent, bool show_bblog)
 	    tp->t_rttupdated, tp->max_sndwnd, tp->t_softerror);
 
 	db_print_indent(indent);
-	db_printf("t_oobflags: 0x%x (", tp->t_oobflags);
-	db_print_toobflags(tp->t_oobflags);
-	db_printf(")   t_iobc: 0x%02x\n", tp->t_iobc);
+	db_printf("t_oobflags: 0x%b   t_iobc: 0x%02x\n", tp->t_oobflags,
+	    TCPOOB_BITS, tp->t_iobc);
 
 	db_print_indent(indent);
 	db_printf("snd_scale: %u   rcv_scale: %u   request_r_scale: %u\n",
@@ -3196,7 +2884,7 @@ db_print_tcpcb(struct tcpcb *tp, const char *name, int indent, bool show_bblog)
 	/* Skip sackblks, sackhint. */
 
 	db_print_indent(indent);
-	db_printf("t_rttlow: %d   rfbuf_ts: %u   rfbuf_cnt: %d\n",
+	db_printf("t_rttlow: %d   rfbuf_ts: %u   rfbuf_cnt: %u\n",
 	    tp->t_rttlow, tp->rfbuf_ts, tp->rfbuf_cnt);
 
 	db_print_indent(indent);
@@ -3227,39 +2915,54 @@ db_print_tcpcb(struct tcpcb *tp, const char *name, int indent, bool show_bblog)
 DB_SHOW_COMMAND(tcpcb, db_show_tcpcb)
 {
 	struct tcpcb *tp;
-	bool show_bblog;
+	bool show_bblog, show_inpcb;
 
 	if (!have_addr) {
-		db_printf("usage: show tcpcb <addr>\n");
+		db_printf("usage: show tcpcb[/bi] <addr>\n");
 		return;
 	}
 	show_bblog = strchr(modif, 'b') != NULL;
+	show_inpcb = strchr(modif, 'i') != NULL;
 	tp = (struct tcpcb *)addr;
-
-	db_print_tcpcb(tp, "tcpcb", 0, show_bblog);
+	db_print_tcpcb(tp, "tcpcb", 0, show_bblog, show_inpcb, false);
 }
 
 DB_SHOW_ALL_COMMAND(tcpcbs, db_show_all_tcpcbs)
 {
 	VNET_ITERATOR_DECL(vnet_iter);
 	struct inpcb *inp;
-	bool only_locked, show_bblog;
+	bool only_locked, show_bblog, show_inpcb;
 
 	only_locked = strchr(modif, 'l') != NULL;
 	show_bblog = strchr(modif, 'b') != NULL;
+	show_inpcb = strchr(modif, 'i') != NULL;
 	VNET_FOREACH(vnet_iter) {
 		CURVNET_SET(vnet_iter);
-		CK_LIST_FOREACH(inp, &V_tcbinfo.ipi_listhead, inp_list) {
-			if (only_locked &&
-			    inp->inp_lock.rw_lock == RW_UNLOCKED)
-				continue;
-			db_print_tcpcb(intotcpcb(inp), "tcpcb", 0, show_bblog);
+		for (u_int i = 0; i <= V_tcbinfo.ipi_hashmask; i++)
+			CK_LIST_FOREACH(inp, &V_tcbinfo.ipi_hash_exact[i].head,
+			    inp_hash_exact) {
+				db_print_tcpcb(intotcpcb(inp), "tcpcb", 0,
+				    show_bblog, show_inpcb, only_locked);
+				if (db_pager_quit)
+					goto break_hash;
+			}
+		for (u_int i = 0; i <= V_tcbinfo.ipi_hashmask; i++)
+			CK_LIST_FOREACH(inp, &V_tcbinfo.ipi_hash_wild[i].head,
+			    inp_hash_wild) {
+				db_print_tcpcb(intotcpcb(inp), "tcpcb", 0,
+				    show_bblog, show_inpcb, only_locked);
+				if (db_pager_quit)
+					goto break_hash;
+			}
+break_hash:
+		CK_LIST_FOREACH(inp, &V_tcbinfo.ipi_list_unconn.head,
+		    inp_unconn_list) {
+			db_print_tcpcb(intotcpcb(inp), "tcpcb", 0,
+			    show_bblog, show_inpcb, only_locked);
 			if (db_pager_quit)
 				break;
 		}
 		CURVNET_RESTORE();
-		if (db_pager_quit)
-			break;
 	}
 }
 #endif

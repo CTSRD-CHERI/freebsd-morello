@@ -51,6 +51,7 @@
 #include <sys/mman.h>
 #include <sys/stack.h>
 #include <sys/stdarg.h>
+#include <sys/syscall.h>
 #include <sys/sysent.h>
 #include <sys/time.h>
 #include <sys/user.h>
@@ -98,8 +99,12 @@
 #include <linux/interval_tree_generic.h>
 #include <linux/printk.h>
 #include <linux/seq_file.h>
+#include <linux/uuid.h>
+#include <linux/mod_devicetable.h>
 
 #if defined(__i386__) || defined(__amd64__)
+#include <asm/cpu_device_id.h>
+#include <asm/cpufeature.h>
 #include <asm/smp.h>
 #include <asm/processor.h>
 #endif
@@ -154,15 +159,26 @@ static cpumask_t *static_single_cpu_mask_lcs;
 struct kobject linux_class_root;
 struct device linux_root_device;
 struct class linux_class_misc;
-struct list_head pci_drivers;
-struct list_head pci_devices;
-spinlock_t pci_lock;
 struct uts_namespace init_uts_ns;
 
 unsigned long linux_timer_hz_mask;
 
 wait_queue_head_t linux_bit_waitq;
 wait_queue_head_t linux_var_waitq;
+
+const guid_t guid_null;
+
+enum system_states system_state = SYSTEM_RUNNING;
+
+struct task_struct *
+__lkpi_current(void)
+{
+	struct thread *td;
+
+	td = curthread;
+	linux_set_current(td);
+	return ((struct task_struct *)td->td_lkpi_task);
+}
 
 int
 panic_cmp(struct rb_node *one, struct rb_node *two)
@@ -544,6 +560,8 @@ linux_cdev_pager_populate(vm_object_t vm_obj, vm_pindex_t pidx, int fault_type,
 		 */
 		*first = vmap->vm_pfn_first;
 		*last = *first + vmap->vm_pfn_count - 1;
+		MPASS(pidx >= *first);
+		MPASS(pidx <= *last);
 		err = VM_PAGER_OK;
 		break;
 	default:
@@ -921,19 +939,39 @@ linux_file_ioctl_sub(struct file *fp, struct linux_file *filp,
 	struct task_struct *task = current;
 	unsigned size;
 	int error;
+	bool direct;
 
 	size = IOCPARM_LEN(cmd);
 	/* refer to logic in sys_ioctl() */
+	direct = false;
 	if (size > 0) {
 		/*
 		 * Setup hint for linux_copyin() and linux_copyout().
 		 *
-		 * Background: Linux code expects a user-space address
-		 * while FreeBSD supplies a kernel-space address.
+		 * Background: Linux kernel code expects to operate on
+		 * userspace addresses, but FreeBSD's kern_ioctl()
+		 * will generally provide a kernel address.  For the
+		 * native process ABI, where we know how to find the
+		 * original address, we reach directly into the system
+		 * call args to get it.  Then, if the Linux driver
+		 * copied out to that address, we copy the whole block
+		 * back into the kernel buffer allocated by
+		 * kern_ioctl() so that kern_ioctl() itself doesn't
+		 * clobber the driver's data.
+		 *
+		 * Otherwise, fall back to the LINUX_IOCTL_MIN_PTR
+		 * hack.
 		 */
 		task->bsd_ioctl_data = data;
 		task->bsd_ioctl_len = size;
-		data = (void *)LINUX_IOCTL_MIN_PTR;
+		if ((td->td_pflags & TDP_KTHREAD) == 0 &&
+		    SV_PROC_ABI(td->td_proc) == SV_ABI_FREEBSD &&
+		    td->td_sa.code == SYS_ioctl) {
+			direct = true;
+			data = (void *)(uintptr_t)td->td_sa.args[2];
+		} else {
+			data = (void *)LINUX_IOCTL_MIN_PTR;
+		}
 	} else {
 		/* fetch user-space pointer */
 		data = *(void **)data;
@@ -963,11 +1001,30 @@ linux_file_ioctl_sub(struct file *fp, struct linux_file *filp,
 			error = ENOTTY;
 		}
 	}
+	if (error == 0 && size > 0 && (cmd & IOC_OUT) != 0 && direct) {
+		void *xdata;
+		int error1;
+
+		/*
+		 * Ensure that the copyout in sys_generic.c copies
+		 * over the data which is possibly modified by the
+		 * driver.  A possible error from the copyin() is
+		 * ignored since it is formally possible for the memory
+		 * to become unaccessible in the meantime.  Do the copying
+		 * through the intermediate buffer instead of copying
+		 * directly to bsd_ioctl_data, to ensure atomicity of
+		 * the change with respect to the error.
+		 */
+		xdata = malloc(size, M_TEMP, M_WAITOK);
+		error1 = copyin(data, xdata, size);
+		if (error1 == 0)
+			memcpy(task->bsd_ioctl_data, xdata, size);
+		free(xdata, M_TEMP);
+	}
 	if (size > 0) {
 		task->bsd_ioctl_data = NULL;
 		task->bsd_ioctl_len = 0;
 	}
-
 	if (error == EWOULDBLOCK) {
 		/* update kqfilter status, if any */
 		linux_file_kqfilter_poll(filp,
@@ -1171,12 +1228,14 @@ static const struct filterops linux_dev_kqfiltops_read = {
 	.f_isfd = 1,
 	.f_detach = linux_file_kqfilter_detach,
 	.f_event = linux_file_kqfilter_read_event,
+	.f_copy = knote_triv_copy,
 };
 
 static const struct filterops linux_dev_kqfiltops_write = {
 	.f_isfd = 1,
 	.f_detach = linux_file_kqfilter_detach,
 	.f_event = linux_file_kqfilter_write_event,
+	.f_copy = knote_triv_copy,
 };
 
 static void
@@ -1347,6 +1406,19 @@ linux_file_mmap_single(struct file *fp, const struct file_operations *fop,
 				error = ESTALE;
 				vm_no_fault = 1;
 			} else {
+				if (ptr->vm_start == vmap->vm_start &&
+				    ptr->vm_end <= vmap->vm_end) {
+					/*
+					 * Userspace wants to grow an existing
+					 * mapping. We already have a
+					 * `vm_object_t' for this mapping. We
+					 * just need to update the `struct
+					 * vm_area_struct` to have the correct
+					 * end address.
+					 */
+					ptr->vm_end = vmap->vm_end;
+				}
+
 				error = EEXIST;
 				vm_no_fault = (ptr->vm_ops->fault == NULL);
 			}
@@ -1810,113 +1882,6 @@ const struct fileops linuxfileops = {
 	.fo_flags = DFLAG_PASSABLE,
 };
 
-/*
- * Hash of vmmap addresses.  This is infrequently accessed and does not
- * need to be particularly large.  This is done because we must store the
- * caller's idea of the map size to properly unmap.
- */
-struct vmmap {
-	LIST_ENTRY(vmmap)	vm_next;
-	void 			*vm_addr;
-	unsigned long		vm_size;
-};
-
-struct vmmaphd {
-	struct vmmap *lh_first;
-};
-#define	VMMAP_HASH_SIZE	64
-#define	VMMAP_HASH_MASK	(VMMAP_HASH_SIZE - 1)
-#define	VM_HASH(addr)	((uintptr_t)(addr) >> PAGE_SHIFT) & VMMAP_HASH_MASK
-static struct vmmaphd vmmaphead[VMMAP_HASH_SIZE];
-static struct mtx vmmaplock;
-
-static void
-vmmap_add(void *addr, unsigned long size)
-{
-	struct vmmap *vmmap;
-
-	vmmap = kmalloc(sizeof(*vmmap), GFP_KERNEL);
-	mtx_lock(&vmmaplock);
-	vmmap->vm_size = size;
-	vmmap->vm_addr = addr;
-	LIST_INSERT_HEAD(&vmmaphead[VM_HASH(addr)], vmmap, vm_next);
-	mtx_unlock(&vmmaplock);
-}
-
-static struct vmmap *
-vmmap_remove(void *addr)
-{
-	struct vmmap *vmmap;
-
-	mtx_lock(&vmmaplock);
-	LIST_FOREACH(vmmap, &vmmaphead[VM_HASH(addr)], vm_next)
-		if (vmmap->vm_addr == addr)
-			break;
-	if (vmmap)
-		LIST_REMOVE(vmmap, vm_next);
-	mtx_unlock(&vmmaplock);
-
-	return (vmmap);
-}
-
-#if defined(__i386__) || defined(__amd64__) || defined(__powerpc__) || defined(__aarch64__) || defined(__riscv)
-void *
-_ioremap_attr(vm_paddr_t phys_addr, unsigned long size, int attr)
-{
-	void *addr;
-
-	addr = pmap_mapdev_attr(phys_addr, size, attr);
-	if (addr == NULL)
-		return (NULL);
-	vmmap_add(addr, size);
-
-	return (addr);
-}
-#endif
-
-void
-iounmap(void *addr)
-{
-	struct vmmap *vmmap;
-
-	vmmap = vmmap_remove(addr);
-	if (vmmap == NULL)
-		return;
-#if defined(__i386__) || defined(__amd64__) || defined(__powerpc__) || defined(__aarch64__) || defined(__riscv)
-	pmap_unmapdev(addr, vmmap->vm_size);
-#endif
-	kfree(vmmap);
-}
-
-void *
-vmap(struct page **pages, unsigned int count, unsigned long flags, int prot)
-{
-	vm_offset_t off;
-	size_t size;
-
-	size = count * PAGE_SIZE;
-	off = kva_alloc(size);
-	if (off == 0)
-		return (NULL);
-	vmmap_add((void *)off, size);
-	pmap_qenter(off, pages, count);
-
-	return ((void *)off);
-}
-
-void
-vunmap(void *addr)
-{
-	struct vmmap *vmmap;
-
-	vmmap = vmmap_remove(addr);
-	if (vmmap == NULL)
-		return;
-	pmap_qremove((vm_offset_t)addr, vmmap->vm_size / PAGE_SIZE);
-	kva_free((vm_offset_t)addr, vmmap->vm_size);
-	kfree(vmmap);
-}
-
 static char *
 devm_kvasprintf(struct device *dev, gfp_t gfp, const char *fmt, va_list ap)
 {
@@ -1999,54 +1964,166 @@ void
 lkpi_hex_dump(int(*_fpf)(void *, const char *, ...), void *arg1,
     const char *level, const char *prefix_str,
     const int prefix_type, const int rowsize, const int groupsize,
-    const void *buf, size_t len, const bool ascii)
+    const void *buf, size_t len, const bool ascii, const bool trailing_newline)
 {
 	typedef const struct { long long value; } __packed *print_64p_t;
 	typedef const struct { uint32_t value; } __packed *print_32p_t;
 	typedef const struct { uint16_t value; } __packed *print_16p_t;
 	const void *buf_old = buf;
-	int row;
+	int row, linelen, ret;
 
 	while (len > 0) {
-		if (level != NULL)
-			_fpf(arg1, "%s", level);
-		if (prefix_str != NULL)
-			_fpf(arg1, "%s ", prefix_str);
+		linelen = 0;
+		if (level != NULL) {
+			ret = _fpf(arg1, "%s", level);
+			if (ret < 0)
+				break;
+			linelen += ret;
+		}
+		if (prefix_str != NULL) {
+			ret = _fpf(
+			    arg1, "%s%s", linelen ? " " : "", prefix_str);
+			if (ret < 0)
+				break;
+			linelen += ret;
+		}
 
 		switch (prefix_type) {
 		case DUMP_PREFIX_ADDRESS:
-			_fpf(arg1, "[%p] ", buf);
+			ret = _fpf(
+			    arg1, "%s[%p]", linelen ? " " : "", buf);
+			if (ret < 0)
+				return;
+			linelen += ret;
 			break;
 		case DUMP_PREFIX_OFFSET:
-			_fpf(arg1, "[%#tx] ", ((const char *)buf -
-			    (const char *)buf_old));
+			ret = _fpf(
+			    arg1, "%s[%#tx]", linelen ? " " : "",
+			    ((const char *)buf - (const char *)buf_old));
+			if (ret < 0)
+				return;
+			linelen += ret;
 			break;
 		default:
 			break;
 		}
 		for (row = 0; row != rowsize; row++) {
 			if (groupsize == 8 && len > 7) {
-				_fpf(arg1, "%016llx ", ((print_64p_t)buf)->value);
+				ret = _fpf(
+				    arg1, "%s%016llx", linelen ? " " : "",
+				    ((print_64p_t)buf)->value);
+				if (ret < 0)
+					return;
+				linelen += ret;
 				buf = (const uint8_t *)buf + 8;
 				len -= 8;
 			} else if (groupsize == 4 && len > 3) {
-				_fpf(arg1, "%08x ", ((print_32p_t)buf)->value);
+				ret = _fpf(
+				    arg1, "%s%08x", linelen ? " " : "",
+				    ((print_32p_t)buf)->value);
+				if (ret < 0)
+					return;
+				linelen += ret;
 				buf = (const uint8_t *)buf + 4;
 				len -= 4;
 			} else if (groupsize == 2 && len > 1) {
-				_fpf(arg1, "%04x ", ((print_16p_t)buf)->value);
+				ret = _fpf(
+				    arg1, "%s%04x", linelen ? " " : "",
+				    ((print_16p_t)buf)->value);
+				if (ret < 0)
+					return;
+				linelen += ret;
 				buf = (const uint8_t *)buf + 2;
 				len -= 2;
 			} else if (len > 0) {
-				_fpf(arg1, "%02x ", *(const uint8_t *)buf);
+				ret = _fpf(
+				    arg1, "%s%02x", linelen ? " " : "",
+				    *(const uint8_t *)buf);
+				if (ret < 0)
+					return;
+				linelen += ret;
 				buf = (const uint8_t *)buf + 1;
 				len--;
 			} else {
 				break;
 			}
 		}
-		_fpf(arg1, "\n");
+		if (len > 0 && trailing_newline) {
+			ret = _fpf(arg1, "\n");
+			if (ret < 0)
+				break;
+		}
 	}
+}
+
+struct hdtb_context {
+	char	*linebuf;
+	size_t	 linebuflen;
+	int	 written;
+};
+
+static int
+hdtb_cb(void *arg, const char *format, ...)
+{
+	struct hdtb_context *context;
+	int written;
+	va_list args;
+
+	context = arg;
+
+	va_start(args, format);
+	written = vsnprintf(
+	    context->linebuf, context->linebuflen, format, args);
+	va_end(args);
+
+	if (written < 0)
+		return (written);
+
+	/*
+	 * Linux' hex_dump_to_buffer() function has the same behaviour as
+	 * snprintf() basically. Therefore, it returns the number of bytes it
+	 * would have written if the destination buffer was large enough.
+	 *
+	 * If the destination buffer was exhausted, lkpi_hex_dump() will
+	 * continue to call this callback but it will only compute the bytes it
+	 * would have written but write nothing to that buffer.
+	 */
+	context->written += written;
+
+	if (written < context->linebuflen) {
+		context->linebuf += written;
+		context->linebuflen -= written;
+	} else {
+		context->linebuf += context->linebuflen;
+		context->linebuflen = 0;
+	}
+
+	return (written);
+}
+
+int
+lkpi_hex_dump_to_buffer(const void *buf, size_t len, int rowsize,
+    int groupsize, char *linebuf, size_t linebuflen, bool ascii)
+{
+	int written;
+	struct hdtb_context context;
+
+	context.linebuf = linebuf;
+	context.linebuflen = linebuflen;
+	context.written = 0;
+
+	if (rowsize != 16 && rowsize != 32)
+		rowsize = 16;
+
+	len = min(len, rowsize);
+
+	lkpi_hex_dump(
+	    hdtb_cb, &context, NULL, NULL, DUMP_PREFIX_NONE,
+	    rowsize, groupsize, buf, len, ascii, false);
+
+	written = context.written;
+
+	return (written);
 }
 
 static void
@@ -2067,7 +2144,7 @@ linux_timer_callback_wrapper(void *context)
 		return;
 	}
 
-	timer->function(timer->data);
+	timer->function(timer);
 }
 
 static int
@@ -2120,7 +2197,7 @@ add_timer_on(struct timer_list *timer, int cpu)
 }
 
 int
-del_timer(struct timer_list *timer)
+timer_delete(struct timer_list *timer)
 {
 
 	if (callout_stop(&(timer)->callout) == -1)
@@ -2129,19 +2206,12 @@ del_timer(struct timer_list *timer)
 }
 
 int
-del_timer_sync(struct timer_list *timer)
+timer_delete_sync(struct timer_list *timer)
 {
 
 	if (callout_drain(&(timer)->callout) == -1)
 		return (0);
 	return (1);
-}
-
-int
-timer_delete_sync(struct timer_list *timer)
-{
-
-	return (del_timer_sync(timer));
 }
 
 int
@@ -2763,6 +2833,12 @@ device_can_wakeup(struct device *dev)
 	return (false);
 }
 
+void
+linuxkpi_device_set_wakeup_capable(struct device *dev, bool capable)
+{
+	dev->power.can_wakeup = capable;
+}
+
 static void
 devm_device_group_remove(struct device *dev, void *p)
 {
@@ -2862,6 +2938,7 @@ linux_compat_init(void *arg)
 	boot_cpu_data.x86 = CPUID_TO_FAMILY(cpu_id);
 	boot_cpu_data.x86_model = CPUID_TO_MODEL(cpu_id);
 	boot_cpu_data.x86_vendor = x86_vendor;
+	boot_cpu_data.x86_stepping = CPUID_TO_STEPPING(cpu_id);
 
 	__cpu_data = kmalloc_array(mp_maxid + 1,
 	    sizeof(*__cpu_data), M_WAITOK | M_ZERO);
@@ -2889,12 +2966,6 @@ linux_compat_init(void *arg)
 	linux_root_device.bsddev = root_bus;
 	linux_class_misc.name = "misc";
 	class_register(&linux_class_misc);
-	INIT_LIST_HEAD(&pci_drivers);
-	INIT_LIST_HEAD(&pci_devices);
-	spin_lock_init(&pci_lock);
-	mtx_init(&vmmaplock, "IO Map lock", NULL, MTX_DEF);
-	for (i = 0; i < VMMAP_HASH_SIZE; i++)
-		LIST_INIT(&vmmaphead[i]);
 	init_waitqueue_head(&linux_bit_waitq);
 	init_waitqueue_head(&linux_var_waitq);
 
@@ -3005,11 +3076,45 @@ linux_compat_uninit(void *arg)
 	free(__cpu_data, M_KMALLOC);
 #endif
 
-	mtx_destroy(&vmmaplock);
-	spin_lock_destroy(&pci_lock);
 	rw_destroy(&linux_vma_lock);
 }
 SYSUNINIT(linux_compat, SI_SUB_DRIVERS, SI_ORDER_SECOND, linux_compat_uninit, NULL);
+
+#if defined(__i386__) || defined(__amd64__)
+const struct x86_cpu_id *
+linuxkpi_x86_match_cpu(const struct x86_cpu_id *match_array)
+{
+	const struct x86_cpu_id *match;
+
+	for (match = match_array;
+	    (match->flags & X86_CPU_ID_FLAG_ENTRY_VALID) != 0;
+	    match++) {
+		if (match->vendor != X86_VENDOR_ANY &&
+		    match->vendor != boot_cpu_data.x86_vendor)
+			continue;
+
+		if (match->family != X86_FAMILY_ANY &&
+		    match->family != boot_cpu_data.x86)
+			continue;
+
+		if (match->model != X86_MODEL_ANY &&
+		    match->model != boot_cpu_data.x86_model)
+			continue;
+
+		if (match->model != X86_STEPPING_ANY &&
+		    (match->steppings & BIT(boot_cpu_data.x86_stepping)) == 0)
+			continue;
+
+		if (match->feature != X86_FEATURE_ANY &&
+		    !static_cpu_has(match->feature))
+			continue;
+
+		return (match);
+	}
+
+	return (NULL);
+}
+#endif
 
 /*
  * NOTE: Linux frequently uses "unsigned long" for pointer to integer

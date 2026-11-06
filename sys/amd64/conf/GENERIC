@@ -24,15 +24,15 @@ makeoptions	DEBUG=-g		# Build kernel with gdb(1) debug symbols
 makeoptions	WITH_CTF=1		# Run ctfconvert(1) for DTrace support
 
 options 	SCHED_ULE		# ULE scheduler
+options 	SCHED_4BSD		# Original 4.xBSD scheduler
 options 	NUMA			# Non-Uniform Memory Architecture support
 options 	PREEMPTION		# Enable kernel thread preemption
-options 	BLOAT_KERNEL_WITH_EXTERR
+options 	EXTERR_STRINGS		# Retain exterror(9) strings in the kernel
 options 	VIMAGE			# Subsystem virtualization, e.g. VNET
 options 	INET			# InterNETworking
 options 	INET6			# IPv6 communications protocols
 options 	IPSEC_SUPPORT		# Allow kldload of ipsec and tcpmd5
 options 	IPSEC_OFFLOAD		# Inline ipsec offload infra
-options 	ROUTE_MPATH		# Multipath routing support
 options 	FIB_ALGO		# Modular fib lookups
 options 	TCP_OFFLOAD		# TCP offload
 options 	TCP_BLACKBOX		# Enhanced TCP event logging
@@ -70,6 +70,7 @@ options 	COMPAT_FREEBSD11	# Compatible with FreeBSD11
 options 	COMPAT_FREEBSD12	# Compatible with FreeBSD12
 options 	COMPAT_FREEBSD13	# Compatible with FreeBSD13
 options 	COMPAT_FREEBSD14	# Compatible with FreeBSD14
+options 	COMPAT_FREEBSD15	# Compatible with FreeBSD15
 options 	SCSI_DELAY=5000		# Delay (in ms) before probing SCSI
 options 	KTRACE			# ktrace(1) support
 options 	STACK			# stack(9) support
@@ -98,10 +99,12 @@ options 	KDB_TRACE		# Print a stack trace for a panic.
 # For full debugger support use (turn off in stable branch):
 include "std.debug"
 
+# Compression support
+options 	GZIO			# gzip (dumps)
+options 	ZSTDIO			# zstd (dumps, tarfs, uzip, zfs)
+
 # Kernel dump features.
 options 	EKCD			# Support for encrypted kernel dumps
-options 	GZIO			# gzip-compressed kernel and user dumps
-options 	ZSTDIO			# zstd-compressed kernel and user dumps
 options 	DEBUGNET		# debugnet networking
 options 	NETDUMP			# netdump(4) client support
 options 	NETGDB			# netgdb(4) client support
@@ -184,6 +187,9 @@ device		mrsas			# LSI/Avago MegaRAID SAS/SATA, 6Gb/s and 12Gb/s
 device		nvme			# base NVMe driver
 device		nvd			# expose NVMe namespaces as disks, depends on nvme
 
+# Universal Flash Storage Host Controller Interface support
+device 		ufshci			# UFS host controller
+
 # Intel Volume Management Device (VMD) support
 device		vmd
 
@@ -224,6 +230,9 @@ device		ppi			# Parallel port interface device
 
 device		puc			# Multi I/O cards and multi-channel UARTs
 
+# MDIO bus for Ethernet NICs that directly expose the MDIO bus
+device		mdio
+
 # PCI/PCI-X/PCIe Ethernet NICs that use iflib infrastructure
 device		iflib
 device		em			# Intel PRO/1000 Gigabit Ethernet Family
@@ -237,8 +246,9 @@ device		vmx			# VMware VMXNET3 Ethernet
 device		axp			# AMD EPYC integrated NIC (requires miibus)
 
 # PCI Ethernet NICs.
+device		aq			# Aquantia / Marvell AQC1xx
 device		bxe			# Broadcom NetXtreme II BCM5771X/BCM578XX 10GbE
-device		le			# AMD Am7900 LANCE and Am79C9xx PCnet
+device		rge			# Realtek 8125/8126/8127
 device		ti			# Alteon Networks Tigon I/II gigabit Ethernet
 
 # Nvidia/Mellanox Connect-X 4 and later, Ethernet only
@@ -268,8 +278,8 @@ device		lge			# Level 1 LXT1001 gigabit Ethernet
 device		msk			# Marvell/SysKonnect Yukon II Gigabit Ethernet
 device		nfe			# nVidia nForce MCP on-board Ethernet
 device		nge			# NatSemi DP83820 gigabit Ethernet
-device		re			# RealTek 8139C+/8169/8169S/8110S
-device		rl			# RealTek 8129/8139
+device		re			# Realtek 8139C+/8169/8169S/8110S
+device		rl			# Realtek 8129/8139
 device		sge			# Silicon Integrated Systems SiS190/191
 device		sis			# Silicon Integrated Systems SiS 900/SiS 7016
 device		sk			# SysKonnect SK-984x & SK-982x gigabit Ethernet
@@ -284,9 +294,9 @@ device		wlan			# 802.11 support
 options 	IEEE80211_DEBUG		# enable debug msgs
 options 	IEEE80211_SUPPORT_MESH	# enable 802.11s draft support
 device		wlan_wep		# 802.11 WEP support
+device		wlan_tkip		# 802.11 TKIP support
 device		wlan_ccmp		# 802.11 CCMP support
 device		wlan_gcmp		# 802.11 GCMP support
-device		wlan_tkip		# 802.11 TKIP support
 device		wlan_amrr		# AMRR transmit rate control algorithm
 device		ath			# Atheros CardBus/PCI NICs
 device		ath_hal			# Atheros CardBus/PCI chip support
@@ -306,8 +316,6 @@ device		wpi			# Intel 3945ABG wireless NICs.
 device		crypto			# core crypto support
 device		aesni			# AES-NI OpenCrypto module
 device		loop			# Network loopback
-device		padlock_rng		# VIA Padlock RNG
-device		rdrand_rng		# Intel Bull Mountain RNG
 device		ether			# Ethernet support
 device		vlan			# 802.1Q VLAN support
 device		tuntap			# Packet tunnel.
@@ -321,12 +329,23 @@ device		xz			# lzma decompression
 # Note that 'bpf' is required for DHCP.
 device		bpf			# Berkeley packet filter
 
+# random(4)
+device		padlock_rng		# VIA Padlock RNG
+device		rdrand_rng		# Intel Bull Mountain RNG
+device		tpm			# Trusted Platform Module
+options 	RANDOM_ENABLE_TPM	# enable entropy from TPM devices
+options 	RANDOM_ENABLE_KBD
+options 	RANDOM_ENABLE_MOUSE
+
 # USB support
 options 	USB_DEBUG		# enable debug msgs
 device		uhci			# UHCI PCI->USB interface
 device		ohci			# OHCI PCI->USB interface
 device		ehci			# EHCI PCI->USB interface (USB 2.0)
 device		xhci			# XHCI PCI->USB interface (USB 3.0)
+# Disabled for now since thunderbolt(4) breaks suspend/resume in some instances
+# and the overall implementation isn't fully fleshed out yet.
+#device		thunderbolt		# Thunderbolt PCI->USB interface (USB 4.0)
 device		usb			# USB Bus (required)
 device		usbhid			# USB HID Transport
 device		hkbd			# HID Keyboard

@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -40,9 +30,6 @@
 #include <sys/cred.h>
 #include "zfs_comutil.h"
 #include "zfs_gitrev.h"
-#ifdef _KERNEL
-#include <sys/zone.h>
-#endif
 
 /*
  * Routines to manage the on-disk history log.
@@ -169,13 +156,14 @@ spa_history_write(spa_t *spa, void *buf, uint64_t len, spa_history_phys_t *shpp,
 	phys_eof = spa_history_log_to_phys(shpp->sh_eof, shpp);
 	firstwrite = MIN(len, shpp->sh_phys_max_off - phys_eof);
 	shpp->sh_eof += len;
-	dmu_write(mos, spa->spa_history, phys_eof, firstwrite, buf, tx);
+	dmu_write(mos, spa->spa_history, phys_eof, firstwrite, buf, tx,
+	    DMU_READ_NO_PREFETCH);
 
 	len -= firstwrite;
 	if (len > 0) {
 		/* write out the rest at the beginning of physical file */
 		dmu_write(mos, spa->spa_history, shpp->sh_pool_create_len,
-		    len, (char *)buf + firstwrite, tx);
+		    len, (char *)buf + firstwrite, tx, DMU_READ_NO_PREFETCH);
 	}
 
 	return (0);

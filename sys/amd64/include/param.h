@@ -41,7 +41,10 @@
 #ifndef _AMD64_INCLUDE_PARAM_H_
 #define	_AMD64_INCLUDE_PARAM_H_
 
-#include <machine/_align.h>
+#include <sys/_align.h>
+
+#define	STACKALIGNBYTES	(16 - 1)
+#define	REDZONE_SZ	128
 
 /*
  * Machine dependent constants for AMD64.
@@ -150,6 +153,15 @@
     (((va) >= kva_layout.dmap_low && (va) < kva_layout.dmap_high) || \
     ((va) >= kva_layout.km_low && (va) < kva_layout.km_high))
 
-#define SC_TABLESIZE    1024                     /* Must be power of 2. */
+/*
+ * Must be power of 2.
+ *
+ * Perhaps should be autosized on boot based on found ncpus.
+ */
+#if MAXCPU > 256
+#define SC_TABLESIZE    2048
+#else
+#define SC_TABLESIZE    1024
+#endif
 
 #endif /* !_AMD64_INCLUDE_PARAM_H_ */

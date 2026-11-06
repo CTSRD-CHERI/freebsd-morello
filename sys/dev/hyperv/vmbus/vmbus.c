@@ -92,7 +92,7 @@ static int			vmbus_read_ivar(device_t, device_t, int,
 				    uintptr_t *);
 static int			vmbus_child_pnpinfo(device_t, device_t, struct sbuf *);
 static struct resource		*vmbus_alloc_resource(device_t dev,
-				    device_t child, int type, int *rid,
+				    device_t child, int type, int rid,
 				    rman_res_t start, rman_res_t end,
 				    rman_res_t count, u_int flags);
 static int			vmbus_alloc_msi(device_t bus, device_t dev,
@@ -848,6 +848,28 @@ vmbus_synic_teardown(void *arg)
 	WRMSR(MSR_HV_SIEFP, (orig & MSR_HV_SIEFP_RSVD_MASK));
 }
 
+struct hyperv_dma *
+vmbus_get_mem_evtflags(void)
+{
+	struct vmbus_softc *sc = vmbus_get_softc();
+
+	if (!sc)
+		return NULL;
+
+	return NULL; //&sc->vmbus_evtflags_dma;
+}
+
+struct hyperv_dma *
+vmbus_get_mem_mnf2(void)
+{
+	struct vmbus_softc *sc = vmbus_get_softc();
+
+	if (!sc)
+		return NULL;
+
+	return NULL; //&sc->vmbus_mnf2_dma;
+}
+
 static int
 vmbus_dma_alloc(struct vmbus_softc *sc)
 {
@@ -1062,7 +1084,7 @@ vmbus_sysctl_version(SYSCTL_HANDLER_ARGS)
  * For the release function, we can use bus_generic_release_resource().
  */
 static struct resource *
-vmbus_alloc_resource(device_t dev, device_t child, int type, int *rid,
+vmbus_alloc_resource(device_t dev, device_t child, int type, int rid,
     rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
 {
 	device_t parent = device_get_parent(dev);
@@ -1346,7 +1368,7 @@ vmbus_fb_mmio_res(device_t dev)
 		    fb_start, fb_count, fb_height * fb_width);
 
 	hv_fb_res = pcib_host_res_alloc(&sc->vmbus_mmio_res, dev,
-	    SYS_RES_MEMORY, &rid, fb_start, fb_end, fb_count,
+	    SYS_RES_MEMORY, rid, fb_start, fb_end, fb_count,
 	    RF_ACTIVE | rman_make_alignment_flags(PAGE_SIZE));
 
 	if (hv_fb_res && bootverbose)

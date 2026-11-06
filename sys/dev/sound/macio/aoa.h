@@ -35,12 +35,12 @@
 #endif
 
 struct aoa_softc {
-	device_t	 sc_dev;	 
+	device_t	 sc_dev;
 	void		*sc_intrp;
 	struct resource	*sc_odma;
 };
 
 void	aoa_interrupt(void *);
-int	aoa_attach(void *xsc);
+int	aoa_attach(void *xsc, kobj_class_t mixer_class, void *mixer_devinfo);
 
 #endif /* SOUND_AOA_H */

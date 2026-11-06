@@ -195,6 +195,7 @@ static const struct {
 	{0x1f3f8086, 0x00, "Intel Avoton (RAID)",	0},
 	{0x23a38086, 0x00, "Intel Coleto Creek",	0},
 	{0x31e38086, 0x00, "Intel Gemini Lake",	0},
+	{0x4b638086, 0x00, "Intel Elkhart Lake",	0},
 	{0x5ae38086, 0x00, "Intel Apollo Lake",	0},
 	{0x7ae28086, 0x00, "Intel Alder Lake",	0},
 	{0x8c028086, 0x00, "Intel Lynx Point",	0},
@@ -293,6 +294,8 @@ static const struct {
 	{0x91821b4b, 0x00, "Marvell 88SE9182",	AHCI_Q_IOMMU_BUSWIDE},
 	{0x91831b4b, 0x00, "Marvell 88SS9183",	AHCI_Q_IOMMU_BUSWIDE},
 	{0x91a01b4b, 0x00, "Marvell 88SE91Ax",	AHCI_Q_IOMMU_BUSWIDE},
+	{0x91a31b4b, 0x00, "Marvell 88SE9128",	AHCI_Q_ALTSIG |
+	    AHCI_Q_IOMMU_BUSWIDE},
 	{0x92151b4b, 0x00, "Marvell 88SE9215",  0},
 	{0x92201b4b, 0x00, "Marvell 88SE9220",  AHCI_Q_ALTSIG |
 	    AHCI_Q_IOMMU_BUSWIDE},
@@ -466,28 +469,6 @@ ahci_ata_probe(device_t dev)
 }
 
 static int
-ahci_pci_read_msix_bars(device_t dev, uint8_t *table_bar, uint8_t *pba_bar)
-{
-	int cap_offset = 0, ret;
-	uint32_t val;
-
-	if ((table_bar == NULL) || (pba_bar == NULL))
-		return (EINVAL);
-
-	ret = pci_find_cap(dev, PCIY_MSIX, &cap_offset);
-	if (ret != 0)
-		return (EINVAL);
-
-	val = pci_read_config(dev, cap_offset + PCIR_MSIX_TABLE, 4);
-	*table_bar = PCIR_BAR(val & PCIM_MSIX_BIR_MASK);
-
-	val = pci_read_config(dev, cap_offset + PCIR_MSIX_PBA, 4);
-	*pba_bar = PCIR_BAR(val & PCIM_MSIX_BIR_MASK);
-
-	return (0);
-}
-
-static int
 ahci_pci_attach(device_t dev)
 {
 	struct ahci_controller *ctlr = device_get_softc(dev);
@@ -495,7 +476,6 @@ ahci_pci_attach(device_t dev)
 	uint32_t devid = pci_get_devid(dev);
 	uint8_t revid = pci_get_revid(dev);
 	int msi_count, msix_count;
-	uint8_t table_bar = 0, pba_bar = 0;
 	uint32_t caps, pi;
 
 	msi_count = pci_msi_count(dev);
@@ -545,7 +525,8 @@ ahci_pci_attach(device_t dev)
 	 * here, or the user has to change the mode in the BIOS
 	 * from RST to AHCI.
 	 */
-	if (pci_get_vendor(dev) == 0x8086) {
+	if (pci_get_vendor(dev) == 0x8086 &&
+	    rman_get_size(ctlr->r_mem) >= 512 * 1024) {
 		uint32_t vscap;
 
 		vscap = ATA_INL(ctlr->r_mem, AHCI_VSCAP);
@@ -583,20 +564,11 @@ ahci_pci_attach(device_t dev)
 	if (ctlr->quirks & AHCI_Q_NOMSIX)
 		msix_count = 0;
 
-	/* Read MSI-x BAR IDs if supported */
-	if (msix_count > 0) {
-		error = ahci_pci_read_msix_bars(dev, &table_bar, &pba_bar);
-		if (error == 0) {
-			ctlr->r_msix_tab_rid = table_bar;
-			ctlr->r_msix_pba_rid = pba_bar;
-		} else {
-			/* Failed to read BARs, disable MSI-x */
-			msix_count = 0;
-		}
-	}
-
 	/* Allocate resources for MSI-x table and PBA */
 	if (msix_count > 0) {
+		ctlr->r_msix_tab_rid = pci_msix_table_bar(dev);
+		ctlr->r_msix_pba_rid = pci_msix_pba_bar(dev);
+
 		/*
 		 * Allocate new MSI-x table only if not
 		 * allocated before.
@@ -607,8 +579,8 @@ ahci_pci_attach(device_t dev)
 			ctlr->r_msix_table = bus_alloc_resource_any(dev, SYS_RES_MEMORY,
 			    &ctlr->r_msix_tab_rid, RF_ACTIVE);
 			if (ctlr->r_msix_table == NULL) {
-				ahci_free_mem(dev);
-				return (ENXIO);
+				msix_count = 0;
+				goto no_msix;
 			}
 		}
 
@@ -623,12 +595,12 @@ ahci_pci_attach(device_t dev)
 			ctlr->r_msix_pba = bus_alloc_resource_any(dev, SYS_RES_MEMORY,
 			    &ctlr->r_msix_pba_rid, RF_ACTIVE);
 			if (ctlr->r_msix_pba == NULL) {
-				ahci_free_mem(dev);
-				return (ENXIO);
+				msix_count = 0;
 			}
 		}
 	}
 
+no_msix:
 	pci_enable_busmaster(dev);
 	/* Reset controller */
 	if ((error = ahci_pci_ctlr_reset(dev)) != 0) {

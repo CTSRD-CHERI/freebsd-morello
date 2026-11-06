@@ -217,7 +217,7 @@ static device_method_t ciss_methods[] = {
     DEVMETHOD(device_attach,	ciss_attach),
     DEVMETHOD(device_detach,	ciss_detach),
     DEVMETHOD(device_shutdown,	ciss_shutdown),
-    { 0, 0 }
+    DEVMETHOD_END
 };
 
 static driver_t ciss_pci_driver = {
@@ -1552,9 +1552,6 @@ ciss_init_physical(struct ciss_softc *sc)
 	    nphys, (nphys > 1 || nphys == 0) ? "s" : "");
     }
 
-    /* Per-controller highest target number seen */
-    sc->ciss_max_physical_target = 0;
-
     /*
      * Figure out the bus mapping.
      * Logical buses include both the local logical bus for local arrays and
@@ -1637,8 +1634,6 @@ ciss_init_physical(struct ciss_softc *sc)
     }
 
     ciss_filter_physical(sc, cll);
-    if (bootverbose || ciss_verbose)
-	ciss_printf(sc, "max physical target id: %d\n", sc->ciss_max_physical_target);
 
 out:
     if (cll != NULL)
@@ -1688,10 +1683,6 @@ ciss_filter_physical(struct ciss_softc *sc, struct ciss_lun_report *cll)
 	target = CISS_EXTRA_TARGET2(ea);
 	sc->ciss_physical[bus][target].cp_address = cll->lun[i];
 	sc->ciss_physical[bus][target].cp_online = 1;
-
-	if ((target > sc->ciss_max_physical_target) &&
-	    (cll->lun[i].physical.mode != CISS_HDR_ADDRESS_MODE_MASK_PERIPHERAL))
-		sc->ciss_max_physical_target = target;
     }
 
     return (0);
@@ -3079,7 +3070,7 @@ ciss_cam_action(struct cam_sim *sim, union ccb *ccb)
 	cpi->hba_inquiry = PI_TAG_ABLE;	/* XXX is this correct? */
 	cpi->target_sprt = 0;
 	cpi->hba_misc = 0;
-	cpi->max_target = MAX(sc->ciss_max_physical_target, sc->ciss_cfg->max_logical_supported);
+	cpi->max_target = sc->ciss_cfg->max_logical_supported;
 	cpi->max_lun = 0;		/* 'logical drive' channel only */
 	if (ciss_initiator_id != CAM_TARGET_WILDCARD)
 		cpi->initiator_id = ciss_initiator_id;
@@ -3140,7 +3131,7 @@ ciss_cam_action(struct cam_sim *sim, union ccb *ccb)
     }
 
     default:		/* we can't do this */
-	debug(1, "unspported func_code = 0x%x", ccb->ccb_h.func_code);
+	debug(1, "unsupported func_code = 0x%x", ccb->ccb_h.func_code);
 	ccb->ccb_h.status = CAM_REQ_INVALID;
 	break;
     }

@@ -31,16 +31,26 @@
 /*
  * 802.11 protocol crypto-related definitions.
  */
-#define	IEEE80211_KEYBUF_SIZE	16
-#define	IEEE80211_MICBUF_SIZE	(8+8)	/* space for both tx+rx keys */
 
 /*
- * Old WEP-style key.  Deprecated.
+ * Legacy 128 bit key size storage for WEP, TKIP, CCMP key sizes.
+ * This has been used to store keys in net80211 for various things
+ * (eg the rc4key in WEP) as well as driver definitions for their
+ * own hardware programming.
+ *
+ * This should eventually be used by the ioctl and drivers instead of
+ * IEEE80211_KEYBUF_SIZE as the key size will eventually grow.
  */
-struct ieee80211_wepkey {
-	u_int		wk_len;		/* key length in bytes */
-	uint8_t		wk_key[IEEE80211_KEYBUF_SIZE];
-};
+#define	IEEE80211_KEYBUF_128_SIZE	16
+#define	IEEE80211_TX_MICBUF_128_SIZE	8
+#define	IEEE80211_RX_MICBUF_128_SIZE	8
+#define	IEEE80211_MICBUF_128_SIZE	(8+8)	/* space for both tx+rx keys */
+
+/*
+ * Temporary definition whilst I clean up where this is still being used.
+ */
+#define	IEEE80211_KEYBUF_SIZE		IEEE80211_KEYBUF_128_SIZE
+#define	IEEE80211_MICBUF_SIZE		IEEE80211_MICBUF_128_SIZE
 
 struct ieee80211_rsnparms {
 	uint8_t		rsn_mcastcipher;	/* mcast/group cipher */
@@ -94,6 +104,7 @@ struct ieee80211_key {
 
 	ieee80211_keyix	wk_keyix;	/* h/w key index */
 	ieee80211_keyix	wk_rxkeyix;	/* optional h/w rx key index */
+	/* TODO: deprecate direct access to wk_key, wk_txmic, wk_rxmic */
 	uint8_t		wk_key[IEEE80211_KEYBUF_SIZE+IEEE80211_MICBUF_SIZE];
 #define	wk_txmic	wk_key+IEEE80211_KEYBUF_SIZE+0	/* XXX can't () right */
 #define	wk_rxmic	wk_key+IEEE80211_KEYBUF_SIZE+8	/* XXX can't () right */
@@ -299,6 +310,255 @@ void	ieee80211_notify_michael_failure(struct ieee80211vap *,
 /* AAD assembly for CCMP/GCMP. */
 uint16_t	ieee80211_crypto_init_aad(const struct ieee80211_frame *,
 		uint8_t *, int);
+
+/**
+ * @brief Set the key data.
+ *
+ * This will only set the key data and length, not the TX/RX MIC.
+ *
+ * Note: there's no locking; this needs to be called in
+ * a situation where the ieee80211_key won't disappear.
+ *
+ * @param key		key to set
+ * @param data		key contents to use
+ * @param len		key length
+ * @returns true	if the key data was copied and it fit,
+ * 			false otherwise.
+ */
+static inline bool
+ieee80211_crypto_set_key_data(struct ieee80211_key *k, const uint8_t *data,
+    uint32_t len)
+{
+	if (len > IEEE80211_KEYBUF_SIZE)
+		return (false);
+	memset(k->wk_key, '\0', IEEE80211_KEYBUF_SIZE);
+	memcpy(k->wk_key, data, len);
+	k->wk_keylen = len;
+	return (true);
+}
+
+/**
+ * @brief Set the TX MIC data.
+ *
+ * This will only set the TX MIC data, not the key.
+ *
+ * Note: there's no locking; this needs to be called in
+ * a situation where the ieee80211_key won't disappear.
+ *
+ * @param key		key to set
+ * @param data		TX MIC contents
+ * @param len		TX MIC length
+ * @returns true	if the MIC data was copied and it fit,
+ * 			false otherwise.
+ */
+static inline bool
+ieee80211_crypto_set_key_txmic_data(struct ieee80211_key *k,
+    uint8_t *data, uint32_t len)
+{
+	if (len > IEEE80211_TX_MICBUF_128_SIZE)
+		return (false);
+	memset(k->wk_key, '\0', IEEE80211_TX_MICBUF_128_SIZE);
+	memcpy(k->wk_txmic, data, len);
+	return (true);
+}
+
+/**
+ * @brief Set the RX MIC data.
+ *
+ * This will only set the RX MIC data, not the key.
+ *
+ * Note: there's no locking; this needs to be called in
+ * a situation where the ieee80211_key won't disappear.
+ *
+ * @param key		key to set
+ * @param data		RX MIC contents
+ * @param len		RX MIC length
+ * @returns true	if the MIC data was copied and it fit,
+ * 			false otherwise.
+ */
+static inline bool
+ieee80211_crypto_set_key_rxmic_data(struct ieee80211_key *k,
+    const uint8_t *data, uint32_t len)
+{
+	if (len > IEEE80211_RX_MICBUF_128_SIZE)
+		return (false);
+	memset(k->wk_key, '\0', IEEE80211_RX_MICBUF_128_SIZE);
+	memcpy(k->wk_rxmic, data, len);
+	return (true);
+}
+
+/**
+ * @brief Get the key data.
+ *
+ * This copies out the key data from the given ieee80211_key
+ * into the given buffer/length.
+ *
+ * @param key	ieee80211_key to copy from
+ * @param data	destination buffer for key
+ * @param len	destination buffer length
+ * @returns	true if copied, false if not
+ */
+static inline bool
+ieee80211_crypto_copy_key_data(const struct ieee80211_key *k,
+    uint8_t *data, uint32_t len)
+{
+	if (len < k->wk_keylen)
+		return (false);
+
+	memset(data, '\0', len);
+	memcpy(data, k->wk_key, k->wk_keylen);
+	return (true);
+}
+
+/**
+ * @brief Get the TX MIC.
+ *
+ * This copies out the TX MIC from the given ieee80211_key
+ * into the given buffer/length.
+ *
+ * @param key	ieee80211_key to copy from
+ * @param data	destination buffer for TX MIC
+ * @param len	destination buffer length
+ * @returns	true if copied, false if not
+ */
+static inline uint32_t
+ieee80211_crypto_copy_txmic_data(const struct ieee80211_key *k,
+    uint8_t *data, uint32_t len)
+{
+	if (len < k->wk_cipher->ic_miclen)
+		return (false);
+
+	memset(data, '\0', len);
+	memcpy(data, k->wk_txmic, k->wk_cipher->ic_miclen);
+	return (true);
+}
+
+/**
+ * @brief Get the RX MIC.
+ *
+ * This copies out the RX MIC from the given ieee80211_key
+ * into the given buffer/length.
+ *
+ * @param key	ieee80211_key to copy from
+ * @param data	destination buffer for RX MIC
+ * @param len	destination buffer length
+ * @returns	true if copied, false if not
+ */
+static inline uint32_t
+ieee80211_crypto_copy_rxmic_data(const struct ieee80211_key *k,
+    uint8_t *data, uint32_t len)
+{
+	if (len < k->wk_cipher->ic_miclen)
+		return (false);
+
+	memset(data, '\0', len);
+	memcpy(data, k->wk_rxmic, k->wk_cipher->ic_miclen);
+	return (true);
+}
+
+/**
+ * @brief Return the key data.
+ *
+ * This returns a pointer to the key data.  Note it does not
+ * guarantee the TX/RX MIC will be immediately after the key.
+ * Callers must use ieee80211_crypto_get_key_txmic_data()
+ * and ieee80211_crypto_get_key_rxmic_data() for that.
+ *
+ * Note: there's no locking; this needs to be called in
+ * a situation where the ieee80211_key won't disappear.
+ *
+ * @param k ieee80211_key
+ * @returns NULL if no key data is available, or a pointer
+ *  to the key data.
+ */
+static inline const uint8_t *
+ieee80211_crypto_get_key_data(const struct ieee80211_key *k)
+{
+	return (k->wk_key);
+}
+
+/**
+ * @brief Return the key length in bytes.
+ *
+ * This doesn't include any TX/RX MIC (eg from TKIP).
+ *
+ * Note: there's no locking; this needs to be called in
+ * a situation where the ieee80211_key won't disappear.
+ *
+ * @param k ieee80211_key
+ * @returns the key length (without any MIC) in bytes
+ */
+static inline const uint16_t
+ieee80211_crypto_get_key_len(const struct ieee80211_key *k)
+{
+	return (k->wk_keylen);
+}
+
+/**
+ * @brief Return the TX MIC data.
+ *
+ * This returns a pointer to the TX MIC data.
+ *
+ * Note: there's no locking; this needs to be called in
+ * a situation where the ieee80211_key won't disappear.
+ *
+ * @param k ieee80211_key
+ * @returns NULL if no key data is available, or a pointer
+ *  to the TX MIC data.
+ */
+static inline const uint8_t *
+ieee80211_crypto_get_key_txmic_data(const struct ieee80211_key *k)
+{
+	return (k->wk_txmic);
+}
+
+/**
+ * @brief Return the TX MIC length in bytes.
+ *
+ * Note: there's no locking; this needs to be called in
+ * a situation where the ieee80211_key won't disappear.
+ *
+ * @param k ieee80211_key
+ * @returns the TX MIC length in bytes
+ */
+static inline const uint16_t
+ieee80211_crypto_get_key_txmic_len(const struct ieee80211_key *k)
+{
+	return (k->wk_cipher->ic_miclen);
+}
+
+/**
+ * @brief Return the RX MIC data.
+ *
+ * This returns a pointer to the RX MIC data.
+ *
+ * Note: there's no locking; this needs to be called in
+ * a situation where the ieee80211_key won't disappear.
+ *
+ * @param k ieee80211_key
+ * @returns NULL if no key data is available, or a pointer
+ *  to the RX MIC data.
+ */
+static inline const uint8_t *
+ieee80211_crypto_get_key_rxmic_data(const struct ieee80211_key *k)
+{
+	return (k->wk_rxmic);
+}
+
+/**
+ * @brief Return the RX MIC length in bytes.
+ *
+ * Note: there's no locking; this needs to be called in
+ * a situation where the ieee80211_key won't disappear.
+ *
+ * @param k ieee80211_key
+ * @returns the RX MIC length in bytes
+ */
+static inline const uint16_t
+ieee80211_crypto_get_key_rxmic_len(const struct ieee80211_key *k)
+{
+	return (k->wk_cipher->ic_miclen);
+}
 
 #endif /* defined(__KERNEL__) || defined(_KERNEL) */
 #endif /* _NET80211_IEEE80211_CRYPTO_H_ */

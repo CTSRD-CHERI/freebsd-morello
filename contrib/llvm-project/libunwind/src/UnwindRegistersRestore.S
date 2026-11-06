@@ -66,7 +66,10 @@ DEFINE_LIBUNWIND_FUNCTION(__libunwind_Registers_x86_jumpto)
   # skip fs
   # skip gs
 
-#elif defined(__x86_64__)
+// Native FreeBSD restores selectors and bases together through sigreturn in
+// libunwind.cpp; its sysarch base setters also replace the segment selectors.
+#elif defined(__x86_64__) && !defined(__arm64ec__) && \
+    (!defined(__FreeBSD__) || defined(_LIBUNWIND_IS_BAREMETAL))
 
 DEFINE_LIBUNWIND_FUNCTION(__libunwind_Registers_x86_64_jumpto)
 #
@@ -91,6 +94,57 @@ DEFINE_LIBUNWIND_FUNCTION(__libunwind_Registers_x86_64_jumpto)
   movq  %rbx, 0(%rax)
   movq  128(%rdi), %rbx # store new rip on new stack
   movq  %rbx, 8(%rax)
+  # Segment selectors are 16 bits. In particular, do not reload unchanged
+  # FS/GS selectors: doing so can clear their hidden base addresses.
+  movw  %fs,%ax
+  cmpw  148(%rdi),%ax
+  je    1f
+  movw  148(%rdi),%fs
+1:
+  movw  %gs,%ax
+  cmpw  150(%rdi),%ax
+  je    2f
+  movw  150(%rdi),%gs
+2:
+  movw  146(%rdi),%es
+  movw  142(%rdi),%ss
+  movw  144(%rdi),%ds
+  movw  %cs,%ax
+  cmpw  140(%rdi),%ax
+  je    3f
+  # An indirect far jump changes CS without consuming a shadow-stack entry.
+  movzwq 140(%rdi),%rax
+  pushq %rax
+  leaq  3f(%rip),%rax
+  pushq %rax
+  rex64 ljmp *(%rsp)
+3:
+  _LIBUNWIND_CET_ENDBR
+  # The far-jump path used a temporary 16-byte far pointer on the old stack.
+  # The old stack is discarded below.
+
+#if defined(X86_64_BASE_SYSCALL)
+  movq  %rdi,%r8
+  movq  $X86_64_BASE_SYSCALL,%rax
+  movq  $X86_64_SET_FSBASE,%rdi
+  movq  152(%r8),%rsi
+  syscall
+  testq %rax,%rax
+  js    9f
+  movq  $X86_64_BASE_SYSCALL,%rax
+  movq  $X86_64_SET_GSBASE,%rdi
+  movq  160(%r8),%rsi
+  syscall
+  testq %rax,%rax
+  js    9f
+  movq  %r8,%rdi
+#endif
+
+  # Restore flags after all arithmetic, comparisons, and syscalls. The upper
+  # half of the packed flags word contains selectors, so zero-extend it first.
+  movl  136(%rdi),%eax
+  pushq %rax
+  popfq
   # restore all registers
   movq    0(%rdi), %rax
   movq    8(%rdi), %rbx
@@ -108,10 +162,6 @@ DEFINE_LIBUNWIND_FUNCTION(__libunwind_Registers_x86_64_jumpto)
   movq  104(%rdi), %r13
   movq  112(%rdi), %r14
   movq  120(%rdi), %r15
-  # skip rflags
-  # skip cs
-  # skip fs
-  # skip gs
 
 #if defined(_WIN64)
   movdqu 176(%rdi),%xmm0
@@ -133,8 +183,13 @@ DEFINE_LIBUNWIND_FUNCTION(__libunwind_Registers_x86_64_jumpto)
 #endif
   movq  56(%rdi), %rsp  # cut back rsp to new location
   pop    %rdi      # rdi was saved here earlier
-  pop    %rcx
-  jmpq   *%rcx
+  leaq   8(%rsp),%rsp
+  jmpq   *-8(%rsp)
+#if defined(X86_64_BASE_SYSCALL)
+9:
+  # A failed base restore cannot safely resume with a different TLS base.
+  ud2
+#endif
 
 
 #elif defined(__powerpc64__)
@@ -658,7 +713,7 @@ DEFINE_LIBUNWIND_FUNCTION(__libunwind_Registers_arm64_jumpto)
   ldp    x26,x27, [x0, #0x0D0]
   ldp    x28,x29, [x0, #0x0E0]
   ldr    x30,     [x0, #0x100]  // restore pc into lr
-
+#if defined(__ARM_FP) && __ARM_FP != 0
   ldp    d0, d1,  [x0, #0x110]
   ldp    d2, d3,  [x0, #0x120]
   ldp    d4, d5,  [x0, #0x130]
@@ -676,7 +731,7 @@ DEFINE_LIBUNWIND_FUNCTION(__libunwind_Registers_arm64_jumpto)
   ldp    d28,d29, [x0, #0x1F0]
   ldr    d30,     [x0, #0x200]
   ldr    d31,     [x0, #0x208]
-
+#endif
   // Finally, restore sp. This must be done after the last read from the
   // context struct, because it is allocated on the stack, and an exception
   // could clobber the de-allocated portion of the stack after sp has been
@@ -1044,9 +1099,10 @@ DEFINE_LIBUNWIND_FUNCTION(_ZN9libunwind18Registers_mips_o326jumptoEv)
   lw    $27, (4 * 27)($4)
   lw    $28, (4 * 28)($4)
   lw    $29, (4 * 29)($4)
-  lw    $30, (4 * 30)($4)
   // load new pc into ra
   lw    $31, (4 * 32)($4)
+  // MIPS 1 has load delay slot. Ensure lw $31 and jr are separated by an instruction.
+  lw    $30, (4 * 30)($4)
   // jump to ra, load a0 in the delay slot
   jr    $31
   lw    $4, (4 * 4)($4)
@@ -1082,11 +1138,13 @@ DEFINE_LIBUNWIND_FUNCTION(_ZN9libunwind21Registers_mips_newabi6jumptoEv)
   ld    $2, (8 * 2)($4)
   ld    $3, (8 * 3)($4)
   // skip a0 for now
-  .irp i,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30
+  .irp i,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29
     ld $\i, (8 * \i)($4)
   .endr
   // load new pc into ra
   ld    $31, (8 * 32)($4)
+  // MIPS 1 has load delay slot. Ensure lw $31 and jr are separated by an instruction.
+  ld    $30, (8 * 30)($4)
   // jump to ra, load a0 in the delay slot
   jr    $31
   ld    $4, (8 * 4)($4)
@@ -1183,7 +1241,11 @@ DEFINE_LIBUNWIND_FUNCTION(_ZN9libunwind15Registers_riscv6jumptoEv)
     ILOAD x\i, (RISCV_ISIZE * \i)(a0)
   .endr
   // skip a0 for now
+#if defined(__riscv_32e)
+  .irp i,11,12,13,14,15
+#else
   .irp i,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
+#endif
     ILOAD x\i, (RISCV_ISIZE * \i)(a0)
   .endr
   ILOAD    x10, (RISCV_ISIZE * 10)(a0)   // restore a0

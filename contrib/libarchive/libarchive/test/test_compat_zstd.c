@@ -67,7 +67,7 @@ compat_zstd(const char *name)
 	assertEqualString(archive_filter_name(a, 0), "zstd");
 	assertEqualInt(archive_format(a), ARCHIVE_FORMAT_TAR_USTAR);
 
-	assertEqualInt(ARCHIVE_OK, archive_read_close(a));
+	assertEqualIntA(a, ARCHIVE_OK, archive_read_close(a));
 	assertEqualInt(ARCHIVE_OK, archive_read_free(a));
 }
 
@@ -80,4 +80,8 @@ DEFINE_TEST(test_compat_zstd)
 
 	/* The same sample compressed with pzstd */
 	compat_zstd("test_compat_zstd_2.tar.zst");
+
+	/* test_compat_zstd_1.tar.zst prefixed with two skippable frames, one with
+       no user data, followed by one with ten bytes of user data. */
+	compat_zstd("test_compat_zstd_3.tar.zst");
 }

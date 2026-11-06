@@ -1,4 +1,4 @@
-/*	$NetBSD: run.c,v 1.14 2016/04/04 15:52:56 christos Exp $	*/
+/*	$NetBSD: run.c,v 1.4 2026/02/07 14:29:09 christos Exp $	*/
 
 /*-
  * Copyright (c) 2015 The NetBSD Foundation, Inc.
@@ -32,8 +32,10 @@
 #include "config.h"
 #endif
 
+#ifdef HAVE_SYS_CDEFS_H
 #include <sys/cdefs.h>
-__RCSID("$NetBSD: run.c,v 1.14 2016/04/04 15:52:56 christos Exp $");
+#endif
+__RCSID("$NetBSD: run.c,v 1.4 2026/02/07 14:29:09 christos Exp $");
 
 #include <stdio.h>
 #ifdef HAVE_LIBUTIL_H
@@ -62,10 +64,10 @@ static char *
 run(const char *cmd, const char *name, ...)
 {
 	const char *argv[20];
-	size_t i;
+	size_t i, len;
 	va_list ap;
 	FILE *fp;
-	char buf[10240], *res;
+	char *line, *res;
 
 	argv[0] = "control";
 	argv[1] = cmd;
@@ -77,6 +79,7 @@ run(const char *cmd, const char *name, ...)
 	va_end(ap);
 
 	if (debug) {
+		char buf[2048];
 		size_t z;
 		int r;
 
@@ -97,10 +100,10 @@ run(const char *cmd, const char *name, ...)
 		(*lfun)(LOG_ERR, "popen %s failed (%m)", controlprog);
 		return NULL;
 	}
-	if (fgets(buf, sizeof(buf), fp) != NULL)
-		res = strdup(buf);
-	else
-		res = NULL;
+	line = res = NULL;
+	len = 0;
+	if (getline(&line, &len, fp) >= 0)
+		res = line;
 	pclose(fp);
 	if (debug)
 		(*lfun)(LOG_DEBUG, "%s returns %s", cmd, res);
@@ -131,7 +134,8 @@ run_change(const char *how, const struct conf *c, char *id, size_t len)
 		prname = "udp";
 		break;
 	default:
-		(*lfun)(LOG_ERR, "%s: bad protocol %d", __func__, c->c_proto);
+		(*lfun)(LOG_ERR, "%s: bad protocol %d (line %zu)", __func__,
+		     c->c_proto, c->c_lineno);
 		return -1;
 	}
 

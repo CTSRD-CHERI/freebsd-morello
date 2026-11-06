@@ -40,6 +40,7 @@
 
 #include <machine/atomic.h>
 #include <machine/cpufunc.h>
+#include <machine/md_var.h>
 #include <x86/specialreg.h>
 #include <x86/ucode.h>
 #include <x86/x86_smp.h>
@@ -58,7 +59,7 @@ static const void	*ucode_amd_match(const uint8_t *data, size_t *len);
 
 static struct ucode_ops {
 	const char *vendor;
-	int (*load)(const void *, bool, uint64_t *, uint64_t *);
+	int (*load)(const void *, ucode_load_how how, uint64_t *, uint64_t *);
 	const void *(*match)(const uint8_t *, size_t *);
 } loaders[] = {
 	{
@@ -79,10 +80,11 @@ static const void *ucode_data;
 static struct ucode_ops *ucode_loader;
 
 /* Variables used for reporting success or failure. */
-enum {
+static enum {
 	NO_ERROR,
 	NO_MATCH,
 	VERIFICATION_FAILED,
+	LOAD_FAILED,
 } ucode_error = NO_ERROR;
 static uint64_t ucode_nrev, ucode_orev;
 
@@ -103,6 +105,9 @@ log_msg(void *arg __unused)
 	case VERIFICATION_FAILED:
 		printf("CPU microcode: microcode verification failed\n");
 		break;
+	case LOAD_FAILED:
+		printf("CPU microcode load failed. BIOS update advised\n");
+		break;
 	default:
 		break;
 	}
@@ -110,7 +115,8 @@ log_msg(void *arg __unused)
 SYSINIT(ucode_log, SI_SUB_CPU, SI_ORDER_FIRST, log_msg, NULL);
 
 int
-ucode_intel_load(const void *data, bool unsafe, uint64_t *nrevp, uint64_t *orevp)
+ucode_intel_load(const void *data, ucode_load_how how, uint64_t *nrevp,
+    uint64_t *orevp)
 {
 	uint64_t nrev, orev;
 	uint32_t cpuid[4];
@@ -122,10 +128,23 @@ ucode_intel_load(const void *data, bool unsafe, uint64_t *nrevp, uint64_t *orevp
 	 * undocumented errata applying to some Broadwell CPUs.
 	 */
 	wbinvd();
-	if (unsafe)
+	switch (how) {
+	case SAFE:
 		wrmsr_safe(MSR_BIOS_UPDT_TRIG, (uint64_t)(uintptr_t)data);
-	else
+		break;
+	case EARLY:
+#ifdef __amd64__
+		wrmsr_early_safe_start();
+		if (wrmsr_early_safe(MSR_BIOS_UPDT_TRIG,
+		    (uint64_t)(uintptr_t)data) != 0)
+			ucode_error = LOAD_FAILED;
+		wrmsr_early_safe_end();
+		break;
+#endif
+	case UNSAFE:
 		wrmsr(MSR_BIOS_UPDT_TRIG, (uint64_t)(uintptr_t)data);
+		break;
+	}
 	wrmsr(MSR_BIOS_SIGN, 0);
 
 	/*
@@ -185,7 +204,6 @@ ucode_intel_match(const uint8_t *data, size_t *len)
 	uint64_t platformid;
 	size_t resid;
 	uint32_t data_size, flags, regs[4], sig, total_size;
-	int i;
 
 	do_cpuid(1, regs);
 	sig = regs[0];
@@ -207,19 +225,35 @@ ucode_intel_match(const uint8_t *data, size_t *len)
 		if (total_size == 0)
 			total_size = UCODE_INTEL_DEFAULT_DATA_SIZE +
 			    sizeof(struct ucode_intel_header);
-		if (data_size > total_size + sizeof(struct ucode_intel_header))
+
+		if (total_size > data_size + sizeof(struct ucode_intel_header))
 			table = (const struct ucode_intel_extsig_table *)
 			    ((const uint8_t *)(hdr + 1) + data_size);
 		else
 			table = NULL;
 
-		if (hdr->processor_signature == sig) {
-			if ((hdr->processor_flags & flags) != 0) {
-				*len = data_size;
-				return (hdr + 1);
+		if (hdr->processor_signature == sig &&
+		    (hdr->processor_flags & flags) != 0) {
+			*len = data_size;
+			return (hdr + 1);
+		}
+		if (table != NULL) {
+			size_t extsize;
+
+			extsize = total_size -
+			    (data_size + sizeof(struct ucode_intel_header));
+			if (extsize < sizeof(struct ucode_intel_extsig_table)) {
+				ucode_error = VERIFICATION_FAILED;
+				break;
 			}
-		} else if (table != NULL) {
-			for (i = 0; i < table->signature_count; i++) {
+			extsize -= sizeof(struct ucode_intel_extsig_table);
+			for (uint32_t i = 0; i < table->signature_count; i++) {
+				if (extsize < sizeof(struct ucode_intel_extsig)) {
+					ucode_error = VERIFICATION_FAILED;
+					goto out;
+				}
+				extsize -= sizeof(struct ucode_intel_extsig);
+
 				entry = &table->entries[i];
 				if (entry->processor_signature == sig &&
 				    (entry->processor_flags & flags) != 0) {
@@ -229,24 +263,36 @@ ucode_intel_match(const uint8_t *data, size_t *len)
 			}
 		}
 	}
+out:
 	return (NULL);
 }
 
 int
-ucode_amd_load(const void *data, bool unsafe, uint64_t *nrevp, uint64_t *orevp)
+ucode_amd_load(const void *data, ucode_load_how how, uint64_t *nrevp,
+    uint64_t *orevp)
 {
 	uint64_t nrev, orev;
 	uint32_t cpuid[4];
 
 	orev = rdmsr(MSR_BIOS_SIGN);
 
-	/*
-	 * Perform update.
-	 */
-	if (unsafe)
+	switch (how) {
+	case SAFE:
 		wrmsr_safe(MSR_K8_UCODE_UPDATE, (uint64_t)(uintptr_t)data);
-	else
+		break;
+	case EARLY:
+#ifdef __amd64__
+		wrmsr_early_safe_start();
+		if (wrmsr_early_safe(MSR_K8_UCODE_UPDATE,
+		    (uint64_t)(uintptr_t)data) != 0)
+			ucode_error = LOAD_FAILED;
+		wrmsr_early_safe_end();
+		break;
+#endif
+	case UNSAFE:
 		wrmsr(MSR_K8_UCODE_UPDATE, (uint64_t)(uintptr_t)data);
+		break;
+	}
 
 	/*
 	 * Serialize instruction flow.
@@ -277,7 +323,8 @@ ucode_amd_match(const uint8_t *data, size_t *len)
 	signature = regs[0];
 	revision = rdmsr(MSR_BIOS_SIGN);
 
-	return (ucode_amd_find("loader blob", signature, revision, data, *len, len));
+	return (ucode_amd_find("loader blob", signature, &revision, data, *len,
+	    len));
 }
 
 /*
@@ -313,7 +360,7 @@ restart:
 		goto restart;
 	}
 }
-SYSINIT(ucode_release, SI_SUB_SMP + 1, SI_ORDER_ANY, ucode_release, NULL);
+SYSINIT(ucode_release, SI_SUB_SMP, SI_ORDER_LAST, ucode_release, NULL);
 
 void
 ucode_load_ap(int cpu)
@@ -326,22 +373,24 @@ ucode_load_ap(int cpu)
 		return;
 #endif
 
-	if (ucode_data != NULL)
-		(void)ucode_loader->load(ucode_data, false, NULL, NULL);
+	if (ucode_data != NULL && ucode_error != LOAD_FAILED)
+		(void)ucode_loader->load(ucode_data, UNSAFE, NULL, NULL);
 }
 
-static void *
-map_ucode(uintptr_t free, size_t len)
+static const void *
+map_ucode(const void *match, uintptr_t free, size_t len)
 {
 #ifdef __i386__
 	uintptr_t va;
 
 	for (va = free; va < free + len; va += PAGE_SIZE)
 		pmap_kenter(va, (vm_paddr_t)va);
+	memcpy_early((void *)free, match, len);
+	return ((const void *)free);
 #else
 	(void)len;
+	return (match);
 #endif
-	return ((void *)free);
 }
 
 static void
@@ -374,7 +423,7 @@ ucode_load_bsp(uintptr_t free)
 		char vendor[13];
 	} cpuid;
 	const uint8_t *fileaddr, *match;
-	uint8_t *addr;
+	const uint8_t *addr;
 	char *type;
 	uint64_t nrev, orev;
 	caddr_t file;
@@ -409,14 +458,10 @@ ucode_load_bsp(uintptr_t free)
 		len = preload_fetch_size(file);
 		match = ucode_loader->match(fileaddr, &len);
 		if (match != NULL) {
-			addr = map_ucode(free, len);
-			/* We can't use memcpy() before ifunc resolution. */
-			memcpy_early(addr, match, len);
-			match = addr;
-
-			error = ucode_loader->load(match, false, &nrev, &orev);
+			addr = map_ucode(match, free, len);
+			error = ucode_loader->load(addr, EARLY, &nrev, &orev);
 			if (error == 0) {
-				ucode_data = early_ucode_data = match;
+				ucode_data = early_ucode_data = addr;
 				ucode_nrev = nrev;
 				ucode_orev = orev;
 				return (len);

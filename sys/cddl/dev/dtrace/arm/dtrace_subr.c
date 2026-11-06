@@ -138,31 +138,6 @@ dtrace_toxic_ranges(void (*func)(uintptr_t base, uintptr_t limit))
 	 */
 }
 
-void
-dtrace_xcall(processorid_t cpu, dtrace_xcall_t func, void *arg)
-{
-	cpuset_t cpus;
-
-	if (cpu == DTRACE_CPUALL)
-		cpus = all_cpus;
-	else
-		CPU_SETOF(cpu, &cpus);
-
-	smp_rendezvous_cpus(cpus, smp_no_rendezvous_barrier, func,
-	    smp_no_rendezvous_barrier, arg);
-}
-
-static void
-dtrace_sync_func(void)
-{
-}
-
-void
-dtrace_sync(void)
-{
-	dtrace_xcall(DTRACE_CPUALL, (dtrace_xcall_t)dtrace_sync_func, NULL);
-}
-
 /*
  * DTrace needs a high resolution time function which can
  * be called from a probe context and guaranteed not to have
@@ -191,7 +166,7 @@ dtrace_gethrestime(void)
 	return (current_time.tv_sec * 1000000000UL + current_time.tv_nsec);
 }
 
-/* Function to handle DTrace traps during probes. See amd64/amd64/trap.c */
+/* Function to handle DTrace traps during probes. See arm/arm/trap-v6.c */
 int
 dtrace_trap(struct trapframe *frame, u_int type)
 {
@@ -212,8 +187,12 @@ dtrace_trap(struct trapframe *frame, u_int type)
 		 */
 		switch (type) {
 		/* Page fault. */
-		case FAULT_ALIGN:
+		case FAULT_PERM_L1:
+		case FAULT_PERM_L2:
+		case FAULT_TRAN_L1:
+		case FAULT_TRAN_L2:
 			/* Flag a bad address. */
+			/* XXX FAR is missing from the trapframe */
 			cpu_core[curcpu].cpuc_dtrace_flags |= CPU_DTRACE_BADADDR;
 			cpu_core[curcpu].cpuc_dtrace_illval = 0;
 

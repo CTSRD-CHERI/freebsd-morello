@@ -89,8 +89,11 @@
  * It used to be called NFS_MAXDATA, but has been renamed to clarify that
  * it refers to server side only and doesn't conflict with the NFS_MAXDATA
  * defined in rpcsvc/nfs_prot.h for userland.
+ * NFS_SRVMAXIO is the default setting for vfs.nfsd.srvmaxio
+ * NFS_SRVLIMITIO is the maximum setting allowed for vfs.nfsd.srvmaxio
  */
 #define	NFS_SRVMAXIO	(128 * 1024)
+#define	NFS_SRVLIMITIO	(4 * 1024 * 1024)
 
 /* Stat numbers for rpc returns (version 2, 3 and 4) */
 /*
@@ -279,9 +282,19 @@
 #define	NFSX_V4NAMEDATTRFH	3
 #define	NFSX_V4FILELAYOUT	(4 * NFSX_UNSIGNED + NFSX_V4DEVICEID +	\
 				 NFSX_HYPER + NFSM_RNDUP(NFSX_V4PNFSFH))
-#define	NFSX_V4FLEXLAYOUT(m)	(NFSX_HYPER + 3 * NFSX_UNSIGNED +		\
-    ((m) * (NFSX_V4DEVICEID + NFSX_STATEID + NFSM_RNDUP(NFSX_V4PNFSFH) +	\
-    8 * NFSX_UNSIGNED)))
+
+/*
+ * NFSX_V4FLEXLAYOUT() is the size in bytes of the XDR for ff_layout4, given
+ * m - # of mirrors
+ * s - # of stripes
+ * NFSX_HYPER is for ffl_stripe_unit
+ * "m + 3" calculates the counts of ffl_mirrors and ffm_data_servers plus
+ *   ffl_flags and ffl_stats_collect_hint.
+ * The final section calculates the size of ff_data_server4.
+ */
+#define	NFSX_V4FLEXLAYOUT(m, s)	(NFSX_HYPER + ((m) + 3) * NFSX_UNSIGNED +		\
+    (((m) * (s)) * (NFSX_V4DEVICEID + NFSX_STATEID +				\
+    NFSM_RNDUP(NFSX_V4PNFSFH) + 7 * NFSX_UNSIGNED)))
 
 /* sizes common to multiple NFS versions */
 #define	NFSX_FHMAX		(NFSX_V4FHMAX)
@@ -1025,6 +1038,10 @@ struct nfsv3_sattr {
 #define	NFSATTRBIT_SECLABEL		80
 #define	NFSATTRBIT_MODEUMASK		81
 #define	NFSATTRBIT_XATTRSUPPORT		82
+#define	NFSATTRBIT_ACLTRUEFORM		89
+#define	NFSATTRBIT_ACLTRUEFORMSCOPE	90
+#define	NFSATTRBIT_POSIXDEFAULTACL	91
+#define	NFSATTRBIT_POSIXACCESSACL	92
 
 #define	NFSATTRBM_SUPPORTEDATTRS	0x00000001
 #define	NFSATTRBM_TYPE			0x00000002
@@ -1109,8 +1126,12 @@ struct nfsv3_sattr {
 #define	NFSATTRBM_SECLABEL		0x00010000
 #define	NFSATTRBM_MODEUMASK		0x00020000
 #define	NFSATTRBM_XATTRSUPPORT		0x00040000
+#define	NFSATTRBM_ACLTRUEFORM		0x02000000
+#define	NFSATTRBM_ACLTRUEFORMSCOPE	0x04000000
+#define	NFSATTRBM_POSIXDEFAULTACL	0x08000000
+#define	NFSATTRBM_POSIXACCESSACL	0x10000000
 
-#define	NFSATTRBIT_MAX			83
+#define	NFSATTRBIT_MAX			93
 
 /*
  * Sets of attributes that are supported, by words in the bitmap.
@@ -1135,6 +1156,7 @@ struct nfsv3_sattr {
  	NFSATTRBM_RDATTRERROR |						\
  	NFSATTRBM_ACL |							\
  	NFSATTRBM_ACLSUPPORT |						\
+	NFSATTRBM_ARCHIVE |						\
  	NFSATTRBM_CANSETTIME |						\
  	NFSATTRBM_CASEINSENSITIVE |					\
  	NFSATTRBM_CASEPRESERVING |					\
@@ -1199,7 +1221,11 @@ struct nfsv3_sattr {
 	NFSATTRBM_SUPPATTREXCLCREAT |					\
 	NFSATTRBM_CLONEBLKSIZE |					\
 	NFSATTRBM_CHANGEATTRTYPE |					\
-	NFSATTRBM_XATTRSUPPORT)
+	NFSATTRBM_XATTRSUPPORT |					\
+	NFSATTRBM_ACLTRUEFORM |						\
+	NFSATTRBM_ACLTRUEFORMSCOPE |					\
+	NFSATTRBM_POSIXDEFAULTACL |					\
+	NFSATTRBM_POSIXACCESSACL)
 
 /*
  * These are the set only attributes.
@@ -1217,6 +1243,7 @@ struct nfsv3_sattr {
 #define	NFSATTRBIT_SETABLE0						\
 	(NFSATTRBM_SIZE |						\
 	NFSATTRBM_HIDDEN |						\
+	NFSATTRBM_ARCHIVE |						\
 	NFSATTRBM_ACL)
 #define	NFSATTRBIT_SETABLE1						\
  	(NFSATTRBM_MODE |						\
@@ -1228,7 +1255,9 @@ struct nfsv3_sattr {
  	NFSATTRBM_TIMEMODIFYSET)
 #define	NFSATTRBIT_SETABLE2						\
 	(NFSATTRBM_MODESETMASKED |					\
-	NFSATTRBM_MODEUMASK)
+	NFSATTRBM_MODEUMASK |						\
+	NFSATTRBM_POSIXDEFAULTACL |					\
+	NFSATTRBM_POSIXACCESSACL)
 
 /*
  * NFSATTRBIT_NFSV41 - Attributes only supported by NFSv4.1.
@@ -1249,7 +1278,11 @@ struct nfsv3_sattr {
 	(NFSATTRBM_CLONEBLKSIZE |					\
 	NFSATTRBM_CHANGEATTRTYPE |					\
 	NFSATTRBM_XATTRSUPPORT |					\
-	NFSATTRBM_MODEUMASK)
+	NFSATTRBM_MODEUMASK |						\
+	NFSATTRBM_ACLTRUEFORM |						\
+	NFSATTRBM_ACLTRUEFORMSCOPE |					\
+	NFSATTRBM_POSIXDEFAULTACL |					\
+	NFSATTRBM_POSIXACCESSACL)
 
 /*
  * Set of attributes that the getattr vnode op needs.
@@ -1262,6 +1295,7 @@ struct nfsv3_sattr {
  	NFSATTRBM_CHANGE |						\
  	NFSATTRBM_SIZE |						\
  	NFSATTRBM_FSID |						\
+	NFSATTRBM_ARCHIVE |						\
  	NFSATTRBM_FILEID |						\
 	NFSATTRBM_HIDDEN |						\
  	NFSATTRBM_MAXREAD)
@@ -1298,6 +1332,7 @@ struct nfsv3_sattr {
  	NFSATTRBM_CHANGE |						\
  	NFSATTRBM_SIZE |						\
  	NFSATTRBM_FSID |						\
+	NFSATTRBM_ARCHIVE |						\
  	NFSATTRBM_FILEID |						\
 	NFSATTRBM_HIDDEN |						\
  	NFSATTRBM_MAXREAD)
@@ -1688,6 +1723,26 @@ typedef struct nfsv4stateid nfsv4stateid_t;
 #define	NFSV4SXATTR_EITHER	0
 #define	NFSV4SXATTR_CREATE	1
 #define	NFSV4SXATTR_REPLACE	2
+
+/* Definitions for POSIX draft ACLs for NFSv4.2. */
+#define	NFSV4_ACL_MODEL_NFS4		1
+#define	NFSV4_ACL_MODEL_POSIX_DRAFT	2
+#define	NFSV4_ACL_MODEL_NONE		3
+
+#define	NFSV4_ACL_SCOPE_FILE_OBJECT	1
+#define	NFSV4_ACL_SCOPE_FILE_SYSTEM	2
+#define	NFSV4_ACL_SCOPE_SERVER		3
+
+#define	NFSV4_POSIXACL_TAG_USER_OBJ	1
+#define	NFSV4_POSIXACL_TAG_USER		2
+#define	NFSV4_POSIXACL_TAG_GROUP_OBJ	3
+#define	NFSV4_POSIXACL_TAG_GROUP	4
+#define	NFSV4_POSIXACL_TAG_MASK		5
+#define	NFSV4_POSIXACL_TAG_OTHER	6
+
+#define	NFSV4_POSIXACL_PERM_PERM_EXECUTE	0x00000001
+#define	NFSV4_POSIXACL_PERM_PERM_WRITE		0x00000002
+#define	NFSV4_POSIXACL_PERM_PERM_READ		0x00000004
 
 /* Values for ChangeAttrType (RFC-7862). */
 #define	NFSV4CHANGETYPE_MONOTONIC_INCR		0

@@ -69,15 +69,18 @@ struct pmap_invl_gen {
  */
 struct mdthread {
 	int	md_spinlock_count;	/* (k) */
+	int	md_td_flags;		/* (k) */
 	register_t md_saved_flags;	/* (k) */
 	register_t md_spurflt_addr;	/* (k) Spurious page fault address. */
 	struct pmap_invl_gen md_invl_gen;
 	register_t md_efirt_tmp;	/* (k) */
 	int	md_efirt_dis_pf;	/* (k) */
 	struct pcb md_pcb;
-	vm_offset_t md_stack_base;
+	void *md_stack_base;
 	void *md_usr_fpu_save;
 };
+
+#define	TDF_MD_SPLITLOCK_AC	0x00000001	/* Disable split cache lines */
 
 struct mdproc {
 	struct proc_ldt *md_ldt;	/* (t) per-process ldt */

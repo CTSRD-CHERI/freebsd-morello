@@ -142,6 +142,7 @@ static const struct sdhci_device {
 	{ 0x5aca8086,	0xffff,	"Intel Apollo Lake SDXC Controller",
 	    SDHCI_QUIRK_BROKEN_DMA |	/* APL18 erratum */
 	    SDHCI_QUIRK_WAIT_WHILE_BUSY |
+	    SDHCI_QUIRK_SLOTTYPE_BROKEN |
 	    SDHCI_QUIRK_PRESET_VALUE_BROKEN },
 	{ 0x5acc8086,	0xffff,	"Intel Apollo Lake eMMC 5.0 Controller",
 	    SDHCI_QUIRK_BROKEN_DMA |	/* APL18 erratum */
@@ -150,6 +151,8 @@ static const struct sdhci_device {
 	    SDHCI_QUIRK_MMC_DDR52 |
 	    SDHCI_QUIRK_CAPS_BIT63_FOR_MMC_HS400 |
 	    SDHCI_QUIRK_PRESET_VALUE_BROKEN },
+	{ 0x9d2d8086,   0xffff, "Intel Sunrise Point-LP SDXC Controller",
+	    SDHCI_QUIRK_BROKEN_TIMEOUT_VAL },
 	{ 0,		0xffff,	NULL,
 	    0 }
 };
@@ -171,7 +174,7 @@ SYSCTL_INT(_hw_sdhci, OID_AUTO, enable_msi, CTLFLAG_RDTUN, &sdhci_enable_msi,
     0, "Enable MSI interrupts");
 
 static uint8_t
-sdhci_pci_read_1(device_t dev, struct sdhci_slot *slot __unused, bus_size_t off)
+sdhci_pci_read_1(device_t dev, struct sdhci_slot *slot, bus_size_t off)
 {
 	struct sdhci_pci_softc *sc = device_get_softc(dev);
 
@@ -181,8 +184,8 @@ sdhci_pci_read_1(device_t dev, struct sdhci_slot *slot __unused, bus_size_t off)
 }
 
 static void
-sdhci_pci_write_1(device_t dev, struct sdhci_slot *slot __unused,
-    bus_size_t off, uint8_t val)
+sdhci_pci_write_1(device_t dev, struct sdhci_slot *slot, bus_size_t off,
+    uint8_t val)
 {
 	struct sdhci_pci_softc *sc = device_get_softc(dev);
 
@@ -192,7 +195,7 @@ sdhci_pci_write_1(device_t dev, struct sdhci_slot *slot __unused,
 }
 
 static uint16_t
-sdhci_pci_read_2(device_t dev, struct sdhci_slot *slot __unused, bus_size_t off)
+sdhci_pci_read_2(device_t dev, struct sdhci_slot *slot, bus_size_t off)
 {
 	struct sdhci_pci_softc *sc = device_get_softc(dev);
 
@@ -202,8 +205,8 @@ sdhci_pci_read_2(device_t dev, struct sdhci_slot *slot __unused, bus_size_t off)
 }
 
 static void
-sdhci_pci_write_2(device_t dev, struct sdhci_slot *slot __unused,
-    bus_size_t off, uint16_t val)
+sdhci_pci_write_2(device_t dev, struct sdhci_slot *slot, bus_size_t off,
+    uint16_t val)
 {
 	struct sdhci_pci_softc *sc = device_get_softc(dev);
 
@@ -213,7 +216,7 @@ sdhci_pci_write_2(device_t dev, struct sdhci_slot *slot __unused,
 }
 
 static uint32_t
-sdhci_pci_read_4(device_t dev, struct sdhci_slot *slot __unused, bus_size_t off)
+sdhci_pci_read_4(device_t dev, struct sdhci_slot *slot, bus_size_t off)
 {
 	struct sdhci_pci_softc *sc = device_get_softc(dev);
 
@@ -223,8 +226,8 @@ sdhci_pci_read_4(device_t dev, struct sdhci_slot *slot __unused, bus_size_t off)
 }
 
 static void
-sdhci_pci_write_4(device_t dev, struct sdhci_slot *slot __unused,
-    bus_size_t off, uint32_t val)
+sdhci_pci_write_4(device_t dev, struct sdhci_slot *slot, bus_size_t off,
+    uint32_t val)
 {
 	struct sdhci_pci_softc *sc = device_get_softc(dev);
 
@@ -234,8 +237,8 @@ sdhci_pci_write_4(device_t dev, struct sdhci_slot *slot __unused,
 }
 
 static void
-sdhci_pci_read_multi_4(device_t dev, struct sdhci_slot *slot __unused,
-    bus_size_t off, uint32_t *data, bus_size_t count)
+sdhci_pci_read_multi_4(device_t dev, struct sdhci_slot *slot, bus_size_t off,
+    uint32_t *data, bus_size_t count)
 {
 	struct sdhci_pci_softc *sc = device_get_softc(dev);
 
@@ -243,8 +246,8 @@ sdhci_pci_read_multi_4(device_t dev, struct sdhci_slot *slot __unused,
 }
 
 static void
-sdhci_pci_write_multi_4(device_t dev, struct sdhci_slot *slot __unused,
-    bus_size_t off, uint32_t *data, bus_size_t count)
+sdhci_pci_write_multi_4(device_t dev, struct sdhci_slot *slot, bus_size_t off,
+    uint32_t *data, bus_size_t count)
 {
 	struct sdhci_pci_softc *sc = device_get_softc(dev);
 

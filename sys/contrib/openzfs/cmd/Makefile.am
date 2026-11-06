@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: CDDL-1.0
 bin_SCRIPTS =
 bin_PROGRAMS =
 sbin_SCRIPTS =
@@ -35,8 +36,8 @@ zhack_SOURCES = \
 zhack_LDADD = \
 	libzpool.la \
 	libzfs_core.la \
-	libnvpair.la
-
+	libnvpair.la \
+	librange_tree.la
 
 ztest_CFLAGS    = $(AM_CFLAGS) $(KERNEL_CFLAGS)
 ztest_CPPFLAGS  = $(AM_CPPFLAGS) $(LIBZPOOL_CPPFLAGS)
@@ -53,7 +54,6 @@ ztest_LDADD = \
 	libnvpair.la
 
 ztest_LDADD += -lm
-ztest_LDFLAGS = -pthread
 
 
 include $(srcdir)/%D%/raidz_test/Makefile.am
@@ -98,17 +98,16 @@ endif
 
 
 if USING_PYTHON
-bin_SCRIPTS      += arc_summary     arcstat        dbufstat        zilstat
-CLEANFILES       += arc_summary     arcstat        dbufstat        zilstat
-dist_noinst_DATA += %D%/arc_summary %D%/arcstat.in %D%/dbufstat.in %D%/zilstat.in
+bin_SCRIPTS      += zarcsummary     zarcstat        dbufstat        zilstat
+CLEANFILES       += zarcsummary     zarcstat        dbufstat        zilstat
+dist_noinst_DATA += %D%/zarcsummary %D%/zarcstat.in %D%/dbufstat.in %D%/zilstat.in
 
-$(call SUBST,arcstat,%D%/)
+$(call SUBST,zarcstat,%D%/)
 $(call SUBST,dbufstat,%D%/)
 $(call SUBST,zilstat,%D%/)
-arc_summary: %D%/arc_summary
+zarcsummary: %D%/zarcsummary
 	$(AM_V_at)cp $< $@
 endif
-
 
 PHONY += cmd
 cmd: $(bin_SCRIPTS) $(bin_PROGRAMS) $(sbin_SCRIPTS) $(sbin_PROGRAMS) $(dist_bin_SCRIPTS) $(zfsexec_PROGRAMS) $(mounthelper_PROGRAMS)

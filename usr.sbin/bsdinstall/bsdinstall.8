@@ -1,4 +1,6 @@
-.\"-
+.\"
+.\" SPDX-License-Identifier: BSD-2-Clause
+.\"
 .\" Copyright (c) 2011-2013 Nathan Whitehorn <nwhitehorn@FreeBSD.org> All rights reserved.
 .\" Copyright (c) 2018 Roberto Fernandez Cueto <roberfern@gmail.com>
 .\" Copyright (c) 2024 The FreeBSD Foundation
@@ -27,7 +29,7 @@
 .\" ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 .\" POSSIBILITY OF SUCH DAMAGE.
 .\"
-.Dd November 4, 2024
+.Dd May 12, 2026
 .Dt BSDINSTALL 8
 .Os
 .Sh NAME
@@ -40,9 +42,10 @@
 .Op Ar ...
 .Sh DESCRIPTION
 .Nm
-is used for installation of new systems, both for system setup from
-installation media, e.g., CD-ROMs, and for use on live systems to prepare
-VM images and jails.
+is used for installation of new systems,
+both for system setup from installation media,
+such as discs, USBs, or network boot environments,
+and for use on live systems to prepare jails and virtual machine images.
 .Pp
 Much like
 .Xr make 1 , Nm
@@ -56,7 +59,7 @@ these subtargets can be invoked separately by an installation script.
 .Sh OPTIONS
 .Nm
 supports the following options, global to all targets:
-.Bl -tag -width indent+
+.Bl -tag -width "-D file"
 .It Fl D Ar file
 Provide a path for the installation log file
 .Pq overrides Ev BSDINSTALL_LOG .
@@ -73,9 +76,15 @@ For interactive use, most users will be interested only in the
 and
 .Cm script
 targets.
-.Bl -tag -width "jail destination"
+.Bl -tag -width "-D file"
 .It Cm auto
 Run the standard interactive installation, including disk partitioning.
+.Pp
+The
+.Ev DISTRIBUTIONS
+environment variable is set to
+.Dq base.txz kernel.txz
+by default for this target.
 .It Cm jail Ar destination
 Sets up a new chroot system at
 .Pa destination ,
@@ -85,12 +94,27 @@ Behavior is generally similar to
 .Cm auto ,
 except that disk partitioning and network setup are skipped and a kernel is
 not installed into the new system.
+.Pp
+The
+.Ev DISTRIBUTIONS
+environment variable is set to
+.Dq base.txz
+by default for this target.
 .It Cm script Ar script
 Runs the installation script at
 .Pa script .
 See
 .Sx SCRIPTING
 for more information on this target.
+.Pp
+The
+.Ev DISTRIBUTIONS
+environment variable is unset by default for this target.
+Instead, the
+.Ev COMPONENTS
+environment variable is effectively set to
+.Dq base kernel kernel-dbg
+for this target.
 .It Cm keymap
 If the current controlling TTY is a
 .Xr syscons 4
@@ -244,7 +268,7 @@ Extracts the distributions listed in
 .Ev DISTRIBUTIONS
 into
 .Ev BSDINSTALL_CHROOT .
-.It Cm pkgbase Op Fl --no-kernel
+.It Cm pkgbase Op Fl -jail
 Fetch and install base system packages to
 .Ev BSDINSTALL_CHROOT .
 Packages are fetched according to repository configuration in
@@ -253,8 +277,10 @@ if set, or
 .Lk pkg.freebsd.org
 otherwise.
 If the
-.Fl --no-kernel
-option is passed, no kernel is installed.
+.Fl -jail
+option is passed, no kernel is installed, and the
+.Dq jail
+variant of each package set will be selected where applicable.
 .It Cm firmware
 executes
 .Xr fwget 8
@@ -293,14 +319,25 @@ Many are used internally during installation and have reasonable default values
 for most installation scenarios.
 Others are set by various interactive user prompts, and can be usefully
 overridden when making scripted or customized installers.
-.Bl -tag -width "BSDINSTALL_DISTSITE"
+.Bl -tag -width "-D file"
 .It Ev TMPDIR
 The directory to use for temporary files.
 Default:
 .Dq Pa /tmp
+.It Ev COMPONENTS
+The set of components to install for scripted installations using
+base system packages, e.g.,
+.Dq base lib32 kernel-dbg tests .
+Default: "base kernel-dbg"
 .It Ev DISTRIBUTIONS
-The set of distributions to install, e.g., "base.txz kernel.txz ports.txz".
-Default: unset
+The set of distributions to install for traditional installations, e.g.,
+.Dq base.txz kernel.txz ports.txz .
+If unset, then
+.Nm
+will install using base system packages.
+Default: unset unless noted otherwise in the
+.Sx TARGETS
+section.
 .It Ev PARTITIONS
 The partitioning of the disk onto which the system is being installed.
 See
@@ -584,18 +621,18 @@ A typical bsdinstall script, using the default filesystem layout and the UFS
 filesystem, looks like this:
 .Bd -literal -offset indent
 PARTITIONS=DEFAULT
-DISTRIBUTIONS="kernel.txz base.txz"
+COMPONENTS="base debug"
 
 #!/bin/sh
 sysrc ifconfig_DEFAULT=DHCP
 sysrc sshd_enable=YES
-pkg install puppet
+pkg install -y puppet
 .Ed
 .Pp
 For a scripted installation involving a ZFS pool spanning multiple disks,
 the script instead looks like this:
 .Bd -literal -offset indent
-DISTRIBUTIONS="kernel.txz base.txz"
+COMPONENTS="base debug"
 export ZFSBOOT_VDEV_TYPE=stripe
 export ZFSBOOT_DISKS="ada0 ada1"
 export nonInteractive="YES"
@@ -603,7 +640,20 @@ export nonInteractive="YES"
 #!/bin/sh
 echo "ifconfig_DEFAULT=DHCP" >> /etc/rc.conf
 echo "sshd_enable=YES" >> /etc/rc.conf
-pkg install puppet
+pkg install -y puppet
+.Ed
+.Pp
+To install using traditional distributions sets instead of packages, set
+.Ev DISTRIBUTIONS
+to the list of distribution sets to install, like this:
+.Bd -literal -offset indent
+PARTITIONS=DEFAULT
+DISTRIBUTIONS="kernel.txz base.txz"
+
+#!/bin/sh
+sysrc ifconfig_DEFAULT=DHCP
+sysrc sshd_enable=YES
+pkg install -y puppet
 .Ed
 .Pp
 On
@@ -628,7 +678,7 @@ arbitrary commands can be run here to extend the installer.
 In addition to the variables in
 .Sx ENVIRONMENT VARIABLES ,
 in particular
-.Ev DISTRIBUTIONS ,
+.Ev COMPONENTS ,
 the preamble can contain a variable
 .Ev PARTITIONS
 which is passed to the
@@ -693,7 +743,7 @@ is:
 # Home directories separated so they are common to all BEs
 /home		mountpoint=/home
 
-# Compress /tmp, allow exec but not setuid
+# Create /tmp and allow exec but not setuid
 /tmp		mountpoint=/tmp,exec=on,setuid=off
 
 # Do not mount /usr so that 'base' files go to the BEROOT
@@ -702,7 +752,7 @@ is:
 # Ports tree
 /usr/ports	setuid=off
 
-# Source tree (compressed)
+# Source tree
 /usr/src
 
 # Create /var and friends

@@ -115,6 +115,7 @@ int	vm_create(const char *name);
 struct vmctx *vm_open(const char *name);
 #define	VMMAPI_OPEN_CREATE	0x01	/* create if the VM does not exist */
 #define	VMMAPI_OPEN_REINIT	0x02	/* reinitialize the VM if it exists */
+#define	VMMAPI_OPEN_CREATE_DESTROY_ON_CLOSE	0x04	/* Destroy the VM when closing vmm_ctl */
 struct vmctx *vm_openf(const char *name, int flags);
 void	vm_close(struct vmctx *ctx);
 void	vm_destroy(struct vmctx *ctx);
@@ -202,6 +203,7 @@ int	vm_set_capability(struct vcpu *vcpu, enum vm_cap_type cap,
 			  int val);
 int	vm_assign_pptdev(struct vmctx *ctx, int bus, int slot, int func);
 int	vm_unassign_pptdev(struct vmctx *ctx, int bus, int slot, int func);
+int	vm_reset_pptdev(struct vmctx *ctx, int bus, int slot, int func);
 int	vm_map_pptdev_mmio(struct vmctx *ctx, int bus, int slot, int func,
 			   vm_paddr_t gpa, size_t len, vm_paddr_t hpa);
 int	vm_unmap_pptdev_mmio(struct vmctx *ctx, int bus, int slot, int func,

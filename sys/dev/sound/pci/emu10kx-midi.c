@@ -138,11 +138,7 @@ static int
 emu_midi_probe(device_t dev)
 {
 	struct emu_midi_softc *scp;
-	uintptr_t func, is_emu10k1;
-
-	BUS_READ_IVAR(device_get_parent(dev), dev, 0, &func);
-	if (func != SCF_MIDI)
-		return (ENXIO);
+	uintptr_t is_emu10k1;
 
 	scp = device_get_softc(dev);
 	bzero(scp, sizeof(*scp));
@@ -157,15 +153,13 @@ static int
 emu_midi_attach(device_t dev)
 {
 	struct emu_midi_softc * scp;
-	struct sndcard_func *func;
 	struct emu_midiinfo *midiinfo;
 	uint32_t inte_val, ipr_val;
 
 	scp = device_get_softc(dev);
-	func = device_get_ivars(dev);
 
 	scp->dev = dev;
-	midiinfo = (struct emu_midiinfo *)func->varinfo;
+	midiinfo = (struct emu_midiinfo *)device_get_ivars(dev);
 	scp->port = midiinfo->port;
 	scp->card = midiinfo->card;
 
@@ -246,5 +240,5 @@ static driver_t emu_midi_driver = {
 };
 DRIVER_MODULE(snd_emu10kx_midi, emu10kx, emu_midi_driver, 0, 0);
 MODULE_DEPEND(snd_emu10kx_midi, snd_emu10kx, SND_EMU10KX_MINVER, SND_EMU10KX_PREFVER, SND_EMU10KX_MAXVER);
-MODULE_DEPEND(snd_emu10kx_midi, sound, SOUND_MINVER, SOUND_PREFVER, SOUND_MAXVER);
+MODULE_DEPEND(snd_emu10kx_midi, sound, 1, 1, 1);
 MODULE_VERSION(snd_emu10kx_midi, SND_EMU10KX_PREFVER);

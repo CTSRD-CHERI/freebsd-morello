@@ -36,6 +36,8 @@
 #define	_MACHINE_CPU_H_
 
 #ifndef LOCORE
+#include <sys/_cpuset.h>
+
 #include <machine/atomic.h>
 #include <machine/cpufunc.h>
 #include <machine/frame.h>
@@ -55,6 +57,7 @@
 #define	MVENDORID_UNIMPL	0x0
 #define	MVENDORID_SIFIVE	0x489
 #define	MVENDORID_THEAD		0x5b7
+#define	MVENDORID_SPACEMIT	0x710
 
 /*
  * Micro-architecture ID register, marchid.
@@ -82,6 +85,9 @@
 #define	MARCHID_SIFIVE_U7	MARCHID_COMMERCIAL(7)
 #define	MARCHID_SIFIVE_P5	MARCHID_COMMERCIAL(8)
 
+/* SpacemiT marchid values */
+#define	MARCHID_SPACEMIT_K1	MARCHID_COMMERCIAL(0x58000001)
+
 /*
  * MMU virtual-addressing modes. Support for each level implies the previous,
  * so Sv48-enabled systems MUST support Sv39, etc.
@@ -101,6 +107,7 @@ void	cpu_reset(void) __dead2;
 void	fork_trampoline(void);
 void	identify_cpu(u_int cpu);
 void	printcpuinfo(u_int cpu);
+cpuset_t hartmask_to_cpumask(const cpuset_t);
 
 static __inline uint64_t
 get_cyclecount(void)

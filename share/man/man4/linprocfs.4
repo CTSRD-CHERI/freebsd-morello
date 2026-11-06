@@ -1,7 +1,7 @@
 .\" Written by Garrett Wollman
 .\" This file is in the public domain.
 .\"
-.Dd May 29, 2025
+.Dd December 26, 2025
 .Dt LINPROCFS 4
 .Os
 .Sh NAME
@@ -9,7 +9,7 @@
 .Nd Linux process file system
 .Sh SYNOPSIS
 .Bd -literal
-linproc		/compat/linux/proc	linprocfs	rw 0 0
+linprocfs		/compat/linux/proc	linprocfs	rw 0 0
 .Ed
 .Sh DESCRIPTION
 The Linux process file system, or
@@ -126,11 +126,11 @@ Information about the swap device if any.
 Time since the last boot and time spent in idle state.
 .It Pa /compat/linux/proc/version
 Version of the emulated linux system.
-.It Pa /compat/linux/proc/pid
+.It Pa /compat/linux/proc/ Ns Ao Ar pid Ac
 A directory containing process information for process
-.Pa pid .
+.Ar pid .
 .It Pa /compat/linux/proc/self
-A directory containing process information for the current process.
+A symlink to a directory containing process information for the current process.
 .El
 .Sh EXAMPLES
 To mount a
@@ -138,7 +138,7 @@ To mount a
 file system on
 .Pa /compat/linux/proc :
 .Pp
-.Dl "mount -t linprocfs linproc /compat/linux/proc"
+.Dl "mount -t linprocfs linprocfs /compat/linux/proc"
 .Sh SEE ALSO
 .Xr mount 2 ,
 .Xr unmount 2 ,

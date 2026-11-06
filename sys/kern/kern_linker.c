@@ -32,10 +32,12 @@
 #include "opt_hwpmc_hooks.h"
 #include "opt_hwt_hooks.h"
 
+#define EXTERR_CATEGORY EXTERR_CAT_LINKER
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/boottrace.h>
 #include <sys/eventhandler.h>
+#include <sys/exterrvar.h>
 #include <sys/fcntl.h>
 #include <sys/jail.h>
 #include <sys/kernel.h>
@@ -329,6 +331,40 @@ linker_file_register_sysctls(linker_file_t lf, bool enable)
 	sx_xlock(&kld_sx);
 }
 
+static void
+linker_file_register_exterr(linker_file_t lf)
+{
+	struct exterr_cat **start, **stop;
+
+	KLD_DPF(FILE,
+	    ("%s: registering exterror categories for %s\n", __func__,
+	    lf->filename));
+
+	sx_assert(&kld_sx, SA_XLOCKED);
+
+	if (linker_file_lookup_set(lf, "exterr_cats", &start, &stop, NULL) != 0)
+		return;
+
+	exterr_cat_register_module(start, stop);
+}
+
+static void
+linker_file_unregister_exterr(linker_file_t lf)
+{
+	struct exterr_cat **start, **stop;
+
+	KLD_DPF(FILE,
+	    ("%s: unregistering exterror categories for %s\n",
+	    __func__, lf->filename));
+
+	sx_assert(&kld_sx, SA_XLOCKED);
+
+	if (linker_file_lookup_set(lf, "exterr_cats", &start, &stop, NULL) != 0)
+		return;
+
+	exterr_cat_unregister_module(start, stop);
+}
+
 /*
  * Invoke the LINKER_CTF_GET implementation for this file.  Existing
  * implementations will load CTF info from the filesystem upon the first call
@@ -435,7 +471,7 @@ linker_file_register_modules(linker_file_t lf)
 }
 
 static void
-linker_init_kernel_modules(void)
+linker_init_kernel_modules(void *dummy __unused)
 {
 
 	sx_xlock(&kld_sx);
@@ -498,6 +534,7 @@ linker_load_file(const char *filename, linker_file_t *result)
 #ifdef VIMAGE
 			LINKER_PROPAGATE_VNETS(lf);
 #endif
+			linker_file_register_exterr(lf);
 			linker_file_sysinit(lf);
 			lf->flags |= LINKER_FILE_LINKED;
 
@@ -703,9 +740,11 @@ linker_file_unload(linker_file_t file, int flags)
 
 	/* Give eventhandlers a chance to prevent the unload. */
 	error = 0;
-	EVENTHANDLER_INVOKE(kld_unload_try, file, &error);
-	if (error != 0)
-		return (EBUSY);
+	if ((file->flags & LINKER_FILE_LINKED) != 0) {
+		EVENTHANDLER_INVOKE(kld_unload_try, file, &error);
+		if (error != 0)
+			return (EBUSY);
+	}
 
 	KLD_DPF(FILE, ("linker_file_unload: file is unloading,"
 	    " informing modules\n"));
@@ -768,10 +807,13 @@ linker_file_unload(linker_file_t file, int flags)
 	 * Don't try to run SYSUNINITs if we are unloaded due to a
 	 * link error.
 	 */
-	if (file->flags & LINKER_FILE_LINKED) {
+	if ((file->flags & LINKER_FILE_LINKED) != 0) {
 		file->flags &= ~LINKER_FILE_LINKED;
 		linker_file_unregister_sysctls(file);
+		linker_file_unregister_exterr(file);
 		linker_file_sysuninit(file);
+		EVENTHANDLER_INVOKE(kld_unload, file->filename, file->address,
+		    file->size);
 	}
 	TAILQ_REMOVE(&linker_files, file, link);
 
@@ -787,9 +829,6 @@ linker_file_unload(linker_file_t file, int flags)
 	}
 
 	LINKER_UNLOAD(file);
-
-	EVENTHANDLER_INVOKE(kld_unload, file->filename, file->address,
-	    file->size);
 
 	if (file->filename) {
 		free(file->filename, M_LINKER);
@@ -1894,9 +1933,10 @@ linker_preload_finish(void *arg)
 /*
  * Attempt to run after all DECLARE_MODULE SYSINITs.  Unfortunately they can be
  * scheduled at any subsystem and order, so run this as late as possible.  init
- * becomes runnable in SI_SUB_KTHREAD_INIT, so go slightly before that.
+ * becomes runnable in SI_SUB_KTHREAD_INIT / SI_ORDER_MIDDLE, so go slightly
+ * before that.
  */
-SYSINIT(preload_finish, SI_SUB_KTHREAD_INIT - 100, SI_ORDER_MIDDLE,
+SYSINIT(preload_finish, SI_SUB_KTHREAD_INIT, SI_ORDER_FIRST,
     linker_preload_finish, NULL);
 
 /*

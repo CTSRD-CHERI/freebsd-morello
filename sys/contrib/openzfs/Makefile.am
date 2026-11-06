@@ -1,6 +1,8 @@
+# SPDX-License-Identifier: CDDL-1.0
 CLEANFILES =
 dist_noinst_DATA =
 INSTALL_DATA_HOOKS =
+INSTALL_EXEC_HOOKS =
 ALL_LOCAL =
 CLEAN_LOCAL =
 CHECKS = shellcheck checkbashisms
@@ -29,9 +31,10 @@ if BUILD_LINUX
 include $(srcdir)/%D%/udev/Makefile.am
 endif
 endif
-CPPCHECKDIRS += module
 if CONFIG_KERNEL
 SUBDIRS += module
+
+CPPCHECKDIRS += module
 
 extradir = $(prefix)/src/zfs-$(VERSION)
 extra_HEADERS = zfs.release.in zfs_config.h.in
@@ -64,12 +67,17 @@ GITREV = include/zfs_gitrev.h
 CLEANFILES += $(GITREV)
 PHONY += gitrev
 gitrev:
-	$(AM_V_GEN)$(top_srcdir)/scripts/make_gitrev.sh $(GITREV)
+	$(AM_V_GEN)cd "$(abs_top_builddir)"; \
+	$(top_srcdir)/scripts/make_gitrev.sh $(GITREV)
 
-all: gitrev
+GITREV_TARGETS := $(shell $(GREP) -rl --include="*.[ch]" $(notdir $(GITREV)) "$(abs_srcdir)"/* | sed "s|$(abs_srcdir)/||" )
+$(GITREV_TARGETS): gitrev
 
 PHONY += install-data-hook $(INSTALL_DATA_HOOKS)
 install-data-hook: $(INSTALL_DATA_HOOKS)
+
+PHONY += install-exec-hook $(INSTALL_EXEC_HOOKS)
+install-exec-hook: $(INSTALL_EXEC_HOOKS)
 
 PHONY += maintainer-clean-local
 maintainer-clean-local:
@@ -128,10 +136,12 @@ cstyle:
 		! -name 'zfs_config.*' ! -name '*.mod.c' \
 		! -name 'opt_global.h' ! -name '*_if*.h' \
 		! -name 'zstd_compat_wrapper.h' \
+		! -path './module/zstd/zstd-in.c' \
 		! -path './module/zstd/lib/*' \
 		! -path './include/sys/lua/*' \
 		! -path './module/lua/l*.[ch]' \
 		! -path './module/zfs/lz4.c' \
+		! -path './tests/unit/munit.[ch]' \
 		$(cstyle_line)
 
 filter_executable = -exec test -x '{}' \; -print

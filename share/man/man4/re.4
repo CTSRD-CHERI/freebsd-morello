@@ -28,12 +28,12 @@
 .\" ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
 .\" THE POSSIBILITY OF SUCH DAMAGE.
 .\"
-.Dd November 7, 2022
+.Dd July 13, 2026
 .Dt RE 4
 .Os
 .Sh NAME
 .Nm re
-.Nd "RealTek 8139C+/8169/816xS/811xS/8168/810xE/8111 PCI/PCIe Ethernet adapter driver"
+.Nd "Realtek 8139C+/8169/816xS/811xS/8168/810xE/8111 PCI/PCIe Ethernet adapter driver"
 .Sh SYNOPSIS
 To compile this driver into the kernel,
 place the following lines in your
@@ -52,7 +52,7 @@ if_re_load="YES"
 .Sh DESCRIPTION
 The
 .Nm
-driver provides support for various NICs based on the RealTek RTL8139C+,
+driver provides support for various NICs based on the Realtek RTL8139C+,
 RTL8169, RTL816xS, RTL811xS, RTL8168, RTL810xE and RTL8111 PCI and
 PCIe Ethernet controllers.
 .Pp
@@ -77,9 +77,12 @@ in both 32-bit PCI and 64-bit PCI models.
 The 8110S is designed for
 embedded LAN-on-motherboard applications.
 .Pp
-The 8169, 8169S and 8110S also support jumbo frames, which can be configured
-via the interface MTU setting.
-The MTU is limited to 7422, since the chip cannot transmit larger frames.
+The 8169, 8169S, 8110S, 8168 and 8111 also support jumbo frames,
+which can be configured via the interface MTU setting.
+The maximum MTU depends on the chip revision:
+the 8169, 8169S and 8110S support up to 7422 bytes;
+the 8168C/8111C and 8168E-VL/8111E-VL support up to approximately 6100 bytes;
+and the 8168D/8111D and later revisions support up to approximately 9200 bytes.
 Selecting an MTU larger than 1500 bytes with the
 .Xr ifconfig 8
 utility configures the adapter to receive and transmit jumbo frames.
@@ -115,7 +118,7 @@ or
 modes.
 .It Cm 1000baseTX
 Set 1000baseTX operation over twisted pair.
-The RealTek gigE chips support 1000Mbps in
+The Realtek gigE chips support 1000Mbps in
 .Cm full-duplex
 mode only.
 .\" .It Cm 1000baseSX
@@ -142,7 +145,7 @@ For more information on configuring this device, see
 .Sh HARDWARE
 The
 .Nm
-driver supports RealTek RTL8139C+, RTL8169, RTL816xS, RTL811xS, RTL8168,
+driver supports Realtek RTL8139C+, RTL8169, RTL816xS, RTL811xS, RTL8168,
 RTL810xE and RTL8111 based Fast Ethernet and Gigabit Ethernet adapters including:
 .Pp
 .Bl -bullet -compact
@@ -154,6 +157,10 @@ Compaq Evo N1015v Integrated Ethernet (8139C+)
 Corega CG-LAPCIGT Gigabit Ethernet (8169S)
 .It
 D-Link DGE-528(T) Gigabit Ethernet (8169S)
+.It
+D-Link DGE-530(T) Gigabit Ethernet (8169S)
+.It
+Killer E2600 Gigabit Ethernet (8168)
 .It
 Gigabyte 7N400 Pro2 Integrated Gigabit Ethernet (8110S)
 .It
@@ -175,6 +182,15 @@ Tunables can be set at the
 prompt before booting the kernel or stored in
 .Xr loader.conf 5 .
 .Bl -tag -width "xxxxxx"
+.It Va hw.re.aspm_disable
+This tunable controls whether the driver disables PCI Express ASPM
+(the L0s and L1 link states and CLKREQ) on the device.
+ASPM is a known trigger of transmit stalls and watchdog timeouts on
+many supported controllers, so it is disabled by default.
+Set to 0 to keep the ASPM configuration programmed by the firmware,
+trading reliability under sustained transmit load for lower link
+power consumption.
+The default value is 1.
 .It Va hw.re.intr_filter
 This tunable makes driver use interrupt filter handler on
 controllers that support MSI/MSI-X capability.
@@ -237,11 +253,12 @@ the network connection (cable).
 .Xr netintro 4 ,
 .Xr ng_ether 4 ,
 .Xr polling 4 ,
+.Xr rge 4 ,
 .Xr rgephy 4 ,
 .Xr vlan 4 ,
 .Xr ifconfig 8
 .Rs
-.%T RealTek Semiconductor RTL8139C+, RTL8169, RTL8169S and RTL8110S datasheets
+.%T Realtek Semiconductor RTL8139C+, RTL8169, RTL8169S and RTL8110S datasheets
 .%U https://www.realtek.com
 .Re
 .Sh HISTORY
@@ -281,7 +298,7 @@ The
 user should ensure the NIC is installed in a 32-bit PCI slot to
 avoid this problem.
 .Pp
-The RealTek 8169, 8169S and 8110S chips appear to only be capable of
+The Realtek 8169, 8169S and 8110S chips appear to only be capable of
 transmitting jumbo frames up to 7.5K in size.
 .Pp
 If this driver is causing problems then an updated driver from

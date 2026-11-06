@@ -47,6 +47,7 @@
 
 #include <geom/geom.h>
 #include <geom/geom_dbg.h>
+#include <geom/geom_disk.h>
 #include <geom/raid/g_raid.h>
 #include "g_raid_md_if.h"
 #include "g_raid_tr_if.h"
@@ -520,6 +521,11 @@ g_raid_get_disk_info(struct g_raid_disk *disk)
 		G_RAID_DEBUG1(2, disk->d_softc,
 		    "BIO_DELETE not supported by %s: %d.", 
 		    cp->provider->name, error);
+
+	/* Read rotation rate. */
+	error = g_getattr("GEOM::rotation_rate", cp, &disk->d_rotation_rate);
+	if (error)
+		disk->d_rotation_rate = DISK_RR_UNKNOWN;
 }
 
 void
@@ -775,8 +781,6 @@ g_raid_open_consumer(struct g_raid_softc *sc, const char *name)
 
 	g_topology_assert();
 
-	if (strncmp(name, _PATH_DEV, 5) == 0)
-		name += 5;
 	pp = g_provider_by_name(name);
 	if (pp == NULL)
 		return (NULL);
@@ -1091,6 +1095,31 @@ g_raid_candelete(struct g_raid_softc *sc, struct bio *bp)
 }
 
 static void
+g_raid_rotation_rate(struct g_raid_softc *sc, struct bio *bp)
+{
+	struct g_raid_volume *vol;
+	struct g_raid_subdisk *sd;
+	bool first = true;
+	uint16_t rr = DISK_RR_UNKNOWN;
+	int i;
+
+	vol = bp->bio_to->private;
+	for (i = 0; i < vol->v_disks_count; i++) {
+		sd = &vol->v_subdisks[i];
+		if (sd->sd_state == G_RAID_SUBDISK_S_NONE)
+			continue;
+		if (first)
+			rr = sd->sd_disk->d_rotation_rate;
+		else if (rr != sd->sd_disk->d_rotation_rate) {
+			rr = DISK_RR_UNKNOWN;
+			break;
+		}
+		first = false;
+	}
+	g_handleattr(bp, "GEOM::rotation_rate", &rr, sizeof(rr));
+}
+
+static void
 g_raid_start(struct bio *bp)
 {
 	struct g_raid_softc *sc;
@@ -1117,6 +1146,8 @@ g_raid_start(struct bio *bp)
 			g_raid_candelete(sc, bp);
 		else if (!strcmp(bp->bio_attribute, "GEOM::kerneldump"))
 			g_raid_kerneldump(sc, bp);
+		else if (!strcmp(bp->bio_attribute, "GEOM::rotation_rate"))
+			g_raid_rotation_rate(sc, bp);
 		else
 			g_io_deliver(bp, EOPNOTSUPP);
 		return;
@@ -1876,7 +1907,7 @@ g_raid_create_node(struct g_class *mp,
 	g_topology_assert();
 	G_RAID_DEBUG(1, "Creating array %s.", name);
 
-	gp = g_new_geomf(mp, "%s", name);
+	gp = g_new_geom(mp, name);
 	sc = malloc(sizeof(*sc), M_RAID, M_WAITOK | M_ZERO);
 	gp->start = g_raid_start;
 	gp->orphan = g_raid_orphan;
@@ -2217,7 +2248,7 @@ g_raid_taste(struct g_class *mp, struct g_provider *pp, int flags __unused)
 
 	geom = NULL;
 	status = G_RAID_MD_TASTE_FAIL;
-	gp = g_new_geomf(mp, "raid:taste");
+	gp = g_new_geom(mp, "raid:taste");
 	/*
 	 * This orphan function should be never called.
 	 */

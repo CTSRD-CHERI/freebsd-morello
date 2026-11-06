@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -51,34 +41,70 @@
 #include <sys/trace_zfs.h>
 
 /*
- * This file contains the necessary logic to remove vdevs from a
- * storage pool.  Currently, the only devices that can be removed
- * are log, cache, and spare devices; and top level vdevs from a pool
- * w/o raidz or mirrors.  (Note that members of a mirror can be removed
- * by the detach operation.)
+ * This file contains the necessary logic to remove vdevs from a storage
+ * pool. Note that members of a mirror can be removed by the detach
+ * operation. Currently, the only devices that can be removed are:
  *
- * Log vdevs are removed by evacuating them and then turning the vdev
- * into a hole vdev while holding spa config locks.
+ * 1) Traditional hot spare and cache vdevs. Note that draid distributed
+ *    spares are fixed at creation time and cannot be removed.
  *
- * Top level vdevs are removed and converted into an indirect vdev via
- * a multi-step process:
+ * 2) Log vdevs are removed by evacuating them and then turning the vdev
+ *    into a hole vdev while holding spa config locks.
  *
- *  - Disable allocations from this device (spa_vdev_remove_top).
+ * 3) Top-level singleton and mirror vdevs, including dedup and special
+ *    vdevs, are removed and converted into an indirect vdev via a
+ *    multi-step process:
  *
- *  - From a new thread (spa_vdev_remove_thread), copy data from
- *    the removing vdev to a different vdev.  The copy happens in open
- *    context (spa_vdev_copy_impl) and issues a sync task
- *    (vdev_mapping_sync) so the sync thread can update the partial
- *    indirect mappings in core and on disk.
+ *    - Disable allocations from this device (spa_vdev_remove_top).
  *
- *  - If a free happens during a removal, it is freed from the
- *    removing vdev, and if it has already been copied, from the new
- *    location as well (free_from_removing_vdev).
+ *    - From a new thread (spa_vdev_remove_thread), copy data from the
+ *      removing vdev to a different vdev. The copy happens in open context
+ *      (spa_vdev_copy_impl) and issues a sync task (vdev_mapping_sync) so
+ *      the sync thread can update the partial indirect mappings in core
+ *      and on disk.
  *
- *  - After the removal is completed, the copy thread converts the vdev
- *    into an indirect vdev (vdev_remove_complete) before instructing
- *    the sync thread to destroy the space maps and finish the removal
- *    (spa_finish_removal).
+ *    - If a free happens during a removal, it is freed from the removing
+ *      vdev, and if it has already been copied, from the new location as
+ *      well (free_from_removing_vdev).
+ *
+ *    - After the removal is completed, the copy thread converts the vdev
+ *      into an indirect vdev (vdev_remove_complete) before instructing
+ *      the sync thread to destroy the space maps and finish the removal
+ *      (spa_finish_removal).
+ *
+ *   The following constraints currently apply primary device removal:
+ *
+ *     - All vdevs must be online, healthy, and not be missing any data
+ *       according to the DTLs.
+ *
+ *     - When removing a singleton or mirror vdev, regardless of it's a
+ *       special, dedup, or primary device, it must have the same ashift
+ *       as the devices in the normal allocation class. Furthermore, all
+ *       vdevs in the normal allocation class must have the same ashift to
+ *       ensure the new allocations never includes additional padding.
+ *
+ *     - The normal allocation class cannot contain any raidz or draid
+ *       top-level vdevs since segments are copied without regard for block
+ *       boundaries. This makes it impossible to calculate the required
+ *       parity columns when using these vdev types as the destination.
+ *
+ *     - The encryption keys must be loaded so the ZIL logs can be reset
+ *       in order to prevent writing to the device being removed.
+ *
+ * N.B. ashift and raidz/draid constraints for primary top-level device
+ * removal could be slightly relaxed if it were possible to request that
+ * DVAs from a mirror or singleton in the specified allocation class be
+ * used (metaslab_alloc_dva).
+ *
+ * This flexibility would be particularly useful for raidz/draid pools which
+ * often include a mirrored special device. If a mistakenly added top-level
+ * singleton were added it could then still be removed at the cost of some
+ * special device capacity. This may be a worthwhile tradeoff depending on
+ * the pool capacity and expense (cost, complexity, time) of creating a new
+ * pool and copying all of the data to correct the configuration.
+ *
+ * Furthermore, while not currently supported it should be possible to allow
+ * vdevs of any type to be removed as long as they've never been written to.
  */
 
 typedef struct vdev_copy_arg {
@@ -273,12 +299,12 @@ spa_vdev_noalloc(spa_t *spa, uint64_t guid)
 	uint64_t txg;
 	int error = 0;
 
-	ASSERT(!MUTEX_HELD(&spa_namespace_lock));
+	ASSERT(!spa_namespace_held());
 	ASSERT(spa_writeable(spa));
 
 	txg = spa_vdev_enter(spa);
 
-	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+	ASSERT(spa_namespace_held());
 
 	vd = spa_lookup_by_guid(spa, guid, B_FALSE);
 
@@ -306,12 +332,12 @@ spa_vdev_alloc(spa_t *spa, uint64_t guid)
 	uint64_t txg;
 	int error = 0;
 
-	ASSERT(!MUTEX_HELD(&spa_namespace_lock));
+	ASSERT(!spa_namespace_held());
 	ASSERT(spa_writeable(spa));
 
 	txg = spa_vdev_enter(spa);
 
-	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+	ASSERT(spa_namespace_held());
 
 	vd = spa_lookup_by_guid(spa, guid, B_FALSE);
 
@@ -1396,14 +1422,17 @@ vdev_remove_complete(spa_t *spa)
 	vdev_remove_replace_with_indirect(vd, txg);
 
 	/*
-	 * We now release the locks, allowing spa_sync to run and finish the
+	 * Release the config lock and allow spa_sync to run and finish the
 	 * removal via vdev_remove_complete_sync in syncing context.
+	 *
+	 * Retain the namespace lock to prevent the pool from being exported
+	 * or destroyed before completion of the device removal.
 	 *
 	 * Note that we hold on to the vdev_t that has been replaced.  Since
 	 * it isn't part of the vdev tree any longer, it can't be concurrently
 	 * manipulated, even while we don't have the config lock.
 	 */
-	(void) spa_vdev_exit(spa, NULL, txg, 0);
+	(void) spa_vdev_config_exit(spa, NULL, txg, 0, FTAG);
 
 	/*
 	 * Top ZAP should have been transferred to the indirect vdev in
@@ -1416,7 +1445,8 @@ vdev_remove_complete(spa_t *spa)
 	 */
 	ASSERT0(vd->vdev_leaf_zap);
 
-	txg = spa_vdev_enter(spa);
+	/* Update the vdev labels and dirty the config. */
+	txg = spa_vdev_config_enter(spa);
 	(void) vdev_label_init(vd, 0, VDEV_LABEL_REMOVE);
 	/*
 	 * Request to update the config and the config cachefile.
@@ -1772,6 +1802,20 @@ again:
 	txg_wait_synced(spa->spa_dsl_pool, 0);
 	ASSERT0(vca.vca_outstanding_bytes);
 
+	/*
+	 * Every copy has reported by now.  The errors of the last segments
+	 * copied may have arrived after the check at the end of the loop
+	 * above, so check again before concluding that the removal can be
+	 * completed.  Otherwise the removal of the last metaslab racing its
+	 * own write errors would drop the vdev with data left uncopied.
+	 */
+	if (zfs_removal_ignore_errors == 0 &&
+	    (vca.vca_read_error_bytes > 0 || vca.vca_write_error_bytes > 0)) {
+		mutex_enter(&svr->svr_lock);
+		svr->svr_thread_exit = B_TRUE;
+		mutex_exit(&svr->svr_lock);
+	}
+
 	mutex_destroy(&vca.vca_lock);
 	cv_destroy(&vca.vca_cv);
 
@@ -2049,7 +2093,7 @@ vdev_remove_make_hole_and_free(vdev_t *vd)
 	spa_t *spa = vd->vdev_spa;
 	vdev_t *rvd = spa->spa_root_vdev;
 
-	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+	ASSERT(spa_namespace_held());
 	ASSERT(spa_config_held(spa, SCL_ALL, RW_WRITER) == SCL_ALL);
 
 	vdev_free(vd);
@@ -2077,7 +2121,7 @@ spa_vdev_remove_log(vdev_t *vd, uint64_t *txg)
 	ASSERT(vd->vdev_islog);
 	ASSERT(vd == vd->vdev_top);
 	ASSERT0P(vd->vdev_log_mg);
-	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+	ASSERT(spa_namespace_held());
 
 	/*
 	 * Stop allocating from this vdev.
@@ -2104,7 +2148,7 @@ spa_vdev_remove_log(vdev_t *vd, uint64_t *txg)
 	 * spa_namespace_lock held.  Once this completes the device
 	 * should no longer have any blocks allocated on it.
 	 */
-	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+	ASSERT(spa_namespace_held());
 	if (vd->vdev_stat.vs_alloc != 0)
 		error = spa_reset_logs(spa);
 
@@ -2115,7 +2159,6 @@ spa_vdev_remove_log(vdev_t *vd, uint64_t *txg)
 		ASSERT0P(vd->vdev_log_mg);
 		return (error);
 	}
-	ASSERT0(vd->vdev_stat.vs_alloc);
 
 	/*
 	 * The evacuation succeeded.  Remove any remaining MOS metadata
@@ -2153,7 +2196,7 @@ spa_vdev_remove_log(vdev_t *vd, uint64_t *txg)
 
 	sysevent_t *ev = spa_event_create(spa, vd, NULL,
 	    ESC_ZFS_VDEV_REMOVE_DEV);
-	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+	ASSERT(spa_namespace_held());
 	ASSERT(spa_config_held(spa, SCL_ALL, RW_WRITER) == SCL_ALL);
 
 	/* The top ZAP should have been destroyed by vdev_remove_empty. */
@@ -2397,7 +2440,7 @@ spa_vdev_remove(spa_t *spa, uint64_t guid, boolean_t unspare)
 	uint64_t txg = 0;
 	uint_t nspares, nl2cache;
 	int error = 0, error_log;
-	boolean_t locked = MUTEX_HELD(&spa_namespace_lock);
+	boolean_t locked = spa_namespace_held();
 	sysevent_t *ev = NULL;
 	const char *vd_type = NULL;
 	char *vd_path = NULL;
@@ -2407,7 +2450,7 @@ spa_vdev_remove(spa_t *spa, uint64_t guid, boolean_t unspare)
 	if (!locked)
 		txg = spa_vdev_enter(spa);
 
-	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+	ASSERT(spa_namespace_held());
 	if (spa_feature_is_active(spa, SPA_FEATURE_POOL_CHECKPOINT)) {
 		error = (spa_has_checkpoint(spa)) ?
 		    ZFS_ERR_CHECKPOINT_EXISTS : ZFS_ERR_DISCARDING_CHECKPOINT;

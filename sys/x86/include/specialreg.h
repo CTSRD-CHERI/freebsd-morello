@@ -91,6 +91,7 @@
 #define	CR4_LASS	0x08000000	/* Linear Address Space Separation */
 #define	CR4_LAM_SUP	0x10000000	/* Linear-Address Masking for
 					   Supervisor */
+#define	CR4_FRED	0x100000000ull	/* FRED */
 
 /*
  * Bits in AMD64 special registers.  EFER is 64 bits wide.
@@ -108,6 +109,28 @@
 #define	EFER_INTWB	0x000040000	/* Interruptible WBINVD */
 #define	EFER_UAIE	0x000100000	/* Upper Address Ignore */
 #define	EFER_AIBRSE	0x000200000	/* Automatic IBRS */
+
+/*
+ * Bits in AMD64 special registers. HWCR is 64 bits wide
+ */
+#define	HWCR_SMMLOCK			0x00000001	/* SMM code lock (R/W) */
+#define	HWCR_TLBCACHEDIS		0x00000008	/* Cacheable memory disable (R/W) */
+#define	HWCR_INVDWBINVD			0x00000010	/* INVD to WBINVD conversion (R/W) */
+#define	HWCR_ALLOWFERRONNE		0x00000080	/* Allow FERR on NE (R/W) */
+#define	HWCR_IGNNEEM			0x00000100	/* IGNNE port emulation enable (R/W) */
+#define	HWCR_MONMWAITDIS		0x00000200	/* MONITOR and MWAIT disable (R/W) */
+#define	HWCR_MONMWAITUSEREN		0x00000400	/* MONITOR/MWAIT user mode enable (R/W) */
+#define	HWCR_SMISPCYCDIS		0x00002000	/* SMI special bus cycle disable */
+#define	HWCR_RSMSPCYCDIS		0x00004000	/* RSM special bus cycle disable */
+#define	HWCR_WRAP32DIS			0x00020000	/* 32-bit address wrap disable (R/W) */
+#define	HWCR_MCSTATUSWREN		0x00040000	/* Machine check status write enable (R/W) */
+#define	HWCR_IOCFGGPFAULT		0x00100000	/* IO-space configuration causes a GP fault (R/W) */
+#define	HWCR_LOCKTSCTOCURRENTP0		0x00200000	/* Lock the TSC to the current P0 frequency (R/W) */
+#define	HWCR_TSCFREQSEL			0x01000000	/* TSC frequency select (R) */
+#define	HWCR_CPBDIS			0x02000000	/* Core performance boost disable (R/W) */
+#define	HWCR_EFFFREQCNTMWAIT		0x04000000	/* Effective frequency counting during mwait (R/W) */
+#define	HWCR_EFFFREQREADONLYLOCK	0x08000000	/* Read-only effective frequency counter lock */
+#define	HWCR_IRPERFEN			0x40000000	/* Enable instructions retired counter (R/W) */
 
 /*
  * Intel Extended Features registers
@@ -418,6 +441,7 @@
 #define	AMDPM_HW_PSTATE		0x00000080
 #define	AMDPM_TSC_INVARIANT	0x00000100
 #define	AMDPM_CPB		0x00000200
+#define	AMDPM_PWR_REPORT	0x00001000
 
 /*
  * AMD extended function 8000_0008h ebx info (amd_extended_feature_extensions)
@@ -547,8 +571,20 @@
 /*
  * CPUID instruction 7 Structured Extended Features, leaf 1 eax info
  */
+#define	CPUID_STDEXT4_SHA512		0x00000001
+#define	CPUID_STDEXT4_SM3		0x00000002
+#define	CPUID_STDEXT4_SM4		0x00000004
 #define	CPUID_STDEXT4_LASS		0x00000040
+#define	CPUID_STDEXT4_FRED		0x00020000
+#define	CPUID_STDEXT4_LKGS		0x00040000
+#define	CPUID_STDEXT4_WRMSRNS		0x00080000
+#define	CPUID_STDEXT4_NMISRC		0x00100000
 #define	CPUID_STDEXT4_LAM		0x04000000
+
+/*
+ * CPUID instruction 7 Structured Extended Features, leaf 1 ecx info
+ */
+#define	CPUID_STDEXT5_MSR_IMM		0x00000020
 
 /* CPUID_HYBRID_ID leaf 0x1a */
 #define	CPUID_HYBRID_CORE_MASK	0xff000000
@@ -566,9 +602,15 @@
 #define	IA32_ARCH_CAP_TSX_CTRL	0x00000080
 #define	IA32_ARCH_CAP_TAA_NO	0x00000100
 
+/* MSR IA32_CORE_CAP bits (platform) */
+#define	IA32_CORE_CAP_SPLITLOCK	0x00000020
+
 /* MSR IA32_TSX_CTRL bits */
 #define	IA32_TSX_CTRL_RTM_DISABLE	0x00000001
 #define	IA32_TSX_CTRL_TSX_CPUID_CLEAR	0x00000002
+
+/* MSR MEMORY_CTL platform bits */
+#define	MSR_MEMORY_CTL_SPLITLOCK	0x20000000
 
 /*
  * CPUID manufacturers identifiers
@@ -598,6 +640,7 @@
 #define	MSR_APICBASE		0x01b
 #define	MSR_EBL_CR_POWERON	0x02a
 #define	MSR_TEST_CTL		0x033
+#define	MSR_MEMORY_CTL		0x033	/* Platform, same index as TEST */
 #define	MSR_IA32_FEATURE_CONTROL 0x03a
 #define	MSR_IA32_SPEC_CTRL	0x048
 #define	MSR_IA32_PRED_CMD	0x049
@@ -609,6 +652,7 @@
 #define	MSR_PERFCTR0		0x0c1
 #define	MSR_PERFCTR1		0x0c2
 #define	MSR_PLATFORM_INFO	0x0ce
+#define	MSR_IA32_CORE_CAP	0x0cf
 #define	MSR_MPERF		0x0e7
 #define	MSR_APERF		0x0e8
 #define	MSR_IA32_EXT_CONFIG	0x0ee	/* Undocumented. Core Solo/Duo only */
@@ -643,6 +687,15 @@
 #define	MSR_IA32_ENERGY_PERF_BIAS	0x1b0
 #define	MSR_IA32_PKG_THERM_STATUS	0x1b1
 #define	MSR_IA32_PKG_THERM_INTERRUPT	0x1b2
+#define	MSR_FRED_RSP0		0x1cc
+#define	MSR_FRED_RSP1		0x1cd
+#define	MSR_FRED_RSP2		0x1ce
+#define	MSR_FRED_RSP3		0x1cf
+#define	MSR_FRED_STKLVLS	0x1d0
+#define	MSR_FRED_SSP1		0x1d1
+#define	MSR_FRED_SSP2		0x1d2
+#define	MSR_FRED_SSP3		0x1d3
+#define	MSR_FRED_CONFIG		0x1d4
 #define	MSR_DEBUGCTLMSR		0x1d9
 #define	MSR_LASTBRANCHFROMIP	0x1db
 #define	MSR_LASTBRANCHTOIP	0x1dc
@@ -889,6 +942,9 @@
 /* MSR IA32_MCU_OPT_CTRL */
 #define	IA32_RNGDS_MITG_DIS	0x00000001
 
+/* MSR IA32_PM_ENABLE */
+#define	IA32_PM_ENABLE_HWP_ENABLE	(1ULL << 0)
+
 /* MSR IA32_HWP_CAPABILITIES */
 #define	IA32_HWP_CAPABILITIES_HIGHEST_PERFORMANCE(x)	(((x) >> 0) & 0xff)
 #define	IA32_HWP_CAPABILITIES_GUARANTEED_PERFORMANCE(x)	(((x) >> 8) & 0xff)
@@ -923,6 +979,15 @@
 
 /* MSR IA32_PKG_THERM_INTERRUPT */
 #define	IA32_PKG_THERM_INTERRUPT_HFI_ENABLE		(0x1ULL << 25)
+
+/* MSR IA32_FRED_CONFIG */
+#define	IA32_FRED_CONFIG_CSL_MASK			0x00000003
+#define	IA32_FRED_CONFIG_DECR_SSP			0x00000008
+#define	IA32_FRED_CONFIG_REDZONESZ_MASK			0x000000e0
+#define	IA32_FRED_CONFIG_REDZONESZ_SHIFT		6
+#define	IA32_FRED_CONFIG_REDZONESZ_MULT			64
+#define	IA32_FRED_CONFIG_EXTINT_SLC_MASK		0x00000600
+#define	IA32_FRED_CONFIG_EXTINT_SLC_SHIFT		9
 
 /*
  * PAT modes.
@@ -1210,6 +1275,7 @@
 #define	MSR_LSTAR	0xc0000082	/* long mode SYSCALL target rip */
 #define	MSR_CSTAR	0xc0000083	/* compat mode SYSCALL target rip */
 #define	MSR_SF_MASK	0xc0000084	/* syscall flags mask */
+#define	MSR_IRPERF	0xc00000e9	/* instructions retired performance count */
 #define	MSR_FSBASE	0xc0000100	/* base address of the %fs "segment" */
 #define	MSR_GSBASE	0xc0000101	/* base address of the %gs "segment" */
 #define	MSR_KGSBASE	0xc0000102	/* base address of the kernel %gs */
@@ -1242,11 +1308,19 @@
 #define	MSR_SMM_MASK	0xc0010113	/* SMM TSEG address mask */
 #define	MSR_VM_CR	0xc0010114	/* SVM: feature control */
 #define	MSR_VM_HSAVE_PA 0xc0010117	/* SVM: host save area address */
+#define	MSR_AMD_RAPL_POWER_UNIT 0xc0010299 /* RAPL unit shifts */
+#define	MSR_AMD_CORE_ENERGY_STATUS 0xc001029a /* RAPL per-core energy */
+#define	MSR_AMD_PKG_ENERGY_STATUS 0xc001029b /* RAPL package energy */
 #define	MSR_AMD_CPUID07	0xc0011002	/* CPUID 07 %ebx override */
+#define	MSR_AMD_CPUID01	0xc0011004	/* CPUID 01 %ecx override */
 #define	MSR_EXTFEATURES	0xc0011005	/* Extended CPUID Features override */
 #define	MSR_LS_CFG	0xc0011020
 #define	MSR_IC_CFG	0xc0011021	/* Instruction Cache Configuration */
 #define	MSR_DE_CFG	0xc0011029	/* Decode Configuration */
+#define	MSR_AMD_IBS_FETCH_CTL	0xc0011030
+#define	MSR_AMD_IBS_OP_CTL	0xc0011033
+#define	MSR_AMD_IBS_OP_CTL2	0xc001103e
+#define	MSR_AMD_IBS_FETCH_CTL2	0xc001103f
 
 /* MSR_AMDK8_IPM */
 #define	AMDK8_SMIONCMPHALT	(1ULL << 27)

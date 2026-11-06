@@ -7,8 +7,8 @@
 # Modified by John Marino to suit DragonFly needs
 #
 
-CLDRVERSION=	45.0
-UCDVERSION=	15.0.0
+CLDRVERSION=	48.2
+UCDVERSION=	17.0.0
 
 .if ${.CURDIR} == ${.OBJDIR}
 .error Do make obj first.
@@ -122,10 +122,10 @@ ENCODINGS=	UTF-8 \
 		UTF-32
 
 # CLDR files
-CLDRFILES_CORE= https://unicode.org/Public/cldr/${CLDRVERSION:R}/core.zip
-CLDRFILES_KEY=	https://unicode.org/Public/cldr/${CLDRVERSION:R}/cldr-keyboards-${CLDRVERSION}.zip
-CLDRFILES_TOOLS=https://unicode.org/Public/cldr/${CLDRVERSION:R}/cldr-tools-${CLDRVERSION}.jar
-CLDRFILES_UCD=	https://www.unicode.org/Public/zipped/${UCDVERSION}/UCD.zip
+CLDRFILES_CORE= https://unicode.org/Public/cldr/${CLDRVERSION}/core.zip
+CLDRFILES_KEY=	https://unicode.org/Public/cldr/${CLDRVERSION}/cldr-keyboards-${CLDRVERSION}.zip
+CLDRFILES_TOOLS=https://unicode.org/Public/cldr/${CLDRVERSION}/cldr-tools-${CLDRVERSION}.jar
+CLDRFILES_UCD=	https://www.unicode.org/Public/${UCDVERSION}/ucd/UCD.zip
 
 # fetch and extract targets
 ${UNIDIR}:

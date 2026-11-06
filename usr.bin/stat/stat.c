@@ -7,6 +7,8 @@
  * This code is derived from software contributed to The NetBSD Foundation
  * by Andrew Brown.
  *
+ * Copyright (c) 2025-2026 Klara, Inc.
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
  * are met:
@@ -29,80 +31,38 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <sys/cdefs.h>
-#if 0
-#ifndef lint
-__RCSID("$NetBSD: stat.c,v 1.33 2011/01/15 22:54:10 njoly Exp $"
-"$OpenBSD: stat.c,v 1.14 2009/06/24 09:44:25 sobrado Exp $");
-#endif
-#endif
-#if HAVE_CONFIG_H
-#include "config.h" 
-#else  /* HAVE_CONFIG_H */
-#define HAVE_STRUCT_STAT_ST_FLAGS 1
-#define HAVE_STRUCT_STAT_ST_GEN 1
-#define HAVE_STRUCT_STAT_ST_BIRTHTIME 1
-#define HAVE_STRUCT_STAT_ST_MTIMENSEC 1
-#define HAVE_DEVNAME 1
-#endif /* HAVE_CONFIG_H */
-
 #include <sys/param.h>
-#include <sys/types.h>
-#include <sys/stat.h>
 #include <sys/mount.h>
+#include <sys/stat.h>
 
 #include <ctype.h>
 #include <err.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <grp.h>
 #include <limits.h>
 #include <locale.h>
 #include <paths.h>
 #include <pwd.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
 
-#if HAVE_STRUCT_STAT_ST_FLAGS
-#define DEF_F "%#Xf "
-#define RAW_F "%f "
-#define SHELL_F " st_flags=%f"
-#else /* HAVE_STRUCT_STAT_ST_FLAGS */
-#define DEF_F
-#define RAW_F
-#define SHELL_F
-#endif /* HAVE_STRUCT_STAT_ST_FLAGS */
-
-#if HAVE_STRUCT_STAT_ST_BIRTHTIME
-#define DEF_B "\"%SB\" "
-#define RAW_B "%B "
-#define SHELL_B "st_birthtime=%B "
-#else /* HAVE_STRUCT_STAT_ST_BIRTHTIME */
-#define DEF_B
-#define RAW_B
-#define SHELL_B
-#endif /* HAVE_STRUCT_STAT_ST_BIRTHTIME */
-
-#if HAVE_STRUCT_STAT_ST_ATIM
-#define st_atimespec st_atim
-#define st_ctimespec st_ctim
-#define st_mtimespec st_mtim
-#endif /* HAVE_STRUCT_STAT_ST_ATIM */
-
 #define DEF_FORMAT \
-	"%d %i %Sp %l %Su %Sg %r %z \"%Sa\" \"%Sm\" \"%Sc\" " DEF_B \
-	"%k %b " DEF_F "%N"
-#define RAW_FORMAT	"%d %i %#p %l %u %g %r %z %a %m %c " RAW_B \
-	"%k %b " RAW_F "%N"
+	"%d %i %Sp %l %Su %Sg %r %z \"%Sa\" \"%Sm\" \"%Sc\" \"%SB\" " \
+	"%k %b %#Xf %N"
+#define RAW_FORMAT	"%d %i %#p %l %u %g %r %z %a %m %c %B " \
+	"%k %b %f %N"
 #define LS_FORMAT	"%Sp %l %Su %Sg %Z %Sm %N%SY"
 #define LSF_FORMAT	"%Sp %l %Su %Sg %Z %Sm %N%T%SY"
 #define SHELL_FORMAT \
 	"st_dev=%d st_ino=%i st_mode=%#p st_nlink=%l " \
 	"st_uid=%u st_gid=%g st_rdev=%r st_size=%z " \
-	"st_atime=%a st_mtime=%m st_ctime=%c " SHELL_B \
-	"st_blksize=%k st_blocks=%b" SHELL_F
+	"st_atime=%a st_mtime=%m st_ctime=%c st_birthtime=%B " \
+	"st_blksize=%k st_blocks=%b st_flags=%f"
 #define LINUX_FORMAT \
 	"  File: \"%N\"%n" \
 	"  Size: %-11z  FileType: %HT%n" \
@@ -178,22 +138,24 @@ __RCSID("$NetBSD: stat.c,v 1.33 2011/01/15 22:54:10 njoly Exp $"
 #define SHOW_filename	'N'
 #define SHOW_sizerdev	'Z'
 
-void	usage(const char *);
-void	output(const struct stat *, const char *,
-	    const char *, int, int);
-int	format1(const struct stat *,	/* stat info */
+static void	 usage(const char *);
+static int	 mountpoint_main(int, char *[]);
+static void	 mountpoint_usage(void) __dead2;
+static void	 output(const struct stat *, const char *, const char *, int);
+static int	 format1(const struct stat *,	/* stat info */
 	    const char *,		/* the file name */
 	    const char *, int,		/* the format string itself */
 	    char *, size_t,		/* a place to put the output */
 	    int, int, int, int,		/* the parsed format */
 	    int, int);
-int	hex2byte(const char [2]);
-#if HAVE_STRUCT_STAT_ST_FLAGS
-char   *xfflagstostr(unsigned long);
-#endif
+static int	 hex2byte(const char [2]);
+static char	*xfflagstostr(unsigned long);
+static int	 fdlistholes(int, const char *);
+static int	 listholes(const char *);
 
 static const char *timefmt;
 static int linkfail;
+static bool nonl;
 
 #define addchar(s, c, nl) \
 	do { \
@@ -205,23 +167,28 @@ int
 main(int argc, char *argv[])
 {
 	struct stat st;
-	int ch, rc, errs, am_readlink;
-	int lsF, fmtchar, usestat, nfs_handle, fn, nonl, quiet;
+	char dname[sizeof(_PATH_DEV) + SPECNAMELEN] = _PATH_DEV;
 	const char *statfmt, *options, *synopsis;
-	char dname[sizeof _PATH_DEV + SPECNAMELEN] = _PATH_DEV;
-	fhandle_t fhnd;
 	const char *file;
+	fhandle_t fhnd;
+	int ch, rc, errs, am_readlink, fn, fmtchar;
+	bool lsF, holes, usestat, nfs_handle, quiet;
 
 	am_readlink = 0;
-	lsF = 0;
+	errs = 0;
+	lsF = false;
 	fmtchar = '\0';
-	usestat = 0;
-	nfs_handle = 0;
-	nonl = 0;
-	quiet = 0;
+	holes = false;
+	usestat = false;
+	nfs_handle = false;
+	nonl = false;
+	quiet = false;
 	linkfail = 0;
 	statfmt = NULL;
 	timefmt = NULL;
+
+	if (strcmp(getprogname(), "mountpoint") == 0)
+		return (mountpoint_main(argc, argv));
 
 	if (strcmp(getprogname(), "readlink") == 0) {
 		am_readlink = 1;
@@ -231,28 +198,35 @@ main(int argc, char *argv[])
 		fmtchar = 'f';
 		quiet = 1;
 	} else {
-		options = "f:FHlLnqrst:x";
-		synopsis = "[-FLnq] [-f format | -l | -r | -s | -x] "
+		options = "Ff:HhLlnqrst:x";
+		synopsis = "[-FHhLnq] [-f format | -l | -r | -s | -x] "
 		    "[-t timefmt] [file|handle ...]";
 	}
 
 	while ((ch = getopt(argc, argv, options)) != -1)
 		switch (ch) {
 		case 'F':
-			lsF = 1;
+			lsF = true;
 			break;
                 case 'H':
-			nfs_handle = 1;
+			nfs_handle = true;
+			break;
+		case 'h':
+			holes = true;
 			break;
 		case 'L':
-			usestat = 1;
+			usestat = true;
 			break;
 		case 'n':
-			nonl = 1;
+			nonl = true;
+			break;
+		case 't':
+			timefmt = optarg;
 			break;
 		case 'q':
-			quiet = 1;
+			quiet = true;
 			break;
+		/* remaining cases are purposefully out of order */
 		case 'f':
 			if (am_readlink) {
 				statfmt = "%R";
@@ -269,9 +243,6 @@ main(int argc, char *argv[])
 				    fmtchar, ch);
 			fmtchar = ch;
 			break;
-		case 't':
-			timefmt = optarg;
-			break;
 		default:
 			usage(synopsis);
 		}
@@ -279,6 +250,28 @@ main(int argc, char *argv[])
 	argc -= optind;
 	argv += optind;
 	fn = 1;
+
+	if (holes) {
+		if (fmtchar || lsF || nfs_handle || usestat || timefmt)
+			usage(synopsis);
+		if (argc > 0) {
+			while (argc-- > 0) {
+				if (listholes(*argv) != 0) {
+					if (!quiet)
+						warn("%s", *argv);
+					errs++;
+				}
+				argv++;
+			}
+		} else {
+			if (fdlistholes(STDIN_FILENO, "stdin") != 0) {
+				if (!quiet)
+					warn("stdin");
+				errs++;
+			}
+		}
+		exit(errs ? 1 : 0);
+	}
 
 	if (fmtchar == '\0') {
 		if (lsF)
@@ -318,7 +311,6 @@ main(int argc, char *argv[])
 	if (timefmt == NULL)
 		timefmt = TIME_FORMAT;
 
-	errs = 0;
 	do {
 		if (argc == 0) {
 			if (fdevname_r(STDIN_FILENO, dname +
@@ -361,8 +353,7 @@ main(int argc, char *argv[])
 				    errno == ENOENT &&
 				    (rc = lstat(file, &st)) == -1)
 					errno = ENOENT;
-			}
-			else
+			} else
 				rc = lstat(file, &st);
 		}
 
@@ -371,9 +362,8 @@ main(int argc, char *argv[])
 			linkfail = 1;
 			if (!quiet)
 				warn("%s", file);
-		}
-		else
-			output(&st, file, statfmt, fn, nonl);
+		} else
+			output(&st, file, statfmt, fn);
 
 		argv++;
 		argc--;
@@ -383,11 +373,10 @@ main(int argc, char *argv[])
 	return (am_readlink ? linkfail : errs);
 }
 
-#if HAVE_STRUCT_STAT_ST_FLAGS
 /*
  * fflagstostr() wrapper that leaks only once
  */
-char *
+static char *
 xfflagstostr(unsigned long fflags)
 {
 	static char *str = NULL;
@@ -400,22 +389,62 @@ xfflagstostr(unsigned long fflags)
 		err(1, "fflagstostr");
 	return (str);
 }
-#endif /* HAVE_STRUCT_STAT_ST_FLAGS */
 
-void
+static void
 usage(const char *synopsis)
 {
-
 	(void)fprintf(stderr, "usage: %s %s\n", getprogname(), synopsis);
 	exit(1);
+}
+
+/*
+ * When invoked as mountpoint, report whether the file is the root of a
+ * mounted file system.  Exit with 0 if it is, 1 if it is not and
+ * 2 on error.
+ */
+static int
+mountpoint_main(int argc, char *argv[])
+{
+	struct stat st;
+	int ch, mounted, quiet;
+
+	quiet = 0;
+	while ((ch = getopt(argc, argv, "q")) != -1)
+		switch (ch) {
+		case 'q':
+			quiet = 1;
+			break;
+		default:
+			mountpoint_usage();
+		}
+	argc -= optind;
+	argv += optind;
+	if (argc != 1)
+		mountpoint_usage();
+
+	if (stat(argv[0], &st) == -1)
+		err(2, "%s", argv[0]);
+
+	mounted = (st.st_bsdflags & SFBSD_MNTPOINT) != 0;
+	if (!quiet)
+		printf("%s is %sa mount point\n", argv[0],
+		    mounted ? "" : "not ");
+	return (mounted ? 0 : 1);
+}
+
+static void
+mountpoint_usage(void)
+{
+
+	(void)fprintf(stderr, "usage: %s [-q] file\n", getprogname());
+	exit(2);
 }
 
 /* 
  * Parses a format string.
  */
-void
-output(const struct stat *st, const char *file,
-    const char *statfmt, int fn, int nonl)
+static void
+output(const struct stat *st, const char *file, const char *statfmt, int fn)
 {
 	int flags, size, prec, ofmt, hilo, what;
 	char buf[PATH_MAX + 4 + 1];
@@ -606,7 +635,7 @@ output(const struct stat *st, const char *file,
 /*
  * Arranges output according to a single parsed format substring.
  */
-int
+static int
 format1(const struct stat *st,
     const char *file,
     const char *fmt, int flen,
@@ -622,6 +651,7 @@ format1(const struct stat *st,
 	struct timespec ts;
 	struct tm *tm;
 	int l, small, formats;
+	mode_t dtype;
 
 	tsp = NULL;
 	formats = 0;
@@ -635,12 +665,17 @@ format1(const struct stat *st,
 	case SHOW_st_dev:
 	case SHOW_st_rdev:
 		small = (sizeof(st->st_dev) == 4);
-		data = (what == SHOW_st_dev) ? st->st_dev : st->st_rdev;
-#if HAVE_DEVNAME
-		sdata = devname(what == SHOW_st_dev ? st->st_dev :
-		    st->st_rdev, S_ISCHR(st->st_mode) ? S_IFCHR :
-		    (S_ISBLK(st->st_mode) ? S_IFBLK : 0));
-#endif /* HAVE_DEVNAME */
+		switch (what) {
+		case SHOW_st_dev:
+			data = st->st_dev;
+			dtype = S_IFCHR;
+			break;
+		case SHOW_st_rdev:
+			data = st->st_rdev;
+			dtype = st->st_mode & (S_IFCHR | S_IFBLK);
+			break;
+		}
+		sdata = devname(data, dtype);
 		if (hilo == HIGH_PIECE) {
 			data = major(data);
 			hilo = 0;
@@ -650,11 +685,7 @@ format1(const struct stat *st,
 			hilo = 0;
 		}
 		formats = FMTF_DECIMAL | FMTF_OCTAL | FMTF_UNSIGNED | FMTF_HEX |
-#if HAVE_DEVNAME
 		    FMTF_STRING;
-#else /* HAVE_DEVNAME */
-		    0;
-#endif /* HAVE_DEVNAME */
 		if (ofmt == 0)
 			ofmt = FMTF_UNSIGNED;
 		break;
@@ -743,11 +774,9 @@ format1(const struct stat *st,
 		if (tsp == NULL)
 			tsp = &st->st_ctimespec;
 		/* FALLTHROUGH */
-#if HAVE_STRUCT_STAT_ST_BIRTHTIME
 	case SHOW_st_btime:
 		if (tsp == NULL)
 			tsp = &st->st_birthtimespec;
-#endif /* HAVE_STRUCT_STAT_ST_BIRTHTIME */
 		ts = *tsp;		/* copy so we can muck with it */
 		small = (sizeof(ts.tv_sec) == 4);
 		data = ts.tv_sec;
@@ -788,7 +817,6 @@ format1(const struct stat *st,
 		if (ofmt == 0)
 			ofmt = FMTF_UNSIGNED;
 		break;
-#if HAVE_STRUCT_STAT_ST_FLAGS
 	case SHOW_st_flags:
 		small = (sizeof(st->st_flags) == 4);
 		data = st->st_flags;
@@ -800,8 +828,6 @@ format1(const struct stat *st,
 		if (ofmt == 0)
 			ofmt = FMTF_UNSIGNED;
 		break;
-#endif /* HAVE_STRUCT_STAT_ST_FLAGS */
-#if HAVE_STRUCT_STAT_ST_GEN
 	case SHOW_st_gen:
 		small = (sizeof(st->st_gen) == 4);
 		data = st->st_gen;
@@ -810,7 +836,6 @@ format1(const struct stat *st,
 		if (ofmt == 0)
 			ofmt = FMTF_UNSIGNED;
 		break;
-#endif /* HAVE_STRUCT_STAT_ST_GEN */
 	case SHOW_realpath:
 		small = 0;
 		data = 0;
@@ -1073,7 +1098,7 @@ format1(const struct stat *st,
 	(void)strcat(lfmt, "ll");
 	switch (ofmt) {
 	case FMTF_DECIMAL:	(void)strcat(lfmt, "d");	break;
-	case FMTF_OCTAL:		(void)strcat(lfmt, "o");	break;
+	case FMTF_OCTAL:	(void)strcat(lfmt, "o");	break;
 	case FMTF_UNSIGNED:	(void)strcat(lfmt, "u");	break;
 	case FMTF_HEX:		(void)strcat(lfmt, "x");	break;
 	}
@@ -1083,9 +1108,75 @@ format1(const struct stat *st,
 
 
 #define hex2nibble(c) (c <= '9' ? c - '0' : toupper(c) - 'A' + 10)
-int
+static int
 hex2byte(const char c[2]) {
 	if (!(ishexnumber(c[0]) && ishexnumber(c[1])))
 		return -1;
 	return (hex2nibble(c[0]) << 4) + hex2nibble(c[1]);
+}
+
+static int
+fdlistholes(int fd, const char *fn)
+{
+	struct stat sb;
+	off_t pos = 0, off;
+	long l;
+
+	if (fstat(fd, &sb) < 0)
+		return (-1);
+	if (S_ISDIR(sb.st_mode)) {
+		if ((l = fpathconf(fd, _PC_MIN_HOLE_SIZE)) < 0)
+			return (-1);
+		printf("%ld", l);
+	} else if (!S_ISREG(sb.st_mode)) {
+		errno = ESPIPE;
+		return (-1);
+	} else {
+		for (;;) {
+			if ((off = lseek(fd, pos, SEEK_HOLE)) < 0) {
+				if (errno != ENXIO)
+					return (-1);
+				/*
+				 * This can only happen if the file was
+				 * truncated while we were scanning it, or
+				 * on the initial seek if the file is
+				 * empty.  Report the virtual hole at the
+				 * end of the file at this position.
+				 */
+				off = pos;
+			}
+			printf("%jd", (intmax_t)off);
+			pos = off;
+			if ((off = lseek(fd, pos, SEEK_DATA)) < 0) {
+				if (errno != ENXIO)
+					return (-1);
+				/*
+				 * There are no more data regions in the
+				 * file, or it got truncated.  However, we
+				 * may not be at the end yet.
+				 */
+				if ((off = lseek(fd, 0, SEEK_END)) > pos)
+					printf("-%jd", (intmax_t)off - 1);
+				break;
+			}
+			printf("-%jd,", (intmax_t)off - 1);
+			pos = off;
+		}
+	}
+	printf(" %s", fn);
+	if (!nonl)
+		printf("\n");
+	return (0);
+}
+
+static int
+listholes(const char *fn)
+{
+	int fd, ret;
+
+	if ((fd = open(fn, O_RDONLY)) < 0)
+		return (-1);
+	ret = fdlistholes(fd, fn);
+	close(fd);
+	return (ret);
 }

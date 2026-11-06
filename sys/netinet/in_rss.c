@@ -29,6 +29,7 @@
 
 
 #include "opt_inet6.h"
+#include "opt_rss.h"
 
 #include <sys/param.h>
 #include <sys/mbuf.h>
@@ -315,7 +316,7 @@ rss_mbuf_software_hash_v4(const struct mbuf *m, int dir, uint32_t *hashval,
 			RSS_DEBUG("short TCP frame?\n");
 			return (-1);
 		}
-		th = (const struct tcphdr *)((c_caddr_t)ip + iphlen);
+		th = (const struct tcphdr *)((const char *)ip + iphlen);
 		return rss_proto_software_hash_v4(ip->ip_src, ip->ip_dst,
 		    th->th_sport,
 		    th->th_dport,
@@ -325,7 +326,7 @@ rss_mbuf_software_hash_v4(const struct mbuf *m, int dir, uint32_t *hashval,
 	} else if ((rss_gethashconfig() & RSS_HASHTYPE_RSS_UDP_IPV4) &&
 	    (proto == IPPROTO_UDP) &&
 	    (is_frag == 0)) {
-		uh = (const struct udphdr *)((c_caddr_t)ip + iphlen);
+		uh = (const struct udphdr *)((const char *)ip + iphlen);
 		if (m->m_len < iphlen + sizeof(struct udphdr)) {
 			RSS_DEBUG("short UDP frame?\n");
 			return (-1);
@@ -350,6 +351,7 @@ rss_mbuf_software_hash_v4(const struct mbuf *m, int dir, uint32_t *hashval,
 	}
 }
 
+#ifdef RSS
 /*
  * Similar to rss_m2cpuid, but designed to be used by the IP NETISR
  * on incoming frames.
@@ -387,3 +389,4 @@ rss_soft_m2cpuid_v4(struct mbuf *m, uintptr_t source, u_int *cpuid)
 	}
 	return (m);
 }
+#endif

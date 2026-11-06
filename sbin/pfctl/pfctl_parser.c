@@ -242,7 +242,7 @@ copy_satopfaddr(struct pf_addr *pfa, struct sockaddr *sa)
 const struct icmptypeent *
 geticmptypebynumber(u_int8_t type, sa_family_t af)
 {
-	unsigned int	i;
+	size_t	i;
 
 	if (af != AF_INET6) {
 		for (i=0; i < nitems(icmp_type); i++) {
@@ -261,7 +261,7 @@ geticmptypebynumber(u_int8_t type, sa_family_t af)
 const struct icmptypeent *
 geticmptypebyname(char *w, sa_family_t af)
 {
-	unsigned int	i;
+	size_t	i;
 
 	if (af != AF_INET6) {
 		for (i=0; i < nitems(icmp_type); i++) {
@@ -280,7 +280,7 @@ geticmptypebyname(char *w, sa_family_t af)
 const struct icmpcodeent *
 geticmpcodebynumber(u_int8_t type, u_int8_t code, sa_family_t af)
 {
-	unsigned int	i;
+	size_t	i;
 
 	if (af != AF_INET6) {
 		for (i=0; i < nitems(icmp_code); i++) {
@@ -301,7 +301,7 @@ geticmpcodebynumber(u_int8_t type, u_int8_t code, sa_family_t af)
 const struct icmpcodeent *
 geticmpcodebyname(u_long type, char *w, sa_family_t af)
 {
-	unsigned int	i;
+	size_t	i;
 
 	if (af != AF_INET6) {
 		for (i=0; i < nitems(icmp_code); i++) {
@@ -389,9 +389,11 @@ print_flags(uint16_t f)
 
 void
 print_fromto(struct pf_rule_addr *src, pf_osfp_t osfp, struct pf_rule_addr *dst,
-    sa_family_t af, u_int8_t proto, int verbose, int numeric)
+    sa_family_t af, u_int8_t proto, int opts, int numeric)
 {
 	char buf[PF_OSFP_LEN*3];
+	int verbose = opts & (PF_OPT_VERBOSE2 | PF_OPT_DEBUG);
+
 	if (src->addr.type == PF_ADDR_ADDRMASK &&
 	    dst->addr.type == PF_ADDR_ADDRMASK &&
 	    PF_AZERO(&src->addr.v.a.addr, AF_INET6) &&
@@ -508,6 +510,8 @@ print_pool(struct pfctl_pool *pool, u_int16_t p1, u_int16_t p2, int id)
 	if (pool->mape.offset > 0)
 		printf(" map-e-portset %u/%u/%u",
 		    pool->mape.offset, pool->mape.psidlen, pool->mape.psid);
+	if (pool->opts & PF_POOL_IPV6NH)
+		printf(" prefer-ipv6-nexthop");
 }
 
 void
@@ -605,6 +609,20 @@ print_status(struct pfctl_status *s, struct pfctl_syncookies *cookies, int opts)
 		    s->src_nodes, "");
 		TAILQ_FOREACH(c, &s->scounters, entry) {
 			printf("  %-25s %14ju ", c->name, c->counter);
+			if (runtime > 0)
+				printf("%14.1f/s\n",
+				    (double)c->counter / (double)runtime);
+			else
+				printf("%14s\n", "");
+		}
+	}
+	if (opts & PF_OPT_VERBOSE) {
+		printf("Fragments\n");
+		printf("  %-25s %14ju %14s\n", "current entries",
+		    s->fragments, "");
+		TAILQ_FOREACH(c, &s->ncounters, entry) {
+			printf("  %-25s %14ju ", c->name,
+			    c->counter);
 			if (runtime > 0)
 				printf("%14.1f/s\n",
 				    (double)c->counter / (double)runtime);
@@ -838,34 +856,74 @@ print_eth_rule(struct pfctl_eth_rule *r, const char *anchor_call,
 }
 
 void
-print_rule(struct pfctl_rule *r, const char *anchor_call, int verbose, int numeric)
+print_statelim(const struct pfctl_state_lim *ioc)
+{
+	printf("state limiter %s id %u limit %u", ioc->name, ioc->id,
+	    ioc->limit);
+	if (ioc->rate.limit != 0)
+		printf(" rate %u/%u", ioc->rate.limit, ioc->rate.seconds);
+
+	printf("\n");
+}
+
+void
+print_sourcelim(const struct pfctl_source_lim *ioc)
+{
+	printf("source limiter %s id %u entries %u limit %u", ioc->name,
+	    ioc->id, ioc->entries, ioc->limit);
+	if (ioc->rate.limit != 0)
+		printf(" rate %u/%u", ioc->rate.limit, ioc->rate.seconds);
+	if (ioc->overload_tblname[0] != '\0') {
+		printf(" table <%s> above %u", ioc->overload_tblname,
+		    ioc->overload_hwm);
+		if (ioc->overload_lwm)
+			printf(" below %u", ioc->overload_lwm);
+	}
+	if (ioc->inet_prefix < 32)
+		printf(" inet mask %u", ioc->inet_prefix);
+	if (ioc->inet6_prefix < 128)
+		printf(" inet6 mask %u", ioc->inet6_prefix);
+
+	printf("\n");
+}
+
+void
+print_rule(struct pfctl_rule *r, const char *anchor_call, int opts, int numeric)
 {
 	static const char *actiontypes[] = { "pass", "block", "scrub",
 	    "no scrub", "nat", "no nat", "binat", "no binat", "rdr", "no rdr",
-	    "", "", "match"};
+	    "synproxy drop", "defer", "match", "af-rt", "route-to" };
 	static const char *anchortypes[] = { "anchor", "anchor", "anchor",
 	    "anchor", "nat-anchor", "nat-anchor", "binat-anchor",
 	    "binat-anchor", "rdr-anchor", "rdr-anchor" };
-	int	i, ropts;
+	int	 i, ropts;
+	int	 verbose = opts & (PF_OPT_VERBOSE2 | PF_OPT_DEBUG);
 	char	*p;
+
+	if ((r->rule_flag & PFRULE_EXPIRED) && (!verbose))
+		return;
 
 	if (verbose)
 		printf("@%d ", r->nr);
-	if (r->action == PF_MATCH)
-		printf("match");
-	else if (r->action > PF_NORDR)
-		printf("action(%d)", r->action);
-	else if (anchor_call[0]) {
-		p = strrchr(anchor_call, '/');
-		if (p ? p[1] == '_' : anchor_call[0] == '_')
-			printf("%s", anchortypes[r->action]);
-		else
-			printf("%s \"%s\"", anchortypes[r->action],
-			    anchor_call);
+	if (anchor_call[0]) {
+		if (r->action >= nitems(anchortypes)) {
+			printf("anchor(%d)", r->action);
+		} else {
+			p = strrchr(anchor_call, '/');
+			if (p ? p[1] == '_' : anchor_call[0] == '_')
+				printf("%s", anchortypes[r->action]);
+			else
+				printf("%s \"%s\"", anchortypes[r->action],
+				    anchor_call);
+		}
 	} else {
-		printf("%s", actiontypes[r->action]);
-		if (r->natpass)
-			printf(" pass");
+		if (r->action >= nitems(actiontypes))
+			printf("action(%d)", r->action);
+		else {
+			printf("%s", actiontypes[r->action]);
+			if (r->natpass)
+				printf(" pass");
+		}
 	}
 	if (r->action == PF_DROP) {
 		if (r->rule_flag & PFRULE_RETURN)
@@ -968,7 +1026,7 @@ print_rule(struct pfctl_rule *r, const char *anchor_call, int verbose, int numer
 			printf(" proto %u", r->proto);
 	}
 	print_fromto(&r->src, r->os_fingerprint, &r->dst, r->af, r->proto,
-	    verbose, numeric);
+	    opts, numeric);
 	if (r->rcv_ifname[0])
 		printf(" %sreceived-on %s", r->rcvifnot ? "!" : "",
 		    r->rcv_ifname);
@@ -1057,6 +1115,33 @@ print_rule(struct pfctl_rule *r, const char *anchor_call, int verbose, int numer
 		}
 		printf(" probability %s%%", buf);
 	}
+	if (r->statelim.id != PF_STATELIM_ID_NONE) {
+#if 0 /* XXX need pf to find statelims */
+		struct pfctl_statelim *stlim =
+		    pfctl_get_statelim_id(pf, r->statelim);
+
+		if (stlim != NULL)
+			printf(" state limiter %s", stlim->ioc.name);
+		else
+#endif
+		printf(" state limiter id %u (%s)", r->statelim.id,
+		    (r->statelim.limiter_action == PF_LIMITER_BLOCK) ?
+		    "block" : "no-match");
+	}
+	if (r->sourcelim.id != PF_SOURCELIM_ID_NONE) {
+#if 0 /* XXX need pf to find sourcelims */
+		struct pfctl_sourcelim *srlim =
+		    pfctl_get_sourcelim_id(pf, r->sourcelim);
+
+		if (srlim != NULL)
+			printf(" source limiter %s", srlim->ioc.name);
+		else
+#endif
+		printf(" source limiter id %u (%s)", r->sourcelim.id,
+		    (r->sourcelim.limiter_action == PF_LIMITER_BLOCK) ?
+		    "block" : "no-match");
+	}
+
 	ropts = 0;
 	if (r->max_states || r->max_src_nodes || r->max_src_states)
 		ropts = 1;
@@ -1217,6 +1302,8 @@ print_rule(struct pfctl_rule *r, const char *anchor_call, int verbose, int numer
 		printf(" %s %d",
 		    r->free_flags & PFRULE_DN_IS_PIPE ? "dnpipe" : "dnqueue",
 		    r->dnpipe);
+	if (r->rule_flag & PFRULE_ONCE)
+		printf(" once");
 	if (r->qname[0] && r->pqname[0])
 		printf(" queue(%s, %s)", r->qname, r->pqname);
 	else if (r->qname[0])
@@ -1268,6 +1355,13 @@ print_rule(struct pfctl_rule *r, const char *anchor_call, int verbose, int numer
 			print_pool(&r->rdr, r->rdr.proxy_port[0],
 			    r->rdr.proxy_port[1], PF_RDR);
 		}
+	}
+
+	if (r->rule_flag & PFRULE_EXPIRED) {
+		printf(" # expired");
+
+		if (r->exptime != 0)
+			printf(" %s", ctime(&r->exptime));
 	}
 }
 
@@ -1438,7 +1532,7 @@ ifa_add_groups_to_map(char *ifa_name)
 			ENTRY	 		 item;
 			ENTRY			*ret_item;
 			int			*answer;
-	
+
 			item.key = ifg->ifgrq_group;
 			if (hsearch_r(item, FIND, &ret_item, &isgroup_map) == 0) {
 				struct ifgroupreq	 ifgr2;
@@ -1511,11 +1605,18 @@ ifa_load(void)
 			copy_satopfaddr(&n->addr.v.a.addr, ifa->ifa_addr);
 			ifa->ifa_netmask->sa_family = ifa->ifa_addr->sa_family;
 			copy_satopfaddr(&n->addr.v.a.mask, ifa->ifa_netmask);
-			if (ifa->ifa_broadaddr != NULL) {
+			if (ifa->ifa_flags & IFF_BROADCAST &&
+			    ifa->ifa_broadaddr != NULL &&
+			    ifa->ifa_broadaddr->sa_len != 0) {
+				ifa->ifa_broadaddr->sa_family =
+				    ifa->ifa_addr->sa_family;
 				ifa->ifa_broadaddr->sa_family = ifa->ifa_addr->sa_family;
 				copy_satopfaddr(&n->bcast, ifa->ifa_broadaddr);
-			}
-			if (ifa->ifa_dstaddr != NULL) {
+			} else if (ifa->ifa_flags & IFF_POINTOPOINT &&
+			    ifa->ifa_dstaddr != NULL &&
+			    ifa->ifa_dstaddr->sa_len != 0) {
+				ifa->ifa_dstaddr->sa_family =
+				    ifa->ifa_addr->sa_family;
 				ifa->ifa_dstaddr->sa_family = ifa->ifa_addr->sa_family;
 				copy_satopfaddr(&n->peer, ifa->ifa_dstaddr);
 			}
@@ -1580,7 +1681,7 @@ is_a_group(char *name)
 {
 	ENTRY	 		 item;
 	ENTRY			*ret_item;
-	
+
 	item.key = name;
 	if (hsearch_r(item, FIND, &ret_item, &isgroup_map) == 0)
 		return (0);
@@ -2029,41 +2130,4 @@ append_addr_host(struct pfr_buffer *b, struct node_host *n, int test, int not)
 	} while ((n = n->next) != NULL);
 
 	return (0);
-}
-
-int
-pfctl_add_trans(struct pfr_buffer *buf, int rs_num, const char *anchor)
-{
-	struct pfioc_trans_e trans;
-
-	bzero(&trans, sizeof(trans));
-	trans.rs_num = rs_num;
-	if (strlcpy(trans.anchor, anchor,
-	    sizeof(trans.anchor)) >= sizeof(trans.anchor))
-		errx(1, "pfctl_add_trans: strlcpy");
-
-	return pfr_buf_add(buf, &trans);
-}
-
-u_int32_t
-pfctl_get_ticket(struct pfr_buffer *buf, int rs_num, const char *anchor)
-{
-	struct pfioc_trans_e *p;
-
-	PFRB_FOREACH(p, buf)
-		if (rs_num == p->rs_num && !strcmp(anchor, p->anchor))
-			return (p->ticket);
-	errx(1, "pfctl_get_ticket: assertion failed");
-}
-
-int
-pfctl_trans(int dev, struct pfr_buffer *buf, u_long cmd, int from)
-{
-	struct pfioc_trans trans;
-
-	bzero(&trans, sizeof(trans));
-	trans.size = buf->pfrb_size - from;
-	trans.esize = sizeof(struct pfioc_trans_e);
-	trans.array = ((struct pfioc_trans_e *)buf->pfrb_caddr) + from;
-	return ioctl(dev, cmd, &trans);
 }

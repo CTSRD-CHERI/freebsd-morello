@@ -71,7 +71,6 @@ DIRDEPS = \
 	lib/libexecinfo \
 	lib/libexpat \
 	lib/libfetch \
-	lib/libfigpar \
 	lib/libgeom \
 	lib/libgssapi \
 	lib/libiconv_modules/BIG5 \
@@ -229,10 +228,6 @@ DIRDEPS+= \
 
 .endif
 
-.if ${MK_DIALOG} != "no"
-DIRDEPS+= lib/libdpv
-.endif
-
 .if ${MK_GPIO} != "no"
 DIRDEPS+= lib/libgpio
 .endif
@@ -253,6 +248,10 @@ DIRDEPS+= \
 
 .if ${MK_BLACKLIST_SUPPORT} != "no"
 DIRDEPS+=	lib/libblacklist
+.endif
+
+.if ${MK_BLOCKLIST_SUPPORT} != "no"
+DIRDEPS+=	lib/libblocklist
 .endif
 
 .if ${MK_ZFS} != "no"

@@ -54,7 +54,8 @@ DTS=	\
 	allwinner/sun50i-h5-orangepi-pc2.dts \
 	allwinner/sun50i-h5-nanopi-neo2.dts \
 	allwinner/sun50i-h6-pine-h64.dts \
-	allwinner/sun50i-h6-pine-h64-model-b.dts
+	allwinner/sun50i-h6-pine-h64-model-b.dts \
+	allwinner/sun55i-a527-cubie-a5e.dts
 
 DTSO=	sun50i-a64-mmc0-disable.dtso \
 	sun50i-a64-mmc1-disable.dtso \
@@ -65,7 +66,12 @@ DTSO=	sun50i-a64-mmc0-disable.dtso \
 	sun50i-a64-timer.dtso \
 	sun50i-h5-opp.dtso \
 	sun50i-h5-nanopi-neo2-opp.dtso
-
+.elif ${MACHINE_CPUARCH} == "riscv"
+DTS=	\
+	allwinner/sun20i-d1-dongshan-nezha-stu.dts \
+	allwinner/sun20i-d1-lichee-rv.dts \
+	allwinner/sun20i-d1-mangopi-mq-pro.dts \
+	allwinner/sun20i-d1-nezha.dts
 .endif
 
 .include <bsd.dtb.mk>

@@ -1740,7 +1740,7 @@ struct getrandom_args {
 };
 struct getfhat_args {
 	char fd_l_[PADL_(int)]; int fd; char fd_r_[PADR_(int)];
-	char path_l_[PADL_(char *)]; char * path; char path_r_[PADR_(char *)];
+	char path_l_[PADL_(const char *)]; const char * path; char path_r_[PADR_(const char *)];
 	char fhp_l_[PADL_(struct fhandle *)]; struct fhandle * fhp; char fhp_r_[PADR_(struct fhandle *)];
 	char flags_l_[PADL_(int)]; int flags; char flags_r_[PADR_(int)];
 };
@@ -1900,6 +1900,53 @@ struct getgroups_args {
 struct setgroups_args {
 	char gidsetsize_l_[PADL_(int)]; int gidsetsize; char gidsetsize_r_[PADR_(int)];
 	char gidset_l_[PADL_(const gid_t *)]; const gid_t * gidset; char gidset_r_[PADR_(const gid_t *)];
+};
+struct jail_attach_jd_args {
+	char fd_l_[PADL_(int)]; int fd; char fd_r_[PADR_(int)];
+};
+struct jail_remove_jd_args {
+	char fd_l_[PADL_(int)]; int fd; char fd_r_[PADR_(int)];
+};
+struct kexec_load_args {
+	char entry_l_[PADL_(uint64_t)]; uint64_t entry; char entry_r_[PADR_(uint64_t)];
+	char nseg_l_[PADL_(u_long)]; u_long nseg; char nseg_r_[PADR_(u_long)];
+	char segments_l_[PADL_(struct kexec_segment *)]; struct kexec_segment * segments; char segments_r_[PADR_(struct kexec_segment *)];
+	char flags_l_[PADL_(u_long)]; u_long flags; char flags_r_[PADR_(u_long)];
+};
+struct pdrfork_args {
+	char fdp_l_[PADL_(int *)]; int * fdp; char fdp_r_[PADR_(int *)];
+	char pdflags_l_[PADL_(int)]; int pdflags; char pdflags_r_[PADR_(int)];
+	char rfflags_l_[PADL_(int)]; int rfflags; char rfflags_r_[PADR_(int)];
+};
+struct pdwait_args {
+	char fd_l_[PADL_(int)]; int fd; char fd_r_[PADR_(int)];
+	char status_l_[PADL_(int *)]; int * status; char status_r_[PADR_(int *)];
+	char options_l_[PADL_(int)]; int options; char options_r_[PADR_(int)];
+	char wrusage_l_[PADL_(struct __wrusage *)]; struct __wrusage * wrusage; char wrusage_r_[PADR_(struct __wrusage *)];
+	char info_l_[PADL_(struct __siginfo *)]; struct __siginfo * info; char info_r_[PADR_(struct __siginfo *)];
+};
+struct renameat2_args {
+	char oldfd_l_[PADL_(int)]; int oldfd; char oldfd_r_[PADR_(int)];
+	char old_l_[PADL_(const char *)]; const char * old; char old_r_[PADR_(const char *)];
+	char newfd_l_[PADL_(int)]; int newfd; char newfd_r_[PADR_(int)];
+	char new_l_[PADL_(const char *)]; const char * new; char new_r_[PADR_(const char *)];
+	char flags_l_[PADL_(int)]; int flags; char flags_r_[PADR_(int)];
+};
+struct pdopenpid_args {
+	char pid_l_[PADL_(pid_t)]; pid_t pid; char pid_r_[PADR_(pid_t)];
+	char flags_l_[PADL_(int)]; int flags; char flags_r_[PADR_(int)];
+};
+struct pddupfd_args {
+	char pd_l_[PADL_(int)]; int pd; char pd_r_[PADR_(int)];
+	char fd_l_[PADL_(int)]; int fd; char fd_r_[PADR_(int)];
+	char flags_l_[PADL_(int)]; int flags; char flags_r_[PADR_(int)];
+};
+struct pdptrace_args {
+	char req_l_[PADL_(int)]; int req; char req_r_[PADR_(int)];
+	char pfd_l_[PADL_(int)]; int pfd; char pfd_r_[PADR_(int)];
+	char lwpid_l_[PADL_(int)]; int lwpid; char lwpid_r_[PADR_(int)];
+	char addr_l_[PADL_(void *)]; void * addr; char addr_r_[PADR_(void *)];
+	char data_l_[PADL_(int)]; int data; char data_r_[PADR_(int)];
 };
 int	sys__exit(struct thread *, struct _exit_args *);
 int	sys_fork(struct thread *, struct fork_args *);
@@ -2305,6 +2352,15 @@ int	sys_inotify_add_watch_at(struct thread *, struct inotify_add_watch_at_args *
 int	sys_inotify_rm_watch(struct thread *, struct inotify_rm_watch_args *);
 int	sys_getgroups(struct thread *, struct getgroups_args *);
 int	sys_setgroups(struct thread *, struct setgroups_args *);
+int	sys_jail_attach_jd(struct thread *, struct jail_attach_jd_args *);
+int	sys_jail_remove_jd(struct thread *, struct jail_remove_jd_args *);
+int	sys_kexec_load(struct thread *, struct kexec_load_args *);
+int	sys_pdrfork(struct thread *, struct pdrfork_args *);
+int	sys_pdwait(struct thread *, struct pdwait_args *);
+int	sys_renameat2(struct thread *, struct renameat2_args *);
+int	sys_pdopenpid(struct thread *, struct pdopenpid_args *);
+int	sys_pddupfd(struct thread *, struct pddupfd_args *);
+int	sys_pdptrace(struct thread *, struct pdptrace_args *);
 
 #ifdef COMPAT_43
 
@@ -3301,6 +3357,15 @@ int	freebsd14_setgroups(struct thread *, struct freebsd14_setgroups_args *);
 #define	SYS_AUE_inotify_rm_watch	AUE_INOTIFY
 #define	SYS_AUE_getgroups	AUE_GETGROUPS
 #define	SYS_AUE_setgroups	AUE_SETGROUPS
+#define	SYS_AUE_jail_attach_jd	AUE_JAIL_ATTACH
+#define	SYS_AUE_jail_remove_jd	AUE_JAIL_REMOVE
+#define	SYS_AUE_kexec_load	AUE_NULL
+#define	SYS_AUE_pdrfork	AUE_PDRFORK
+#define	SYS_AUE_pdwait	AUE_PDWAIT
+#define	SYS_AUE_renameat2	AUE_RENAMEAT
+#define	SYS_AUE_pdopenpid	AUE_PDOPENPID
+#define	SYS_AUE_pddupfd	AUE_NULL
+#define	SYS_AUE_pdptrace	AUE_PDPTRACE
 
 #undef PAD_
 #undef PADL_

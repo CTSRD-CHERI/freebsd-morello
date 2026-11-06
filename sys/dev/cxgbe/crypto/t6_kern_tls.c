@@ -383,6 +383,8 @@ t6_tls_tag_alloc(if_t ifp, union if_snd_tag_alloc_params *params,
 	int atid, error, explicit_iv_size, keyid, mac_first;
 
 	tls = params->tls.tls;
+	vi = if_getsoftc(ifp);
+	sc = vi->adapter;
 
 	/* Only TLS 1.1 and TLS 1.2 are currently supported. */
 	if (tls->params.tls_vmajor != TLS_MAJOR_VER_ONE ||
@@ -410,6 +412,8 @@ t6_tls_tag_alloc(if_t ifp, union if_snd_tag_alloc_params *params,
 		default:
 			return (EPROTONOSUPPORT);
 		}
+		if (!sc->tlst.cbc)
+			return (EPROTONOSUPPORT);
 		explicit_iv_size = AES_BLOCK_LEN;
 		mac_first = 1;
 		break;
@@ -430,9 +434,6 @@ t6_tls_tag_alloc(if_t ifp, union if_snd_tag_alloc_params *params,
 	default:
 		return (EPROTONOSUPPORT);
 	}
-
-	vi = if_getsoftc(ifp);
-	sc = vi->adapter;
 
 	tlsp = alloc_tlspcb(ifp, vi, M_WAITOK);
 
@@ -458,15 +459,15 @@ t6_tls_tag_alloc(if_t ifp, union if_snd_tag_alloc_params *params,
 	}
 
 	inp = params->tls.inp;
+	tp = intotcpcb(inp);
 	INP_RLOCK(inp);
-	if (inp->inp_flags & INP_DROPPED) {
+	if (tp->t_flags & TF_DISCONNECTED) {
 		INP_RUNLOCK(inp);
 		error = ECONNRESET;
 		goto failed;
 	}
 	tlsp->inp = inp;
 
-	tp = intotcpcb(inp);
 	if (tp->t_flags & TF_REQ_TSTMP) {
 		tlsp->using_timestamps = true;
 		if ((tp->ts_offset & 0xfffffff) != 0) {
@@ -501,7 +502,7 @@ t6_tls_tag_alloc(if_t ifp, union if_snd_tag_alloc_params *params,
 		goto failed;
 	}
 
-	if (inp->inp_flags & INP_DROPPED) {
+	if (tp->t_flags & TF_DISCONNECTED) {
 		INP_RUNLOCK(inp);
 		error = ECONNRESET;
 		goto failed;
@@ -2003,7 +2004,7 @@ t6_ktls_write_wr(struct sge_txq *txq, void *dst, struct mbuf *m,
 		if (tlsp->l2te)
 			t4_l2t_release(tlsp->l2te);
 		tlsp->l2te = t4_l2t_alloc_tls(tlsp->sc, txq, dst, &ndesc,
-		    vlan_tag, tlsp->vi->pi->lport, eh->ether_dhost);
+		    vlan_tag, tlsp->vi->pi->hw_port, eh->ether_dhost);
 		if (tlsp->l2te == NULL)
 			CXGBE_UNIMPLEMENTED("failed to allocate TLS L2TE");
 		if (ndesc != 0) {

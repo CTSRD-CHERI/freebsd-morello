@@ -1,6 +1,5 @@
 .include "${SRCTOP}/lib/clang/lldb.pre.mk"
 
-PACKAGE=	lldb
 PROG_CXX=	lldb-server
 
 CFLAGS+=	-I${LLDB_SRCS}/include
@@ -9,7 +8,6 @@ CFLAGS+=	-I${.OBJDIR}
 
 SRCDIR=		lldb/tools/lldb-server
 
-SRCS+=		Acceptor.cpp
 SRCS+=		LLDBServerUtilities.cpp
 SRCS+=		SystemInitializerLLGS.cpp
 SRCS+=		lldb-gdbserver.cpp
@@ -22,8 +20,13 @@ LIBDEPS+=	lldb
 LIBDEPS+=	clang
 LIBDEPS+=	llvm
 
+.if defined(TOOLS_PREFIX) || ${MK_LLVM_LINK_STATIC_LIBRARIES} == "yes"
+LIBPRIV=
+LIBEXT=		a
+.else
 LIBPRIV=	private
 LIBEXT=		so
+.endif
 
 .for lib in ${LIBDEPS}
 DPADD+=		${OBJTOP}/lib/clang/lib${lib}/lib${LIBPRIV}${lib}.${LIBEXT}

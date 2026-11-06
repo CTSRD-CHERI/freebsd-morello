@@ -27,9 +27,6 @@
 # for the MP Table if the user explicitly asks for it via the
 # MPTABLE_FORCE_HTT option.  Do NOT use this option if you have HTT
 # disabled in your BIOS.
-#
-# IPI_PREEMPTION instructs the kernel to preempt threads running on other
-# CPUS if needed.  Relies on the PREEMPTION option
 
 # Mandatory:
 device		apic			# I/O apic
@@ -178,12 +175,6 @@ options 	CYRIX_CACHE_REALLY_WORKS
 options 	NPX_DEBUG	# enable npx debugging
 
 #
-# PERFMON causes the driver for Pentium/Pentium Pro performance counters
-# to be compiled.  See perfmon(4) for more information.
-#
-options 	PERFMON
-
-#
 # Hints for the non-optional Numeric Processing eXtension driver.
 envvar		hint.npx.0.flags="0x0"
 envvar		hint.npx.0.irq="13"
@@ -249,11 +240,6 @@ envvar		hint.ed.0.at="isa"
 envvar		hint.ed.0.port="0x280"
 envvar		hint.ed.0.irq="5"
 envvar		hint.ed.0.maddr="0xd8000"
-# Hint for the i386-only ISA front-end of le(4).
-envvar		hint.le.0.at="isa"
-envvar		hint.le.0.port="0x280"
-envvar		hint.le.0.irq="10"
-envvar		hint.le.0.drq="0"
 device		sbni
 envvar		hint.sbni.0.at="isa"
 envvar		hint.sbni.0.port="0x210"

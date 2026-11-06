@@ -36,10 +36,12 @@
 #include <sys/mutex.h>
 #include <sys/kdb.h>
 
+#include <linux/cleanup.h>
 #include <linux/compiler.h>
 #include <linux/rwlock.h>
 #include <linux/bottom_half.h>
 #include <linux/lockdep.h>
+#include <linux/preempt.h>
 
 typedef struct mtx spinlock_t;
 
@@ -177,5 +179,34 @@ _atomic_dec_and_lock_irqsave(atomic_t *cnt, spinlock_t *lock,
 	spin_unlock_irqrestore(lock, *flags);
 	return (0);
 }
+
+/*
+ * struct raw_spinlock
+ */
+
+typedef struct raw_spinlock {
+	struct mtx	lock;
+} raw_spinlock_t;
+
+#define	raw_spin_lock_init(rlock) \
+	mtx_init(&(rlock)->lock, spin_lock_name("lnxspin_raw"), \
+	    NULL, MTX_DEF | MTX_NOWITNESS | MTX_NEW)
+
+#define	raw_spin_lock(rl)	spin_lock(&(rl)->lock)
+#define	raw_spin_trylock(rl)	spin_trylock(&(rl)->lock)
+#define	raw_spin_unlock(rl)	spin_unlock(&(rl)->lock)
+
+#define	raw_spin_lock_irqsave(rl, f)		spin_lock_irqsave(&(rl)->lock, (f))
+#define	raw_spin_trylock_irqsave(rl, f)		spin_trylock_irqsave(&(rl)->lock, (f))
+#define	raw_spin_unlock_irqrestore(rl, f)	spin_unlock_irqrestore(&(rl)->lock, (f))
+
+/*
+ * cleanup.h related pre-defined cases.
+ */
+DEFINE_LOCK_GUARD_1(spinlock_irqsave,
+    spinlock_t,
+    spin_lock_irqsave(_T->lock, _T->flags),
+    spin_unlock_irqrestore(_T->lock, _T->flags),
+    unsigned long flags)
 
 #endif					/* _LINUXKPI_LINUX_SPINLOCK_H_ */

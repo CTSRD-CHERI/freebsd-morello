@@ -338,7 +338,7 @@ linux_rt_sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 
 	/* Make room, keeping the stack aligned */
 	fp--;
-	fp = (struct l_sigframe *)STACKALIGN(fp);
+	fp = STACKALIGN(fp);
 
 	get_mcontext(td, &uc.uc_mcontext, 0);
 	uc.uc_sigmask = *mask;
@@ -448,8 +448,7 @@ struct sysentvec elf_linux_sysvec = {
 	.sv_setregs	= linux_exec_setregs,
 	.sv_fixlimit	= NULL,
 	.sv_maxssiz	= NULL,
-	.sv_flags	= SV_ABI_LINUX | SV_LP64 | SV_SHP | SV_SIG_DISCIGN |
-	    SV_SIG_WAITNDQ | SV_TIMEKEEP,
+	.sv_flags	= SV_ABI_LINUX_FLAGS | SV_LP64,
 	.sv_set_syscall_retval = linux_set_syscall_retval,
 	.sv_fetch_syscall_args = linux_fetch_syscall_args,
 	.sv_syscallnames = linux_syscallnames,
@@ -584,7 +583,7 @@ linux_vdso_reloc(char *mapping, Elf_Addr offset)
 	}
 }
 
-static Elf_Brandnote linux64_brandnote = {
+static const Elf_Brandnote linux64_brandnote = {
 	.hdr.n_namesz	= sizeof(GNU_ABI_VENDOR),
 	.hdr.n_descsz	= 16,
 	.hdr.n_type	= 1,
@@ -593,7 +592,7 @@ static Elf_Brandnote linux64_brandnote = {
 	.trans_osrel	= linux_trans_osrel
 };
 
-static Elf64_Brandinfo linux_glibc2brand = {
+static const Elf64_Brandinfo linux_glibc2brand = {
 	.brand		= ELFOSABI_LINUX,
 	.machine	= EM_AARCH64,
 	.compat_3_brand	= "Linux",
@@ -601,10 +600,11 @@ static Elf64_Brandinfo linux_glibc2brand = {
 	.sysvec		= &elf_linux_sysvec,
 	.interp_newpath	= NULL,
 	.brand_note	= &linux64_brandnote,
-	.flags		= BI_CAN_EXEC_DYN | BI_BRAND_NOTE
+	.flags		= BI_CAN_EXEC_DYN | BI_BRAND_NOTE |
+	    LINUX_BI_FUTEX_REQUEUE,
 };
 
-Elf64_Brandinfo *linux_brandlist[] = {
+const Elf64_Brandinfo *linux_brandlist[] = {
 	&linux_glibc2brand,
 	NULL
 };
@@ -612,8 +612,8 @@ Elf64_Brandinfo *linux_brandlist[] = {
 static int
 linux64_elf_modevent(module_t mod, int type, void *data)
 {
-	Elf64_Brandinfo **brandinfo;
-	struct linux_ioctl_handler**lihp;
+	const Elf64_Brandinfo **brandinfo;
+	struct linux_ioctl_handler **lihp;
 	int error;
 
 	error = 0;

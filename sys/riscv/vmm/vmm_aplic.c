@@ -46,7 +46,9 @@
 #include <riscv/vmm/vmm_aplic.h>
 
 #include <machine/vmm_instruction_emul.h>
-#include <machine/vmm_dev.h>
+
+#include <dev/vmm/vmm_dev.h>
+#include <dev/vmm/vmm_vm.h>
 
 MALLOC_DEFINE(M_APLIC, "RISC-V VMM APLIC", "RISC-V AIA APLIC");
 
@@ -576,14 +578,4 @@ void
 aplic_sync_hwstate(struct hypctx *hypctx)
 {
 
-}
-
-int
-aplic_max_cpu_count(struct hyp *hyp)
-{
-	int16_t max_count;
-
-	max_count = vm_get_maxcpus(hyp->vm);
-
-	return (max_count);
 }

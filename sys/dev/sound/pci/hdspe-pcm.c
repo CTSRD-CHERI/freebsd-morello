@@ -305,10 +305,10 @@ hdspemixer_init(struct snd_mixer *m)
 	if (hdspe_channel_rec_ports(scp->hc))
 		mask |= SOUND_MASK_RECLEV;
 
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	pcm_setflags(scp->dev, pcm_getflags(scp->dev) | SD_F_SOFTPCMVOL);
 	mix_setdevs(m, mask);
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 
 	return (0);
 }
@@ -391,35 +391,21 @@ hdspe_running(struct sc_info *sc)
 {
 	struct sc_pcminfo *scp;
 	struct sc_chinfo *ch;
-	device_t *devlist;
-	int devcount;
-	int i, j;
-	int err;
+	unsigned int i;
+	int j;
 
-	if ((err = device_get_children(sc->dev, &devlist, &devcount)) != 0)
-		goto bad;
-
-	for (i = 0; i < devcount; i++) {
-		scp = device_get_ivars(devlist[i]);
+	for (i = 0; i < HDSPE_MAX_PCMDEV; i++) {
+		scp = sc->pcms[i];
+		if (scp == NULL)
+			continue;
 		for (j = 0; j < scp->chnum; j++) {
 			ch = &scp->chan[j];
 			if (ch->run)
-				goto bad;
+				return (1);
 		}
 	}
 
-	free(devlist, M_TEMP);
-
 	return (0);
-bad:
-
-#if 0
-	device_printf(sc->dev, "hdspe is running\n");
-#endif
-
-	free(devlist, M_TEMP);
-
-	return (1);
 }
 
 static void
@@ -474,7 +460,7 @@ buffer_mux_port(uint32_t *dma, uint32_t *pcm, uint32_t subset, uint32_t ports,
 	channels = hdspe_channel_count(ports, pcm_width);
 
 	/* Only copy as much as supported by both hardware and pcm channel. */
-	slots = hdspe_port_slot_width(subset, MIN(adat_width, pcm_width));
+	slots = hdspe_port_slot_width(subset, min(adat_width, pcm_width));
 
 	/* Let the compiler inline and loop unroll common cases. */
 	if (slots == 2)
@@ -520,7 +506,7 @@ buffer_demux_port(uint32_t *dma, uint32_t *pcm, uint32_t subset, uint32_t ports,
 	channels = hdspe_channel_count(ports, pcm_width);
 
 	/* Only copy as much as supported by both hardware and pcm channel. */
-	slots = hdspe_port_slot_width(subset, MIN(adat_width, pcm_width));
+	slots = hdspe_port_slot_width(subset, min(adat_width, pcm_width));
 
 	/* Let the compiler inline and loop unroll common cases. */
 	if (slots == 2)
@@ -576,14 +562,13 @@ buffer_copy(struct sc_chinfo *ch)
 			length -= offset;
 		}
 	} else {
-		/* Position per channel is n times smaller than PCM. */
+		/* Snapshot the write position before synchronizing the buffer. */
 		pos = sndbuf_getfreeptr(ch->buffer) / n;
-		/* Get DMA buffer write position. */
 		dma_pos = hdspe_read_2(sc, HDSPE_STATUS_REG);
 		dma_pos &= HDSPE_BUF_POSITION_MASK;
-		/* Copy what is newly available. */
 		length = (dma_pos + HDSPE_CHANBUF_SIZE) - pos;
 		length %= HDSPE_CHANBUF_SIZE;
+		bus_dmamap_sync(sc->dmat, sc->rmap, BUS_DMASYNC_POSTREAD);
 	}
 
 	/* Position and length in samples (4 bytes). */
@@ -612,6 +597,12 @@ buffer_copy(struct sc_chinfo *ch)
 			row = hdspe_port_first(ports);
 	}
 
+	if (ch->dir == PCMDIR_PLAY && length > 0) {
+		bus_dmamap_sync(sc->dmat, sc->pmap, BUS_DMASYNC_PREWRITE);
+	} else if (ch->dir == PCMDIR_REC) {
+		bus_dmamap_sync(sc->dmat, sc->rmap, BUS_DMASYNC_PREREAD);
+	}
+
 	ch->position = ((pos + length) * 4) % HDSPE_CHANBUF_SIZE;
 }
 
@@ -631,6 +622,11 @@ clean(struct sc_chinfo *ch)
 	if (ch->dir == PCMDIR_PLAY)
 		buf = sc->pbuf;
 
+	if (ch->dir == PCMDIR_PLAY)
+		bus_dmamap_sync(sc->dmat, sc->pmap, BUS_DMASYNC_POSTWRITE);
+	else
+		bus_dmamap_sync(sc->dmat, sc->rmap, BUS_DMASYNC_POSTREAD);
+
 	/* Iterate through rows of ports with contiguous slots. */
 	ports = ch->ports;
 	row = hdspe_port_first_row(ports);
@@ -645,6 +641,12 @@ clean(struct sc_chinfo *ch)
 		ports &= ~row;
 		row = hdspe_port_first_row(ports);
 	}
+
+	if (ch->dir == PCMDIR_PLAY)
+		bus_dmamap_sync(sc->dmat, sc->pmap, BUS_DMASYNC_PREWRITE);
+	else
+		bus_dmamap_sync(sc->dmat, sc->rmap,
+		    BUS_DMASYNC_PREWRITE | BUS_DMASYNC_PREREAD);
 
 	ch->position = 0;
 
@@ -667,16 +669,12 @@ hdspechan_free(kobj_t obj, void *data)
 	device_printf(scp->dev, "hdspechan_free()\n");
 #endif
 
-	snd_mtxlock(sc->lock);
-	if (ch->data != NULL) {
-		free(ch->data, M_HDSPE);
-		ch->data = NULL;
-	}
-	if (ch->caps != NULL) {
-		free(ch->caps, M_HDSPE);
-		ch->caps = NULL;
-	}
-	snd_mtxunlock(sc->lock);
+	mtx_lock(&sc->lock);
+	free(ch->data, M_HDSPE);
+	ch->data = NULL;
+	free(ch->caps, M_HDSPE);
+	ch->caps = NULL;
+	mtx_unlock(&sc->lock);
 
 	return (0);
 }
@@ -688,12 +686,15 @@ hdspechan_init(kobj_t obj, void *devinfo, struct snd_dbuf *b,
 	struct sc_pcminfo *scp;
 	struct sc_chinfo *ch;
 	struct sc_info *sc;
+	struct pcmchan_caps *caps;
+	uint32_t *data;
 	int num;
 
 	scp = devinfo;
 	sc = scp->sc;
+	caps = malloc(sizeof(struct pcmchan_caps), M_HDSPE, M_WAITOK);
 
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	num = scp->chnum;
 
 	ch = &scp->chan[num];
@@ -715,12 +716,11 @@ hdspechan_init(kobj_t obj, void *devinfo, struct snd_dbuf *b,
 	ch->cap_fmts[2] =
 	    SND_FORMAT(AFMT_S32_LE, hdspe_channel_count(ch->ports, 8), 0);
 	ch->cap_fmts[3] = 0;
-	ch->caps = malloc(sizeof(struct pcmchan_caps), M_HDSPE, M_NOWAIT);
+	ch->caps = caps;
 	*(ch->caps) = (struct pcmchan_caps) {32000, 192000, ch->cap_fmts, 0};
 
 	/* Allocate maximum buffer size. */
 	ch->size = HDSPE_CHANBUF_SIZE * hdspe_channel_count(ch->ports, 8);
-	ch->data = malloc(ch->size, M_HDSPE, M_NOWAIT);
 	ch->position = 0;
 
 	ch->buffer = b;
@@ -729,7 +729,18 @@ hdspechan_init(kobj_t obj, void *devinfo, struct snd_dbuf *b,
 
 	ch->dir = dir;
 
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
+
+	/*
+	 * It is safe to access ch->size here without holding the lock, because
+	 * 1) as of now, ch->size is written only once, here, and 2) ch's
+	 * lifetime is equal to scp's lifetime so it cannot go away yet.
+	 */
+	data = malloc(ch->size, M_HDSPE, M_WAITOK);
+
+	mtx_lock(&sc->lock);
+	ch->data = data;
+	mtx_unlock(&sc->lock);
 
 	if (sndbuf_setup(ch->buffer, ch->data, ch->size) != 0) {
 		device_printf(scp->dev, "Can't setup sndbuf.\n");
@@ -751,7 +762,7 @@ hdspechan_trigger(kobj_t obj, void *data, int go)
 	scp = ch->parent;
 	sc = scp->sc;
 
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	switch (go) {
 	case PCMTRIG_START:
 #if 0
@@ -767,8 +778,8 @@ hdspechan_trigger(kobj_t obj, void *data, int go)
 #if 0
 		device_printf(scp->dev, "hdspechan_trigger(): stop or abort\n");
 #endif
-		clean(ch);
 		hdspechan_enable(ch, 0);
+		clean(ch);
 		hdspe_stop_audio(sc);
 		break;
 
@@ -779,7 +790,7 @@ hdspechan_trigger(kobj_t obj, void *data, int go)
 		break;
 	}
 
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 
 	return (0);
 }
@@ -796,9 +807,9 @@ hdspechan_getptr(kobj_t obj, void *data)
 	scp = ch->parent;
 	sc = scp->sc;
 
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	ret = hdspe_read_2(sc, HDSPE_STATUS_REG);
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 
 	pos = ret & HDSPE_BUF_POSITION_MASK;
 	pos *= AFMT_CHANNEL(ch->format); /* Hardbuf with multiple channels. */
@@ -842,6 +853,8 @@ hdspechan_setspeed(kobj_t obj, void *data, uint32_t speed)
 #if 0
 	device_printf(scp->dev, "hdspechan_setspeed(%d)\n", speed);
 #endif
+
+	mtx_lock(&sc->lock);
 
 	if (hdspe_running(sc) == 1)
 		goto end;
@@ -893,8 +906,10 @@ hdspechan_setspeed(kobj_t obj, void *data, uint32_t speed)
 
 	sc->speed = hr->speed;
 end:
+	speed = sc->speed;
+	mtx_unlock(&sc->lock);
 
-	return (sc->speed);
+	return (speed);
 }
 
 static uint32_t
@@ -915,6 +930,8 @@ hdspechan_setblocksize(kobj_t obj, void *data, uint32_t blocksize)
 #if 0
 	device_printf(scp->dev, "hdspechan_setblocksize(%d)\n", blocksize);
 #endif
+
+	mtx_lock(&sc->lock);
 
 	if (hdspe_running(sc) == 1)
 		goto end;
@@ -946,23 +963,35 @@ hdspechan_setblocksize(kobj_t obj, void *data, uint32_t blocksize)
 		}
 	}
 
-	snd_mtxlock(sc->lock);
+	/* sndbuf_resize() may sleep. */
+	mtx_unlock(&sc->lock);
+	if (sndbuf_resize(ch->buffer,
+	    (HDSPE_CHANBUF_SIZE * AFMT_CHANNEL(ch->format)) / (hl->period * 4),
+	    (hl->period * 4)) != 0)
+		return (0);
+
+	mtx_lock(&sc->lock);
+	/* A channel may have started while the lock was dropped. */
+	if (hdspe_running(sc) == 1) {
+		mtx_unlock(&sc->lock);
+		return (0);
+	}
+
 	sc->ctrl_register &= ~HDSPE_LAT_MASK;
 	sc->ctrl_register |= hdspe_encode_latency(hl->n);
 	hdspe_write_4(sc, HDSPE_CONTROL_REG, sc->ctrl_register);
 	sc->period = hl->period;
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 
 #if 0
-	device_printf(scp->dev, "New period=%d\n", sc->period);
+	device_printf(scp->dev, "New period=%d\n", hl->period);
 #endif
 
-	sndbuf_resize(ch->buffer,
-	    (HDSPE_CHANBUF_SIZE * AFMT_CHANNEL(ch->format)) / (sc->period * 4),
-	    (sc->period * 4));
+	return (ch->buffer->blksz);
 end:
+	mtx_unlock(&sc->lock);
 
-	return (sndbuf_getblksz(ch->buffer));
+	return (ch->buffer->blksz);
 }
 
 static uint32_t hdspe_bkp_fmt[] = {
@@ -1025,9 +1054,9 @@ hdspe_pcm_intr(struct sc_pcminfo *scp)
 
 	for (i = 0; i < scp->chnum; i++) {
 		ch = &scp->chan[i];
-		snd_mtxunlock(sc->lock);
+		mtx_unlock(&sc->lock);
 		chn_intr(ch->channel);
-		snd_mtxlock(sc->lock);
+		mtx_lock(&sc->lock);
 	}
 
 	return (0);
@@ -1038,12 +1067,15 @@ hdspe_pcm_attach(device_t dev)
 {
 	char status[SND_STATUSLEN];
 	struct sc_pcminfo *scp;
+	struct sc_info *sc;
 	const char *buf;
 	uint32_t pcm_flags;
 	int err;
 	int play, rec;
+	int i;
 
 	scp = device_get_ivars(dev);
+	sc = scp->sc;
 	scp->ih = &hdspe_pcm_intr;
 
 	if (scp->hc->ports & HDSPE_CHAN_AIO_ALL)
@@ -1066,6 +1098,8 @@ hdspe_pcm_attach(device_t dev)
 
 	pcm_init(dev, scp);
 
+	mixer_init(dev, &hdspemixer_class, scp);
+
 	play = (hdspe_channel_play_ports(scp->hc)) ? 1 : 0;
 	rec = (hdspe_channel_rec_ports(scp->hc)) ? 1 : 0;
 
@@ -1081,8 +1115,8 @@ hdspe_pcm_attach(device_t dev)
 	}
 
 	snprintf(status, SND_STATUSLEN, "port 0x%jx irq %jd on %s",
-	    rman_get_start(scp->sc->cs),
-	    rman_get_start(scp->sc->irq),
+	    rman_get_start(sc->cs),
+	    rman_get_start(sc->irq),
 	    device_get_nameunit(device_get_parent(dev)));
 	err = pcm_register(dev, status);
 	if (err) {
@@ -1090,21 +1124,78 @@ hdspe_pcm_attach(device_t dev)
 		return (ENXIO);
 	}
 
-	mixer_init(dev, &hdspemixer_class, scp);
+	/* Register the PCM child for interrupt dispatch. */
+	mtx_lock(&sc->lock);
+	for (i = 0; i < HDSPE_MAX_PCMDEV; i++) {
+		if (sc->pcms[i] == NULL) {
+			sc->pcms[i] = scp;
+			break;
+		}
+	}
+	mtx_unlock(&sc->lock);
+	if (i == HDSPE_MAX_PCMDEV)
+		device_printf(dev, "Too many PCM children.\n");
 
 	return (0);
 }
 
 static int
+hdspe_pcm_quiesce(struct sc_pcminfo *scp)
+{
+	struct sc_info *sc;
+	unsigned int i;
+	int slot;
+
+	sc = scp->sc;
+	slot = -1;
+	mtx_lock(&sc->lock);
+	for (i = 0; i < HDSPE_MAX_PCMDEV; i++) {
+		if (sc->pcms[i] == scp) {
+			sc->pcm_detaching[i] = true;
+			while (sc->pcm_refs[i] != 0)
+				cv_wait(&sc->pcm_cv, &sc->lock);
+			slot = (int)i;
+			break;
+		}
+	}
+	mtx_unlock(&sc->lock);
+	return (slot);
+}
+
+static void
+hdspe_pcm_unquiesce(struct sc_pcminfo *scp, int slot, bool detach)
+{
+	struct sc_info *sc;
+
+	sc = scp->sc;
+	mtx_lock(&sc->lock);
+	KASSERT(slot >= 0 && slot < HDSPE_MAX_PCMDEV &&
+	    sc->pcms[slot] == scp && sc->pcm_detaching[slot],
+	    ("invalid PCM slot %d", slot));
+	if (detach)
+		sc->pcms[slot] = NULL;
+	sc->pcm_detaching[slot] = false;
+	mtx_unlock(&sc->lock);
+}
+
+static int
 hdspe_pcm_detach(device_t dev)
 {
-	int err;
+	struct sc_pcminfo *scp;
+	int err, slot;
+
+	scp = device_get_ivars(dev);
+	slot = hdspe_pcm_quiesce(scp);
 
 	err = pcm_unregister(dev);
 	if (err) {
 		device_printf(dev, "Can't unregister device.\n");
+		if (slot >= 0)
+			hdspe_pcm_unquiesce(scp, slot, false);
 		return (err);
 	}
+	if (slot >= 0)
+		hdspe_pcm_unquiesce(scp, slot, true);
 
 	return (0);
 }
@@ -1113,7 +1204,7 @@ static device_method_t hdspe_pcm_methods[] = {
 	DEVMETHOD(device_probe,     hdspe_pcm_probe),
 	DEVMETHOD(device_attach,    hdspe_pcm_attach),
 	DEVMETHOD(device_detach,    hdspe_pcm_detach),
-	{ 0, 0 }
+	DEVMETHOD_END
 };
 
 static driver_t hdspe_pcm_driver = {
@@ -1123,5 +1214,5 @@ static driver_t hdspe_pcm_driver = {
 };
 
 DRIVER_MODULE(snd_hdspe_pcm, hdspe, hdspe_pcm_driver, 0, 0);
-MODULE_DEPEND(snd_hdspe, sound, SOUND_MINVER, SOUND_PREFVER, SOUND_MAXVER);
+MODULE_DEPEND(snd_hdspe, sound, 1, 1, 1);
 MODULE_VERSION(snd_hdspe, 1);

@@ -9,7 +9,9 @@
 #include "bsdunzip_platform.h"
 
 #include "la_queue.h"
-#include "la_getline.h"
+#include "lafe_explicit_bzero.h"
+#include "lafe_fnmatch.h"
+#include "lafe_getline.h"
 #ifdef HAVE_SYS_STAT_H
 #include <sys/stat.h>
 #endif
@@ -29,6 +31,9 @@
 #ifdef HAVE_LOCALE_H
 #include <locale.h>
 #endif
+#ifdef HAVE_SIGNAL_H
+#include <signal.h>
+#endif
 #ifdef HAVE_STDARG_H
 #include <stdarg.h>
 #endif
@@ -41,6 +46,12 @@
 #endif
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
+#elif defined(HAVE_IO_H)
+/*
+ * Windows has no <unistd.h>; close(), isatty(), open() and write() are
+ * made available by including io.h instead.
+ */
+#include <io.h>
 #endif
 #if ((!defined(HAVE_UTIMENSAT) && defined(HAVE_LUTIMES)) || \
     (!defined(HAVE_FUTIMENS) && defined(HAVE_FUTIMES)))
@@ -48,13 +59,17 @@
 #include <sys/time.h>
 #endif
 #endif
-#ifdef HAVE_GETOPT_OPTRESET
-#include <getopt.h>
-#endif
 
 #include "bsdunzip.h"
 #include "passphrase.h"
-#include "err.h"
+#include "lafe_err.h"
+
+#ifndef O_BINARY
+#define O_BINARY	0
+#endif
+#ifndef O_CLOEXEC
+#define O_CLOEXEC	0
+#endif
 
 /* command-line options */
 static int		 a_opt;		/* convert EOL */
@@ -144,6 +159,7 @@ errorx(const char *fmt, ...)
 	exit(EXIT_FAILURE);
 }
 
+#if defined(HAVE_LCHMOD) || defined(HAVE_UTIMENSAT) || defined(HAVE_LUTIMES)
 /* non-fatal error message + errno */
 static void
 warning(const char *fmt, ...)
@@ -159,6 +175,7 @@ warning(const char *fmt, ...)
 	va_end(ap);
 	fprintf(stderr, ": %s\n", strerror(errno));
 }
+#endif
 
 /* non-fatal error message, no errno */
 static void
@@ -304,12 +321,8 @@ match_pattern(struct pattern_list *list, const char *str)
 	struct pattern *entry;
 
 	STAILQ_FOREACH(entry, list, link) {
-#ifdef HAVE_FNMATCH
 		if (fnmatch(entry->pattern, str, C_opt ? FNM_CASEFOLD : 0) == 0)
 			return (1);
-#else
-#error "Unsupported platform: fnmatch() is required"
-#endif
 	}
 	return (0);
 }
@@ -329,9 +342,33 @@ accept_pathname(const char *pathname)
 	return (1);
 }
 
+/* System call to create a directory. */
+static int
+system_mkdir(const char *pathname, int mode)
+{
+#if defined(_WIN32) && !defined(__CYGWIN__)
+	(void)mode; /* UNUSED */
+	return _mkdir(pathname);
+#else
+	return mkdir(pathname, mode);
+#endif
+}
+
+static void
+system_unlink(const char *pathname) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+	if (unlink(pathname) == -1) {
+		/* Windows treats directory symbolic links specially. */
+		rmdir(pathname);
+	}
+#else
+	(void)unlink(pathname);
+#endif
+}
+
 /*
  * Create the specified directory with the specified mode, taking certain
- * precautions on they way.
+ * precautions on the way.
  */
 static void
 make_dir(const char *path, int mode)
@@ -349,14 +386,9 @@ make_dir(const char *path, int mode)
 		 * even compromise (if this non-directory happens to be a
 		 * symlink to somewhere unsafe), so we don't.
 		 */
-
-		/*
-		 * Don't check unlink() result; failure will cause mkdir()
-		 * to fail later, which we will catch.
-		 */
-		(void)unlink(path);
+		system_unlink(path);
 	}
-	if (mkdir(path, (mode_t)mode) != 0 && errno != EEXIST)
+	if (system_mkdir(path, (mode_t)mode) != 0 && errno != EEXIST)
 		error("mkdir('%s')", path);
 }
 
@@ -371,32 +403,32 @@ make_parent(char *path)
 {
 	struct stat sb;
 	char *sep;
+	size_t len;
 
+	/* Retrieve string length of parent directory. */
 	sep = strrchr(path, '/');
 	if (sep == NULL || sep == path)
 		return;
-	*sep = '\0';
-	if (lstat(path, &sb) == 0) {
-		if (S_ISDIR(sb.st_mode)) {
-			*sep = '/';
-			return;
-		}
-		unlink(path);
-	}
-	make_parent(path);
-	mkdir(path, 0755);
-	*sep = '/';
+	len = sep - path;
 
-#if 0
-	for (sep = path; (sep = strchr(sep, '/')) != NULL; sep++) {
-		/* root in case of absolute d_arg */
-		if (sep == path)
-			continue;
+	/* Find deepest already existing directory. */
+	do {
 		*sep = '\0';
-		make_dir(path, 0755);
-		*sep = '/';
+		if (lstat(path, &sb) == 0) {
+			if (S_ISDIR(sb.st_mode)) {
+				*sep = '/';
+				break;
+			}
+			system_unlink(path);
+		}
+		sep = strrchr(path, '/');
+	} while (sep != NULL && sep != path);
+
+	/* Create missing directories and restore path. */
+	while (strlen(path) <= len) {
+		system_mkdir(path, 0755);
+		path[strlen(path)] = '/';
 	}
-#endif
 }
 
 /*
@@ -445,29 +477,34 @@ static char spinner[] = { '|', '/', '-', '\\' };
 static int
 handle_existing_file(char **path)
 {
-	size_t alen;
+	char *answer = NULL;
+	size_t alen, answer_size = 0;
 	ssize_t len;
-	char buf[4];
+	int ret;
 
 	for (;;) {
 		fprintf(stderr,
 		    "replace %s? [y]es, [n]o, [A]ll, [N]one, [r]ename: ",
 		    *path);
-		if (fgets(buf, sizeof(buf), stdin) == NULL)
+		/* Read the whole line, so that an answer such as "yes"
+		 * does not leave characters behind for the next prompt. */
+		if (getline(&answer, &answer_size, stdin) < 1)
 			goto stdin_err;
-		switch (*buf) {
+		switch (*answer) {
 		case 'A':
 			o_opt = 1;
 			/* FALLTHROUGH */
 		case 'y':
 		case 'Y':
-			(void)unlink(*path);
-			return 1;
+			system_unlink(*path);
+			ret = 1;
+			goto out;
 		case 'N':
 			n_opt = 1;
 			/* FALLTHROUGH */
 		case 'n':
-			return -1;
+			ret = -1;
+			goto out;
 		case 'r':
 		case 'R':
 			printf("New name: ");
@@ -480,7 +517,8 @@ handle_existing_file(char **path)
 				goto stdin_err;
 			if ((*path)[len - 1] == '\n')
 				(*path)[len - 1] = '\0';
-			return 0;
+			ret = 0;
+			goto out;
 		default:
 			break;
 		}
@@ -490,7 +528,10 @@ stdin_err:
 	printf("NULL\n(EOF or read error, "
 		"treating as \"[N]one\"...)\n");
 	n_opt = 1;
-	return -1;
+	ret = -1;
+out:
+	free(answer);
+	return ret;
 }
 
 /*
@@ -651,20 +692,20 @@ recheck:
 #elif HAVE_STRUCT_STAT_ST_MTIME_N
 			    sb.st_mtime > mtime.tv_sec ||
 			    (sb.st_mtime == mtime.tv_sec &&
-			    sb.st_mtime_n => mtime.tv_nsec)
+			    sb.st_mtime_n >= mtime.tv_nsec)
 #elif HAVE_STRUCT_STAT_ST_MTIME_USEC
 			    sb.st_mtime > mtime.tv_sec ||
 			    (sb.st_mtime == mtime.tv_sec &&
-			    sb.st_mtime_usec => mtime.tv_nsec / 1000)
+			    sb.st_mtime_usec >= mtime.tv_nsec / 1000)
 #else
 			    sb.st_mtime > mtime.tv_sec
 #endif
 			    ))
 				return;
-			(void)unlink(*path);
+			system_unlink(*path);
 		} else if (o_opt) {
 			/* overwrite */
-			(void)unlink(*path);
+			system_unlink(*path);
 		} else if (n_opt) {
 			/* do not overwrite */
 			return;
@@ -715,7 +756,7 @@ recheck:
 		return;
 	}
 
-	if ((fd = open(*path, O_RDWR|O_CREAT|O_TRUNC, mode)) < 0)
+	if ((fd = open(*path, O_RDWR|O_CREAT|O_TRUNC|O_BINARY, mode)) < 0)
 		error("open('%s')", *path);
 
 	info(" extracting: %s", *path);
@@ -741,6 +782,37 @@ recheck:
 		error("close('%s')", *path);
 }
 
+static int
+pathname_is_insecure(const char* pathname)
+{
+	size_t len = strlen(pathname);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+	const char *p;
+#endif
+
+	if (pathname[0] == '/' ||
+	    strcmp(pathname, "..") == 0 ||
+	    strncmp(pathname, "../", 3) == 0 ||
+	    strstr(pathname, "/../") != NULL ||
+	    (len >= 3 && strcmp(pathname + len - 3, "/..") == 0))
+		return 1;
+
+#if defined(_WIN32) && !defined(__CYGWIN__)
+	if (pathname[0] == '\\' ||
+	    (isalpha((unsigned char)pathname[0]) && pathname[1] == ':'))
+		return 1;
+
+	/* Windows treats both slash characters as path separators. */
+	for (p = pathname; *p != '\0'; ++p) {
+		if (p[0] == '.' && p[1] == '.' &&
+		    (p[2] == '\0' || p[2] == '/' || p[2] == '\\') &&
+		    (p == pathname || p[-1] == '/' || p[-1] == '\\'))
+			return 1;
+	}
+#endif
+	return 0;
+}
+
 /*
  * Extract a zipfile entry: first perform some sanity checks to ensure
  * that it is either a directory or a regular file and that the path is
@@ -760,6 +832,7 @@ static void
 extract(struct archive *a, struct archive_entry *e)
 {
 	char *pathname, *realpathname;
+	const char *linktarget;
 	mode_t filetype;
 	char *p, *q;
 
@@ -771,10 +844,17 @@ extract(struct archive *a, struct archive_entry *e)
 	filetype = archive_entry_filetype(e);
 
 	/* sanity checks */
-	if (pathname[0] == '/' ||
-	    strncmp(pathname, "../", 3) == 0 ||
-	    strstr(pathname, "/../") != NULL) {
+	if (pathname_is_insecure(pathname)) {
 		warningx("skipping insecure entry '%s'", pathname);
+		ac(archive_read_data_skip(a));
+		free(pathname);
+		return;
+	}
+
+	if (S_ISLNK(filetype) &&
+	    ((linktarget = archive_entry_symlink(e)) != NULL) &&
+	    pathname_is_insecure(linktarget)) {
+		warningx("skipping insecure symlink '%s' to '%s'", pathname, linktarget);
 		ac(archive_read_data_skip(a));
 		free(pathname);
 		return;
@@ -881,9 +961,9 @@ list(struct archive *a, struct archive_entry *e)
 	mtime = archive_entry_mtime(e);
 	tm = localtime(&mtime);
 	if (*y_str)
-		strftime(buf, sizeof(buf), "%m-%d-%G %R", tm);
+		strftime(buf, sizeof(buf), "%m-%d-%Y %H:%M", tm);
 	else
-		strftime(buf, sizeof(buf), "%m-%d-%g %R", tm);
+		strftime(buf, sizeof(buf), "%m-%d-%y %H:%M", tm);
 
 	pathname = archive_entry_pathname(e);
 	if (!pathname)
@@ -976,7 +1056,8 @@ unzip(const char *fn)
 {
 	struct archive *a;
 	struct archive_entry *e;
-	int ret;
+	char *buf;
+	int fd, ret, use_stdin;
 	uintmax_t total_size, file_count, error_count;
 
 	if ((a = archive_read_new()) == NULL)
@@ -993,7 +1074,38 @@ unzip(const char *fn)
 		archive_read_set_passphrase_callback(a, NULL,
 			&passphrase_callback);
 
-	ac(archive_read_open_filename(a, fn, 8192));
+	use_stdin = strcmp(fn, "-") == 0;
+
+	buf = NULL;
+	if (use_stdin) {
+		fd = STDIN_FILENO;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+		if (_setmode(STDIN_FILENO, _O_BINARY) == -1)
+			errorx("unable to set binary input mode");
+#endif
+	} else
+		fd = open(fn, O_RDONLY | O_BINARY | O_CLOEXEC);
+	if (fd == -1) {
+		size_t s;
+
+		s = strlen(fn) + 5;
+		buf = malloc(s);
+		if (buf == NULL)
+			error("Failed to construct filename");
+		if (snprintf(buf, s, "%s.zip", fn) < 0)
+			errorx("Failed to construct filename");
+		fd = open(buf, O_RDONLY | O_BINARY | O_CLOEXEC);
+		if (fd == -1) {
+			if (snprintf(buf, s, "%s.ZIP", fn) < 0)
+				errorx("Failed to construct filename");
+			fd = open(buf, O_RDONLY | O_BINARY | O_CLOEXEC);
+		}
+		if (fd != -1)
+			fn = buf;
+	}
+	if (fd == -1)
+		errorx("Failed to open '%s'", fn);
+	ac(archive_read_open_fd(a, fd, 64 * 1024));
 
 	if (!zipinfo_mode) {
 		if (!p_opt && !q_opt)
@@ -1046,10 +1158,11 @@ unzip(const char *fn)
 		}
 	}
 
-	ac(archive_read_free(a));
+	ac(archive_read_close(a));
+	archive_read_free(a);
 
 	if (passphrase_buf != NULL) {
-		memset(passphrase_buf, 0, PPBUFF_SIZE);
+		explicit_bzero(passphrase_buf, PPBUFF_SIZE);
 		free(passphrase_buf);
 	}
 
@@ -1062,6 +1175,10 @@ unzip(const char *fn)
 			       fn);
 		}
 	}
+
+	if (!use_stdin)
+		close(fd);
+	free(buf);
 }
 
 static void
@@ -1163,7 +1280,8 @@ getopts(int argc, char *argv[])
 		case 'Z':
 			zipinfo_mode = 1;
 			if (bsdunzip->argument != NULL &&
-			    strcmp(bsdunzip->argument, "1") == 0) {
+			    (strcmp(bsdunzip->argument, "1") == 0 ||
+			    strcmp(bsdunzip->argument, "-1") == 0)) {
 				Z1_opt = 1;
 			}
 			break;
@@ -1186,6 +1304,16 @@ main(int argc, char *argv[])
 {
 	const char *zipfile;
 	int nopts;
+
+#if defined(HAVE_SIGACTION) && defined(SIGCHLD)
+	{ /* Do not ignore SIGCHLD. */
+		struct sigaction sa;
+		sa.sa_handler = SIG_DFL;
+		sigemptyset(&sa.sa_mask);
+		sa.sa_flags = 0;
+		sigaction(SIGCHLD, &sa, NULL);
+	}
+#endif
 
 	lafe_setprogname(*argv, "bsdunzip");
 
@@ -1230,9 +1358,6 @@ main(int argc, char *argv[])
 		usage();
 	zipfile = argv[nopts++];
 
-	if (strcmp(zipfile, "-") == 0)
-		zipfile = NULL; /* STDIN */
-
 	unzip_exclude_mode = 0;
 
 	while (nopts < argc && *argv[nopts] != '-')
@@ -1259,6 +1384,13 @@ main(int argc, char *argv[])
 
 	if (n_opt + o_opt + u_opt > 1)
 		errorx("-n, -o and -u are contradictory");
+
+#if defined(_WIN32) && !defined(__CYGWIN__)
+	if (c_opt || p_opt) {
+		if (_setmode(STDOUT_FILENO, _O_BINARY) == -1)
+			errorx("unable to set binary output mode");
+	}
+#endif
 
 	unzip(zipfile);
 

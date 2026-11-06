@@ -29,14 +29,13 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/cdefs.h>
-
 #include <sys/param.h>
 #include <sys/bus.h>
 #include <sys/conf.h>
 #include <sys/event.h>
 #include <sys/hwt.h>
 #include <sys/kernel.h>
+#include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/module.h>
 #include <sys/mutex.h>
@@ -64,13 +63,15 @@ device_attach_t arm_spe_attach;
 
 static device_method_t arm_spe_methods[] = {
 	/* Device interface */
-	DEVMETHOD(device_attach,	arm_spe_attach),
+	DEVMETHOD(device_attach,        arm_spe_attach),
 
 	DEVMETHOD_END,
 };
 
 DEFINE_CLASS_0(spe, arm_spe_driver, arm_spe_methods,
     sizeof(struct arm_spe_softc));
+
+#define ARM_SPE_KVA_MAX_ALIGN	UL(2048)
 
 int
 arm_spe_attach(device_t dev)
@@ -85,13 +86,13 @@ arm_spe_attach(device_t dev)
 	sc->pmsidr = READ_SPECIALREG(PMSIDR_EL1_REG);
 	device_printf(dev, "PMBIDR_EL1: %#lx\n", sc->pmbidr);
 	device_printf(dev, "PMSIDR_EL1: %#lx\n", sc->pmsidr);
-	if (sc->pmbidr & PMBIDR_P) {
+	if ((sc->pmbidr & PMBIDR_P) != 0) {
 		device_printf(dev, "Profiling Buffer is owned by a higher Exception level\n");
 		return (EPERM);
 	}
 
 	sc->kva_align = 1 << ((sc->pmbidr & PMBIDR_Align_MASK) >> PMBIDR_Align_SHIFT);
-	if (sc->kva_align > UL(2048)) {
+	if (sc->kva_align > ARM_SPE_KVA_MAX_ALIGN) {
 		device_printf(dev, "Invalid PMBIDR.Align value of %d\n", sc->kva_align);
 		return (EINVAL);
 	}
@@ -130,7 +131,7 @@ arm_spe_intr(void *arg)
 	uint64_t pmbsr;
 	uint64_t base, limit;
 	uint8_t ec;
-	struct arm_spe_info *info = &sc->spe_info[cpu_id];
+	struct arm_spe_info *info = sc->spe_info[cpu_id];
 	uint8_t i = info->buf_idx;
 	struct arm_spe_buf_info *buf = &info->buf_info[i];
 	struct arm_spe_buf_info *prev_buf = &info->buf_info[!i];
@@ -152,51 +153,51 @@ arm_spe_intr(void *arg)
 	ec = PMBSR_EC_VAL(pmbsr);
 	switch (ec)
 	{
-		case PMBSR_EC_OTHER_BUF_MGMT: /* Other buffer management event */
-			break;
-		case PMBSR_EC_GRAN_PROT_CHK: /* Granule Protection Check fault */
-			device_printf(dev, "PMBSR_EC_GRAN_PROT_CHK\n");
-			break;
-		case PMBSR_EC_STAGE1_DA: /* Stage 1 Data Abort */
-			device_printf(dev, "PMBSR_EC_STAGE1_DA\n");
-			break;
-		case PMBSR_EC_STAGE2_DA: /* Stage 2 Data Abort */
-			device_printf(dev, "PMBSR_EC_STAGE2_DA\n");
-			break;
-		default:
-			/* Unknown EC */
-			device_printf(dev, "unknown PMBSR_EC: %#x\n", ec);
-			arm_spe_disable(NULL);
-			TASK_INIT(&sc->task, 0, (task_fn_t *)arm_spe_error, sc->ctx);
-			taskqueue_enqueue(taskqueue_arm_spe, &sc->task);
-			return (FILTER_HANDLED);
+	case PMBSR_EC_OTHER_BUF_MGMT: /* Other buffer management event */
+		break;
+	case PMBSR_EC_GRAN_PROT_CHK: /* Granule Protection Check fault */
+		device_printf(dev, "PMBSR_EC_GRAN_PROT_CHK\n");
+		break;
+	case PMBSR_EC_STAGE1_DA: /* Stage 1 Data Abort */
+		device_printf(dev, "PMBSR_EC_STAGE1_DA\n");
+		break;
+	case PMBSR_EC_STAGE2_DA: /* Stage 2 Data Abort */
+		device_printf(dev, "PMBSR_EC_STAGE2_DA\n");
+		break;
+	default:
+		/* Unknown EC */
+		device_printf(dev, "unknown PMBSR_EC: %#x\n", ec);
+		arm_spe_disable(NULL);
+		TASK_INIT(&sc->task, 0, (task_fn_t *)arm_spe_error, sc->ctx);
+		taskqueue_enqueue(taskqueue_arm_spe, &sc->task);
+		return (FILTER_HANDLED);
 	}
 
-	switch (ec)
-	{
-		case PMBSR_EC_OTHER_BUF_MGMT:
-			/* Buffer Status Code = buffer filled */
-			if ((pmbsr & PMBSR_MSS_BSC_MASK) == 0b000001)
-				dprintf("%s SPE buffer full event (cpu:%d)\n",
-				    __func__, cpu_id);
-				break;
-		case PMBSR_EC_GRAN_PROT_CHK:
-		case PMBSR_EC_STAGE1_DA:
-		case PMBSR_EC_STAGE2_DA:
-			/*
-			 * If we have one of these, we've messed up the
-			 * programming somehow (e.g. passed invalid memory to
-			 * SPE) and can't recover
-			 */
-			arm_spe_disable(NULL);
-			TASK_INIT(&sc->task, 0, (task_fn_t *)arm_spe_error, sc->ctx);
-			taskqueue_enqueue(taskqueue_arm_spe, &sc->task);
-			/* PMBPTR_EL1 is fault address if PMBSR_DL is 1 */
-			device_printf(dev, "CPU:%d PMBSR_EL1:%#lx\n", cpu_id, pmbsr);
-			device_printf(dev, "PMBPTR_EL1:%#lx PMBLIMITR_EL1:%#lx\n",
-			    READ_SPECIALREG(PMBPTR_EL1_REG),
-			    READ_SPECIALREG(PMBLIMITR_EL1_REG));
-			return (FILTER_HANDLED);
+	switch (ec) {
+	case PMBSR_EC_OTHER_BUF_MGMT:
+		/* Buffer Status Code = buffer filled */
+		if ((pmbsr & PMBSR_MSS_BSC_MASK) == PMBSR_MSS_BSC_BUFFER_FILLED) {
+			dprintf("%s SPE buffer full event (cpu:%d)\n",
+			    __func__, cpu_id);
+			break;
+		}
+	case PMBSR_EC_GRAN_PROT_CHK:
+	case PMBSR_EC_STAGE1_DA:
+	case PMBSR_EC_STAGE2_DA:
+		/*
+		 * If we have one of these, we've messed up the
+		 * programming somehow (e.g. passed invalid memory to
+		 * SPE) and can't recover
+		 */
+		arm_spe_disable(NULL);
+		TASK_INIT(&sc->task, 0, (task_fn_t *)arm_spe_error, sc->ctx);
+		taskqueue_enqueue(taskqueue_arm_spe, &sc->task);
+		/* PMBPTR_EL1 is fault address if PMBSR_DL is 1 */
+		device_printf(dev, "CPU:%d PMBSR_EL1:%#lx\n", cpu_id, pmbsr);
+		device_printf(dev, "PMBPTR_EL1:%#lx PMBLIMITR_EL1:%#lx\n",
+		    READ_SPECIALREG(PMBPTR_EL1_REG),
+		    READ_SPECIALREG(PMBLIMITR_EL1_REG));
+		return (FILTER_HANDLED);
 	}
 
 	mtx_lock_spin(&info->lock);
@@ -205,7 +206,7 @@ arm_spe_intr(void *arg)
 	 * Data Loss bit - pmbptr might not be pointing to the end of the last
 	 * complete record
 	 */
-	if ((pmbsr & PMBSR_DL) == 1)
+	if ((pmbsr & PMBSR_DL) == PMBSR_DL)
 		buf->partial_rec = 1;
 	buf->pmbptr = READ_SPECIALREG(PMBPTR_EL1_REG);
 	buf->buf_svc = true;
@@ -233,10 +234,10 @@ arm_spe_intr(void *arg)
 	 * other half of the buffer
 	 *
 	 * This might be because:
-	 *	a) Kernel hasn't scheduled the task via taskqueue to notify
-	 *	   userspace to copy out the data
-	 *	b) Userspace is still copying the buffer or hasn't notified us
-	 *	   back via the HWT_IOC_SVC_BUF ioctl
+	 *      a) Kernel hasn't scheduled the task via taskqueue to notify
+	 *         userspace to copy out the data
+	 *      b) Userspace is still copying the buffer or hasn't notified us
+	 *         back via the HWT_IOC_SVC_BUF ioctl
 	 *
 	 * Either way we need to avoid overwriting uncopied data in the
 	 * buffer, so disable profiling until we receive that SVC_BUF
@@ -303,7 +304,6 @@ arm_spe_send_buffer(void *arg, int pending __unused)
 	}
 }
 
-
 static void
 arm_spe_error(void *arg, int pending __unused)
 {
@@ -311,11 +311,15 @@ arm_spe_error(void *arg, int pending __unused)
 	struct kevent kev;
 	int ret;
 
-	smp_rendezvous_cpus(ctx->cpu_map, smp_no_rendezvous_barrier,
-	    arm_spe_disable, smp_no_rendezvous_barrier, NULL);
+	if (!CPU_EMPTY(&ctx->cpu_map))
+		smp_rendezvous_cpus(ctx->cpu_map, smp_no_rendezvous_barrier,
+		    arm_spe_disable, smp_no_rendezvous_barrier, NULL);
 
 	EV_SET(&kev, ARM_SPE_KQ_SHUTDOWN, EVFILT_USER, 0, NOTE_TRIGGER, 0, NULL);
 	ret = kqfd_register(ctx->kqueue_fd, &kev, ctx->hwt_td, M_WAITOK);
 	if (ret)
 		dprintf("%s kqfd_register ret:%d\n", __func__, ret);
 }
+
+MODULE_DEPEND(spe, hwt, 1, 1, 1);
+MODULE_VERSION(spe, 1);

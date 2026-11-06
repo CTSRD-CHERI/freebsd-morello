@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*	Copyright (c) 1984, 1986, 1987, 1988, 1989 AT&T	*/
 /*	  All Rights Reserved  	*/
@@ -290,80 +280,11 @@ extern unsigned char bcd_to_byte[256];
 #define	offsetof(type, field)	__offsetof(type, field)
 #endif
 
-/*
- * Find highest one bit set.
- *      Returns bit number + 1 of highest bit that is set, otherwise returns 0.
- * High order bit is 31 (or 63 in _LP64 kernel).
- */
-static __inline int
-highbit(ulong_t i)
-{
-#if defined(HAVE_INLINE_FLSL)
-	return (flsl(i));
-#else
-	int h = 1;
+#define	highbit(x)		flsl(x)
+#define	lowbit(x)		ffsl(x)
 
-	if (i == 0)
-		return (0);
-#ifdef _LP64
-	if (i & 0xffffffff00000000ul) {
-		h += 32; i >>= 32;
-	}
-#endif
-	if (i & 0xffff0000) {
-		h += 16; i >>= 16;
-	}
-	if (i & 0xff00) {
-		h += 8; i >>= 8;
-	}
-	if (i & 0xf0) {
-		h += 4; i >>= 4;
-	}
-	if (i & 0xc) {
-		h += 2; i >>= 2;
-	}
-	if (i & 0x2) {
-		h += 1;
-	}
-	return (h);
-#endif
-}
-
-/*
- * Find highest one bit set.
- *	Returns bit number + 1 of highest bit that is set, otherwise returns 0.
- */
-static __inline int
-highbit64(uint64_t i)
-{
-#if defined(HAVE_INLINE_FLSLL)
-	return (flsll(i));
-#else
-	int h = 1;
-
-	if (i == 0)
-		return (0);
-	if (i & 0xffffffff00000000ULL) {
-		h += 32; i >>= 32;
-	}
-	if (i & 0xffff0000) {
-		h += 16; i >>= 16;
-	}
-	if (i & 0xff00) {
-		h += 8; i >>= 8;
-	}
-	if (i & 0xf0) {
-		h += 4; i >>= 4;
-	}
-	if (i & 0xc) {
-		h += 2; i >>= 2;
-	}
-	if (i & 0x2) {
-		h += 1;
-	}
-	return (h);
-#endif
-}
+#define	highbit64(x)		flsll(x)
+#define	lowbit64(x)		ffsll(x)
 
 #ifdef	__cplusplus
 }

@@ -4,7 +4,7 @@
  * Copyright (c) 2010 Panasas, Inc.
  * Copyright (c) 2013-2016 Mellanox Technologies, Ltd.
  * All rights reserved.
- * Copyright (c) 2021-2022 The FreeBSD Foundation
+ * Copyright (c) 2021-2025 The FreeBSD Foundation
  *
  * Portions of this software were developed by Björn Zeeb
  * under sponsorship from the FreeBSD Foundation.
@@ -48,6 +48,7 @@
 #include <linux/overflow.h>
 #include <linux/ratelimit.h>	/* via linux/dev_printk.h */
 #include <linux/fwnode.h>
+#include <linux/device/devres.h>
 #include <asm/atomic.h>
 
 #include <sys/bus.h>
@@ -92,6 +93,7 @@ struct device_driver {
 	const struct dev_pm_ops *pm;
 
 	void (*shutdown) (struct device *);
+	void (*coredump) (struct device *);
 };
 
 struct device_type {
@@ -266,25 +268,32 @@ show_class_attr_string(struct class *class,
 		dev_dbg(dev, __VA_ARGS__);	\
 } while (0)
 
-/* Public and LinuxKPI internal devres functions. */
-void *lkpi_devres_alloc(void(*release)(struct device *, void *), size_t, gfp_t);
-void lkpi_devres_add(struct device *, void *);
-void lkpi_devres_free(void *);
-void *lkpi_devres_find(struct device *, void(*release)(struct device *, void *),
-    int (*match)(struct device *, void *, void *), void *);
-int lkpi_devres_destroy(struct device *, void(*release)(struct device *, void *),
-    int (*match)(struct device *, void *, void *), void *);
-#define	devres_alloc(_r, _s, _g)	lkpi_devres_alloc(_r, _s, _g)
-#define	devres_add(_d, _p)		lkpi_devres_add(_d, _p)
-#define	devres_free(_p)			lkpi_devres_free(_p)
-#define	devres_find(_d, _rfn, _mfn, _mp) \
-					lkpi_devres_find(_d, _rfn, _mfn, _mp)
-#define	devres_destroy(_d, _rfn, _mfn, _mp) \
-					lkpi_devres_destroy(_d, _rfn, _mfn, _mp)
+static inline int
+dev_err_probe(const struct device *dev, int err, const char *fmt, ...)
+{
+	va_list args;
+
+	va_start(args, fmt);
+
+	/*
+	 * On Linux, they look at the error code to determine if the message
+	 * should be logged (not logged if -ENOMEM) and at which log level.
+	 */
+	device_printf(dev->bsddev, fmt, args);
+
+	va_end(args);
+
+	return (err);
+}
+
+#define	dev_err_ptr_probe(dev, err, fmt, ...) \
+    ERR_PTR(dev_err_probe((dev), (err), fmt, ##__VA_ARGS__)
+
+#define	dev_err_cast_probe(dev, err, fmt, ...) \
+    ERR_PTR(dev_err_probe((dev), PTR_ERR(err), fmt, ##__VA_ARGS__)
+
 void lkpi_devres_release_free_list(struct device *);
 void lkpi_devres_unlink(struct device *, void *);
-void lkpi_devm_kmalloc_release(struct device *, void *);
-#define	devm_kfree(_d, _p)		lkpi_devm_kmalloc_release(_d, _p)
 
 static inline const char *
 dev_driver_string(const struct device *dev)
@@ -432,6 +441,11 @@ device_add(struct device *dev)
 		if (dev->devt == 0)
 			dev->devt = makedev(0, device_get_unit(dev->bsddev));
 	}
+
+	/*
+	 * Do not change:
+	 * the specific location is used by IB user space tools (PR298485).
+	 */
 	kobject_add(&dev->kobj, &dev->class->kobj, dev_name(dev));
 
 	if (dev->groups)
@@ -555,6 +569,7 @@ static inline void
 device_release_driver(struct device *dev)
 {
 
+	pr_debug("%s: TODO\n", __func__);
 #if 0
 	/* This leads to panics. Disable temporarily. Keep to rework. */
 
@@ -670,33 +685,6 @@ char *lkpi_devm_kasprintf(struct device *, gfp_t, const char *, ...);
 
 #define	devm_kasprintf(_dev, _gfp, _fmt, ...)			\
     lkpi_devm_kasprintf(_dev, _gfp, _fmt, ##__VA_ARGS__)
-
-static __inline void *
-devm_kmalloc(struct device *dev, size_t size, gfp_t gfp)
-{
-	void *p;
-
-	p = lkpi_devres_alloc(lkpi_devm_kmalloc_release, size, gfp);
-	if (p != NULL)
-		lkpi_devres_add(dev, p);
-
-	return (p);
-}
-
-static inline void *
-devm_kmemdup(struct device *dev, const void *src, size_t len, gfp_t gfp)
-{
-	void *dst;
-
-	if (len == 0)
-		return (NULL);
-
-	dst = devm_kmalloc(dev, len, gfp);
-	if (dst != NULL)
-		memcpy(dst, src, len);
-
-	return (dst);
-}
 
 #define	devm_kzalloc(_dev, _size, _gfp)				\
     devm_kmalloc((_dev), (_size), (_gfp) | __GFP_ZERO)

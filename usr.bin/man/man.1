@@ -33,7 +33,7 @@
 .Nd display online manual documentation pages
 .Sh SYNOPSIS
 .Nm
-.Op Fl adho
+.Op Fl adhlo
 .Op Fl t | w
 .Op Fl M Ar manpath
 .Op Fl P Ar pager
@@ -144,6 +144,15 @@ Search names and descriptions of all manual pages for an extended regular
 .Ar expression ,
 emulating basic functionality of
 .Xr apropos 1 .
+.It Fl l
+Interpret all arguments as absolute or relative filename(s)
+of the manual page(s) to display.
+No search is done and the options
+.Fl M ,
+.Fl m ,
+and
+.Fl S
+are ignored.
 .It Fl m Ar arch Ns Op : Ns Ar machine
 Override the default architecture and machine settings allowing lookup of
 other platform specific manual pages.
@@ -181,8 +190,6 @@ Valid preprocessors arguments:
 .Xr refer 1 Pq Pa ports/textproc/groff
 .It Cm t
 .Xr tbl 1 Pq Pa ports/textproc/groff
-.It Cm v
-.Xr vgrind 1
 .El
 .Pp
 Overrides the
@@ -216,6 +223,8 @@ will search for locale specific manual pages using the following logic:
 .It
 .Va lang . Ns Va charset
 .It
+.Va lang
+.It
 .Li en . Ns Va charset
 .El
 .Pp
@@ -232,6 +241,8 @@ will search the following paths when considering section 1 manual pages in
 .Pa /usr/share/man/ja_JP.eucJP/man1
 .It
 .Pa /usr/share/man/ja.eucJP/man1
+.It
+.Pa /usr/share/man/ja/man1
 .It
 .Pa /usr/share/man/en.eucJP/man1
 .It
@@ -269,12 +280,15 @@ will search the following paths when considering section 4 manual pages in
 .Pa /usr/share/man/man4
 .El
 .Ss Displaying Specific Manual Files
-The
+For compatibility reasons,
 .Nm
-utility also supports displaying a specific manual page if passed a path
-to the file as long as it contains a
+will interpret any argument containing at least one
 .Ql /
-character.
+character as an absolute or relative path to a manual page to be
+displayed.
+This heuristic, made redundant by the more widely supported
+.Fl l
+option, is now deprecated and may be removed in future releases.
 .Sh ENVIRONMENT
 The following environment variables affect the execution of
 .Nm :
@@ -398,7 +412,7 @@ manual page:
 .Pp
 Show a manual page in the current working directory:
 .Pp
-.Dl $ man ./man.1
+.Dl $ man -l man.1
 .Pp
 Show the location of manual pages in sections 1 and 8 which contain the word
 .Ql arm :

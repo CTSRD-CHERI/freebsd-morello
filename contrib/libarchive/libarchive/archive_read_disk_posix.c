@@ -97,9 +97,6 @@
 #include "archive_private.h"
 #include "archive_read_disk_private.h"
 
-#ifndef HAVE_FCHDIR
-#error fchdir function required.
-#endif
 #ifndef O_BINARY
 #define O_BINARY	0
 #endif
@@ -107,9 +104,23 @@
 #define O_CLOEXEC	0
 #endif
 
+#define MAX_FILESYSTEM_ID 1000000
+
 #if defined(__hpux) && !defined(HAVE_DIRFD)
 #define dirfd(x) ((x)->__dd_fd)
 #define HAVE_DIRFD
+#endif
+
+#ifndef HAVE_FCHDIR
+/*
+ * Stub function for platforms that do not support fchdir.  This is OK on
+ * platforms with newer *at functions as fchdir isn't used there (e.g. WASI).
+ */
+static int fchdir(int fd)
+{
+	errno = ENOSYS;
+	return -1;
+}
 #endif
 
 /*-
@@ -168,9 +179,6 @@ struct filesystem {
 	int		synthetic;
 	int		remote;
 	int		noatime;
-#if defined(USE_READDIR_R)
-	size_t		name_max;
-#endif
 	long		incr_xfer_size;
 	long		max_xfer_size;
 	long		min_xfer_size;
@@ -203,10 +211,6 @@ struct tree {
 	DIR			*d;
 #define	INVALID_DIR_HANDLE NULL
 	struct dirent		*de;
-#if defined(USE_READDIR_R)
-	struct dirent		*dirent;
-	size_t			 dirent_allocated;
-#endif
 	int			 flags;
 	int			 visit_type;
 	/* Error code from last failed operation. */
@@ -458,6 +462,10 @@ archive_read_disk_new(void)
 	a->archive.state = ARCHIVE_STATE_NEW;
 	a->archive.vtable = &archive_read_disk_vtable;
 	a->entry = archive_entry_new2(&a->archive);
+	if (a->entry == NULL) {
+		free(a);
+		return (NULL);
+	}
 	a->lookup_uname = trivial_lookup_uname;
 	a->lookup_gname = trivial_lookup_gname;
 	a->flags = ARCHIVE_READDISK_MAC_COPYFILE;
@@ -869,7 +877,7 @@ next_entry(struct archive_read_disk *a, struct tree *t,
 			tree_enter_initial_dir(t);
 			return (ARCHIVE_FATAL);
 		case TREE_ERROR_DIR:
-			archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
+			archive_set_error(&a->archive, t->tree_errno,
 			    "%s: Couldn't visit directory",
 			    tree_current_path(t));
 			tree_enter_initial_dir(t);
@@ -925,8 +933,8 @@ next_entry(struct archive_read_disk *a, struct tree *t,
 	if (a->matching) {
 		r = archive_match_path_excluded(a->matching, entry);
 		if (r < 0) {
-			archive_set_error(&(a->archive), errno,
-			    "Failed : %s", archive_error_string(a->matching));
+			archive_set_error(&(a->archive), archive_errno(a->matching),
+			    "%s", archive_error_string(a->matching));
 			return (r);
 		}
 		if (r) {
@@ -1039,8 +1047,8 @@ next_entry(struct archive_read_disk *a, struct tree *t,
 	if (a->matching) {
 		r = archive_match_time_excluded(a->matching, entry);
 		if (r < 0) {
-			archive_set_error(&(a->archive), errno,
-			    "Failed : %s", archive_error_string(a->matching));
+			archive_set_error(&(a->archive), archive_errno(a->matching),
+			    "%s", archive_error_string(a->matching));
 			return (r);
 		}
 		if (r) {
@@ -1065,8 +1073,8 @@ next_entry(struct archive_read_disk *a, struct tree *t,
 	if (a->matching) {
 		r = archive_match_owner_excluded(a->matching, entry);
 		if (r < 0) {
-			archive_set_error(&(a->archive), errno,
-			    "Failed : %s", archive_error_string(a->matching));
+			archive_set_error(&(a->archive), archive_errno(a->matching),
+			    "%s", archive_error_string(a->matching));
 			return (r);
 		}
 		if (r) {
@@ -1418,14 +1426,18 @@ update_current_filesystem(struct archive_read_disk *a, int64_t dev)
 	/*
 	 * This is the new filesystem which we have to generate a new ID for.
 	 */
-	fid = t->max_filesystem_id++;
-	if (t->max_filesystem_id > t->allocated_filesystem) {
-		size_t s;
+	fid = t->max_filesystem_id;
+	if (fid >= MAX_FILESYSTEM_ID) {
+		archive_set_error(&a->archive, ENOMEM, "Too many filesystems");
+		return (ARCHIVE_FATAL);
+	}
+	if (fid + 1 > t->allocated_filesystem) {
+		int s;
 		void *p;
 
-		s = t->max_filesystem_id * 2;
+		s = (fid + 1) * 2;
 		p = realloc(t->filesystem_table,
-		        s * sizeof(*t->filesystem_table));
+		    s * sizeof(*t->filesystem_table));
 		if (p == NULL) {
 			archive_set_error(&a->archive, ENOMEM,
 			    "Can't allocate tar data");
@@ -1434,6 +1446,7 @@ update_current_filesystem(struct archive_read_disk *a, int64_t dev)
 		t->filesystem_table = (struct filesystem *)p;
 		t->allocated_filesystem = s;
 	}
+	t->max_filesystem_id = fid + 1;
 	t->current_filesystem_id = fid;
 	t->current_filesystem = &(t->filesystem_table[fid]);
 	t->current_filesystem->dev = dev;
@@ -1578,9 +1591,6 @@ setup_current_filesystem(struct archive_read_disk *a)
 #  endif
 #endif
 	int r, xr = 0;
-#if !defined(HAVE_STRUCT_STATFS_F_NAMEMAX)
-	long nm;
-#endif
 
 	t->current_filesystem->synthetic = -1;
 	t->current_filesystem->remote = -1;
@@ -1647,35 +1657,6 @@ setup_current_filesystem(struct archive_read_disk *a)
 #endif
 		t->current_filesystem->noatime = 0;
 
-#if defined(USE_READDIR_R)
-	/* Set maximum filename length. */
-#if defined(HAVE_STRUCT_STATFS_F_NAMEMAX)
-	t->current_filesystem->name_max = sfs.f_namemax;
-#else
-# if defined(_PC_NAME_MAX)
-	/* Mac OS X does not have f_namemax in struct statfs. */
-	if (tree_current_is_symblic_link_target(t)) {
-		if (tree_enter_working_dir(t) != 0) {
-			archive_set_error(&a->archive, errno, "fchdir failed");
-			return (ARCHIVE_FAILED);
-		}
-		nm = pathconf(tree_current_access_path(t), _PC_NAME_MAX);
-	} else
-		nm = fpathconf(tree_current_dir_fd(t), _PC_NAME_MAX);
-# else
-	nm = -1;
-# endif
-	if (nm == -1)
-		t->current_filesystem->name_max = NAME_MAX;
-	else
-		t->current_filesystem->name_max = nm;
-#endif
-	if (t->current_filesystem->name_max == 0) {
-		archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
-		    "Cannot determine name_max");
-		return (ARCHIVE_FAILED);
-	}
-#endif /* USE_READDIR_R */
 	return (ARCHIVE_OK);
 }
 
@@ -1732,8 +1713,6 @@ setup_current_filesystem(struct archive_read_disk *a)
 #endif
 		t->current_filesystem->noatime = 0;
 
-	/* Set maximum filename length. */
-	t->current_filesystem->name_max = svfs.f_namemax;
 	return (ARCHIVE_OK);
 }
 
@@ -1863,19 +1842,6 @@ setup_current_filesystem(struct archive_read_disk *a)
 #endif
 		t->current_filesystem->noatime = 0;
 
-#if defined(USE_READDIR_R)
-	/* Set maximum filename length. */
-#if defined(HAVE_STATVFS)
-	t->current_filesystem->name_max = svfs.f_namemax;
-#else
-	t->current_filesystem->name_max = sfs.f_namelen;
-#endif
-	if (t->current_filesystem->name_max == 0) {
-		archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
-		    "Cannot determine name_max");
-		return (ARCHIVE_FAILED);
-	}
-#endif
 	return (ARCHIVE_OK);
 }
 
@@ -1953,15 +1919,6 @@ setup_current_filesystem(struct archive_read_disk *a)
 #endif
 		t->current_filesystem->noatime = 0;
 
-#if defined(USE_READDIR_R)
-	/* Set maximum filename length. */
-	t->current_filesystem->name_max = svfs.f_namemax;
-	if (t->current_filesystem->name_max == 0) {
-		archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
-		    "Cannot determine name_max");
-		return (ARCHIVE_FAILED);
-	}
-#endif
 	return (ARCHIVE_OK);
 }
 
@@ -1975,9 +1932,6 @@ static int
 setup_current_filesystem(struct archive_read_disk *a)
 {
 	struct tree *t = a->tree;
-#if defined(_PC_NAME_MAX) && defined(USE_READDIR_R)
-	long nm;
-#endif
 	t->current_filesystem->synthetic = -1;/* Not supported */
 	t->current_filesystem->remote = -1;/* Not supported */
 	t->current_filesystem->noatime = 0;
@@ -1987,40 +1941,6 @@ setup_current_filesystem(struct archive_read_disk *a)
 	t->current_filesystem->min_xfer_size = -1;
 	t->current_filesystem->incr_xfer_size = -1;
 
-#if defined(USE_READDIR_R)
-	/* Set maximum filename length. */
-#  if defined(_PC_NAME_MAX)
-	if (tree_current_is_symblic_link_target(t)) {
-		if (tree_enter_working_dir(t) != 0) {
-			archive_set_error(&a->archive, errno, "fchdir failed");
-			return (ARCHIVE_FAILED);
-		}
-		nm = pathconf(tree_current_access_path(t), _PC_NAME_MAX);
-	} else
-		nm = fpathconf(tree_current_dir_fd(t), _PC_NAME_MAX);
-	if (nm == -1)
-#  endif /* _PC_NAME_MAX */
-		/*
-		 * Some systems (HP-UX or others?) incorrectly defined
-		 * NAME_MAX macro to be a smaller value.
-		 */
-#  if defined(NAME_MAX) && NAME_MAX >= 255
-		t->current_filesystem->name_max = NAME_MAX;
-#  else
-		/* No way to get a trusted value of maximum filename
-		 * length. */
-		t->current_filesystem->name_max = PATH_MAX;
-#  endif /* NAME_MAX */
-#  if defined(_PC_NAME_MAX)
-	else
-		t->current_filesystem->name_max = nm;
-#  endif /* _PC_NAME_MAX */
-	if (t->current_filesystem->name_max == 0) {
-		archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
-		    "Cannot determine name_max");
-		return (ARCHIVE_FAILED);
-	}
-#endif /* USE_READDIR_R */
 	return (ARCHIVE_OK);
 }
 
@@ -2445,16 +2365,20 @@ static int
 tree_dir_next_posix(struct tree *t)
 {
 	int r;
+#if defined(HAVE_FDOPENDIR)
+	int fd;
+#endif
 	const char *name;
 	size_t namelen;
 
 	if (t->d == NULL) {
-#if defined(USE_READDIR_R)
-		size_t dirent_size;
-#endif
 
 #if defined(HAVE_FDOPENDIR)
-		t->d = fdopendir(tree_dup(t->working_dir_fd));
+		if (t->working_dir_fd >= 0) {
+			fd = tree_dup(t->working_dir_fd);
+			if (fd != -1)
+				t->d = fdopendir(fd);
+		}
 #else /* HAVE_FDOPENDIR */
 		if (tree_enter_working_dir(t) == 0) {
 			t->d = opendir(".");
@@ -2470,45 +2394,12 @@ tree_dir_next_posix(struct tree *t)
 			t->visit_type = r != 0 ? r : TREE_ERROR_DIR;
 			return (t->visit_type);
 		}
-#if defined(USE_READDIR_R)
-		dirent_size = offsetof(struct dirent, d_name) +
-		  t->filesystem_table[t->current->filesystem_id].name_max + 1;
-		if (t->dirent == NULL || t->dirent_allocated < dirent_size) {
-			free(t->dirent);
-			t->dirent = malloc(dirent_size);
-			if (t->dirent == NULL) {
-				closedir(t->d);
-				t->d = INVALID_DIR_HANDLE;
-				(void)tree_ascend(t);
-				tree_pop(t);
-				t->tree_errno = ENOMEM;
-				t->visit_type = TREE_ERROR_DIR;
-				return (t->visit_type);
-			}
-			t->dirent_allocated = dirent_size;
-		}
-#endif /* USE_READDIR_R */
 	}
 	for (;;) {
 		errno = 0;
-#if defined(USE_READDIR_R)
-		r = readdir_r(t->d, t->dirent, &t->de);
-#ifdef _AIX
-		/* Note: According to the man page, return value 9 indicates
-		 * that the readdir_r was not successful and the error code
-		 * is set to the global errno variable. And then if the end
-		 * of directory entries was reached, the return value is 9
-		 * and the third parameter is set to NULL and errno is
-		 * unchanged. */
-		if (r == 9)
-			r = errno;
-#endif /* _AIX */
-		if (r != 0 || t->de == NULL) {
-#else
 		t->de = readdir(t->d);
 		if (t->de == NULL) {
 			r = errno;
-#endif
 			closedir(t->d);
 			t->d = INVALID_DIR_HANDLE;
 			if (r != 0) {
@@ -2747,9 +2638,6 @@ tree_free(struct tree *t)
 	if (t == NULL)
 		return;
 	archive_string_free(&t->path);
-#if defined(USE_READDIR_R)
-	free(t->dirent);
-#endif
 	free(t->sparse_list);
 	for (i = 0; i < t->max_filesystem_id; i++)
 		free(t->filesystem_table[i].allocation_ptr);

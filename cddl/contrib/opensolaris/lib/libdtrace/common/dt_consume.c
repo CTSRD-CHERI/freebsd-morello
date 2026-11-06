@@ -2143,7 +2143,7 @@ dt_print_sym(dtrace_hdl_t *dtp, FILE *fp, const char *format, caddr_t addr)
 		}
 	}
 
-	if (dtp->dt_oformat != 0 && dt_printf(dtp, fp, format, c) < 0)
+	if (!dtp->dt_oformat && dt_printf(dtp, fp, format, c) < 0)
 		return (-1);
 
 	return (0);
@@ -2242,11 +2242,10 @@ dt_format_bytes_get(dtrace_hdl_t *dtp, caddr_t addr, size_t nbytes)
 static int
 dt_format_memory(dtrace_hdl_t *dtp, caddr_t addr)
 {
-
-	size_t nbytes = *((uintptr_t *) addr);
+	size_t nbytes = *((size_t *) addr);
 	char *s;
 
-	s = dt_format_bytes_get(dtp, addr + sizeof(uintptr_t), nbytes);
+	s = dt_format_bytes_get(dtp, addr + sizeof(size_t), nbytes);
 	if (s == NULL)
 		return (-1);
 
@@ -2260,9 +2259,9 @@ static int
 dt_print_memory(dtrace_hdl_t *dtp, FILE *fp, caddr_t addr)
 {
 	int quiet = (dtp->dt_options[DTRACEOPT_QUIET] != DTRACEOPT_UNSET);
-	size_t nbytes = *((uintptr_t *) addr);
+	size_t nbytes = *((size_t *) addr);
 
-	return (dt_print_bytes(dtp, fp, addr + sizeof(uintptr_t),
+	return (dt_print_bytes(dtp, fp, addr + sizeof(size_t),
 	    nbytes, 50, quiet, 1));
 }
 

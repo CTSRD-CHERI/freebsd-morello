@@ -817,7 +817,7 @@ ng_bridge_rcvdata(hook_p hook, item_p item)
 		NG_FREE_M(ctx.m);
 		return (EINVAL);
 	}
-	if (ctx.m->m_len < ETHER_HDR_LEN && !(ctx.m = m_pullup(ctx.m, ETHER_HDR_LEN))) {
+	if ((ctx.m = m_pullup(ctx.m, ETHER_HDR_LEN)) == NULL) {
 		counter_u64_add(ctx.incoming->stats.memoryFailures, 1);
 		NG_FREE_ITEM(item);
 		return (ENOBUFS);
@@ -858,8 +858,12 @@ ng_bridge_rcvdata(hook_p hook, item_p item)
 		if (__predict_false(host->staleness > 0))
 			host->staleness = 0;
 
-	if ((host == NULL && ctx.incoming->learnMac) ||
-	    (host != NULL && host->link != ctx.incoming)) {
+	/*
+	 * learnMac is 0 on uplink: neither insert a new host nor
+	 * move an existing one from packets received there.
+	 */
+	if (ctx.incoming->learnMac &&
+	    (host == NULL || host->link != ctx.incoming)) {
 		struct ng_mesg *msg;
 		struct ng_bridge_move_host *mh;
 		int error = 0;

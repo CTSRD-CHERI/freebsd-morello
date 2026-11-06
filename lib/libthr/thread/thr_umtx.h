@@ -59,7 +59,8 @@ int _thr_umtx_timedwait_uint(volatile u_int *mtx, u_int exp, int clockid,
 	const struct timespec *timeout, int shared) __hidden;
 int _thr_umtx_wake(volatile void *mtx, int count, int shared) __hidden;
 int _thr_ucond_wait(struct ucond *cv, struct umutex *m,
-        const struct timespec *timeout, int flags) __hidden;
+        const struct timespec *timeout, const struct _umtx_time *utimep,
+	int flags) __hidden;
 void _thr_ucond_init(struct ucond *cv) __hidden;
 int _thr_ucond_signal(struct ucond *cv) __hidden;
 int _thr_ucond_broadcast(struct ucond *cv) __hidden;
@@ -81,13 +82,19 @@ _thr_umutex_trylock(struct umutex *mtx, uint32_t id)
 
 	if (atomic_cmpset_acq_32(&mtx->m_owner, UMUTEX_UNOWNED, id))
 		return (0);
+	if ((uint32_t)mtx->m_owner == UMUTEX_CONTESTED &&
+	    __predict_true((mtx->m_flags & (UMUTEX_PRIO_PROTECT |
+	   UMUTEX_PRIO_INHERIT)) == 0) &&
+	   atomic_cmpset_acq_32(&mtx->m_owner, UMUTEX_CONTESTED,
+	   id | UMUTEX_CONTESTED))
+		return (0);
 	if (__predict_false((uint32_t)mtx->m_owner == UMUTEX_RB_OWNERDEAD) &&
 	    atomic_cmpset_acq_32(&mtx->m_owner, UMUTEX_RB_OWNERDEAD,
 	    id | UMUTEX_CONTESTED))
 		return (EOWNERDEAD);
 	if (__predict_false((uint32_t)mtx->m_owner == UMUTEX_RB_NOTRECOV))
 		return (ENOTRECOVERABLE);
-	if ((mtx->m_flags & UMUTEX_PRIO_PROTECT) == 0)
+	if ((mtx->m_flags & (UMUTEX_PRIO_PROTECT | UMUTEX_PRIO_INHERIT)) == 0)
 		return (EBUSY);
 	return (__thr_umutex_trylock(mtx));
 }

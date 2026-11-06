@@ -407,6 +407,9 @@ usbd_get_max_frame_length(const struct usb_endpoint_descriptor *edesc,
 		max_packet_size &= 0x7FF;
 		break;
 	case USB_SPEED_SUPER:
+	case USB_SPEED_SUPER_PLUS:
+	case USB_SPEED_SUPER_PLUS_X2:
+	case USB_SPEED_SUPER_PLUS_GEN2_X2:
 		max_packet_count += (max_packet_size >> 11) & 3;
 
 		if (ecomp != NULL)
@@ -517,6 +520,9 @@ usbd_transfer_setup_sub(struct usb_setup_params *parm)
 		xfer->max_packet_size &= 0x7FF;
 		break;
 	case USB_SPEED_SUPER:
+	case USB_SPEED_SUPER_PLUS:
+	case USB_SPEED_SUPER_PLUS_X2:
+	case USB_SPEED_SUPER_PLUS_GEN2_X2:
 		xfer->max_packet_count += (xfer->max_packet_size >> 11) & 3;
 
 		if (ecomp != NULL)
@@ -1889,8 +1895,10 @@ usbd_transfer_submit(struct usb_xfer *xfer)
 	 */
 #if USB_HAVE_BUSDMA
 	if (xfer->flags_int.bdma_enable) {
+		USB_BUS_LOCK(bus);
 		/* insert the USB transfer last in the BUS-DMA queue */
 		usb_command_wrapper(&xfer->xroot->dma_q, xfer);
+		USB_BUS_UNLOCK(bus);
 		return;
 	}
 #endif
@@ -3532,6 +3540,9 @@ usbd_get_std_packet_size(struct usb_std_packet_size *ptr,
 		[USB_SPEED_HIGH] = 1024,
 		[USB_SPEED_VARIABLE] = 1024,
 		[USB_SPEED_SUPER] = 1024,
+		[USB_SPEED_SUPER_PLUS] = 1024,
+		[USB_SPEED_SUPER_PLUS_X2] = 1024,
+		[USB_SPEED_SUPER_PLUS_GEN2_X2] = 1024,
 	};
 
 	static const uint16_t isoc_range_max[USB_SPEED_MAX] = {
@@ -3540,6 +3551,9 @@ usbd_get_std_packet_size(struct usb_std_packet_size *ptr,
 		[USB_SPEED_HIGH] = 1024,
 		[USB_SPEED_VARIABLE] = 3584,
 		[USB_SPEED_SUPER] = 1024,
+		[USB_SPEED_SUPER_PLUS] = 1024,
+		[USB_SPEED_SUPER_PLUS_X2] = 1024,
+		[USB_SPEED_SUPER_PLUS_GEN2_X2] = 1024,
 	};
 
 	static const uint16_t control_min[USB_SPEED_MAX] = {
@@ -3548,6 +3562,9 @@ usbd_get_std_packet_size(struct usb_std_packet_size *ptr,
 		[USB_SPEED_HIGH] = 64,
 		[USB_SPEED_VARIABLE] = 512,
 		[USB_SPEED_SUPER] = 512,
+		[USB_SPEED_SUPER_PLUS] = 512,
+		[USB_SPEED_SUPER_PLUS_X2] = 512,
+		[USB_SPEED_SUPER_PLUS_GEN2_X2] = 512,
 	};
 
 	static const uint16_t bulk_min[USB_SPEED_MAX] = {
@@ -3556,6 +3573,9 @@ usbd_get_std_packet_size(struct usb_std_packet_size *ptr,
 		[USB_SPEED_HIGH] = 512,
 		[USB_SPEED_VARIABLE] = 512,
 		[USB_SPEED_SUPER] = 1024,
+		[USB_SPEED_SUPER_PLUS] = 1024,
+		[USB_SPEED_SUPER_PLUS_X2] = 1024,
+		[USB_SPEED_SUPER_PLUS_GEN2_X2] = 1024,
 	};
 
 	uint16_t temp;

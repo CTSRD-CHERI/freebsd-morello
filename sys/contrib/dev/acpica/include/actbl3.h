@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2025, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2026, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -404,6 +404,7 @@ typedef struct acpi_srat_mem_affinity
 #define ACPI_SRAT_MEM_ENABLED       (1)         /* 00: Use affinity structure */
 #define ACPI_SRAT_MEM_HOT_PLUGGABLE (1<<1)      /* 01: Memory region is hot pluggable */
 #define ACPI_SRAT_MEM_NON_VOLATILE  (1<<2)      /* 02: Memory region is non-volatile */
+#define ACPI_SRAT_MEM_SPEC_PURPOSE  (1<<3)      /* 03: Memory is intended for specific-purpose usage */
 
 
 /* 2: Processor Local X2_APIC Affinity (ACPI 4.0) */

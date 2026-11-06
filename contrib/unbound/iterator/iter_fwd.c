@@ -139,6 +139,17 @@ forwards_insert_data(struct iter_forwards* fwd, uint16_t c, uint8_t* nm,
 	return 1;
 }
 
+static struct iter_forward_zone*
+fwd_zone_find(struct iter_forwards* fwd, uint16_t c, uint8_t* nm)
+{
+	struct iter_forward_zone key;
+	key.node.key = &key;
+	key.dclass = c;
+	key.name = nm;
+	key.namelabs = dname_count_size_labels(nm, &key.namelen);
+	return (struct iter_forward_zone*)rbtree_search(fwd->tree, &key);
+}
+
 /** insert new info into forward structure given dp */
 static int
 forwards_insert(struct iter_forwards* fwd, uint16_t c, struct delegpt* dp)
@@ -216,6 +227,11 @@ read_fwds_host(struct config_stub* s, struct delegpt* dp)
 			log_err("cannot parse forward %s server name: '%s'", 
 				s->name, p->str);
 			return 0;
+		}
+		if(dname_subdomain_c(dname, dp->name)) {
+			log_warn("forward-host '%s' may have a circular "
+				"dependency on forward-zone '%s'",
+				p->str, s->name);
 		}
 #if ! defined(HAVE_SSL_SET1_HOST) && ! defined(HAVE_X509_VERIFY_PARAM_SET1_HOST)
 		if(tls_auth_name)
@@ -321,6 +337,11 @@ make_stub_holes(struct iter_forwards* fwd, struct config_file* cfg)
 			log_err("cannot parse stub name '%s'", s->name);
 			return 0;
 		}
+		if(fwd_zone_find(fwd, LDNS_RR_CLASS_IN, dname) != NULL) {
+			/* Already a forward zone there. */
+			free(dname);
+			continue;
+		}
 		if(!fwd_add_stub_hole(fwd, LDNS_RR_CLASS_IN, dname)) {
 			free(dname);
 			log_err("out of memory");
@@ -344,6 +365,11 @@ make_auth_holes(struct iter_forwards* fwd, struct config_file* cfg)
 		if(!dname) {
 			log_err("cannot parse auth name '%s'", a->name);
 			return 0;
+		}
+		if(fwd_zone_find(fwd, LDNS_RR_CLASS_IN, dname) != NULL) {
+			/* Already a forward zone there. */
+			free(dname);
+			continue;
 		}
 		if(!fwd_add_stub_hole(fwd, LDNS_RR_CLASS_IN, dname)) {
 			free(dname);
@@ -535,17 +561,6 @@ forwards_get_mem(struct iter_forwards* fwd)
 	}
 	lock_rw_unlock(&fwd->lock);
 	return s;
-}
-
-static struct iter_forward_zone*
-fwd_zone_find(struct iter_forwards* fwd, uint16_t c, uint8_t* nm)
-{
-	struct iter_forward_zone key;
-	key.node.key = &key;
-	key.dclass = c;
-	key.name = nm;
-	key.namelabs = dname_count_size_labels(nm, &key.namelen);
-	return (struct iter_forward_zone*)rbtree_search(fwd->tree, &key);
 }
 
 int 

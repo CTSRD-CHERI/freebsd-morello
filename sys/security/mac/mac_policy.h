@@ -88,6 +88,7 @@ struct mount;
 struct msg;
 struct msqid_kernel;
 struct pipepair;
+struct prison;
 struct proc;
 struct sbuf;
 struct semid_kernel;
@@ -100,6 +101,8 @@ struct sysctl_req;
 struct thread;
 struct ucred;
 struct vattr;
+struct vfsconf;
+struct vfsoptlist;
 struct vnode;
 
 struct in_addr;
@@ -167,7 +170,7 @@ typedef int	(*mpo_cred_check_visible_t)(struct ucred *cr1,
 typedef void	(*mpo_cred_copy_label_t)(struct label *src,
 		    struct label *dest);
 typedef void	(*mpo_cred_create_init_t)(struct ucred *cred);
-typedef void	(*mpo_cred_create_swapper_t)(struct ucred *cred);
+typedef void	(*mpo_cred_create_kproc0_t)(struct ucred *cred);
 typedef void	(*mpo_cred_destroy_label_t)(struct label *label);
 typedef int	(*mpo_cred_externalize_label_t)(struct label *label,
 		    char *element_name, struct sbuf *sb, int *claimed);
@@ -293,6 +296,14 @@ typedef void	(*mpo_mount_create_t)(struct ucred *cred, struct mount *mp,
 		    struct label *mplabel);
 typedef void	(*mpo_mount_destroy_label_t)(struct label *label);
 typedef void	(*mpo_mount_init_label_t)(struct label *label);
+typedef int	(*mpo_mount_check_mount_t)(struct ucred *cred, struct vnode *vp,
+		    struct label *vplabel, struct vfsconf *vfsp,
+		    struct vfsoptlist **optlist, uint64_t fsflags);
+typedef int	(*mpo_mount_check_update_t)(struct ucred *cred,
+		    struct mount *mp, struct label *mplabel,
+		    struct vfsoptlist **optlist, uint64_t fsflags);
+typedef int	(*mpo_mount_check_unmount_t)(struct ucred *cred,
+		    struct mount *mp, struct label *mplabel, uint64_t flags);
 
 typedef void	(*mpo_netinet_arp_send_t)(struct ifnet *ifp,
 		    struct label *ifplabel, struct mbuf *m,
@@ -406,6 +417,39 @@ typedef void	(*mpo_posixshm_create_t)(struct ucred *cred,
 		    struct shmfd *shmfd, struct label *shmlabel);
 typedef void	(*mpo_posixshm_destroy_label_t)(struct label *label);
 typedef void	(*mpo_posixshm_init_label_t)(struct label *label);
+
+typedef int	(*mpo_prison_init_label_t)(struct label *label, int flag);
+typedef int	(*mpo_prison_check_relabel_t)(struct ucred *cred,
+		    struct prison *pr, struct label *prlabel,
+		    struct label *newlabel);
+typedef void	(*mpo_prison_destroy_label_t)(struct label *label);
+typedef void	(*mpo_prison_copy_label_t)(struct label *src,
+		    struct label *dest);
+typedef int	(*mpo_prison_externalize_label_t)(struct label *label,
+		    char *element_name, struct sbuf *sb, int *claimed);
+typedef int	(*mpo_prison_internalize_label_t)(struct label *label,
+		    char *element_name, char *element_data, int *claimed);
+typedef void	(*mpo_prison_relabel_t)(struct ucred *cred, struct prison *pr,
+		    struct label *prlabel, struct label *newlabel);
+typedef int	(*mpo_prison_check_attach_t)(struct ucred *cred,
+		    struct prison *pr, struct label *prlabel);
+typedef int	(*mpo_prison_check_create_t)(struct ucred *cred,
+		    struct vfsoptlist *opts, int flags);
+typedef int	(*mpo_prison_check_get_t)(struct ucred *cred,
+		    struct prison *pr, struct label *prlabel,
+		    struct vfsoptlist *opts, int flags);
+typedef int	(*mpo_prison_check_set_t)(struct ucred *cred,
+		    struct prison *pr, struct label *prlabel,
+		    struct vfsoptlist *opts, int flags);
+typedef int	(*mpo_prison_check_remove_t)(struct ucred *cred,
+		    struct prison *pr, struct label *prlabel);
+typedef void	(*mpo_prison_created_t)(struct ucred *cred,
+		    struct prison *pr, struct label *prlabel);
+typedef void	(*mpo_prison_cleanup_t)(struct ucred *cred,
+		    struct prison *pr);
+typedef void	(*mpo_prison_attached_t)(struct ucred *cred,
+		    struct prison *pr, struct label *prlabel, struct proc *p,
+		    struct label *proclabel);
 
 typedef int	(*mpo_priv_check_t)(struct ucred *cred, int priv);
 typedef int	(*mpo_priv_grant_t)(struct ucred *cred, int priv);
@@ -738,7 +782,7 @@ struct mac_policy_ops {
 	mpo_cred_check_setresgid_t		mpo_cred_check_setresgid;
 	mpo_cred_check_visible_t		mpo_cred_check_visible;
 	mpo_cred_copy_label_t			mpo_cred_copy_label;
-	mpo_cred_create_swapper_t		mpo_cred_create_swapper;
+	mpo_cred_create_kproc0_t		mpo_cred_create_kproc0;
 	mpo_cred_create_init_t			mpo_cred_create_init;
 	mpo_cred_destroy_label_t		mpo_cred_destroy_label;
 	mpo_cred_externalize_label_t		mpo_cred_externalize_label;
@@ -811,6 +855,9 @@ struct mac_policy_ops {
 	mpo_mount_create_t			mpo_mount_create;
 	mpo_mount_destroy_label_t		mpo_mount_destroy_label;
 	mpo_mount_init_label_t			mpo_mount_init_label;
+	mpo_mount_check_mount_t			mpo_mount_check_mount;
+	mpo_mount_check_update_t		mpo_mount_check_update;
+	mpo_mount_check_unmount_t		mpo_mount_check_unmount;
 
 	mpo_netinet_arp_send_t			mpo_netinet_arp_send;
 	mpo_netinet_firewall_reply_t		mpo_netinet_firewall_reply;
@@ -862,6 +909,22 @@ struct mac_policy_ops {
 	mpo_posixshm_create_t			mpo_posixshm_create;
 	mpo_posixshm_destroy_label_t		mpo_posixshm_destroy_label;
 	mpo_posixshm_init_label_t		mpo_posixshm_init_label;
+
+	mpo_prison_init_label_t			mpo_prison_init_label;
+	mpo_prison_check_relabel_t		mpo_prison_check_relabel;
+	mpo_prison_destroy_label_t		mpo_prison_destroy_label;
+	mpo_prison_copy_label_t			mpo_prison_copy_label;
+	mpo_prison_externalize_label_t		mpo_prison_externalize_label;
+	mpo_prison_internalize_label_t		mpo_prison_internalize_label;
+	mpo_prison_relabel_t			mpo_prison_relabel;
+	mpo_prison_check_attach_t		mpo_prison_check_attach;
+	mpo_prison_check_create_t		mpo_prison_check_create;
+	mpo_prison_check_get_t			mpo_prison_check_get;
+	mpo_prison_check_set_t			mpo_prison_check_set;
+	mpo_prison_check_remove_t		mpo_prison_check_remove;
+	mpo_prison_created_t			mpo_prison_created;
+	mpo_prison_cleanup_t			mpo_prison_cleanup;
+	mpo_prison_attached_t			mpo_prison_attached;
 
 	mpo_priv_check_t			mpo_priv_check;
 	mpo_priv_grant_t			mpo_priv_grant;
@@ -1007,9 +1070,9 @@ struct mac_policy_ops {
  * structure, as its layout is statically compiled into all policies.
  */
 struct mac_policy_conf {
-	char				*mpc_name;	/* policy name */
-	char				*mpc_fullname;	/* policy full name */
-	struct mac_policy_ops		*mpc_ops;	/* policy operations */
+	const char			*mpc_name;	/* policy name */
+	const char			*mpc_fullname;	/* policy full name */
+	const struct mac_policy_ops	*mpc_ops;	/* policy operations */
 	int				 mpc_loadtime_flags;	/* flags */
 	int				*mpc_field_off; /* security field */
 	int				 mpc_runtime_flags; /* flags */
@@ -1041,8 +1104,9 @@ struct mac_policy_conf {
  *   4                       8.x
  *   5                       14.x
  *   6                       15.x
+ *   7                       16.x
  */
-#define	MAC_VERSION	6
+#define	MAC_VERSION	7
 
 #define	MAC_POLICY_SET(mpops, mpname, mpfullname, mpflags, privdata_wanted) \
 	static struct mac_policy_conf mpname##_mac_policy_conf = {	\

@@ -42,9 +42,7 @@
 #include <sys/malloc.h>
 #include <sys/stdarg.h>
 #include <sys/sysctl.h>
-#ifdef RSS
 #include <net/rss_config.h>
-#endif
 
 #include "iavf_debug.h"
 #include "iavf_osdep.h"
@@ -315,6 +313,8 @@ enum iavf_state {
 	IAVF_STATE_INITIALIZED,
 	IAVF_STATE_RESET_REQUIRED,
 	IAVF_STATE_RESET_PENDING,
+	IAVF_STATE_RESET_RECOVERY,
+	IAVF_STATE_VC_POLLING,
 	IAVF_STATE_RUNNING,
 	/* This entry must be last */
 	IAVF_STATE_LAST,
@@ -428,11 +428,12 @@ cmp_etheraddr(const u8 *ea1, const u8 *ea2)
 
 int iavf_send_vc_msg(struct iavf_sc *sc, u32 op);
 int iavf_send_vc_msg_sleep(struct iavf_sc *sc, u32 op);
+bool iavf_mbx_log_allowed(struct iavf_sc *sc);
 void iavf_update_link_status(struct iavf_sc *);
 bool iavf_driver_is_detaching(struct iavf_sc *sc);
 void iavf_msec_pause(int msecs);
-void iavf_get_default_rss_key(u32 *key);
 int iavf_allocate_pci_resources_common(struct iavf_sc *sc);
+bool iavf_reset_is_complete(struct iavf_hw *hw);
 int iavf_reset_complete(struct iavf_hw *hw);
 int iavf_setup_vc(struct iavf_sc *sc);
 int iavf_reset(struct iavf_sc *sc);
@@ -472,9 +473,9 @@ struct iavf_mac_filter *
 struct iavf_mac_filter *
     iavf_get_mac_filter(struct iavf_sc *sc);
 u64 iavf_baudrate_from_link_speed(struct iavf_sc *sc);
-void iavf_add_vlan_filter(struct iavf_sc *sc, u16 vtag);
+bool iavf_add_vlan_filter(struct iavf_sc *sc, u16 vtag);
 int iavf_mark_del_vlan_filter(struct iavf_sc *sc, u16 vtag);
-void iavf_disable_queues_with_retries(struct iavf_sc *);
+int iavf_disable_queues_with_retries(struct iavf_sc *);
 
 int iavf_sysctl_current_speed(SYSCTL_HANDLER_ARGS);
 int iavf_sysctl_tx_itr(SYSCTL_HANDLER_ARGS);

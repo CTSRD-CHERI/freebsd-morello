@@ -242,7 +242,7 @@ int
 extstrtoaddr(const char* str, struct sockaddr_storage* addr,
 	socklen_t* addrlen, int port)
 {
-	char* s;
+	const char* s;
 	if((s=strchr(str, '@'))) {
 		char buf[MAX_ADDR_STRLEN];
 		if(s-str >= MAX_ADDR_STRLEN) {
@@ -268,7 +268,7 @@ ipstrtoaddr(const char* ip, int port, struct sockaddr_storage* addr,
 	p = (uint16_t) port;
 	if(str_is_ip6(ip)) {
 		char buf[MAX_ADDR_STRLEN];
-		char* s;
+		const char* s;
 		struct sockaddr_in6* sa = (struct sockaddr_in6*)addr;
 		*addrlen = (socklen_t)sizeof(struct sockaddr_in6);
 		memset(sa, 0, *addrlen);
@@ -304,8 +304,9 @@ ipstrtoaddr(const char* ip, int port, struct sockaddr_storage* addr,
 int netblockstrtoaddr(const char* str, int port, struct sockaddr_storage* addr,
         socklen_t* addrlen, int* net)
 {
+	const char* s;
 	char buf[64];
-	char* s;
+	char* b = NULL;
 	*net = (str_is_ip6(str)?128:32);
 	if((s=strchr(str, '/'))) {
 		if(atoi(s+1) > *net) {
@@ -317,16 +318,21 @@ int netblockstrtoaddr(const char* str, int port, struct sockaddr_storage* addr,
 			log_err("cannot parse netblock: '%s'", str);
 			return 0;
 		}
+		if(*net < 0) {
+			log_err("netblock value %d is negative in: '%s'",
+				*net, str);
+			return 0;
+		}
 		strlcpy(buf, str, sizeof(buf));
-		s = strchr(buf, '/');
-		if(s) *s = 0;
-		s = buf;
+		b = strchr(buf, '/');
+		if(b) *b = 0;
+		b = buf;
 	}
-	if(!ipstrtoaddr(s?s:str, port, addr, addrlen)) {
+	if(!ipstrtoaddr(b?b:str, port, addr, addrlen)) {
 		log_err("cannot parse ip address: '%s'", str);
 		return 0;
 	}
-	if(s) {
+	if(b) {
 		addr_mask(addr, *addrlen, *net);
 	}
 	return 1;
@@ -429,6 +435,8 @@ int netblockdnametoaddr(uint8_t* dname, size_t dnamelen,
 	buff[nlablen] = '\0';
 	*net = atoi(buff);
 	if(*net == 0 && strcmp(buff, "0") != 0)
+		return 0;
+	if(*net < 0)
 		return 0;
 	dname += nlablen;
 	dname++;
@@ -776,7 +784,7 @@ sockaddr_cmp_scopeid(struct sockaddr_storage* addr1, socklen_t len1,
 }
 
 int
-addr_is_ip6(struct sockaddr_storage* addr, socklen_t len)
+addr_is_ip6(const struct sockaddr_storage* addr, socklen_t len)
 {
 	if(len == (socklen_t)sizeof(struct sockaddr_in6) &&
 		((struct sockaddr_in6*)addr)->sin6_family == AF_INET6)
@@ -797,7 +805,7 @@ addr_mask(struct sockaddr_storage* addr, socklen_t len, int net)
 		s = (uint8_t*)&((struct sockaddr_in*)addr)->sin_addr;
 		max = 32;
 	}
-	if(net >= max)
+	if(net >= max || net < 0)
 		return;
 	for(i=net/8+1; i<max/8; i++) {
 		s[i] = 0;
@@ -1028,7 +1036,7 @@ void log_crypto_err_code(const char* str, unsigned long err)
 }
 
 #ifdef HAVE_SSL
-/** Print crypt erro with SSL_get_error want code and err_get_error code */
+/** Print crypt error with SSL_get_error want code and err_get_error code */
 static void log_crypto_err_io_code_arg(const char* str, int r,
 	unsigned long err, int err_present)
 {
@@ -1219,10 +1227,13 @@ setup_ticket_keys_cb(void* sslctx)
 #endif /* HAVE_SSL */
 
 int
-listen_sslctx_setup(void* ctxt)
+listen_sslctx_setup(void* ctxt, const char* tls_protocols)
 {
 #ifdef HAVE_SSL
+	int allow12, allow13;
 	SSL_CTX* ctx = (SSL_CTX*)ctxt;
+	cfg_tls_protocols_allowed(tls_protocols, &allow12, &allow13);
+
 	/* no SSLv2, SSLv3 because has defects */
 #if SSL_OP_NO_SSLv2 != 0
 	if((SSL_CTX_set_options(ctx, SSL_OP_NO_SSLv2) & SSL_OP_NO_SSLv2)
@@ -1250,6 +1261,26 @@ listen_sslctx_setup(void* ctxt)
 		!= SSL_OP_NO_TLSv1_1){
 		log_crypto_err("could not set SSL_OP_NO_TLSv1_1");
 		return 0;
+	}
+#endif
+#if defined(SSL_OP_NO_TLSv1_2)
+	if(!allow12) {
+		/* we are not allowed to use TLS1.2 */
+		if((SSL_CTX_set_options(ctx, SSL_OP_NO_TLSv1_2) & SSL_OP_NO_TLSv1_2)
+			!= SSL_OP_NO_TLSv1_2){
+			log_crypto_err("could not set SSL_OP_NO_TLSv1_2");
+			return 0;
+		}
+	}
+#endif
+#if defined(SSL_OP_NO_TLSv1_3)
+	if(!allow13) {
+		/* we are not allowed to use TLS1.3 */
+		if((SSL_CTX_set_options(ctx, SSL_OP_NO_TLSv1_3) & SSL_OP_NO_TLSv1_3)
+			!= SSL_OP_NO_TLSv1_3){
+			log_crypto_err("could not set SSL_OP_NO_TLSv1_3");
+			return 0;
+		}
 	}
 #endif
 #if defined(SSL_OP_NO_RENEGOTIATION)
@@ -1290,7 +1321,7 @@ listen_sslctx_setup(void* ctxt)
 	SSL_CTX_set_security_level(ctx, 0);
 #endif
 #else
-	(void)ctxt;
+	(void)ctxt; (void)tls_protocols;
 #endif /* HAVE_SSL */
 	return 1;
 }
@@ -1305,7 +1336,7 @@ listen_sslctx_setup_2(void* ctxt)
 	if(!SSL_CTX_set_ecdh_auto(ctx,1)) {
 		log_crypto_err("Error in SSL_CTX_ecdh_auto, not enabling ECDHE");
 	}
-#elif defined(USE_ECDSA) && defined(HAVE_SSL_CTX_SET_TMP_ECDH)
+#elif defined(USE_ECDSA) && HAVE_DECL_SSL_CTX_SET_TMP_ECDH
 	if(1) {
 		EC_KEY *ecdh = EC_KEY_new_by_curve_name (NID_X9_62_prime256v1);
 		if (!ecdh) {
@@ -1326,7 +1357,7 @@ listen_sslctx_setup_2(void* ctxt)
 void* listen_sslctx_create(const char* key, const char* pem,
 	const char* verifypem, const char* tls_ciphers,
 	const char* tls_ciphersuites, int set_ticket_keys_cb,
-	int is_dot, int is_doh)
+	int is_dot, int is_doh, const char* tls_protocols)
 {
 #ifdef HAVE_SSL
 	SSL_CTX* ctx = SSL_CTX_new(SSLv23_server_method());
@@ -1344,7 +1375,7 @@ void* listen_sslctx_create(const char* key, const char* pem,
 		SSL_CTX_free(ctx);
 		return NULL;
 	}
-	if(!listen_sslctx_setup(ctx)) {
+	if(!listen_sslctx_setup(ctx, tls_protocols)) {
 		SSL_CTX_free(ctx);
 		return NULL;
 	}
@@ -1415,12 +1446,15 @@ void* listen_sslctx_create(const char* key, const char* pem,
 		SSL_CTX_set_alpn_select_cb(ctx, doh_alpn_select_cb, NULL);
 #endif
 	}
+#else /* HAVE_SSL_CTX_SET_ALPN_SELECT_CB */
+	(void)is_dot; (void)is_doh;
 #endif /* HAVE_SSL_CTX_SET_ALPN_SELECT_CB */
 	return ctx;
 #else
 	(void)key; (void)pem; (void)verifypem;
 	(void)tls_ciphers; (void)tls_ciphersuites;
 	(void)set_ticket_keys_cb; (void)is_dot; (void)is_doh;
+	(void)tls_protocols;
 	return NULL;
 #endif /* HAVE_SSL */
 }
@@ -1673,6 +1707,10 @@ int check_auth_name_for_ssl(char* auth_name)
 /** set the authname on an SSL structure, SSL* ssl */
 int set_auth_name_on_ssl(void* ssl, char* auth_name, int use_sni)
 {
+#ifdef HAVE_SSL_SET1_DNSNAME
+	struct sockaddr_storage tmpaddr;
+	socklen_t tmpaddrlen = (socklen_t)sizeof(tmpaddr);
+#endif
 	if(!auth_name) return 1;
 #ifdef HAVE_SSL
 	if(use_sni) {
@@ -1682,7 +1720,20 @@ int set_auth_name_on_ssl(void* ssl, char* auth_name, int use_sni)
 	(void)ssl;
 	(void)use_sni;
 #endif
-#ifdef HAVE_SSL_SET1_HOST
+#ifdef HAVE_SSL_SET1_DNSNAME
+	SSL_set_verify(ssl, SSL_VERIFY_PEER, NULL);
+	if(ipstrtoaddr(auth_name, UNBOUND_DNS_PORT, &tmpaddr, &tmpaddrlen)) {
+		if(!SSL_set1_ipaddr(ssl, auth_name)) {
+			log_err("SSL_set1_ipaddr failed");
+			return 0;
+		}
+	} else {
+		if(!SSL_set1_dnsname(ssl, auth_name)) {
+			log_err("SSL_set1_dnsname failed");
+			return 0;
+		}
+	}
+#elif defined(HAVE_SSL_SET1_HOST)
 	SSL_set_verify(ssl, SSL_VERIFY_PEER, NULL);
 	/* setting the hostname makes openssl verify the
 	 * host name in the x509 certificate in the
@@ -1782,7 +1833,7 @@ void ub_openssl_lock_delete(void)
 #endif /* OPENSSL_THREADS */
 }
 
-int listen_sslctx_setup_ticket_keys(struct config_strlist* tls_session_ticket_keys) {
+int listen_sslctx_setup_ticket_keys(struct config_strlist* tls_session_ticket_keys, char* chroot) {
 #ifdef HAVE_SSL
 	size_t s = 1;
 	struct config_strlist* p;
@@ -1800,14 +1851,18 @@ int listen_sslctx_setup_ticket_keys(struct config_strlist* tls_session_ticket_ke
 		size_t n;
 		unsigned char *data;
 		FILE *f;
+		char* fstr;
 
 		data = (unsigned char *)malloc(80);
 		if(!data)
 			return 0;
 
-		f = fopen(p->str, "rb");
+		fstr = p->str;
+		if(chroot && strncmp(fstr, chroot, strlen(chroot)) == 0)
+			fstr += strlen(chroot);
+		f = fopen(fstr, "rb");
 		if(!f) {
-			log_err("could not read tls-session-ticket-key %s: %s", p->str, strerror(errno));
+			log_err("could not read tls-session-ticket-key %s: %s", fstr, strerror(errno));
 			free(data);
 			return 0;
 		}
@@ -1815,11 +1870,11 @@ int listen_sslctx_setup_ticket_keys(struct config_strlist* tls_session_ticket_ke
 		fclose(f);
 
 		if(n != 80) {
-			log_err("tls-session-ticket-key %s is %d bytes, must be 80 bytes", p->str, (int)n);
+			log_err("tls-session-ticket-key %s is %d bytes, must be 80 bytes", fstr, (int)n);
 			free(data);
 			return 0;
 		}
-		verbose(VERB_OPS, "read tls-session-ticket-key: %s", p->str);
+		verbose(VERB_OPS, "read tls-session-ticket-key: %s", fstr);
 
 		keys->key_name = data;
 		keys->aes_key = data + 16;
@@ -1830,7 +1885,7 @@ int listen_sslctx_setup_ticket_keys(struct config_strlist* tls_session_ticket_ke
 	keys->key_name = NULL;
 	return 1;
 #else
-	(void)tls_session_ticket_keys;
+	(void)tls_session_ticket_keys; (void)chroot;
 	return 0;
 #endif
 }

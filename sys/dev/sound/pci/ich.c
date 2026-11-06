@@ -77,9 +77,9 @@
 #define AMD_768		0x7445
 #define AMD_8111	0x746d
 
-#define ICH_LOCK(sc)		snd_mtxlock((sc)->ich_lock)
-#define ICH_UNLOCK(sc)		snd_mtxunlock((sc)->ich_lock)
-#define ICH_LOCK_ASSERT(sc)	snd_mtxassert((sc)->ich_lock)
+#define ICH_LOCK(sc)		mtx_lock(&(sc)->ich_lock)
+#define ICH_UNLOCK(sc)		mtx_unlock(&(sc)->ich_lock)
+#define ICH_LOCK_ASSERT(sc)	mtx_assert(&(sc)->ich_lock, MA_OWNED)
 
 #if 0
 #define ICH_DEBUG(stmt)		do {	\
@@ -196,7 +196,7 @@ struct sc_info {
 	uint16_t vendor;
 	uint16_t devid;
 	uint32_t flags;
-	struct mtx *ich_lock;
+	struct mtx ich_lock;
 };
 
 /* -------------------------------------------------------------------- */
@@ -294,28 +294,31 @@ AC97_DECLARE(ich_ac97);
 /* -------------------------------------------------------------------- */
 /* common routines */
 
-static void
-ich_filldtbl(struct sc_chinfo *ch)
+static int
+ich_filldtbl(struct sc_chinfo *ch, uint32_t blksz)
 {
 	struct sc_info *sc = ch->parent;
 	uint32_t base;
-	int i;
+	int error, i;
 
-	base = sndbuf_getbufaddr(ch->buffer);
-	if ((ch->blksz * ch->blkcnt) > sndbuf_getmaxsize(ch->buffer))
-		ch->blksz = sndbuf_getmaxsize(ch->buffer) / ch->blkcnt;
-	if ((sndbuf_getblksz(ch->buffer) != ch->blksz ||
-	    sndbuf_getblkcnt(ch->buffer) != ch->blkcnt) &&
-	    sndbuf_resize(ch->buffer, ch->blkcnt, ch->blksz) != 0)
+	base = ch->buffer->buf_addr;
+	if (blksz * ch->blkcnt > ch->buffer->maxsize)
+		blksz = ch->buffer->maxsize / ch->blkcnt;
+	if ((ch->buffer->blksz != blksz ||
+	    ch->buffer->blkcnt != ch->blkcnt) &&
+	    (error = sndbuf_resize(ch->buffer, ch->blkcnt, blksz)) != 0) {
 		device_printf(sc->dev, "%s: failed blksz=%u blkcnt=%u\n",
-		    __func__, ch->blksz, ch->blkcnt);
-	ch->blksz = sndbuf_getblksz(ch->buffer);
+		    __func__, blksz, ch->blkcnt);
+		return (error);
+	}
+	ch->blksz = ch->buffer->blksz;
 
 	for (i = 0; i < ICH_DTBL_LENGTH; i++) {
 		ch->dtbl[i].buffer = base + (ch->blksz * (i % ch->blkcnt));
 		ch->dtbl[i].length = ICH_BDC_IOC
 				   | (ch->blksz / ch->parent->sample_size);
 	}
+	return (0);
 }
 
 static int
@@ -351,7 +354,7 @@ ich_resetchan(struct sc_info *sc, int num)
 		return (0);
 #if 0
 	else if (sc->vendor == NVIDIA_VENDORID) {
-	    	sc->flags |= ICH_IGNORE_RESET;
+		sc->flags |= ICH_IGNORE_RESET;
 		device_printf(sc->dev, "ignoring reset failure!\n");
 		return (0);
 	}
@@ -491,13 +494,13 @@ ichchan_setblocksize(kobj_t obj, void *data, uint32_t blocksize)
 	);
 
 	if (sc->flags & ICH_HIGH_LATENCY)
-		blocksize = sndbuf_getmaxsize(ch->buffer) / ch->blkcnt;
+		blocksize = ch->buffer->maxsize / ch->blkcnt;
 
 	if (blocksize < ICH_MIN_BLKSZ)
 		blocksize = ICH_MIN_BLKSZ;
 	blocksize &= ~(ICH_MIN_BLKSZ - 1);
-	ch->blksz = blocksize;
-	ich_filldtbl(ch);
+	if (ich_filldtbl(ch, blocksize) != 0)
+		return (0);
 	ICH_LOCK(sc);
 	ich_wr(sc, ch->regbase + ICH_REG_X_LVI, ch->blkcnt - 1, 1);
 	ICH_UNLOCK(sc);
@@ -544,7 +547,7 @@ ichchan_getptr(kobj_t obj, void *data)
 {
 	struct sc_chinfo *ch = data;
 	struct sc_info *sc = ch->parent;
-      	uint32_t pos;
+	uint32_t pos;
 
 	ICH_DEBUG(
 		if (!(sc->flags & ICH_CALIBRATE_DONE))
@@ -734,7 +737,7 @@ ich_calibrate(void *arg)
 	ch->blkcnt = 2;
 	sc->flags |= ICH_CALIBRATE_DONE;
 	ICH_UNLOCK(sc);
-	ichchan_setblocksize(0, ch, sndbuf_getmaxsize(ch->buffer) >> 1);
+	ichchan_setblocksize(0, ch, ch->buffer->maxsize >> 1);
 	ICH_LOCK(sc);
 	sc->flags &= ~ICH_CALIBRATE_DONE;
 
@@ -802,7 +805,7 @@ ich_calibrate(void *arg)
 		device_printf(sc->dev, "measured ac97 link rate at %d Hz", actual_48k_rate);
 		if (sc->ac97rate != actual_48k_rate)
 			printf(", will use %d Hz", sc->ac97rate);
-	 	printf("\n");
+		printf("\n");
 	}
 	sc->flags |= ICH_CALIBRATE_DONE;
 	ICH_UNLOCK(sc);
@@ -884,11 +887,12 @@ ich_pci_attach(device_t dev)
 	uint32_t		subdev;
 	uint16_t		extcaps;
 	uint16_t		devid, vendor;
-	struct sc_info 		*sc;
+	struct sc_info		*sc;
 	int			i;
 
 	sc = malloc(sizeof(*sc), M_DEVBUF, M_WAITOK | M_ZERO);
-	sc->ich_lock = snd_mtxcreate(device_get_nameunit(dev), "snd_ich softc");
+	mtx_init(&sc->ich_lock, device_get_nameunit(dev), "snd_ich softc",
+	    MTX_DEF);
 	sc->dev = dev;
 
 	vendor = sc->vendor = pci_get_vendor(dev);
@@ -926,7 +930,7 @@ ich_pci_attach(device_t dev)
 	 * read-only.  Need to enable "legacy support", by poking into
 	 * pci config space.  The driver should use MMBAR and MBBAR,
 	 * but doing so will mess things up here.  ich4 has enough new
-	 * features it warrants it's own driver. 
+	 * features it warrants it's own driver.
 	 */
 	if (vendor == INTEL_VENDORID && (devid == INTEL_82801DB ||
 	    devid == INTEL_82801EB || devid == INTEL_6300ESB ||
@@ -941,9 +945,9 @@ ich_pci_attach(device_t dev)
 		sc->regtype = SYS_RES_IOPORT;
 	}
 
-	sc->nambar = bus_alloc_resource_any(dev, sc->regtype, 
+	sc->nambar = bus_alloc_resource_any(dev, sc->regtype,
 		&sc->nambarid, RF_ACTIVE);
-	sc->nabmbar = bus_alloc_resource_any(dev, sc->regtype, 
+	sc->nabmbar = bus_alloc_resource_any(dev, sc->regtype,
 		&sc->nabmbarid, RF_ACTIVE);
 
 	if (!sc->nambar || !sc->nabmbar) {
@@ -1028,6 +1032,8 @@ ich_pci_attach(device_t dev)
 		break;
 	}
 
+	pcm_init(dev, sc);
+
 	mixer_init(dev, ac97_getmixerclass(), sc->codec);
 
 	/* check and set VRA function */
@@ -1065,8 +1071,6 @@ ich_pci_attach(device_t dev)
 	if (bus_dmamap_load(sc->dmat, sc->dtmap, sc->dtbl, sc->dtbl_size,
 	    ich_setmap, sc, 0))
 		goto bad;
-
-	pcm_init(dev, sc);
 
 	pcm_addchan(dev, PCMDIR_PLAY, &ichchan_class, sc);		/* play */
 	pcm_addchan(dev, PCMDIR_REC, &ichchan_class, sc);		/* record */
@@ -1111,8 +1115,7 @@ bad:
 		bus_dma_tag_destroy(sc->chan_dmat);
 	if (sc->dmat)
 		bus_dma_tag_destroy(sc->dmat);
-	if (sc->ich_lock)
-		snd_mtxfree(sc->ich_lock);
+	mtx_destroy(&sc->ich_lock);
 	free(sc, M_DEVBUF);
 	return (ENXIO);
 }
@@ -1136,7 +1139,7 @@ ich_pci_detach(device_t dev)
 	bus_dmamem_free(sc->dmat, sc->dtbl, sc->dtmap);
 	bus_dma_tag_destroy(sc->chan_dmat);
 	bus_dma_tag_destroy(sc->dmat);
-	snd_mtxfree(sc->ich_lock);
+	mtx_destroy(&sc->ich_lock);
 	free(sc, M_DEVBUF);
 	return (0);
 }
@@ -1147,14 +1150,14 @@ ich_pci_codec_reset(struct sc_info *sc)
 	int i;
 	uint32_t control;
 
-	control = ich_rd(sc, ICH_REG_GLOB_CNT, 4); 
+	control = ich_rd(sc, ICH_REG_GLOB_CNT, 4);
 	control &= ~(ICH_GLOB_CTL_SHUT);
 	control |= (control & ICH_GLOB_CTL_COLD) ?
 		    ICH_GLOB_CTL_WARM : ICH_GLOB_CTL_COLD;
 	ich_wr(sc, ICH_REG_GLOB_CNT, control, 4);
 
 	for (i = 500000; i; i--) {
-	     	if (ich_rd(sc, ICH_REG_GLOB_STA, 4) & ICH_GLOB_STA_PCR)
+		if (ich_rd(sc, ICH_REG_GLOB_STA, 4) & ICH_GLOB_STA_PCR)
 			break;		/*		or ICH_SCR? */
 		DELAY(1);
 	}
@@ -1203,7 +1206,7 @@ ich_pci_resume(device_t dev)
 	ich_pci_codec_reset(sc);
 	ICH_UNLOCK(sc);
 	ac97_setextmode(sc->codec, sc->hasvra | sc->hasvrm);
-    	if (mixer_reinit(dev) == -1) {
+	if (mixer_reinit(dev) == -1) {
 		device_printf(dev, "unable to reinitialize the mixer\n");
 		return (ENXIO);
 	}
@@ -1224,9 +1227,9 @@ static device_method_t ich_methods[] = {
 	DEVMETHOD(device_probe,		ich_pci_probe),
 	DEVMETHOD(device_attach,	ich_pci_attach),
 	DEVMETHOD(device_detach,	ich_pci_detach),
-	DEVMETHOD(device_suspend, 	ich_pci_suspend),
+	DEVMETHOD(device_suspend,	ich_pci_suspend),
 	DEVMETHOD(device_resume,	ich_pci_resume),
-	{ 0, 0 }
+	DEVMETHOD_END
 };
 
 static driver_t ich_driver = {
@@ -1236,5 +1239,5 @@ static driver_t ich_driver = {
 };
 
 DRIVER_MODULE(snd_ich, pci, ich_driver, 0, 0);
-MODULE_DEPEND(snd_ich, sound, SOUND_MINVER, SOUND_PREFVER, SOUND_MAXVER);
+MODULE_DEPEND(snd_ich, sound, 1, 1, 1);
 MODULE_VERSION(snd_ich, 1);

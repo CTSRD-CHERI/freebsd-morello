@@ -214,10 +214,14 @@ mpool_get(MPOOL *mp, pgno_t pgno,
 	/* Read in the contents. */
 	off = mp->pagesize * pgno;
 	if ((nr = pread(mp->fd, bp->page, mp->pagesize, off)) != (ssize_t)mp->pagesize) {
+		int serrno;
+
 		switch (nr) {
 		case -1:
 			/* errno is set for us by pread(). */
+			serrno = errno;
 			free(bp);
+			errno = serrno;
 			mp->curcache--;
 			return (NULL);
 		case 0:
@@ -455,7 +459,7 @@ mpool_stat(MPOOL *mp)
 
 	(void)fprintf(stderr, "%lu pages in the file\n", mp->npages);
 	(void)fprintf(stderr,
-	    "page size %lu, cacheing %lu pages of %lu page max cache\n",
+	    "page size %lu, caching %lu pages of %lu page max cache\n",
 	    mp->pagesize, mp->curcache, mp->maxcache);
 	(void)fprintf(stderr, "%lu page puts, %lu page gets, %lu page new\n",
 	    mp->pageput, mp->pageget, mp->pagenew);

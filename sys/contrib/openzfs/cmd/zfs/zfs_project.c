@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -145,11 +135,11 @@ zfs_project_handle_one(const char *name, zfs_project_control_t *zpc)
 	switch (zpc->zpc_op) {
 	case ZFS_PROJECT_OP_LIST:
 		(void) printf("%5u %c %s\n", fsx.fsx_projid,
-		    (fsx.fsx_xflags & ZFS_PROJINHERIT_FL) ? 'P' : '-', name);
+		    (fsx.fsx_xflags & FS_XFLAG_PROJINHERIT) ? 'P' : '-', name);
 		goto out;
 	case ZFS_PROJECT_OP_CHECK:
 		if (fsx.fsx_projid == zpc->zpc_expected_projid &&
-		    fsx.fsx_xflags & ZFS_PROJINHERIT_FL)
+		    fsx.fsx_xflags & FS_XFLAG_PROJINHERIT)
 			goto out;
 
 		if (!zpc->zpc_newline) {
@@ -164,29 +154,30 @@ zfs_project_handle_one(const char *name, zfs_project_control_t *zpc)
 			    "(%u/%u)\n", name, fsx.fsx_projid,
 			    (uint32_t)zpc->zpc_expected_projid);
 
-		if (!(fsx.fsx_xflags & ZFS_PROJINHERIT_FL))
+		if (!(fsx.fsx_xflags & FS_XFLAG_PROJINHERIT))
 			(void) printf("%s - project inherit flag is not set\n",
 			    name);
 
 		goto out;
 	case ZFS_PROJECT_OP_CLEAR:
-		if (!(fsx.fsx_xflags & ZFS_PROJINHERIT_FL) &&
+		if (!(fsx.fsx_xflags & FS_XFLAG_PROJINHERIT) &&
 		    (zpc->zpc_keep_projid ||
 		    fsx.fsx_projid == ZFS_DEFAULT_PROJID))
 			goto out;
 
-		fsx.fsx_xflags &= ~ZFS_PROJINHERIT_FL;
+		fsx.fsx_xflags &= ~FS_XFLAG_PROJINHERIT;
 		if (!zpc->zpc_keep_projid)
 			fsx.fsx_projid = ZFS_DEFAULT_PROJID;
 		break;
 	case ZFS_PROJECT_OP_SET:
 		if (fsx.fsx_projid == zpc->zpc_expected_projid &&
-		    (!zpc->zpc_set_flag || fsx.fsx_xflags & ZFS_PROJINHERIT_FL))
+		    (!zpc->zpc_set_flag ||
+		    fsx.fsx_xflags & FS_XFLAG_PROJINHERIT))
 			goto out;
 
 		fsx.fsx_projid = zpc->zpc_expected_projid;
 		if (zpc->zpc_set_flag)
-			fsx.fsx_xflags |= ZFS_PROJINHERIT_FL;
+			fsx.fsx_xflags |= FS_XFLAG_PROJINHERIT;
 		break;
 	default:
 		ASSERT(0);
@@ -194,10 +185,29 @@ zfs_project_handle_one(const char *name, zfs_project_control_t *zpc)
 	}
 
 	ret = ioctl(fd, ZFS_IOC_FSSETXATTR, &fsx);
-	if (ret)
+	if (ret) {
 		(void) fprintf(stderr,
 		    gettext("failed to set xattr for %s: %s\n"),
 		    name, strerror(errno));
+
+		if (errno == ENOTSUP) {
+			char *kver = zfs_version_kernel();
+			/*
+			 * Special case: a module/userspace version mismatch can
+			 * return ENOTSUP due to us fixing the XFLAGs bits in
+			 * #17884.  In that case give a hint to the user that
+			 * they should take action to make the versions match.
+			 */
+			if (strcmp(kver, ZFS_META_ALIAS) != 0) {
+				fprintf(stderr,
+				    gettext("Warning: The zfs module version "
+				    "(%s) and userspace\nversion (%s) do not "
+				    "match up.  This may be the\ncause of the "
+				    "\"Operation not supported\" error.\n"),
+				    kver, ZFS_META_ALIAS);
+			}
+		}
+	}
 
 out:
 	close(fd);

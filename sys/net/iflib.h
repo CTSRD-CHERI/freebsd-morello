@@ -66,6 +66,13 @@ typedef struct if_rxd_frag {
 /* bnxt supports 64 with hardware LRO enabled */
 #define IFLIB_MAX_RX_SEGS		64
 
+/*
+ * iri_flags bits an isc_rxd_pkt_get() driver callback is permitted to
+ * set.  iflib masks iri_flags against this set before copying the flags
+ * into an mbuf.
+ */
+#define IFLIB_IRI_VALID_FLAGS	(M_VLANTAG | M_TSTMP | M_TSTMP_HPREC)
+
 typedef struct if_rxd_info {
 	/* set by iflib */
 	uint16_t iri_qsidx;		/* qset index */
@@ -77,11 +84,12 @@ typedef struct if_rxd_info {
 
 	/* updated by driver */
 	if_rxd_frag_t iri_frags;
+	uint64_t iri_rcv_tstmp;		/* nanoseconds since boot */
 	uint32_t iri_flowid;		/* RSS hash for packet */
 	uint32_t iri_csum_flags;	/* m_pkthdr csum flags */
 
 	uint32_t iri_csum_data;		/* m_pkthdr csum data */
-	uint8_t iri_flags;		/* mbuf flags for packet */
+	uint32_t iri_flags;		/* see IFLIB_IRI_VALID_FLAGS */
 	uint8_t	 iri_nfrags;		/* number of fragments in packet */
 	uint8_t	 iri_rsstype;		/* RSS hash type */
 	uint8_t	 iri_pad;		/* any padding in the received data */
@@ -127,7 +135,8 @@ typedef struct if_pkt_info {
 	uint8_t			ipi_ip_tos;	/* IP ToS field data */
 	uint8_t			ipi_mflags;	/* packet mbuf flags */
 	uint8_t			__spare0__;
-	uint8_t		__spare1__;
+	uint8_t			__spare1__;
+	struct mbuf		*ipi_mbuf;		/* mbuf for ktls */
 } *if_pkt_info_t;
 
 typedef struct if_irq {
@@ -191,7 +200,7 @@ typedef struct if_softc_ctx {
 	int isc_vectors;
 	int isc_nrxqsets;
 	int isc_ntxqsets;
-	uint16_t __spare0__;
+	uint16_t isc_tx_pad;
 	uint32_t __spare1__;
 	int isc_msix_bar;		/* can be model specific - initialize in attach_pre */
 	int isc_tx_nsegments;		/* can be model specific - initialize in attach_pre */
@@ -230,7 +239,7 @@ typedef struct if_softc_ctx {
 	uint32_t __spare6__;
 	uint32_t __spare7__;
 	uint32_t __spare8__;
-	caddr_t __spare9__;
+	void *__spare9__;
 	int isc_disable_msix;
 	if_txrx_t isc_txrx;
 	struct ifmedia *isc_media;
@@ -272,7 +281,7 @@ struct if_shared_ctx {
 	int isc_ntxqs;			/* # of tx queues per tx qset - usually 1 */
 	int isc_nrxqs;			/* # of rx queues per rx qset - intel 1, chelsio 2, broadcom 3 */
 	int __spare0__;
-	int isc_tx_reclaim_thresh;
+	int __spare1__;
 	int isc_flags;
 };
 
@@ -347,8 +356,14 @@ typedef enum {
  * Driver needs frames padded to some minimum length
  */
 #define IFLIB_NEED_ETHER_PAD	0x100
-#define	IFLIB_SPARE7		0x200
-#define	IFLIB_SPARE6		0x400
+/*
+ * Driver understands page/bank i2c reads
+ */
+#define	IFLIB_I2C_PAGE_BANK	0x200
+/*
+ * Non-TSO packets must not exceed isc_tx_nsegments DMA segments.
+ */
+#define	IFLIB_SPARSE_TX		0x400
 #define	IFLIB_SPARE5		0x800
 #define	IFLIB_SPARE4		0x1000
 #define	IFLIB_SPARE3		0x2000
@@ -399,6 +414,13 @@ typedef enum {
  */
 #define IFLIB_FEATURE_SUB_INTERFACES	1500014
 
+/* Power transitions for ifdi_power_prepare(). */
+enum iflib_power_event {
+	IFLIB_POWER_DETACH,
+	IFLIB_POWER_SUSPEND,
+	IFLIB_POWER_SHUTDOWN,
+};
+
 /*
  * These enum values are used in iflib_needs_restart to indicate to iflib
  * functions whether or not the interface needs restarting when certain events
@@ -417,6 +439,13 @@ device_t iflib_get_dev(if_ctx_t ctx);
 
 if_t iflib_get_ifp(if_ctx_t ctx);
 
+/*
+ * Lockless software admission snapshot.  This neither pins the context nor
+ * establishes that queue DMA has stopped; callers retain their usual lifetime
+ * and queue synchronization requirements.
+ */
+bool iflib_is_running(if_ctx_t ctx);
+
 struct ifmedia *iflib_get_media(if_ctx_t ctx);
 
 if_softc_ctx_t iflib_get_softc_ctx(if_ctx_t ctx);
@@ -424,6 +453,11 @@ if_shared_ctx_t iflib_get_sctx(if_ctx_t ctx);
 
 void iflib_set_mac(if_ctx_t ctx, uint8_t mac[ETHER_ADDR_LEN]);
 void iflib_request_reset(if_ctx_t ctx);
+/* Defer a reset, but discard it if the interface is administratively down. */
+void iflib_request_reset_if_up(if_ctx_t ctx);
+
+/* Report an error from the otherwise void ifdi_init method while it runs. */
+void iflib_init_failed(if_ctx_t ctx);
 uint8_t iflib_in_detach(if_ctx_t ctx);
 
 uint32_t iflib_get_rx_mbuf_sz(if_ctx_t ctx);
@@ -446,7 +480,9 @@ int iflib_device_shutdown(device_t);
 int iflib_device_probe_vendor(device_t);
 
 int iflib_device_iov_init(device_t, uint16_t, const nvlist_t *);
+int iflib_device_iov_init_restart(device_t, uint16_t, const nvlist_t *);
 void iflib_device_iov_uninit(device_t);
+void iflib_device_iov_uninit_restart(device_t);
 int iflib_device_iov_add_vf(device_t, uint16_t, const nvlist_t *);
 
 /*
@@ -470,6 +506,7 @@ void iflib_irq_free(if_ctx_t ctx, if_irq_t irq);
 void iflib_io_tqg_attach(struct grouptask *gt, void *uniq, int cpu,
     const char *name);
 
+/* Configuration task callbacks must return when iflib_in_detach() is true. */
 void iflib_config_task_init(if_ctx_t ctx, struct task *config_task,
     task_fn_t *fn);
 void iflib_config_task_enqueue(if_ctx_t ctx, struct task *config_task);

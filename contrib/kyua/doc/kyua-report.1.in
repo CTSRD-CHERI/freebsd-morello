@@ -30,7 +30,7 @@
 .Os
 .Sh NAME
 .Nm "kyua report"
-.Nd Generates reports with the results of a test suite run
+.Nd generate reports with the results of a test suite run
 .Sh SYNOPSIS
 .Nm
 .Op Fl -output Ar path
@@ -70,7 +70,7 @@ and
 .Pa /dev/stderr
 can be used to specify the standard output and the standard error,
 respectively.
-.It Fl -results-file Ar path , Fl s Ar path
+.It Fl -results-file Ar path , Fl r Ar path
 __include__ results-file-flag-read.mdoc
 .It Fl -results-filter Ar types
 Comma-separated list of the test result types to include in the report.

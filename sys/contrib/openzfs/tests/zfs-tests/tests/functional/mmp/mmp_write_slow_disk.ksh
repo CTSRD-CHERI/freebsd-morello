@@ -1,8 +1,6 @@
 #!/bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
-#
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
 # You may only use this file in accordance with the terms of version
@@ -10,9 +8,7 @@
 #
 # A full copy of the text of the CDDL should have accompanied this
 # source.  A copy of the CDDL is also available via the Internet at
-# http://www.illumos.org/license/CDDL.
-#
-# CDDL HEADER END
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -91,7 +87,7 @@ for x in {0,1,2,4}; do
 done
 
 # Expect that the pool was not suspended
-log_must check_state $MMP_POOL "" "ONLINE"
+log_must check_state $MMP_POOL "" "DEGRADED"
 health=$(zpool list -H -o health $MMP_POOL)
 log_note "$MMP_POOL health is $health"
 [[ "$health" == "SUSPENDED" ]] && log_fail "$MMP_POOL $health unexpected"

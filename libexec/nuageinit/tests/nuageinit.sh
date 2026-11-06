@@ -1,5 +1,6 @@
 #-
 # Copyright (c) 2022-2025 Baptiste Daroussin <bapt@FreeBSD.org>
+# Copyright (c) 2025 Jesús Daniel Colmenares Oviedo <dtxdf@FreeBSD.org>
 #
 # SPDX-License-Identifier: BSD-2-Clause
 #
@@ -18,6 +19,7 @@ atf_test_case config2_pubkeys_user_data
 atf_test_case config2_pubkeys_meta_data
 atf_test_case config2_network
 atf_test_case config2_network_static_v4
+atf_test_case config2_network_dns
 atf_test_case config2_ssh_keys
 atf_test_case nocloud_userdata_cloudconfig_ssh_pwauth
 atf_test_case nocloud_userdata_cloudconfig_chpasswd
@@ -28,8 +30,24 @@ atf_test_case config2_userdata_packages
 atf_test_case config2_userdata_update_packages
 atf_test_case config2_userdata_upgrade_packages
 atf_test_case config2_userdata_shebang
+atf_test_case config2_userdata_ssh_deletekeys
+atf_test_case config2_userdata_disable_root
+atf_test_case config2_userdata_bootcmd
+atf_test_case config2_userdata_manage_etc_hosts
+atf_test_case config2_userdata_mounts
+atf_test_case config2_userdata_resolv_conf
+atf_test_case config2_userdata_keyboard
+atf_test_case config2_userdata_ssh_authkey_fingerprints
+atf_test_case config2_userdata_ntp
+atf_test_case config2_userdata_ca_certs
+atf_test_case config2_userdata_multipart
+atf_test_case config2_userdata_power_state
+atf_test_case config2_userdata_locale
 atf_test_case config2_userdata_fqdn_and_hostname
 atf_test_case config2_userdata_write_files
+atf_test_case config2_userdata_encode_base64
+atf_test_case config2_userdata_final_message
+atf_test_case config2_userdata_phone_home
 
 setup_test_adduser()
 {
@@ -58,36 +76,52 @@ args_body()
 nocloud_body()
 {
 	mkdir -p media/nuageinit
+	setup_test_adduser
 	atf_check -s exit:1 -e match:"nuageinit: error parsing nocloud.*" /usr/libexec/nuageinit "${PWD}"/media/nuageinit/ nocloud
 	printf "instance-id: iid-local01\nlocal-hostname: cloudimg\n" > "${PWD}"/media/nuageinit/meta-data
 	atf_check -s exit:0 /usr/libexec/nuageinit "${PWD}"/media/nuageinit nocloud
-	atf_check -o inline:"hostname=\"cloudimg\"\n" cat etc/rc.conf.d/hostname
+	atf_check -o inline:"hostname='cloudimg'\n" cat etc/rc.conf.d/hostname
 	cat > media/nuageinit/meta-data << EOF
 instance-id: iid-local01
 hostname: myhost
 EOF
 	atf_check -s exit:0 /usr/libexec/nuageinit "${PWD}"/media/nuageinit nocloud
-	atf_check -o inline:"hostname=\"myhost\"\n" cat etc/rc.conf.d/hostname
+	atf_check -o inline:"hostname='myhost'\n" cat etc/rc.conf.d/hostname
 }
 
 nocloud_userdata_script_body()
 {
 	mkdir -p media/nuageinit
-	printf "instance-id: iid-local01\n" > "${PWD}"/media/nuageinit/meta-data
-	printf "#!/bin/sh\necho yeah\n" > "${PWD}"/media/nuageinit/user-data
-	chmod 755 "${PWD}"/media/nuageinit/user-data
+	setup_test_adduser
+	cat > media/nuageinit/meta-data << EOF
+instance-id: iid-local01
+hostname: myhost
+EOF
+	# ensure this is an invalid when parsed with the yaml parser
+	printf "#!/bin/sh\n: ${test:-yes}\necho $test\n" > "${PWD}"/media/nuageinit/user-data
+	chmod 644 "${PWD}"/media/nuageinit/user-data
 	atf_check -s exit:0 /usr/libexec/nuageinit "${PWD}"/media/nuageinit nocloud
-	atf_check -o inline:"#!/bin/sh\necho yeah\n" cat var/cache/nuageinit/user_data
+	atf_check test -x var/cache/nuageinit/user_data
+	atf_check -o inline:"#!/bin/sh\n: ${test:-yes}\necho $test\n" cat var/cache/nuageinit/user_data
+	# ensure meta-data is applied, regardless of what is in user-data
+	atf_check -o inline:"hostname='myhost'\n" cat etc/rc.conf.d/hostname
 }
 
 nocloud_user_data_script_body()
 {
 	mkdir -p media/nuageinit
-	printf "instance-id: iid-local01\n" > "${PWD}"/media/nuageinit/meta-data
+	setup_test_adduser
+	cat > media/nuageinit/meta-data << EOF
+instance-id: iid-local01
+hostname: myhost
+EOF
 	printf "#!/bin/sh\necho yeah\n" > "${PWD}"/media/nuageinit/user_data
-	chmod 755 "${PWD}"/media/nuageinit/user_data
+	chmod 644 "${PWD}"/media/nuageinit/user_data
 	atf_check -s exit:0 /usr/libexec/nuageinit "${PWD}"/media/nuageinit nocloud
+	atf_check test -x var/cache/nuageinit/user_data
 	atf_check -o inline:"#!/bin/sh\necho yeah\n" cat var/cache/nuageinit/user_data
+	# ensure meta-data is applied, regardless of what is in user-data
+	atf_check -o inline:"hostname='myhost'\n" cat etc/rc.conf.d/hostname
 }
 
 nocloud_userdata_cloudconfig_users_head()
@@ -119,12 +153,16 @@ users:
     gecos: Foo B. Bar
     primary_group: foobar
     sudo: ALL=(ALL) NOPASSWD:ALL
+    doas: permit persist %u as root
     groups: users
     passwd: $6$j212wezy$7H/1LT4f9/N3wpgNunhsIqtMj62OKiS3nyNwuizouQc3u7MbYCarYeAHWYPYb2FT.lbioDm2RrkJPb9BZMN1O/
   - name: bla
     sudo:
     - "ALL=(ALL) NOPASSWD:/usr/sbin/pw"
     - "ALL=(ALL) ALL"
+    doas:
+    - "deny %u as foobar"
+    - "permit persist %u as root cmd whoami"
 EOF
 	atf_check /usr/libexec/nuageinit "${PWD}"/media/nuageinit nocloud
 	atf_check /usr/libexec/nuageinit "${PWD}"/media/nuageinit postnet
@@ -147,7 +185,42 @@ EOF
 	sed -i "" "s/freebsd:.*:1001/freebsd:freebsd:1001/" "${PWD}"/etc/master.passwd
 	atf_check -o file:expectedpasswd cat "${PWD}"/etc/master.passwd
 	atf_check -o file:expectedgroup cat "${PWD}"/etc/group
-	atf_check -o inline:"foobar ALL=(ALL) NOPASSWD:ALL\nbla ALL=(ALL) NOPASSWD:/usr/sbin/pw\nbla ALL=(ALL) ALL\n" cat ${PWD}/usr/local/etc/sudoers.d/90-nuageinit-users
+	localbase=`sysctl -ni user.localbase 2> /dev/null`
+	if [ -z "${localbase}" ]; then
+		# fallback
+		localbase="/usr/local"
+	fi
+	atf_check -o inline:"foobar ALL=(ALL) NOPASSWD:ALL\nbla ALL=(ALL) NOPASSWD:/usr/sbin/pw\nbla ALL=(ALL) ALL\n" cat "${PWD}/${localbase}/etc/sudoers.d/90-nuageinit-users"
+	atf_check -o inline:"permit persist foobar as root\ndeny bla as foobar\npermit persist bla as root cmd whoami\n" cat "${PWD}/${localbase}/etc/doas.conf"
+}
+
+nocloud_userdata_cloudconfig_users_lock_passwd_head()
+{
+	atf_set "require.user" root
+}
+nocloud_userdata_cloudconfig_users_lock_passwd_body()
+{
+	mkdir -p media/nuageinit
+	printf "instance-id: iid-local01\n" > "${PWD}"/media/nuageinit/meta-data
+	mkdir -p etc
+	cat > etc/master.passwd << EOF
+root:*:0:0::0:0:Charlie &:/root:/bin/sh
+sys:*:1:0::0:0:Sys:/home/sys:/bin/sh
+EOF
+	pwd_mkdb -d etc "${PWD}"/etc/master.passwd
+	cat > etc/group << EOF
+wheel:*:0:root
+users:*:1:
+EOF
+	cat > media/nuageinit/user-data << 'EOF'
+#cloud-config
+users:
+  - name: lockeduser
+    lock_passwd: true
+EOF
+	atf_check /usr/libexec/nuageinit "${PWD}"/media/nuageinit nocloud
+	atf_check /usr/libexec/nuageinit "${PWD}"/media/nuageinit postnet
+	atf_check -o match:'lockeduser:\*LOCKED\*:' cat "${PWD}"/etc/master.passwd
 }
 
 nocloud_network_head()
@@ -192,15 +265,15 @@ network:
 EOF
 	atf_check /usr/libexec/nuageinit "${PWD}"/media/nuageinit nocloud
 	cat > network << EOF
-ifconfig_${myiface}="inet 192.0.2.2/24"
-ifconfig_${myiface}_ipv6="inet6 2001:db8::2/64"
-ipv6_network_interfaces="${myiface}"
-ipv6_default_interface="${myiface}"
+ifconfig_${myiface}='inet 192.0.2.2/24'
+ifconfig_${myiface}_ipv6='inet6 2001:db8::2/64'
+ipv6_network_interfaces='${myiface}'
+ipv6_default_interface='${myiface}'
 EOF
 	cat > routing << EOF
-defaultrouter="192.0.2.1"
-ipv6_defaultrouter="2001:db8::1"
-ipv6_route_${myiface}="2001:db8::1 -prefixlen 128 -interface ${myiface}"
+defaultrouter='192.0.2.1'
+ipv6_defaultrouter='2001:db8::1'
+ipv6_route_${myiface}='2001:db8::1 -prefixlen 128 -interface ${myiface}'
 EOF
 	atf_check -o file:network cat "${PWD}"/etc/rc.conf.d/network
 	atf_check -o file:routing cat "${PWD}"/etc/rc.conf.d/routing
@@ -209,6 +282,7 @@ EOF
 config2_body()
 {
 	mkdir -p media/nuageinit
+	setup_test_adduser
 	atf_check -s exit:1 -e match:"nuageinit: error parsing config-2 meta_data.json:.*" /usr/libexec/nuageinit "${PWD}"/media/nuageinit config-2
 	printf "{}" > media/nuageinit/meta_data.json
 	atf_check /usr/libexec/nuageinit "${PWD}"/media/nuageinit config-2
@@ -218,7 +292,7 @@ config2_body()
 }
 EOF
 	atf_check /usr/libexec/nuageinit "${PWD}"/media/nuageinit config-2
-	atf_check -o inline:"hostname=\"cloudimg\"\n" cat etc/rc.conf.d/hostname
+	atf_check -o inline:"hostname='cloudimg'\n" cat etc/rc.conf.d/hostname
 }
 
 config2_pubkeys_head()
@@ -235,6 +309,7 @@ ssh_authorized_keys:
   - "ssh-rsa AAAAB3NzaC1y...== Generated by Nova"
 EOF
 	mkdir -p etc
+	mkdir -p root
 	cat > etc/master.passwd << EOF
 root:*:0:0::0:0:Charlie &:/root:/bin/sh
 sys:*:1:0::0:0:Sys:/home/sys:/bin/sh
@@ -262,6 +337,7 @@ ssh_authorized_keys:
   - "ssh-rsa AAAAB3NzaC1y...== Generated by Nova"
 EOF
 	mkdir -p etc
+	mkdir -p root
 	cat > etc/master.passwd << EOF
 root:*:0:0::0:0:Charlie &:/root:/bin/sh
 sys:*:1:0::0:0:Sys:/home/sys:/bin/sh
@@ -308,6 +384,7 @@ config2_pubkeys_meta_data_body()
 }
 EOF
 	mkdir -p etc
+	mkdir -p root
 	cat > etc/master.passwd << EOF
 root:*:0:0::0:0:Charlie &:/root:/bin/csh
 sys:*:1:0::0:0:Sys:/home/sys:/bin/csh
@@ -321,9 +398,50 @@ EOF
 	atf_check -o inline:"ssh-ed25519 my_key_id tdb@host\n" cat home/freebsd/.ssh/authorized_keys
 }
 
+config2_pubkeys_allow_public_ssh_keys_head()
+{
+	atf_set "require.user" root
+}
+config2_pubkeys_allow_public_ssh_keys_body()
+{
+	here=$(pwd)
+	export NUAGE_FAKE_ROOTDIR=$(pwd)
+	if [ $(id -u) -ne 0 ]; then
+		atf_skip "root required"
+	fi
+	mkdir -p media/nuageinit
+	cat > media/nuageinit/meta_data.json << EOF
+{
+    "uuid": "uuid_for_this_instance",
+    "public_keys": {
+        "tdb": "ssh-ed25519 my_key_id tdb@host"
+    }
+}
+EOF
+	cat > media/nuageinit/user_data << EOF
+#cloud-config
+allow_public_ssh_keys: false
+EOF
+	mkdir -p etc
+	mkdir -p root
+	cat > etc/master.passwd << EOF
+root:*:0:0::0:0:Charlie &:/root:/bin/csh
+sys:*:1:0::0:0:Sys:/home/sys:/bin/csh
+EOF
+	pwd_mkdb -d etc ${here}/etc/master.passwd
+	cat > etc/group << EOF
+wheel:*:0:root
+users:*:1:
+EOF
+	atf_check /usr/libexec/nuageinit ${here}/media/nuageinit config-2
+	# no public key should be imported
+	atf_check -s exit:1 test -e home/freebsd/.ssh/authorized_keys
+}
+
 config2_network_body()
 {
 	mkdir -p media/nuageinit
+	setup_test_adduser
 	printf "{}" > media/nuageinit/meta_data.json
 	mynetworks=$(ifconfig -l ether)
 	if [ -z "$mynetworks" ]; then
@@ -373,15 +491,15 @@ cat > media/nuageinit/network_data.json << EOF
 EOF
 	atf_check /usr/libexec/nuageinit "${PWD}"/media/nuageinit config-2
 	cat > network << EOF
-ifconfig_${myiface}="DHCP"
-ifconfig_${myiface}_ipv6="inet6 2001:db8::3257:9652/64"
-ipv6_network_interfaces="${myiface}"
-ipv6_default_interface="${myiface}"
+ifconfig_${myiface}='DHCP'
+ifconfig_${myiface}_ipv6='inet6 2001:db8::3257:9652/64'
+ipv6_network_interfaces='${myiface}'
+ipv6_default_interface='${myiface}'
 EOF
 	cat > routing << EOF
-ipv6_defaultrouter="fd00::1"
-ipv6_route_${myiface}="fd00::1 -prefixlen 128 -interface ${myiface}"
-ipv6_static_routes="${myiface}"
+ipv6_defaultrouter='fd00::1'
+ipv6_route_${myiface}='fd00::1 -prefixlen 128 -interface ${myiface}'
+ipv6_static_routes='${myiface}'
 EOF
 	atf_check -o file:network cat "${PWD}"/etc/rc.conf.d/network
 	atf_check -o file:routing cat "${PWD}"/etc/rc.conf.d/routing
@@ -390,6 +508,7 @@ EOF
 config2_network_static_v4_body()
 {
 	mkdir -p media/nuageinit
+	setup_test_adduser
 	printf "{}" > media/nuageinit/meta_data.json
 	mynetworks=$(ifconfig -l ether)
 	if [ -z "$mynetworks" ]; then
@@ -432,15 +551,60 @@ cat > media/nuageinit/network_data.json << EOF
 EOF
 	atf_check /usr/libexec/nuageinit "${PWD}"/media/nuageinit config-2
 	cat > network << EOF
-ifconfig_${myiface}="inet 10.184.0.244 netmask 255.255.240.0"
+ifconfig_${myiface}='inet 10.184.0.244 netmask 255.255.240.0'
 EOF
 	cat > routing << EOF
-route_cloudinit1_${myiface}="-net 10.0.0.0 11.0.0.1 255.0.0.0"
-defaultrouter="23.253.157.1"
-static_routes="cloudinit1_${myiface}"
+route_cloudinit1_${myiface}='-net 10.0.0.0 11.0.0.1 255.0.0.0'
+defaultrouter='23.253.157.1'
+static_routes='cloudinit1_${myiface}'
 EOF
 	atf_check -o file:network cat "${PWD}"/etc/rc.conf.d/network
 	atf_check -o file:routing cat "${PWD}"/etc/rc.conf.d/routing
+}
+
+config2_network_dns_body()
+{
+	mkdir -p media/nuageinit
+	setup_test_adduser
+	printf "{}" > media/nuageinit/meta_data.json
+	mynetworks=$(ifconfig -l ether)
+	if [ -z "$mynetworks" ]; then
+		atf_skip "a network interface is needed"
+	fi
+	set -- $mynetworks
+	myiface=$1
+	myaddr=$(ifconfig $myiface ether | awk '/ether/ { print $2 }')
+cat > media/nuageinit/network_data.json << EOF
+{
+    "links": [
+        {
+            "ethernet_mac_address": "$myaddr",
+            "id": "iface0",
+            "mtu": null
+        }
+    ],
+    "networks": [
+        {
+            "id": "network0",
+            "link": "iface0",
+            "type": "ipv4_dhcp"
+        }
+    ],
+    "services": [
+        {
+            "type": "dns",
+            "address": "9.9.9.9"
+        },
+        {
+            "type": "dns",
+            "address": "149.112.112.112"
+        }
+    ]
+}
+EOF
+	atf_check /usr/libexec/nuageinit "${PWD}"/media/nuageinit config-2
+	atf_check -o inline:"name_servers='9.9.9.9 149.112.112.112'\n" \
+		cat "${PWD}"/etc/resolvconf.conf
 }
 
 config2_ssh_keys_head()
@@ -550,6 +714,24 @@ EOF
 	printf "   PasswordAuthentication yes # Should change\n" > etc/ssh/sshd_config
 	atf_check -o empty -e empty /usr/libexec/nuageinit "${PWD}"/media/nuageinit nocloud
 	atf_check -o inline:"PasswordAuthentication no\n" cat etc/ssh/sshd_config
+
+	cat > media/nuageinit/user-data << 'EOF'
+#cloud-config
+ssh_pwauth: "no"
+EOF
+
+	printf "   PasswordAuthentication yes # Should change\n" > etc/ssh/sshd_config
+	atf_check -o empty -e empty /usr/libexec/nuageinit "${PWD}"/media/nuageinit nocloud
+	atf_check -o inline:"PasswordAuthentication no\n" cat etc/ssh/sshd_config
+
+	cat > media/nuageinit/user-data << 'EOF'
+#cloud-config
+ssh_pwauth: "unchanged"
+EOF
+
+	printf "   PasswordAuthentication yes # keep\n" > etc/ssh/sshd_config
+	atf_check -o empty -e empty /usr/libexec/nuageinit "${PWD}"/media/nuageinit nocloud
+	atf_check -o inline:"   PasswordAuthentication yes # keep\n" cat etc/ssh/sshd_config
 }
 
 nocloud_userdata_cloudconfig_chpasswd_head()
@@ -784,7 +966,7 @@ packages:
   - yeah/plop
 EOF
 	chmod 755 "${PWD}"/media/nuageinit/user_data
-	atf_check -s exit:0 -o inline:"pkg install -y yeah/plop\npkg info -q yeah/plop\n" /usr/libexec/nuageinit "${PWD}"/media/nuageinit postnet
+	atf_check -s exit:0 -o inline:"pkg install -y 'yeah/plop'\npkg info -q 'yeah/plop'\n" /usr/libexec/nuageinit "${PWD}"/media/nuageinit postnet
 
 	cat > media/nuageinit/user_data << 'EOF'
 #cloud-config
@@ -792,7 +974,7 @@ packages:
   - curl
 EOF
 	chmod 755 "${PWD}"/media/nuageinit/user_data
-	atf_check -o inline:"pkg install -y curl\npkg info -q curl\n" /usr/libexec/nuageinit "${PWD}"/media/nuageinit postnet
+	atf_check -o inline:"pkg install -y 'curl'\npkg info -q 'curl'\n" /usr/libexec/nuageinit "${PWD}"/media/nuageinit postnet
 
 	cat > media/nuageinit/user_data << 'EOF'
 #cloud-config
@@ -801,7 +983,7 @@ packages:
   - meh: bla
 EOF
 	chmod 755 "${PWD}"/media/nuageinit/user_data
-	atf_check -o inline:"pkg install -y curl\npkg info -q curl\n" -e inline:"nuageinit: Invalid type: table for packages entry number 2\n" /usr/libexec/nuageinit "${PWD}"/media/nuageinit postnet
+	atf_check -o inline:"pkg install -y 'curl'\npkg info -q 'curl'\n" -e inline:"nuageinit: Invalid type: table for packages entry number 2\n" /usr/libexec/nuageinit "${PWD}"/media/nuageinit postnet
 }
 
 config2_userdata_update_packages_body()
@@ -815,7 +997,7 @@ config2_userdata_update_packages_body()
 package_update: true
 EOF
 	chmod 755 "${PWD}"/media/nuageinit/user_data
-	atf_check -o inline:"pkg update -y\n" /usr/libexec/nuageinit "${PWD}"/media/nuageinit postnet
+	atf_check -o inline:"env ASSUME_ALWAYS_YES=yes pkg update\n" /usr/libexec/nuageinit "${PWD}"/media/nuageinit postnet
 }
 
 config2_userdata_upgrade_packages_body()
@@ -829,7 +1011,7 @@ config2_userdata_upgrade_packages_body()
 package_upgrade: true
 EOF
 	chmod 755 "${PWD}"/media/nuageinit/user_data
-	atf_check -o inline:"pkg upgrade -y\n" /usr/libexec/nuageinit "${PWD}"/media/nuageinit postnet
+	atf_check -o inline:"env ASSUME_ALWAYS_YES=yes pkg upgrade\n" /usr/libexec/nuageinit "${PWD}"/media/nuageinit postnet
 }
 
 config2_userdata_shebang_body()
@@ -879,12 +1061,409 @@ EOF
 	atf_check -o inline:"plop" cat file1
 	atf_check -o inline:"" cat emptyfile
 	atf_check -o inline:"bla\n" cat file_base64
-	test -f foo && atf_fail "foo creation should have been defered"
+	test -f foo && atf_fail "foo creation should have been deferred"
 	atf_check -o match:"^-rwxr-xr-x.*nobody" ls -l file_base64
 	rm file1 emptyfile file_base64
 	atf_check -o empty /usr/libexec/nuageinit "${PWD}"/media/nuageinit postnet
 	test -f file1 -o -f emptyfile -o -f file_base64 && atf_fail "defer not working properly"
 	atf_check -o inline:"bob" cat foo
+}
+
+config2_userdata_ssh_deletekeys_head()
+{
+	atf_set "require.user" root
+}
+config2_userdata_ssh_deletekeys_body()
+{
+	mkdir -p media/nuageinit
+	setup_test_adduser
+	printf "{}" > media/nuageinit/meta_data.json
+	cat > media/nuageinit/user_data <<EOF
+#cloud-config
+ssh_deletekeys: true
+EOF
+	mkdir -p etc/ssh
+	touch etc/ssh/ssh_host_rsa_key
+	touch etc/ssh/ssh_host_rsa_key.pub
+	touch etc/ssh/ssh_host_ed25519_key
+	touch etc/ssh/ssh_host_ed25519_key.pub
+	touch etc/ssh/ssh_host_ecdsa_key
+	touch etc/ssh/ssh_host_ecdsa_key.pub
+	atf_check -o empty /usr/libexec/nuageinit "${PWD}"/media/nuageinit config-2
+	test -f etc/ssh/ssh_host_rsa_key && atf_fail "ssh_host_rsa_key not deleted"
+	test -f etc/ssh/ssh_host_rsa_key.pub && atf_fail "ssh_host_rsa_key.pub not deleted"
+	test -f etc/ssh/ssh_host_ed25519_key && atf_fail "ssh_host_ed25519_key not deleted"
+	test -f etc/ssh/ssh_host_ed25519_key.pub && atf_fail "ssh_host_ed25519_key.pub not deleted"
+	test -f etc/ssh/ssh_host_ecdsa_key && atf_fail "ssh_host_ecdsa_key not deleted"
+	test -f etc/ssh/ssh_host_ecdsa_key.pub && atf_fail "ssh_host_ecdsa_key.pub not deleted"
+	true
+}
+
+config2_userdata_disable_root_head()
+{
+	atf_set "require.user" root
+}
+config2_userdata_disable_root_body()
+{
+	mkdir -p media/nuageinit
+	setup_test_adduser
+	mkdir -p root
+	printf "{}" > media/nuageinit/meta_data.json
+	cat > media/nuageinit/user_data <<EOF
+#cloud-config
+disable_root: true
+ssh_authorized_keys:
+  - "ssh-rsa AAAAB3NzaC1y...== Generated by Nova"
+EOF
+	atf_check -o empty /usr/libexec/nuageinit "${PWD}"/media/nuageinit config-2
+	atf_check -o match:'no-port-forwarding,no-agent-forwarding,no-X11-forwarding,command=.*exit 142" ssh-rsa AAAAB3NzaC1y...== Generated by Nova' cat root/.ssh/authorized_keys
+	rm -f root/.ssh/authorized_keys
+	cat > media/nuageinit/user_data <<EOF
+#cloud-config
+disable_root: true
+disable_root_opts: "no-port-forwarding"
+ssh_authorized_keys:
+  - "ssh-rsa AAAAB3NzaC1y...== Generated by Nova"
+EOF
+	atf_check -o empty /usr/libexec/nuageinit "${PWD}"/media/nuageinit config-2
+	atf_check -o inline:"no-port-forwarding ssh-rsa AAAAB3NzaC1y...== Generated by Nova\n" cat root/.ssh/authorized_keys
+	rm -f root/.ssh/authorized_keys
+	cat > media/nuageinit/user_data <<EOF
+#cloud-config
+disable_root: false
+ssh_authorized_keys:
+  - "ssh-rsa AAAAB3NzaC1y...== Generated by Nova"
+EOF
+	atf_check -o empty /usr/libexec/nuageinit "${PWD}"/media/nuageinit config-2
+	atf_check -o inline:"ssh-rsa AAAAB3NzaC1y...== Generated by Nova\n" cat root/.ssh/authorized_keys
+}
+
+config2_userdata_bootcmd_head()
+{
+	atf_set "require.user" root
+}
+config2_userdata_bootcmd_body()
+{
+	mkdir -p media/nuageinit
+	setup_test_adduser
+	printf "{}" > media/nuageinit/meta_data.json
+	cat > media/nuageinit/user_data <<EOF
+#cloud-config
+bootcmd:
+  - kldload if_bridge
+EOF
+	atf_check -o empty /usr/libexec/nuageinit "${PWD}"/media/nuageinit config-2
+	test -f var/cache/nuageinit/bootcmds || atf_fail "bootcmds file not created"
+	atf_check -o inline:"#!/bin/sh\nkldload if_bridge\n" cat var/cache/nuageinit/bootcmds
+	cat > media/nuageinit/user_data <<EOF
+#cloud-config
+bootcmd:
+  - sysctl net.inet.ip.forwarding=1
+  - kldload if_bridge
+EOF
+	atf_check -o empty /usr/libexec/nuageinit "${PWD}"/media/nuageinit config-2
+	atf_check -o inline:"#!/bin/sh\nsysctl net.inet.ip.forwarding=1\nkldload if_bridge\n" cat var/cache/nuageinit/bootcmds
+	# Test 3: empty list (clean up from previous tests first)
+	rm -f var/cache/nuageinit/bootcmds
+	cat > media/nuageinit/user_data <<EOF
+#cloud-config
+bootcmd: []
+EOF
+	atf_check -o empty /usr/libexec/nuageinit "${PWD}"/media/nuageinit config-2
+	test -f var/cache/nuageinit/bootcmds && atf_fail "bootcmds should not have been created for empty list"
+	true
+}
+
+config2_userdata_manage_etc_hosts_head()
+{
+	atf_set "require.user" root
+}
+config2_userdata_manage_etc_hosts_body()
+{
+	mkdir -p media/nuageinit
+	setup_test_adduser
+	printf "{}" > media/nuageinit/meta_data.json
+	# Test 1: manage_etc_hosts adds hostname when /etc/hosts does not exist
+	cat > media/nuageinit/user_data <<EOF
+#cloud-config
+hostname: mycloud
+EOF
+	atf_check -o empty /usr/libexec/nuageinit "${PWD}"/media/nuageinit config-2
+	atf_check -o inline:"::1\t\tlocalhost mycloud\n127.0.0.1\t\tlocalhost mycloud\n" cat etc/hosts
+	# Test 2: manage_etc_hosts appends hostname to existing localhost lines
+	cat > etc/hosts <<EOF
+::1		localhost
+127.0.0.1		localhost
+EOF
+	cat > media/nuageinit/user_data <<EOF
+#cloud-config
+hostname: myvm
+EOF
+	atf_check -o empty /usr/libexec/nuageinit "${PWD}"/media/nuageinit config-2
+	atf_check -o inline:"::1\t\tlocalhost myvm\n127.0.0.1\t\tlocalhost myvm\n" cat etc/hosts
+	# Test 3: hostname already present in /etc/hosts, no change
+	cat > etc/hosts <<EOF
+::1		localhost myvm
+127.0.0.1		localhost myvm
+EOF
+	cat > media/nuageinit/user_data <<EOF
+#cloud-config
+hostname: myvm
+EOF
+	atf_check -o empty /usr/libexec/nuageinit "${PWD}"/media/nuageinit config-2
+	atf_check -o inline:"::1\t\tlocalhost myvm\n127.0.0.1\t\tlocalhost myvm\n" cat etc/hosts
+	# Test 4: manage_etc_hosts: false disables the behaviour
+	cat > etc/hosts <<EOF
+::1		localhost
+127.0.0.1		localhost
+EOF
+	cat > media/nuageinit/user_data <<EOF
+#cloud-config
+hostname: nope
+manage_etc_hosts: false
+EOF
+	atf_check -o empty /usr/libexec/nuageinit "${PWD}"/media/nuageinit config-2
+	atf_check -o inline:"::1\t\tlocalhost\n127.0.0.1\t\tlocalhost\n" cat etc/hosts
+}
+
+config2_userdata_mounts_head()
+{
+	atf_set "require.user" root
+}
+config2_userdata_mounts_body()
+{
+	mkdir -p media/nuageinit
+	setup_test_adduser
+	printf "{}" > media/nuageinit/meta_data.json
+	cat > media/nuageinit/user_data <<EOF
+#cloud-config
+mounts:
+  - [ /dev/ada1p1, /mnt/data, ufs, rw, 0, 2 ]
+  - device: tmpfs
+    mountpoint: /mnt/tmp
+    fstype: tmpfs
+    options: "size=256M"
+EOF
+	atf_check -o empty /usr/libexec/nuageinit "${PWD}"/media/nuageinit config-2
+	atf_check -o match:"/dev/ada1p1.*/mnt/data.*ufs.*rw.*0.*2" cat etc/fstab
+	atf_check -o match:"tmpfs.*/mnt/tmp.*tmpfs.*size=256M.*0.*0" cat etc/fstab
+	test -d mnt/data || atf_fail "/mnt/data directory not created"
+	test -d mnt/tmp || atf_fail "/mnt/tmp directory not created"
+	true
+}
+
+config2_userdata_resolv_conf_head()
+{
+	atf_set "require.user" root
+}
+config2_userdata_resolv_conf_body()
+{
+	mkdir -p media/nuageinit
+	setup_test_adduser
+	printf "{}" > media/nuageinit/meta_data.json
+	cat > media/nuageinit/user_data <<EOF
+#cloud-config
+resolv_conf:
+  nameservers:
+    - 9.9.9.9
+    - 149.112.112.112
+  searchdomains:
+    - example.com
+    - test.local
+  domain: mydomain.local
+  options:
+    timeout: "1"
+    attempts: "2"
+  sortlist:
+    - 192.168.1.0/255.255.255.0
+EOF
+	atf_check -o empty /usr/libexec/nuageinit "${PWD}"/media/nuageinit config-2
+	atf_check -o match:"domain mydomain.local" cat etc/resolv.conf
+	atf_check -o match:"search example.com test.local" cat etc/resolv.conf
+	atf_check -o match:"sortlist 192.168.1.0/255.255.255.0" cat etc/resolv.conf
+	atf_check -o match:"nameserver 9.9.9.9" cat etc/resolv.conf
+	atf_check -o match:"nameserver 149.112.112.112" cat etc/resolv.conf
+	atf_check -o match:"options.*timeout:1" cat etc/resolv.conf
+	atf_check -o match:"options.*attempts:2" cat etc/resolv.conf
+	true
+}
+
+config2_userdata_keyboard_head()
+{
+	atf_set "require.user" root
+}
+config2_userdata_keyboard_body()
+{
+	mkdir -p media/nuageinit
+	setup_test_adduser
+	printf "{}" > media/nuageinit/meta_data.json
+	cat > media/nuageinit/user_data <<EOF
+#cloud-config
+keyboard:
+  layout: fr
+  variant: acc
+EOF
+	atf_check -o empty /usr/libexec/nuageinit "${PWD}"/media/nuageinit config-2
+	atf_check -o inline:"keymap='fr.acc'\n" cat etc/rc.conf.d/keymap
+	true
+}
+
+config2_userdata_ssh_authkey_fingerprints_head()
+{
+	atf_set "require.user" root
+}
+config2_userdata_ssh_authkey_fingerprints_body()
+{
+	mkdir -p media/nuageinit
+	setup_test_adduser
+	printf "{}" > media/nuageinit/meta_data.json
+	mkdir -p etc/ssh
+	ssh-keygen -t ed25519 -f etc/ssh/ssh_host_ed25519_key -N "" -q 2>/dev/null
+	cat > media/nuageinit/user_data <<EOF
+#cloud-config
+ssh_authkey_fingerprints: true
+EOF
+	atf_check -s exit:0 -e match:"SHA256:" /usr/libexec/nuageinit "${PWD}"/media/nuageinit config-2
+	true
+}
+
+config2_userdata_ntp_head()
+{
+	atf_set "require.user" root
+}
+config2_userdata_ntp_body()
+{
+	mkdir -p media/nuageinit
+	setup_test_adduser
+	printf "{}" > media/nuageinit/meta_data.json
+	cat > media/nuageinit/user_data <<EOF
+#cloud-config
+ntp:
+  servers:
+    - 192.168.1.1
+    - 10.0.0.1
+  pools:
+    - 0.pool.ntp.org
+EOF
+	atf_check -o empty /usr/libexec/nuageinit "${PWD}"/media/nuageinit postnet
+	atf_check -o match:"server 192.168.1.1 iburst" cat etc/ntp.conf
+	atf_check -o match:"server 10.0.0.1 iburst" cat etc/ntp.conf
+	atf_check -o match:"pool 0.pool.ntp.org iburst" cat etc/ntp.conf
+	atf_check -o match:"leapfile /var/db/ntpd.leap-seconds.list" cat etc/ntp.conf
+	true
+}
+
+config2_userdata_ca_certs_head()
+{
+	atf_set "require.user" root
+}
+config2_userdata_ca_certs_body()
+{
+	mkdir -p media/nuageinit
+	setup_test_adduser
+	printf "{}" > media/nuageinit/meta_data.json
+	cat > media/nuageinit/user_data <<'EOF'
+#cloud-config
+ca_certs:
+  trusted:
+    - |
+      -----BEGIN CERTIFICATE-----
+      dGVzdGNlcnQx
+      -----END CERTIFICATE-----
+    - |
+      -----BEGIN CERTIFICATE-----
+      dGVzdGNlcnQy
+      -----END CERTIFICATE-----
+EOF
+	atf_check -o empty /usr/libexec/nuageinit "${PWD}"/media/nuageinit config-2
+	atf_check -o match:"dGVzdGNlcnQx" cat usr/share/certs/trusted/nuageinit-1.pem
+	atf_check -o match:"dGVzdGNlcnQy" cat usr/share/certs/trusted/nuageinit-2.pem
+	true
+}
+
+config2_userdata_multipart_head()
+{
+	atf_set "require.user" root
+}
+config2_userdata_multipart_body()
+{
+	mkdir -p media/nuageinit
+	setup_test_adduser
+	printf "{}" > media/nuageinit/meta_data.json
+	cat > media/nuageinit/user_data <<'EOF'
+Content-Type: multipart/mixed; boundary="==BOUNDARY=="
+
+--==BOUNDARY==
+Content-Type: text/cloud-config; charset="us-ascii"
+
+#cloud-config
+hostname: multipart-host
+
+--==BOUNDARY==
+Content-Type: text/x-shellscript
+
+#!/bin/sh
+echo "multipart script executed"
+
+--==BOUNDARY==--
+EOF
+	atf_check -o empty /usr/libexec/nuageinit "${PWD}"/media/nuageinit config-2
+	atf_check -o inline:"hostname='multipart-host'\n" cat etc/rc.conf.d/hostname
+	atf_check -o inline:"#!/bin/sh\necho \"multipart script executed\"\n" cat var/cache/nuageinit/multipart_script
+	test -x var/cache/nuageinit/multipart_script || atf_fail "multipart_script not executable"
+	true
+}
+
+config2_userdata_power_state_head()
+{
+	atf_set "require.user" root
+}
+config2_userdata_power_state_body()
+{
+	mkdir -p media/nuageinit
+	setup_test_adduser
+	export NUAGE_RUN_TESTS=1
+	printf "{}" > media/nuageinit/meta_data.json
+	cat > media/nuageinit/user_data <<EOF
+#cloud-config
+power_state:
+  delay: "+5"
+  mode: reboot
+  message: "Rebooting after configuration is complete"
+  timeout: 30
+  condition: true
+EOF
+	atf_check -o inline:"shutdown -r '+5' 'Rebooting after configuration is complete'\n" \
+	    /usr/libexec/nuageinit "${PWD}"/media/nuageinit postnet
+	true
+}
+
+config2_userdata_locale_head()
+{
+	atf_set "require.user" root
+}
+config2_userdata_locale_body()
+{
+	mkdir -p media/nuageinit
+	setup_test_adduser
+	printf "{}" > media/nuageinit/meta_data.json
+	cat > media/nuageinit/user_data <<EOF
+#cloud-config
+locale: fr_FR.UTF-8
+EOF
+	atf_check -o empty /usr/libexec/nuageinit "${PWD}"/media/nuageinit config-2
+	atf_check -o inline:"export LANG='fr_FR.UTF-8'\n" cat etc/profile
+
+	cat > media/nuageinit/user_data <<EOF
+#cloud-config
+locale:
+  LANG: de_DE.UTF-8
+  LC_ALL: de_DE.UTF-8
+EOF
+	atf_check -o empty /usr/libexec/nuageinit "${PWD}"/media/nuageinit config-2
+	atf_check -o match:"export LANG='de_DE.UTF-8'" cat etc/profile
+	atf_check -o match:"export LC_ALL='de_DE.UTF-8'" cat etc/profile
+	true
 }
 
 config2_userdata_fqdn_and_hostname_body()
@@ -898,13 +1477,76 @@ fqdn: host.domain.tld
 hostname: host
 EOF
 	atf_check -o empty /usr/libexec/nuageinit "${PWD}"/media/nuageinit config-2
-	atf_check -o inline:"hostname=\"host.domain.tld\"\n" cat ${PWD}/etc/rc.conf.d/hostname
+	atf_check -o inline:"hostname='host.domain.tld'\n" cat ${PWD}/etc/rc.conf.d/hostname
 	cat > media/nuageinit/user_data <<EOF
 #cloud-config
 hostname: host
 EOF
 	atf_check -o empty /usr/libexec/nuageinit "${PWD}"/media/nuageinit config-2
-	atf_check -o inline:"hostname=\"host\"\n" cat ${PWD}/etc/rc.conf.d/hostname
+	atf_check -o inline:"hostname='host'\n" cat ${PWD}/etc/rc.conf.d/hostname
+}
+
+config2_userdata_encode_base64_body()
+{
+	mkdir -p media/nuageinit
+	setup_test_adduser
+	atf_check -o inline:"dGVzdA==\n" \
+	    /usr/libexec/flua -e "print(require('nuage').encode_base64('test'))"
+	atf_check -o inline:"dA==\n" \
+	    /usr/libexec/flua -e "print(require('nuage').encode_base64('t'))"
+	atf_check -o inline:"dGU=\n" \
+	    /usr/libexec/flua -e "print(require('nuage').encode_base64('te'))"
+	# Roundtrip test
+	atf_check -o inline:"hello world\n" \
+	    /usr/libexec/flua -e "print(require('nuage').decode_base64(require('nuage').encode_base64('hello world')))"
+	# Empty input
+	atf_check -o inline:"\n" \
+	    /usr/libexec/flua -e "print(require('nuage').encode_base64(''))"
+}
+
+config2_userdata_final_message_body()
+{
+	mkdir -p media/nuageinit
+	setup_test_adduser
+	export NUAGE_RUN_TESTS=1
+	printf "{}" > media/nuageinit/meta_data.json
+	cat > media/nuageinit/user_data << 'EOF'
+#cloud-config
+final_message: "System ready after $UPTIME seconds"
+EOF
+	atf_check -e match:"System ready after [0-9]+ seconds" \
+	    /usr/libexec/nuageinit "${PWD}"/media/nuageinit postnet
+}
+
+config2_userdata_phone_home_body()
+{
+	mkdir -p media/nuageinit
+	setup_test_adduser
+	export NUAGE_RUN_TESTS=1
+	printf '{"hostname": "myhost", "uuid": "abc-123", "public_keys": ["ssh-rsa AAAAB...", "ssh-ed25519 AAAAC..."]}' > media/nuageinit/meta_data.json
+	cat > media/nuageinit/user_data << 'EOF'
+#cloud-config
+phone_home:
+  url: "http://example.com/endpoint"
+  post:
+    - hostname
+    - instance_id
+  tries: 1
+EOF
+	atf_check -o match:"fetch -q -o /dev/null --post-data 'hostname=myhost&instance_id=abc-123' 'http://example.com/endpoint'" \
+	    /usr/libexec/nuageinit "${PWD}"/media/nuageinit postnet
+
+	# Test "all" post
+	printf '{"hostname": "myhost"}' > media/nuageinit/meta_data.json
+	cat > media/nuageinit/user_data << 'EOF'
+#cloud-config
+phone_home:
+  url: "http://example.com/endpoint"
+  post: all
+  tries: 1
+EOF
+	atf_check -o match:"fetch -q -o /dev/null --post-data 'hostname=myhost&fqdn=myhost' 'http://example.com/endpoint'" \
+	    /usr/libexec/nuageinit "${PWD}"/media/nuageinit postnet
 }
 
 atf_init_test_cases()
@@ -914,13 +1556,16 @@ atf_init_test_cases()
 	atf_add_test_case nocloud_userdata_script
 	atf_add_test_case nocloud_user_data_script
 	atf_add_test_case nocloud_userdata_cloudconfig_users
+	atf_add_test_case nocloud_userdata_cloudconfig_users_lock_passwd
 	atf_add_test_case nocloud_network
 	atf_add_test_case config2
 	atf_add_test_case config2_pubkeys
 	atf_add_test_case config2_pubkeys_user_data
 	atf_add_test_case config2_pubkeys_meta_data
+	atf_add_test_case config2_pubkeys_allow_public_ssh_keys
 	atf_add_test_case config2_network
 	atf_add_test_case config2_network_static_v4
+	atf_add_test_case config2_network_dns
 	atf_add_test_case config2_ssh_keys
 	atf_add_test_case nocloud_userdata_cloudconfig_ssh_pwauth
 	atf_add_test_case nocloud_userdata_cloudconfig_chpasswd
@@ -931,6 +1576,22 @@ atf_init_test_cases()
 	atf_add_test_case config2_userdata_update_packages
 	atf_add_test_case config2_userdata_upgrade_packages
 	atf_add_test_case config2_userdata_shebang
+	atf_add_test_case config2_userdata_ssh_deletekeys
+	atf_add_test_case config2_userdata_disable_root
+	atf_add_test_case config2_userdata_bootcmd
+	atf_add_test_case config2_userdata_manage_etc_hosts
+	atf_add_test_case config2_userdata_mounts
+	atf_add_test_case config2_userdata_resolv_conf
+	atf_add_test_case config2_userdata_keyboard
+	atf_add_test_case config2_userdata_ssh_authkey_fingerprints
+	atf_add_test_case config2_userdata_ntp
+	atf_add_test_case config2_userdata_ca_certs
+	atf_add_test_case config2_userdata_multipart
+	atf_add_test_case config2_userdata_power_state
+	atf_add_test_case config2_userdata_locale
 	atf_add_test_case config2_userdata_fqdn_and_hostname
 	atf_add_test_case config2_userdata_write_files
+	atf_add_test_case config2_userdata_encode_base64
+	atf_add_test_case config2_userdata_final_message
+	atf_add_test_case config2_userdata_phone_home
 }

@@ -211,6 +211,9 @@ pmc_intel_initialize(void)
 			break;
 		case 0x97:
 		case 0x9A:
+		case 0xB7:
+		case 0xBA:
+		case 0xBF:
 			cputype = PMC_CPU_INTEL_ALDERLAKE;
 			nclasses = 3;
 			break;
@@ -244,6 +247,29 @@ pmc_intel_initialize(void)
 			cputype = PMC_CPU_INTEL_ATOM_TREMONT;
 			nclasses = 3;
 			break;
+		case 0xAA:
+		case 0xAC:
+		case 0xB5:
+			cputype = PMC_CPU_INTEL_METEOR_LAKE;
+			nclasses = 3;
+			break;
+		case 0xAD:
+		case 0xAE:
+			cputype = PMC_CPU_INTEL_GRANITE_RAPIDS;
+			nclasses = 3;
+			break;
+		case 0xBE:
+			cputype = PMC_CPU_INTEL_ALDERLAKEN;
+			nclasses = 3;
+			break;
+		case 0xCF:
+			cputype = PMC_CPU_INTEL_EMERALD_RAPIDS;
+			nclasses = 3;
+			break;
+		case 0x8F:
+			cputype = PMC_CPU_INTEL_SAPPHIRE_RAPIDS;
+			nclasses = 3;
+			break;
 		}
 		break;
 	}
@@ -253,6 +279,20 @@ pmc_intel_initialize(void)
 		printf("pmc: Unknown Intel CPU.\n");
 		return (NULL);
 	}
+
+	/*
+	 * Detect support for MPERF and APERF MSRs. tsc_perf_stat is set by the
+	 * kernel's generic TSC initialization (start_TSC(), called at boot via
+	 * cpu_startup() -> startrtclock()), not by hwpmc's TSC PMC class. It is
+	 * set only after confirming both MSRs actually increment (some emulators
+	 * expose the CPUID bit without real MSR support).
+	 */
+	if ((cpu_power_ecx & CPUID_PERF_STAT) && (tsc_perf_stat == 1)) {
+		nclasses++;
+	}
+
+	/* Reserve one extra class slot for the optional RAPL counters. */
+	nclasses++;
 
 	/* Allocate base class and initialize machine dependent struct */
 	pmc_mdep = pmc_mdep_alloc(nclasses);
@@ -308,6 +348,15 @@ pmc_intel_initialize(void)
 	default:
 		break;
 	}
+
+	if (error == 0) {
+		/* Initialize PERF class. */
+		pmc_perf_initialize(pmc_mdep, ncpus, nclasses - 1);
+	}
+
+	if (error == 0 &&
+	    pmc_rapl_initialize(pmc_mdep, ncpus, pmc_mdep->pmd_nclass - 1) != 0)
+		pmc_mdep->pmd_nclass--;
   error:
 	if (error) {
 		pmc_mdep_free(pmc_mdep);
@@ -320,9 +369,13 @@ pmc_intel_initialize(void)
 void
 pmc_intel_finalize(struct pmc_mdep *md)
 {
+	pmc_rapl_finalize(md);
+
 	pmc_tsc_finalize(md);
 
 	pmc_core_finalize(md);
+
+	pmc_perf_finalize(md);
 
 	/*
 	 * Uncore.

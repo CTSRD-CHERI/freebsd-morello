@@ -56,12 +56,14 @@ SRCS+= \
 	fmtmsg.c \
 	fnmatch.c \
 	fpclassify.c \
+	freadlink.c \
 	frexp.c \
 	fstab.c \
 	ftok.c \
 	fts.c \
 	fts-compat.c \
 	fts-compat11.c \
+	fts-compat15.c \
 	ftw.c \
 	ftw-compat11.c \
 	getbootfile.c \
@@ -163,6 +165,8 @@ SRCS+= \
 	ualarm.c \
 	uexterr_format.c \
 	uexterr_gettext.c \
+	uexterr_init.c \
+	uexterr_set.c \
 	ulimit.c \
 	uname.c \
 	unvis-compat.c \
@@ -274,8 +278,10 @@ MAN+=	alarm.3 \
 	posix_spawn.3 \
 	posix_spawn_file_actions_addopen.3 \
 	posix_spawn_file_actions_init.3 \
+	posix_spawnattr_getexecfd_np.3 \
 	posix_spawnattr_getflags.3 \
 	posix_spawnattr_getpgroup.3 \
+	posix_spawnattr_getprocdescp_np.3 \
 	posix_spawnattr_getschedparam.3 \
 	posix_spawnattr_getschedpolicy.3 \
 	posix_spawnattr_init.3 \
@@ -321,6 +327,8 @@ MAN+=	alarm.3 \
 	ttyname.3 \
 	ualarm.3 \
 	ucontext.3 \
+	uexterr_gettext.3 \
+	uexterror.3 \
 	ulimit.3 \
 	uname.3 \
 	unvis.3 \
@@ -384,6 +392,7 @@ MLINKS+=frexp.3 frexpf.3 \
 MLINKS+=fts.3 fts_children.3 \
 	fts.3 fts_close.3 \
 	fts.3 fts_open.3 \
+	fts.3 fts_openat.3 \
 	fts.3 fts_read.3 \
 	fts.3 fts_set.3 \
 	fts.3 fts_set_clientptr.3 \
@@ -465,11 +474,13 @@ MLINKS+=posix_spawn.3 posix_spawnp.3 \
 	posix_spawn_file_actions_addopen.3 posix_spawn_file_actions_addclose.3 \
 	posix_spawn_file_actions_addopen.3 posix_spawn_file_actions_addclosefrom_np.3 \
 	posix_spawn_file_actions_addopen.3 posix_spawn_file_actions_adddup2.3 \
-	posix_spawn_file_actions_addopen.3 posix_spawn_file_actions_addchdir_np.3 \
-	posix_spawn_file_actions_addopen.3 posix_spawn_file_actions_addfchdir_np.3 \
+	posix_spawn_file_actions_addopen.3 posix_spawn_file_actions_addchdir.3 \
+	posix_spawn_file_actions_addopen.3 posix_spawn_file_actions_addfchdir.3 \
 	posix_spawn_file_actions_init.3 posix_spawn_file_actions_destroy.3 \
 	posix_spawnattr_getflags.3 posix_spawnattr_setflags.3 \
+	posix_spawnattr_getexecfd_np.3 posix_spawnattr_setexecfd_np.3 \
 	posix_spawnattr_getpgroup.3 posix_spawnattr_setpgroup.3 \
+	posix_spawnattr_getprocdescp_np.3 posix_spawnattr_setprocdescp_np.3 \
 	posix_spawnattr_getschedparam.3 posix_spawnattr_setschedparam.3 \
 	posix_spawnattr_getschedpolicy.3 posix_spawnattr_setschedpolicy.3 \
 	posix_spawnattr_getsigdefault.3 posix_spawnattr_setsigdefault.3 \
@@ -557,6 +568,7 @@ MLINKS+=unvis.3 strunvis.3 \
 	unvis.3 strunvisx.3
 MLINKS+=vis.3 nvis.3 \
 	vis.3 snvis.3 \
+	vis.3 stravis.3 \
 	vis.3 strenvisx.3 \
 	vis.3 strnunvis.3 \
 	vis.3 strnunvisx.3 \
@@ -583,8 +595,8 @@ install-passwd: .PHONY
 	${PWD_MKDB_CMD} -i -p -d ${DESTDIR}/etc ${DESTDIR}/etc/master.passwd
 .if defined(NO_ROOT) && defined(METALOG)
 	( \
-		echo ".${DISTBASE}/etc/pwd.db type=file mode=0644 uname=root gname=wheel"; \
-		echo ".${DISTBASE}/etc/spwd.db type=file mode=0600 uname=root gname=wheel"; \
-		echo ".${DISTBASE}/etc/passwd type=file mode=0644 uname=root gname=wheel"; \
+		echo ".${DISTBASE}/etc/pwd.db type=file uname=root gname=wheel mode=0644"; \
+		echo ".${DISTBASE}/etc/spwd.db type=file uname=root gname=wheel mode=0600"; \
+		echo ".${DISTBASE}/etc/passwd type=file uname=root gname=wheel mode=0644"; \
 	) | cat -l >> ${METALOG}
 .endif

@@ -27,6 +27,8 @@
  * SUCH DAMAGE.
  */
 
+#include "opt_inet.h"
+#include "opt_inet6.h"
 #include "opt_kern_tls.h"
 
 #include <sys/param.h>
@@ -68,7 +70,6 @@
 
 static MALLOC_DEFINE(M_SENDFILE, "sendfile", "sendfile dynamic memory");
 
-#define	EXT_FLAG_SYNC		EXT_FLAG_VENDOR1
 #define	EXT_FLAG_NOCACHE	EXT_FLAG_VENDOR2
 #define	EXT_FLAG_CACHE_LAST	EXT_FLAG_VENDOR3
 
@@ -96,46 +97,11 @@ struct sf_io {
 	vm_pindex_t	pindex0;
 #ifdef KERN_TLS
 	struct ktls_session *tls;
+	struct mbuf	*tls_m;
+	int		tls_enq_cnt;
 #endif
 	vm_page_t	pa[];
 };
-
-/*
- * Structure used to track requests with SF_SYNC flag.
- */
-struct sendfile_sync {
-	struct mtx	mtx;
-	struct cv	cv;
-	unsigned	count;
-	bool		waiting;
-};
-
-static void
-sendfile_sync_destroy(struct sendfile_sync *sfs)
-{
-	KASSERT(sfs->count == 0, ("sendfile sync %p still busy", sfs));
-
-	cv_destroy(&sfs->cv);
-	mtx_destroy(&sfs->mtx);
-	free(sfs, M_SENDFILE);
-}
-
-static void
-sendfile_sync_signal(struct sendfile_sync *sfs)
-{
-	mtx_lock(&sfs->mtx);
-	KASSERT(sfs->count > 0, ("sendfile sync %p not busy", sfs));
-	if (--sfs->count == 0) {
-		if (!sfs->waiting) {
-			/* The sendfile() waiter was interrupted by a signal. */
-			sendfile_sync_destroy(sfs);
-			return;
-		} else {
-			cv_signal(&sfs->cv);
-		}
-	}
-	mtx_unlock(&sfs->mtx);
-}
 
 counter_u64_t sfstat[sizeof(struct sfstat) / sizeof(uint64_t)];
 
@@ -179,11 +145,6 @@ sendfile_free_mext(struct mbuf *m)
 
 	sf_buf_free(sf);
 	vm_page_release(pg, flags);
-
-	if (m->m_ext.ext_flags & EXT_FLAG_SYNC) {
-		struct sendfile_sync *sfs = m->m_ext.ext_arg2;
-		sendfile_sync_signal(sfs);
-	}
 }
 
 static void
@@ -203,11 +164,6 @@ sendfile_free_mext_pg(struct mbuf *m)
 			flags = 0;
 		pg = PHYS_TO_VM_PAGE(m->m_epg_pa[i]);
 		vm_page_release(pg, flags);
-	}
-
-	if (m->m_ext.ext_flags & EXT_FLAG_SYNC) {
-		struct sendfile_sync *sfs = m->m_ext.ext_arg1;
-		sendfile_sync_signal(sfs);
 	}
 }
 
@@ -386,7 +342,12 @@ sendfile_iodone(void *arg, vm_page_t *pa, int count, int error)
 		so->so_proto->pr_abort(so);
 		so->so_error = EIO;
 
-		mb_free_notready(sfio->m, sfio->npages);
+#ifdef KERN_TLS
+		if (sfio->tls_m != NULL)
+			mb_free_notready(sfio->tls_m, sfio->tls_enq_cnt);
+		else
+#endif
+			mb_free_notready(sfio->m, sfio->npages);
 #ifdef KERN_TLS
 	} else if (sfio->tls != NULL && sfio->tls->mode == TCP_TLS_MODE_SW) {
 		/*
@@ -398,7 +359,10 @@ sendfile_iodone(void *arg, vm_page_t *pa, int count, int error)
 		 * Donate the socket reference from sfio to rather
 		 * than explicitly invoking soref().
 		 */
-		ktls_enqueue(sfio->m, so, sfio->npages);
+		if (sfio->tls_m != NULL)
+			ktls_enqueue(sfio->tls_m, so, sfio->tls_enq_cnt);
+		else
+			ktls_enqueue(sfio->m, so, sfio->npages);
 		goto out_with_ref;
 #endif
 	} else
@@ -566,8 +530,7 @@ sendfile_swapin(vm_object_t obj, struct sf_io *sfio, int *nios, off_t off,
 
 static int
 sendfile_getobj(struct thread *td, struct file *fp, vm_object_t *obj_res,
-    struct vnode **vp_res, struct shmfd **shmfd_res, off_t *obj_size,
-    int *bsize)
+    struct vnode **vp_res, struct shmfd **shmfd_res, off_t *obj_size)
 {
 	vm_object_t obj;
 	struct vnode *vp;
@@ -578,7 +541,6 @@ sendfile_getobj(struct thread *td, struct file *fp, vm_object_t *obj_res,
 	vp = *vp_res = NULL;
 	obj = NULL;
 	shmfd = *shmfd_res = NULL;
-	*bsize = 0;
 
 	/*
 	 * The file descriptor must be a regular file and have a
@@ -591,7 +553,6 @@ sendfile_getobj(struct thread *td, struct file *fp, vm_object_t *obj_res,
 			error = EINVAL;
 			goto out;
 		}
-		*bsize = vp->v_mount->mnt_stat.f_iosize;
 		obj = vp->v_object;
 		if (obj == NULL) {
 			error = EINVAL;
@@ -678,6 +639,7 @@ sendfile_getsock(struct thread *td, int s, struct file **sock_fp,
 int
 sendfile_wait_generic(struct socket *so, off_t need, int *space)
 {
+	u_int lowat, newlowat;
 	int error;
 
 	MPASS(need > 0);
@@ -698,9 +660,15 @@ sendfile_wait_generic(struct socket *so, off_t need, int *space)
 	 */
 	error = 0;
 	SOCK_SENDBUF_LOCK(so);
+	lowat = so->so_snd.sb_lowat;
 	if (so->so_snd.sb_flags & SB_AUTOLOWAT) {
-		if (so->so_snd.sb_lowat < so->so_snd.sb_hiwat / 2)
-			so->so_snd.sb_lowat = so->so_snd.sb_hiwat / 2;
+#if defined(INET) || defined(INET6)
+		newlowat = min(V_tcp_sendspace, so->so_snd.sb_hiwat) / 2;
+#else
+		newlowat = so->so_snd.sb_hiwat / 2;
+#endif
+		if (so->so_snd.sb_lowat < newlowat)
+			so->so_snd.sb_lowat = newlowat;
 		if (so->so_snd.sb_lowat < PAGE_SIZE &&
 		    so->so_snd.sb_hiwat >= PAGE_SIZE)
 			so->so_snd.sb_lowat = PAGE_SIZE;
@@ -720,7 +688,7 @@ retry_space:
 	}
 
 	*space = sbspace(&so->so_snd);
-	if (*space < need && (*space <= 0 || *space < so->so_snd.sb_lowat)) {
+	if (*space < need && (*space <= 0 || *space < lowat)) {
 		if (so->so_state & SS_NBIO) {
 			error = EAGAIN;
 			goto done;
@@ -763,10 +731,9 @@ vn_sendfile(struct file *fp, int sockfd, struct uio *hdr_uio,
 	struct mbuf *m, *mh, *mhtail;
 	struct sf_buf *sf;
 	struct shmfd *shmfd;
-	struct sendfile_sync *sfs;
 	struct vattr va;
 	off_t off, sbytes, rem, obj_size, nobj_size;
-	int bsize, error, ext_pgs_idx, hdrlen, max_pgs, softerr;
+	int error, ext_pgs_idx, hdrlen, max_pgs, softerr;
 #ifdef KERN_TLS
 	int tls_enq_cnt;
 #endif
@@ -775,7 +742,6 @@ vn_sendfile(struct file *fp, int sockfd, struct uio *hdr_uio,
 	obj = NULL;
 	so = NULL;
 	m = mh = NULL;
-	sfs = NULL;
 #ifdef KERN_TLS
 	tls = NULL;
 #endif
@@ -783,9 +749,9 @@ vn_sendfile(struct file *fp, int sockfd, struct uio *hdr_uio,
 	softerr = 0;
 	use_ext_pgs = false;
 
-	error = sendfile_getobj(td, fp, &obj, &vp, &shmfd, &obj_size, &bsize);
+	error = sendfile_getobj(td, fp, &obj, &vp, &shmfd, &obj_size);
 	if (error != 0)
-		return (error);
+		goto out;
 
 	error = sendfile_getsock(td, sockfd, &sock_fp, &so);
 	if (error != 0)
@@ -800,17 +766,6 @@ vn_sendfile(struct file *fp, int sockfd, struct uio *hdr_uio,
 
 	SFSTAT_INC(sf_syscalls);
 	SFSTAT_ADD(sf_rhpages_requested, SF_READAHEAD(flags));
-
-	if (__predict_false(flags & SF_SYNC)) {
-		gone_in(16, "Warning! %s[%u] uses SF_SYNC sendfile(2) flag. "
-		    "Please follow up to https://bugs.freebsd.org/"
-		    "bugzilla/show_bug.cgi?id=287348. ",
-		    td->td_proc->p_comm, td->td_proc->p_pid);
-		sfs = malloc(sizeof(*sfs), M_SENDFILE, M_WAITOK | M_ZERO);
-		mtx_init(&sfs->mtx, "sendfile", NULL, MTX_DEF);
-		cv_init(&sfs->cv, "sendfile");
-		sfs->waiting = true;
-	}
 
 	rem = nbytes ? omin(nbytes, obj_size - offset) : obj_size - offset;
 
@@ -961,6 +916,8 @@ vn_sendfile(struct file *fp, int sockfd, struct uio *hdr_uio,
 		 * for all of sfio's lifetime.
 		 */
 		sfio->tls = tls;
+		sfio->tls_m = NULL;
+		sfio->tls_enq_cnt = 0;
 #endif
 		vm_object_pip_add(obj, 1);
 		error = sendfile_swapin(obj, sfio, &nios, off, space, rhpages,
@@ -1042,14 +999,6 @@ vn_sendfile(struct file *fp, int sockfd, struct uio *hdr_uio,
 							m0->m_ext.ext_flags |=
 							    EXT_FLAG_CACHE_LAST;
 					}
-					if (sfs != NULL) {
-						m0->m_ext.ext_flags |=
-						    EXT_FLAG_SYNC;
-						m0->m_ext.ext_arg1 = sfs;
-						mtx_lock(&sfs->mtx);
-						sfs->count++;
-						mtx_unlock(&sfs->mtx);
-					}
 					ext_pgs_idx = 0;
 
 					/* Append to mbuf chain. */
@@ -1102,7 +1051,7 @@ vn_sendfile(struct file *fp, int sockfd, struct uio *hdr_uio,
 			}
 
 			m0 = m_get(M_WAITOK, MT_DATA);
-			m0->m_ext.ext_buf = (char *)sf_buf_kva(sf);
+			m0->m_ext.ext_buf = sf_buf_kva(sf);
 			m0->m_ext.ext_size = PAGE_SIZE;
 			m0->m_ext.ext_arg1 = sf;
 			m0->m_ext.ext_type = EXT_SFBUF;
@@ -1120,13 +1069,6 @@ vn_sendfile(struct file *fp, int sockfd, struct uio *hdr_uio,
 			    !((off + space) & PAGE_MASK) ||
 			    !(rem > space || rhpages > 0)))
 				m0->m_ext.ext_flags |= EXT_FLAG_NOCACHE;
-			if (sfs != NULL) {
-				m0->m_ext.ext_flags |= EXT_FLAG_SYNC;
-				m0->m_ext.ext_arg2 = sfs;
-				mtx_lock(&sfs->mtx);
-				sfs->count++;
-				mtx_unlock(&sfs->mtx);
-			}
 			m0->m_ext.ext_count = 1;
 			m0->m_flags |= (M_EXT | M_RDONLY);
 			if (nios)
@@ -1204,6 +1146,13 @@ prepend_header:
 		} else {
 			sfio->so = so;
 			sfio->m = m0;
+#ifdef KERN_TLS
+			if (hdrlen != 0 && tls != NULL &&
+			    tls->mode == TCP_TLS_MODE_SW) {
+				sfio->tls_m = m;
+				sfio->tls_enq_cnt = tls_enq_cnt;
+			}
+#endif
 			soref(so);
 			error = pr->pr_send(so, PRUS_NOTREADY, m, NULL, NULL,
 			    td);
@@ -1228,14 +1177,16 @@ prepend_header:
 	}
 
 	/*
-	 * Send trailers. Wimp out and use writev(2).
+	 * Send trailers.
 	 */
 	if (trl_uio != NULL) {
+		ssize_t cnt;
+
 		SOCK_IO_SEND_UNLOCK(so);
 		CURVNET_RESTORE();
-		error = kern_writev(td, sockfd, trl_uio);
+		error = kern_filewrite(td, sockfd, sock_fp, trl_uio, 0, &cnt);
 		if (error == 0)
-			sbytes += td->td_retval[0];
+			sbytes += cnt;
 		goto out;
 	}
 
@@ -1243,15 +1194,8 @@ done:
 	SOCK_IO_SEND_UNLOCK(so);
 	CURVNET_RESTORE();
 out:
-	/*
-	 * If there was no error we have to clear td->td_retval[0]
-	 * because it may have been set by writev.
-	 */
-	if (error == 0) {
-		td->td_retval[0] = 0;
-		if (sbytes > 0 && vp != NULL)
-			INOTIFY(vp, IN_ACCESS);
-	}
+	if (error == 0 && sbytes > 0 && vp != NULL)
+		INOTIFY(vp, IN_ACCESS);
 	if (sent != NULL) {
 		(*sent) = sbytes;
 	}
@@ -1263,18 +1207,6 @@ out:
 		m_freem(m);
 	if (mh)
 		m_freem(mh);
-
-	if (sfs != NULL) {
-		mtx_lock(&sfs->mtx);
-		if (sfs->count != 0)
-			error = cv_wait_sig(&sfs->cv, &sfs->mtx);
-		if (sfs->count == 0) {
-			sendfile_sync_destroy(sfs);
-		} else {
-			sfs->waiting = false;
-			mtx_unlock(&sfs->mtx);
-		}
-	}
 #ifdef KERN_TLS
 	if (tls != NULL)
 		ktls_free(tls);
@@ -1286,7 +1218,15 @@ out:
 }
 
 static int
-sendfile(struct thread *td, struct sendfile_args *uap, int compat)
+copyin_hdtr(const struct sf_hdtr *uhdtr, struct sf_hdtr *hdtr)
+{
+	return (copyin(uhdtr, hdtr, sizeof(*hdtr)));
+}
+
+int
+kern_sendfile(struct thread *td, int fd, int s, off_t offset, size_t nbytes,
+    struct sf_hdtr *uhdtr, off_t *usbytes, int flags, bool compat,
+    copyin_hdtr_t *copyin_hdtr_f, copyinuio_t *copyinuio_f)
 {
 	struct sf_hdtr hdtr;
 	struct uio *hdr_uio, *trl_uio;
@@ -1298,18 +1238,18 @@ sendfile(struct thread *td, struct sendfile_args *uap, int compat)
 	 * File offset must be positive.  If it goes beyond EOF
 	 * we send only the header/trailer and no payload data.
 	 */
-	if (uap->offset < 0)
+	if (offset < 0)
 		return (EINVAL);
 
 	sbytes = 0;
 	hdr_uio = trl_uio = NULL;
 
-	if (uap->hdtr != NULL) {
-		error = copyin(uap->hdtr, &hdtr, sizeof(hdtr));
+	if (uhdtr != NULL) {
+		error = copyin_hdtr_f(uhdtr, &hdtr);
 		if (error != 0)
 			goto out;
 		if (hdtr.headers != NULL) {
-			error = copyinuio(hdtr.headers, hdtr.hdr_cnt,
+			error = copyinuio_f(hdtr.headers, hdtr.hdr_cnt,
 			    &hdr_uio);
 			if (error != 0)
 				goto out;
@@ -1320,36 +1260,38 @@ sendfile(struct thread *td, struct sendfile_args *uap, int compat)
 			 * header size from nbytes.
 			 */
 			if (compat) {
-				if (uap->nbytes > hdr_uio->uio_resid)
-					uap->nbytes -= hdr_uio->uio_resid;
+				if (nbytes > hdr_uio->uio_resid)
+					nbytes -= hdr_uio->uio_resid;
 				else
-					uap->nbytes = 0;
+					nbytes = 0;
 			}
 #endif
 		}
 		if (hdtr.trailers != NULL) {
-			error = copyinuio(hdtr.trailers, hdtr.trl_cnt,
+			error = copyinuio_f(hdtr.trailers, hdtr.trl_cnt,
 			    &trl_uio);
 			if (error != 0)
 				goto out;
+			trl_uio->uio_rw = UIO_WRITE;
+			trl_uio->uio_td = td;
 		}
 	}
 
-	AUDIT_ARG_FD(uap->fd);
+	AUDIT_ARG_FD(fd);
 
 	/*
 	 * sendfile(2) can start at any offset within a file so we require
 	 * CAP_READ+CAP_SEEK = CAP_PREAD.
 	 */
-	if ((error = fget_read(td, uap->fd, &cap_pread_rights, &fp)) != 0)
+	if ((error = fget_read(td, fd, &cap_pread_rights, &fp)) != 0)
 		goto out;
 
-	error = fo_sendfile(fp, uap->s, hdr_uio, trl_uio, uap->offset,
-	    uap->nbytes, &sbytes, uap->flags, td);
+	error = fo_sendfile(fp, s, hdr_uio, trl_uio, offset,
+	    nbytes, &sbytes, flags, td);
 	fdrop(fp, td);
 
-	if (uap->sbytes != NULL)
-		(void)copyout(&sbytes, uap->sbytes, sizeof(off_t));
+	if (usbytes != NULL)
+		(void)copyout(&sbytes, usbytes, sizeof(off_t));
 
 out:
 	freeuio(hdr_uio);
@@ -1371,24 +1313,17 @@ out:
 int
 sys_sendfile(struct thread *td, struct sendfile_args *uap)
 {
-
-	return (sendfile(td, uap, 0));
+	return (kern_sendfile(td, uap->fd, uap->s, uap->offset,
+	    uap->nbytes, uap->hdtr, uap->sbytes, uap->flags, false,
+	    (copyin_hdtr_t *)copyin_hdtr, (copyinuio_t *)copyinuio));
 }
 
 #ifdef COMPAT_FREEBSD4
 int
 freebsd4_sendfile(struct thread *td, struct freebsd4_sendfile_args *uap)
 {
-	struct sendfile_args args;
-
-	args.fd = uap->fd;
-	args.s = uap->s;
-	args.offset = uap->offset;
-	args.nbytes = uap->nbytes;
-	args.hdtr = uap->hdtr;
-	args.sbytes = uap->sbytes;
-	args.flags = uap->flags;
-
-	return (sendfile(td, &args, 1));
+	return (kern_sendfile(td, uap->fd, uap->s, uap->offset,
+	    uap->nbytes, uap->hdtr, uap->sbytes, uap->flags, true,
+	    (copyin_hdtr_t *)copyin_hdtr, (copyinuio_t *)copyinuio));
 }
 #endif /* COMPAT_FREEBSD4 */

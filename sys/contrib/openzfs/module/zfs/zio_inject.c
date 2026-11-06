@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -827,6 +817,44 @@ zio_handle_export_delay(spa_t *spa, hrtime_t elapsed)
 	zio_handle_pool_delay(spa, elapsed, ZINJECT_DELAY_EXPORT);
 }
 
+/*
+ * For testing, inject a delay before ready state.
+ */
+hrtime_t
+zio_handle_ready_delay(zio_t *zio)
+{
+	inject_handler_t *handler;
+	hrtime_t now = gethrtime();
+	hrtime_t target = 0;
+
+	/*
+	 * Ignore I/O not associated with any logical data.
+	 */
+	if (zio->io_logical == NULL)
+		return (0);
+
+	rw_enter(&inject_lock, RW_READER);
+
+	for (handler = list_head(&inject_handlers); handler != NULL;
+	    handler = list_next(&inject_handlers, handler)) {
+		if (zio->io_spa != handler->zi_spa ||
+		    handler->zi_record.zi_cmd != ZINJECT_DELAY_READY)
+			continue;
+
+		/* If this handler matches, inject the delay */
+		if (zio_match_iotype(zio, handler->zi_record.zi_iotype) &&
+		    zio_match_handler(&zio->io_logical->io_bookmark,
+		    zio->io_bp ? BP_GET_TYPE(zio->io_bp) : DMU_OT_NONE,
+		    zio_match_dva(zio), &handler->zi_record, zio->io_error)) {
+			target = now + (hrtime_t)handler->zi_record.zi_timer;
+			break;
+		}
+	}
+
+	rw_exit(&inject_lock);
+	return (target);
+}
+
 static int
 zio_calculate_range(const char *pool, zinject_record_t *record)
 {
@@ -970,9 +998,9 @@ zio_inject_fault(char *name, int flags, int *id, zinject_record_t *record)
 			if (zio_pool_handler_exists(name, record->zi_cmd))
 				return (SET_ERROR(EEXIST));
 
-			mutex_enter(&spa_namespace_lock);
+			spa_namespace_enter(FTAG);
 			boolean_t has_spa = spa_lookup(name) != NULL;
-			mutex_exit(&spa_namespace_lock);
+			spa_namespace_exit(FTAG);
 
 			if (record->zi_cmd == ZINJECT_DELAY_IMPORT && has_spa)
 				return (SET_ERROR(EEXIST));
@@ -1057,7 +1085,7 @@ zio_inject_list_next(int *id, char *name, size_t buflen,
 	inject_handler_t *handler;
 	int ret;
 
-	mutex_enter(&spa_namespace_lock);
+	spa_namespace_enter(FTAG);
 	rw_enter(&inject_lock, RW_READER);
 
 	for (handler = list_head(&inject_handlers); handler != NULL;
@@ -1079,7 +1107,7 @@ zio_inject_list_next(int *id, char *name, size_t buflen,
 	}
 
 	rw_exit(&inject_lock);
-	mutex_exit(&spa_namespace_lock);
+	spa_namespace_exit(FTAG);
 
 	return (ret);
 }
@@ -1150,7 +1178,6 @@ zio_inject_fini(void)
 	rw_destroy(&inject_lock);
 }
 
-#if defined(_KERNEL)
 EXPORT_SYMBOL(zio_injection_enabled);
 EXPORT_SYMBOL(zio_inject_fault);
 EXPORT_SYMBOL(zio_inject_list_next);
@@ -1158,4 +1185,3 @@ EXPORT_SYMBOL(zio_clear_fault);
 EXPORT_SYMBOL(zio_handle_fault_injection);
 EXPORT_SYMBOL(zio_handle_device_injection);
 EXPORT_SYMBOL(zio_handle_label_injection);
-#endif

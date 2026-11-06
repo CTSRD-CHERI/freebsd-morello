@@ -1,8 +1,9 @@
 .\" SPDX-License-Identifier: BSD-2-Clause
 .\"
 .\" Copyright (c) 2025 Baptiste Daroussin <bapt@FreeBSD.org>
+.\" Copyright (c) 2025 Jesús Daniel Colmenares Oviedo <dtxdf@FreeBSD.org>
 .\"
-.Dd June 26, 2025
+.Dd June 8, 2026
 .Dt NUAGEINIT 7
 .Os
 .Sh NAME
@@ -116,6 +117,8 @@ file supports the following keys:
 Array of network interfaces to be configured.
 .It Ic networks
 Array of network configurations to be set.
+.It Ic services
+Array of service configurations to be set (e.g: DNS).
 .El
 .El
 .Pp
@@ -128,12 +131,12 @@ If this file starts with a
 it will be executed at the end of the boot via
 .Cm nuageinit_user_data_script .
 If this file starts with
-.Qq #!cloud-config ,
+.Qq #cloud-config ,
 it will be parsed as a YAML configuration file.
 All other cases will be ignored.
 .Pp
 The
-.Qq #!cloud-config
+.Qq #cloud-config
 configuration entries supported by
 .Nm :
 .Bl -tag -width "config-2"
@@ -143,6 +146,150 @@ Specify a fully qualified domain name for the instance.
 Specify the hostname of the instance if
 .Qq Ic fqdn
 is not set.
+.It Ic manage_etc_hosts
+Boolean which determines whether the hostname should be added to
+.Pa /etc/hosts
+on the
+.Qq 127.0.0.1
+and
+.Qq ::1
+localhost lines.
+Defaults to
+.Ar true .
+Set to
+.Ar false
+to skip this behaviour.
+.It Ic mounts
+A list of mount points to configure.
+Each entry is written to
+.Pa /etc/fstab
+and the mount point directory is created.
+.Pp
+Each entry can be specified as a list:
+.Bd -literal -offset indent
+[ device, mountpoint, fstype ]
+.Ed
+.Pp
+or as an object:
+.Bd -literal -offset indent
+{ device: "...", mountpoint: "...", type: "...", options: "..." }
+.Ed
+.Pp
+The following keys are recognized:
+.Bl -tag -width "options"
+.It device (or name, spec)
+The device to mount.
+.It mountpoint (or mount_point)
+The mount point directory.
+.It type (or fstype, filesystem)
+The filesystem type.
+.It options (or opts)
+The mount options, defaults to
+.Qq rw .
+.It dump
+The dump frequency for
+.Xr dump 8 ,
+defaults to 0.
+.It passno
+The pass number for
+.Xr fsck 8 ,
+defaults to 0.
+.El
+.It Ic resolv_conf
+An object configuring the content of
+.Pa /etc/resolv.conf .
+.Pp
+The following keys are recognized:
+.Bl -tag -width "nameservers"
+.It nameservers
+A list of IP addresses for DNS name servers.
+.It searchdomains
+A list of search domains.
+.It domain
+A single domain name.
+.It sortlist
+A list of IP/netmask sortlist entries.
+.It options
+A dictionary of resolver options.
+.El
+.It Ic locale
+Set the system locale by appending
+.Qq Cm export
+statements to
+.Pa /etc/profile .
+.Pp
+If the value is a string, it is used as the
+.Dq Cm LANG
+value.
+If the value is an object mapping, each key-value pair is exported.
+.It Ic keyboard
+An object configuring the keyboard layout.
+.Pp
+Sets the
+.Va keymap
+variable in
+.Pa /etc/rc.conf.d/keymap .
+.Pp
+The following keys are recognized:
+.Bl -tag -width "variant"
+.It layout
+The keyboard layout (e.g.,
+.Qq fr ,
+.Qq de ,
+.Qq us ) .
+.It variant
+The keyboard variant (e.g.,
+.Qq acc ,
+.Qq nodeadkeys ) .
+.El
+.It Ic ssh_authkey_fingerprints
+Boolean which determines whether fingerprints of SSH host keys
+should be logged to the console.
+Defaults to
+.Ar false .
+.It Ic ntp
+An object configuring the NTP daemon by writing
+.Pa /etc/ntp.conf .
+.Pp
+The following keys are recognized:
+.Bl -tag -width "enabled"
+.It servers
+A list of NTP server addresses.
+.It pools
+A list of NTP pool addresses.
+.It enabled
+Boolean, defaults to
+.Ar true .
+Set to
+.Ar false
+to skip NTP configuration.
+.El
+.Pp
+Alternatively,
+.Ic ntp
+can be a list of server addresses (legacy format).
+.It Ic ca_certs
+An object managing CA certificates.
+.Pp
+The following keys are recognized:
+.Bl -tag -width "remove_defaults"
+.It trusted
+A list of PEM-encoded CA certificates to add to the system trust store.
+Certificates are written to
+.Pa /usr/share/certs/trusted/
+and
+.Xr certctl 8
+rehash is executed.
+.It remove_defaults
+Boolean, if
+.Ar true ,
+remove the default CA certificates.
+.El
+.It Ic timezone
+Sets the system timezone based on the value provided.
+.Pp
+See also
+.Xr tzfile 5 .
 .It Ic groups
 An array of strings or objects to be created:
 .Bl -bullet
@@ -156,6 +303,12 @@ will be used as the name of the group, the
 .Qq Ar value
 is expected to be a list of members (array), specified by name.
 .El
+.It Ic ssh_deletekeys
+Boolean which determines if the existing SSH host keys in
+.Pa /etc/ssh
+should be removed on first boot.
+New host keys will be generated automatically by
+.Xr sshd 8 .
 .It Ic ssh_keys
 An object of multiple key/values,
 .Qq Cm keys
@@ -170,12 +323,146 @@ being the actual content of the files in
 Append each entry of the array to
 .Nm
 default user which will be created.
+.It Ic allow_public_ssh_keys
+Boolean which determines if the public SSH keys from the datasource
+metadata are imported to the default user and root.
+If set to
+.Ar false ,
+only the keys specified in
+.Ic ssh_authorized_keys
+are used.
+Defaults to
+.Ar true .
 .It Ic ssh_pwauth
 boolean which determines the value of the
 .Qq Ic PasswordAuthentication
 configuration in
 .Pa /etc/ssh/sshd_config
+.It Ic disable_root
+Boolean which determines if root login via SSH should be disabled.
+If set to
+.Ar true
+.Pq the default ,
+the public SSH keys are written to
+.Pa /root/.ssh/authorized_keys
+with the options specified in
+.Ic disable_root_opts ,
+which by default redirects the login to the default user.
+If set to
+.Ar false ,
+the public SSH keys are written to
+.Pa /root/.ssh/authorized_keys
+without any restriction.
+.It Ic disable_root_opts
+String or array of options used to prefix the public SSH keys in
+.Pa /root/.ssh/authorized_keys
+when
+.Ic disable_root
+is set to
+.Ar true .
+The
+.Ar $USER
+and
+.Ar $DISABLE_USER
+placeholders are replaced with the default user name and
+.Ar root
+respectively.
+If not specified, defaults to
+.Ar no-port-forwarding,no-agent-forwarding,no-X11-forwarding,command="echo 'Please login as the user "$USER" rather than the user "$DISABLE_USER".';echo;sleep 10;exit 142" .
+.Pp
+Only the first value is used when an array is provided.
 .It Ic network
+Network configuration parameters.
+.Pp
+Specifying the following parameters from a file named
+.Pa network-config
+takes precedence over their specification from the
+.Ic network
+parameter of
+.Pa user-data .
+.Bl -tag -width "ethernets"
+.It Ic ethernets
+Mapping representing a generic configuration for existing network interfaces.
+.Pp
+Each key is an interface name that is only used when no
+.Sy match
+rule is specified.
+If
+.Sy match
+rules are specified, an arbitrary name can be used
+.Po e.g.: id0 Pc .
+.Bl -tag -width "nameservers"
+.It Ic match
+This selects a subset of available physical devices by various hardware
+properties.
+The following configuration will then apply to all matching devices, as soon as
+they appear.
+All specified properties must match.
+The following properties for
+creating matches are supported:
+.Bl -tag -width "macaddress"
+.It Ic macaddress
+.No Device's MAC address in the form Sy xx:xx:xx:xx:xx:xx .
+Letters should be lowercase.
+.It Ic name
+Current interface name.
+Lua pattern-matching expressions are supported.
+.It Ic driver
+Interface driver name and unit number of the interface.
+Lua pattern-natching expressions
+are supported.
+.El
+.It Ic set-name
+When matching on unique properties such as MAC, match rules can be written so
+that they match only one device.
+Then this property can be used to give that device a more
+specific/desirable/nicer name than the default.
+.Pp
+While multiple properties can be used in a match,
+.Sy macaddress
+is required for nuageinit to perform the rename.
+.It Ic mtu
+The MTU key represents a device's Maximum Transmission Unit, the largest size
+packet or frame.
+.It Ic wakeonlan
+Enable wake on LAN.
+Off by default.
+.It Ic dhcp4
+Configure the interface to use DHCP.
+.Pp
+This takes precedence over
+.Sy addresses
+when both are specified.
+.It Ic addresses
+List of strings representing IPv4 or IPv6 addresses.
+.It Ic gateway4
+Set default gateway for IPv4, for manual address configuration.
+This requires setting
+.Sy addresses
+too.
+.Pp
+Since only one default router can be configured at a time, this parameter is
+applied when processing the first entry, and any others are silently ignored.
+.It Ic gateway6
+Set default gateway for IPv6, for manual address configuration.
+This requires setting
+.Sy addresses
+too.
+.Pp
+Since only one default router can be configured at a time, this parameter is
+applied when processing the first entry, and any others are silently ignored.
+.It Ic nameservers
+Set DNS servers and search domains, for manual address configuration.
+.Pp
+There are two supported fields:
+.Bl -tag -width "addresses"
+.It Ic search
+Search list for host-name lookup.
+.It Ic addresses
+List of IPv4 or IPv6 name server addresses that the resolver should query.
+.El
+.El
+.El
 .It Ic runcmd
 An array of commands to be run at the end of the boot process
 .It Ic packages
@@ -184,9 +471,79 @@ List of packages to be installed.
 Update the remote package metadata.
 .It Ic package_upgrade
 Upgrade the packages installed to their latest version.
+.It Ic power_state
+An object controlling the power state of the instance after configuration.
+The following keys are recognized:
+.Bl -tag -width "condition"
+.It Ic delay
+Time to wait before the action.
+Can be
+.Qq now
+or a time accepted by
+.Xr shutdown 8
+(e.g.,
+.Qq +5
+for five minutes).
+Defaults to
+.Qq now .
+.It Ic mode
+The action to take:
+.Qq poweroff ,
+.Qq reboot ,
+or
+.Qq halt .
+Defaults to
+.Qq poweroff .
+.It Ic message
+Optional message to display to users.
+.It Ic timeout
+Not supported on
+.Fx ,
+silently ignored.
+.It Ic condition
+Boolean or command string.
+If
+.Qq false ,
+the action is skipped.
+If a string, it is run as a command; the action is only taken if the command
+succeeds.
+Defaults to
+.Qq true .
+.El
+.It Ic phone_home
+An object configuring the posting of instance data to a URL.
+.Pp
+The following keys are recognized:
+.Bl -tag -width "tries"
+.It Ic url
+The target URL to which the data will be posted.
+.It Ic post
+A list of data items to send, or the string
+.Qq all
+to send all supported items.
+Supported items are:
+.Qq hostname ,
+.Qq fqdn ,
+.Qq instance_id ,
+.Qq pub_key_rsa ,
+.Qq pub_key_ecdsa ,
+and
+.Qq pub_key_ed25519 .
+.It Ic tries
+Number of retry attempts.
+Defaults to 1.
+.El
+.Pp
+The data is posted using
+.Xr fetch 1 .
+.It Ic final_message
+A string message to be displayed at the end of the boot process.
+The placeholder
+.Qq $UPTIME
+is replaced with the system uptime in seconds.
 .It Ic users
 Specify a list of users to be created:
-.Bl -tag -width "plain_text_passwd"
+.Bl -tag -width "ssh_authorized_keys"
 .It Ic name
 Name of the user.
 .It Ic gecos
@@ -201,23 +558,44 @@ The list of other groups the user should belong to.
 A boolean which determines if the home directory should be created or not.
 .It Ic shell
 The shell that should be used for the user.
+.It Ic ssh_authorized_keys
+List of SSH keys for the user.
 .It Ic passwd
 The encrypted password for the user.
 .It Ic plain_text_passwd
 The password in plain text for the user.
 Ignored if an encrypted password is already provided.
-.It Ic groups
-The list of other groups the user should belong to.
-.It Ic locked
+.It Ic lock_passwd
 Boolean to determine if the user account should be locked.
+The legacy
+.Ic locked
+key is also accepted.
 .It Ic sudo
-A string or an array of strings which which should be appended to
-.Pa /usr/local/etc/sudoers.d/90-nuageinit-users
+A string or an array of strings which should be appended to
+.Pa ${LOCALBASE}/etc/sudoers.d/90-nuageinit-users
+.It Ic doas
+A string or an array of strings which should be appended to
+.Pa ${LOCALBASE}/etc/doas.conf
+.Pp
+Instead of hardcoding the username, you can use
+.Sy %u ,
+which will be replaced by the current username.
 .El
 .Pp
 A special case exist: if the entry is a simple string with the value
 .Qq default ,
 then the default user is created.
+Configuring
+.Nm sudo
+or
+.Nm doas
+does not automatically install them.
+Ensure the relevant command is listed in your
+.Nm packages
+section.
+.It Ic bootcmd
+An array of commands to be run early in the boot process,
+before the hostname is set and before the network is configured.
 .It Ic chpasswd
 Change the passwords for users, it accepts the following keys:
 .Bl -tag -width "expire"
@@ -226,11 +604,10 @@ Boolean to force the user to change their password on first login.
 .It Ic users
 An array of objects:
 .Bl -tag -width "password"
-.It Ic user
+.It Ic name
 Specify the user whose password will be changed.
 .It Ic password
 Specify a text line with the new password or
-specify the user whose password will be changed.
 .Qq Cm RANDOM
 to assign the password randomly.
 If the textline starts with
@@ -251,7 +628,7 @@ It accepts the following keys for each objects:
 The content to be written to the file.
 If this key is not existing then an empty file will be created.
 .It Ic encoding
-Specifiy the encoding used for content.
+Specify the encoding used for content.
 If not specified, then plain text is considered.
 Only
 .Ar b64
@@ -260,7 +637,7 @@ and
 are supported for now.
 .It Ic path
 The path of the file to be created.
-.Pq Note intermerdiary directories will not be created .
+.Pq Note intermerdiary directories will be created .
 .It Ic permissions
 A string representing the permission of the file in octal.
 .It Ic owner
@@ -276,26 +653,45 @@ A boolean to specify that the files should be created after the packages are
 installed and the users are created.
 .El
 .El
+.Pp
+Additionally, user-data can be provided as a MIME multipart message
+with content type
+.Qq multipart/mixed .
+Each part is handled according to its
+.Qq Content-Type
+header.
+Supported part types:
+.Bl -tag -width "text/x-shellscript"
+.It text/cloud-config
+Processed as a cloud-config YAML document.
+.It text/x-shellscript
+Saved as an executable script for later execution.
+.El
 .Sh EXAMPLES
 Here is an example of a YAML configuration for
 .Nm :
 .Bd -literal
 #cloud-config
+bootcmd:
+  - kldload if_bridge
 fqdn: myhost.mynetwork.tld
 users:
   - default
   - name: user
     gecos: Foo B. Bar
     sudo: ALL=(ALL) NOPASSWD:ALL
-    ssh-authorized-keys:
+    ssh_authorized_keys:
       - ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAr...
 packages:
   - neovim
   - git-lite
+  - sudo
 package_update: true
 package_upgrade: true
 runcmd:
   - logger -t nuageinit "boot finished"
+ssh_deletekeys: true
+disable_root: true
 ssh_keys:
   ed25519_private: |
     -----BEGIN OPENSSH PRIVATE KEY-----
@@ -303,6 +699,12 @@ ssh_keys:
     ...
     -----END OPENSSH PRIVATE KEY-----
   ed25519_public: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK+MH4E8KO32N5CXRvXVqvyZVl0+6ue4DobdhU0FqFd+
+network:
+  ethernets:
+    vtnet0:
+      addresses:
+        - 192.168.8.2/24
+      gateway4: 192.168.8.1
 .Ed
 .Sh SEE ALSO
 .Xr kenv 2 ,

@@ -94,11 +94,14 @@ extern volatile long ticksl;
  */
 enum sysinit_sub_id {
 	SI_SUB_DUMMY		= 0x0000000,	/* not executed; for linker */
+	SI_SUB_FIRST		= 0x0600000,	/* mp_maxid, etc... */
 	SI_SUB_TUNABLES		= 0x0700000,	/* establish tunable values */
 	SI_SUB_COPYRIGHT	= 0x0800001,	/* first use of console */
+	SI_SUB_NUMA		= 0x0810000,	/* initialize NUMA topology */
 	SI_SUB_VM		= 0x1000000,	/* virtual memory system init */
 	SI_SUB_COUNTER		= 0x1100000,	/* counter(9) is initialized */
 	SI_SUB_KMEM		= 0x1800000,	/* kernel memory */
+	SI_SUB_KENV		= 0x1900000,	/* kernel environment */
 	SI_SUB_HYPERVISOR	= 0x1A40000,	/*
 						 * Hypervisor detection and
 						 * virtualization support
@@ -154,9 +157,9 @@ enum sysinit_sub_id {
 	SI_SUB_EXEC		= 0x7400000,	/* execve() handlers */
 	SI_SUB_PROTO_BEGIN	= 0x8000000,	/* VNET initialization */
 	SI_SUB_PROTO_PFIL	= 0x8100000,	/* Initialize pfil before FWs */
+	SI_SUB_PROTO_MC		= 0x8300000,	/* Multicast */
 	SI_SUB_PROTO_IF		= 0x8400000,	/* interfaces */
 	SI_SUB_PROTO_DOMAININIT	= 0x8600000,	/* domain registration system */
-	SI_SUB_PROTO_MC		= 0x8700000,	/* Multicast */
 	SI_SUB_PROTO_DOMAIN	= 0x8800000,	/* domains (address families?) */
 	SI_SUB_PROTO_FIREWALL	= 0x8806000,	/* Firewalls */
 	SI_SUB_PROTO_IFATTACHDOMAIN = 0x8808000,/* domain dependent data init */
@@ -194,7 +197,8 @@ enum sysinit_elem_order {
 	SI_ORDER_SEVENTH	= 0x0000006,	/* seventh */
 	SI_ORDER_EIGHTH		= 0x0000007,	/* eighth */
 	SI_ORDER_MIDDLE		= 0x1000000,	/* somewhere in the middle */
-	SI_ORDER_ANY		= 0xfffffff	/* last */
+	SI_ORDER_ANY		= 0xf000000,	/* default */
+	SI_ORDER_LAST		= 0xfffffff	/* last */
 };
 
 /*
@@ -249,15 +253,8 @@ struct sysinit_tslog {
 	const void *data;
 	const char *name;
 };
-static inline void
-sysinit_tslog_shim(const void *data)
-{
-	const struct sysinit_tslog *x = data;
+void sysinit_tslog_shim(const void *);
 
-	TSRAW(curthread, TS_ENTER, "SYSINIT", x->name);
-	(x->func)(x->data);
-	TSRAW(curthread, TS_EXIT, "SYSINIT", x->name);
-}
 #define	C_SYSINIT(uniquifier, subsystem, order, func, ident)	\
 	static struct sysinit_tslog uniquifier ## _sys_init_tslog = {	\
 		func,						\
@@ -322,7 +319,7 @@ void	sysinit_add(struct sysinit **set, struct sysinit **set_end);
  * int
  * please avoid using for new tunables!
  */
-extern void tunable_int_init(void *);
+extern void tunable_int_init(const void *);
 struct tunable_int {
 	const char *path;
 	int *var;
@@ -341,7 +338,7 @@ struct tunable_int {
 /*
  * long
  */
-extern void tunable_long_init(void *);
+extern void tunable_long_init(const void *);
 struct tunable_long {
 	const char *path;
 	long *var;
@@ -360,7 +357,7 @@ struct tunable_long {
 /*
  * unsigned long
  */
-extern void tunable_ulong_init(void *);
+extern void tunable_ulong_init(const void *);
 struct tunable_ulong {
 	const char *path;
 	unsigned long *var;
@@ -379,7 +376,7 @@ struct tunable_ulong {
 /*
  * int64_t
  */
-extern void tunable_int64_init(void *);
+extern void tunable_int64_init(const void *);
 struct tunable_int64 {
 	const char *path;
 	int64_t *var;
@@ -398,7 +395,7 @@ struct tunable_int64 {
 /*
  * uint64_t
  */
-extern void tunable_uint64_init(void *);
+extern void tunable_uint64_init(const void *);
 struct tunable_uint64 {
 	const char *path;
 	uint64_t *var;
@@ -417,7 +414,7 @@ struct tunable_uint64 {
 /*
  * quad
  */
-extern void tunable_quad_init(void *);
+extern void tunable_quad_init(const void *);
 struct tunable_quad {
 	const char *path;
 	quad_t *var;
@@ -436,7 +433,7 @@ struct tunable_quad {
 /*
  * bool
  */
-extern void tunable_bool_init(void *);
+extern void tunable_bool_init(const void *);
 struct tunable_bool {
 	const char *path;
 	bool *var;
@@ -452,7 +449,7 @@ struct tunable_bool {
 
 #define	TUNABLE_BOOL_FETCH(path, var)	getenv_bool((path), (var))
 
-extern void tunable_str_init(void *);
+extern void tunable_str_init(const void *);
 struct tunable_str {
 	const char *path;
 	char *var;

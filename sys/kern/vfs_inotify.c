@@ -111,6 +111,7 @@ static const struct filterops inotify_rfiltops = {
 	.f_isfd = 1,
 	.f_detach = filt_inotifydetach,
 	.f_event = filt_inotifyevent,
+	.f_copy = knote_triv_copy,
 };
 
 static MALLOC_DEFINE(M_INOTIFY, "inotify", "inotify data structures");
@@ -380,7 +381,14 @@ inotify_unlink_watch_locked(struct inotify_softc *sc, struct inotify_watch *watc
 static void
 inotify_free_watch(struct inotify_watch *watch)
 {
-	vrele(watch->vp);
+	/*
+	 * Formally, we don't need to lock the vnode here.  However, if we
+	 * don't, and vrele() releases the last reference, it's possible the
+	 * vnode will be recycled while a different thread holds the vnode lock.
+	 * Work around this bug by acquiring the lock here.
+	 */
+	(void)vn_lock(watch->vp, LK_EXCLUSIVE | LK_RETRY);
+	vput(watch->vp);
 	free(watch, M_INOTIFY);
 }
 
@@ -555,7 +563,7 @@ inotify_overflow_event(struct inotify_event *evp)
 }
 
 /*
- * Put an event record on the queue for an inotify desscriptor.  Return false if
+ * Put an event record on the queue for an inotify descriptor.  Return false if
  * the record was not enqueued for some reason, true otherwise.
  */
 static bool
@@ -606,25 +614,36 @@ inotify_log_one(struct inotify_watch *watch, const char *name, size_t namelen,
 	struct inotify_watch key;
 	struct inotify_softc *sc;
 	struct inotify_record *rec;
-	bool allocfail;
+	bool allocfail, delete, notify, oneshot, unmount;
 
 	mtx_assert(&watch->vp->v_pollinfo->vpi_lock, MA_OWNED);
 
 	sc = watch->sc;
-	rec = inotify_alloc_record(watch->wd, name, namelen, event, cookie,
-	    M_NOWAIT);
-	if (rec == NULL) {
-		rec = &sc->overflow;
-		allocfail = true;
+
+	delete = (event & IN_DELETE_SELF) != 0;
+	notify = (watch->mask & event) != 0;
+	oneshot = (watch->mask & IN_ONESHOT) != 0;
+	unmount = (event & IN_UNMOUNT) != 0;
+	if (!notify && !delete && !unmount)
+		return;
+
+	allocfail = false;
+	if (notify || unmount) {
+		rec = inotify_alloc_record(watch->wd, name, namelen, event,
+		    cookie, M_NOWAIT);
+		if (rec == NULL) {
+			rec = &sc->overflow;
+			allocfail = true;
+		}
 	} else {
-		allocfail = false;
+		rec = NULL;
 	}
 
 	mtx_lock(&sc->lock);
-	if (!inotify_queue_record(sc, rec) && rec != &sc->overflow)
+	if (rec != NULL && !inotify_queue_record(sc, rec) &&
+	    rec != &sc->overflow)
 		free(rec, M_INOTIFY);
-	if ((watch->mask & IN_ONESHOT) != 0 ||
-	    (event & (IN_DELETE_SELF | IN_UNMOUNT)) != 0) {
+	if (oneshot || delete || unmount) {
 		if (!allocfail) {
 			rec = inotify_alloc_record(watch->wd, NULL, 0,
 			    IN_IGNORED, 0, M_NOWAIT);
@@ -668,8 +687,7 @@ inotify_log(struct vnode *vp, const char *name, size_t namelen, int event,
 	TAILQ_FOREACH_SAFE(watch, &vp->v_pollinfo->vpi_inotify, vlink, tmp) {
 		KASSERT(watch->vp == vp,
 		    ("inotify_log: watch %p vp != vp", watch));
-		if ((watch->mask & event) != 0 || event == IN_UNMOUNT)
-			inotify_log_one(watch, name, namelen, event, cookie);
+		inotify_log_one(watch, name, namelen, event, cookie);
 	}
 	mtx_unlock(&vp->v_pollinfo->vpi_lock);
 }
@@ -715,7 +733,6 @@ vn_inotify(struct vnode *vp, struct vnode *dvp, struct componentname *cnp,
 				}
 				break;
 			case IN_MOVED_FROM:
-				cookie = 0;
 				selfevent = IN_MOVE_SELF;
 				break;
 			case _IN_ATTRIB_LINKCOUNT:
@@ -726,10 +743,8 @@ vn_inotify(struct vnode *vp, struct vnode *dvp, struct componentname *cnp,
 				break;
 			}
 
-			if ((selfevent & ~_IN_DIR_EVENTS) != 0) {
-				inotify_log(vp, NULL, 0, selfevent | isdir,
-				    cookie);
-			}
+			if ((selfevent & ~_IN_DIR_EVENTS) != 0)
+				inotify_log(vp, NULL, 0, selfevent | isdir, 0);
 		}
 
 		/*
@@ -770,6 +785,14 @@ vn_inotify_add_watch(struct vnode *vp, struct inotify_softc *sc, uint32_t mask,
 		size_t buflen, len;
 		int eof, error;
 
+		/*
+		 * Some filesystems, at least fuse, require that the directory
+		 * be opened before reading it.
+		 */
+		error = VOP_OPEN(vp, FREAD, td->td_ucred, td, NULL);
+		if (error != 0)
+			return (error);
+
 		buflen = 128 * sizeof(struct dirent);
 		buf = malloc(buflen, M_TEMP, M_WAITOK);
 
@@ -806,6 +829,7 @@ vn_inotify_add_watch(struct vnode *vp, struct inotify_softc *sc, uint32_t mask,
 			vrele(nd.ni_vp);
 		}
 		free(buf, M_TEMP);
+		VOP_CLOSE(vp, FREAD, td->td_ucred, td);
 		if (error != 0)
 			return (error);
 	}
@@ -884,10 +908,6 @@ vn_inotify_add_watch(struct vnode *vp, struct inotify_softc *sc, uint32_t mask,
 void
 vn_inotify_revoke(struct vnode *vp)
 {
-	if (vp->v_pollinfo == NULL) {
-		/* This is a nullfs vnode which shadows a watched vnode. */
-		return;
-	}
 	inotify_log(vp, NULL, 0, IN_UNMOUNT, 0);
 }
 
@@ -910,8 +930,8 @@ fget_inotify(struct thread *td, int fd, const cap_rights_t *needrightsp,
 }
 
 int
-kern_inotify_add_watch(int fd, int dfd, const char *path, uint32_t mask,
-    struct thread *td)
+kern_inotify_add_watch(struct thread *td, int fd, int dfd, const char *path,
+    uint32_t mask)
 {
 	struct nameidata nd;
 	struct file *fp;
@@ -991,12 +1011,12 @@ int
 sys_inotify_add_watch_at(struct thread *td,
     struct inotify_add_watch_at_args *uap)
 {
-	return (kern_inotify_add_watch(uap->fd, uap->dfd, uap->path,
-	    uap->mask, td));
+	return (kern_inotify_add_watch(td, uap->fd, uap->dfd, uap->path,
+	    uap->mask));
 }
 
 int
-kern_inotify_rm_watch(int fd, uint32_t wd, struct thread *td)
+kern_inotify_rm_watch(struct thread *td, int fd, uint32_t wd)
 {
 	struct file *fp;
 	struct inotify_softc *sc;
@@ -1041,5 +1061,5 @@ kern_inotify_rm_watch(int fd, uint32_t wd, struct thread *td)
 int
 sys_inotify_rm_watch(struct thread *td, struct inotify_rm_watch_args *uap)
 {
-	return (kern_inotify_rm_watch(uap->fd, uap->wd, td));
+	return (kern_inotify_rm_watch(td, uap->fd, uap->wd));
 }

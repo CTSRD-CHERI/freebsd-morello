@@ -427,10 +427,13 @@ iso_mountfs(struct vnode *devvp, struct mount *mp)
 
 		rootp = (struct iso_directory_record *)bp->b_data;
 
-		if ((isomp->rr_skip = cd9660_rrip_offset(rootp,isomp)) < 0) {
-		    isomp->im_flags |= ISOFSMNT_NORRIP;
+		if ((isomp->rr_skip = cd9660_rrip_offset(rootp, isomp,
+		    &error)) < 0) {
+			if (error != 0)
+				goto out;
+			isomp->im_flags |= ISOFSMNT_NORRIP;
 		} else {
-		    isomp->im_flags &= ~ISOFSMNT_GENS;
+			isomp->im_flags &= ~ISOFSMNT_GENS;
 		}
 
 		/*
@@ -506,11 +509,8 @@ out:
 		brelse(pribp);
 	if (supbp != NULL)
 		brelse(supbp);
-	if (cp != NULL) {
-		g_topology_lock();
-		g_vfs_close(cp);
-		g_topology_unlock();
-	}
+	if (cp != NULL)
+		g_vfs_close_unlocked(cp);
 	if (isomp) {
 		free(isomp, M_ISOFSMNT);
 		mp->mnt_data = NULL;
@@ -541,9 +541,7 @@ cd9660_unmount(struct mount *mp, int mntflags)
 		if (isomp->im_l2d)
 			cd9660_iconv->close(isomp->im_l2d);
 	}
-	g_topology_lock();
-	g_vfs_close(isomp->im_cp);
-	g_topology_unlock();
+	g_vfs_close_unlocked(isomp->im_cp);
 	vrele(isomp->im_devvp);
 	dev_rel(isomp->im_dev);
 	free(isomp, M_ISOFSMNT);
@@ -617,13 +615,13 @@ cd9660_fhtovp(struct mount *mp, struct fid *fhp, int flags, struct vnode **vpp)
 #endif
 
 	if ((error = VFS_VGET(mp, ifh.ifid_ino, LK_EXCLUSIVE, &nvp)) != 0) {
-		*vpp = NULLVP;
+		*vpp = NULL;
 		return (error);
 	}
 	ip = VTOI(nvp);
 	if (ip->inode.iso_mode == 0) {
 		vput(nvp);
-		*vpp = NULLVP;
+		*vpp = NULL;
 		return (ESTALE);
 	}
 	*vpp = nvp;
@@ -704,7 +702,7 @@ cd9660_vget_internal(struct mount *mp, ino_t ino, int flags,
 
 	/* Allocate a new vnode/iso_node. */
 	if ((error = getnewvnode("isofs", mp, &cd9660_vnodeops, &vp)) != 0) {
-		*vpp = NULLVP;
+		*vpp = NULL;
 		return (error);
 	}
 	ip = malloc(sizeof(struct iso_node), M_ISOFSNODE,
@@ -717,7 +715,7 @@ cd9660_vget_internal(struct mount *mp, ino_t ino, int flags,
 	error = insmntque(vp, mp);
 	if (error != 0) {
 		free(ip, M_ISOFSNODE);
-		*vpp = NULLVP;
+		*vpp = NULL;
 		return (error);
 	}
 	error = vfs_hash_insert(vp, ino, flags, td, vpp, cd9660_vfs_hash_cmp,

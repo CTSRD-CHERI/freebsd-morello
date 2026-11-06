@@ -56,13 +56,16 @@
 	__ret;						\
 })
 
-#if defined(LINUXKPI_VERSION) && LINUXKPI_VERSION >= 60600
+#if !defined(LINUXKPI_VERSION) || (LINUXKPI_VERSION >= 60600)
 #define abs_diff(x, y) ({		\
 	__typeof(x) _x = (x);		\
 	__typeof(y) _y = (y);		\
 	_x > _y ? _x - _y : _y - _x;	\
 })
 #endif
+
+unsigned long linuxkpi_int_sqrt(unsigned long val);
+#define	int_sqrt(x)	linuxkpi_int_sqrt(x)
 
 static inline uintmax_t
 mult_frac(uintmax_t x, uintmax_t multiplier, uintmax_t divisor)

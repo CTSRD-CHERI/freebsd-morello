@@ -1,5 +1,5 @@
-LIB_CXX= pmc
-
+PACKAGE=pmc
+LIB_CXX=pmc
 SRCS=	libpmc.c pmclog.c libpmc_pmu_util.c libpmc_json.cc
 INCS=	pmc.h pmclog.h pmcformat.h
 
@@ -74,8 +74,11 @@ MAN+=	pmc.haswell.3
 MAN+=	pmc.haswelluc.3
 MAN+=	pmc.haswellxeon.3
 MAN+=	pmc.iaf.3
+MAN+=	pmc.ibs.3
 MAN+=	pmc.ivybridge.3
 MAN+=	pmc.ivybridgexeon.3
+MAN+=	pmc.perf.3
+MAN+=	pmc.rapl.3
 MAN+=	pmc.sandybridge.3
 MAN+=	pmc.sandybridgeuc.3
 MAN+=	pmc.sandybridgexeon.3

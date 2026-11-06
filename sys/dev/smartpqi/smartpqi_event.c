@@ -1,5 +1,5 @@
 /*-
- * Copyright 2016-2023 Microchip Technology, Inc. and/or its subsidiaries.
+ * Copyright 2016-2026 Microchip Technology, Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -59,7 +59,7 @@ pqisrc_wait_for_rescan_complete(pqisrc_softstate_t *softs)
  */
 static void
 pqisrc_acknowledge_event(pqisrc_softstate_t *softs,
-	struct pqi_event *event)
+	struct pqi_event const *event)
 {
 
 	int ret;
@@ -115,7 +115,7 @@ pqisrc_ack_all_events(void *arg1)
 
 
 	pending_event = &softs->pending_events[0];
-	for (i=0; i < PQI_NUM_SUPPORTED_EVENTS; i++) {
+	for (i = 0; i < PQI_NUM_SUPPORTED_EVENTS; i++) {
 		if (pending_event->pending == true) {
 			pending_event->pending = false;
 			pqisrc_acknowledge_event(softs, pending_event);
@@ -204,6 +204,17 @@ pqisrc_process_event_intr_src(pqisrc_softstate_t *softs,int obq_id)
 		}
 
 		if (event_index >= 0) {
+			static const char *event_names[] = {
+				[PQI_EVENT_HOTPLUG]           = "hotplug",
+				[PQI_EVENT_HARDWARE]          = "hardware",
+				[PQI_EVENT_PHYSICAL_DEVICE]   = "physical device",
+				[PQI_EVENT_LOGICAL_DEVICE]    = "logical device",
+				[PQI_EVENT_AIO_STATE_CHANGE]  = "AIO state change",
+				[PQI_EVENT_AIO_CONFIG_CHANGE] = "AIO config change",
+			};
+			device_printf(softs->os_specific.pqi_dev,
+			    "event: %s (type=0x%x)\n",
+			    event_names[event_index], response.event_type);
 			if(response.request_acknowledge) {
 				pending_event = &softs->pending_events[event_index];
 				pending_event->pending = true;
@@ -225,7 +236,7 @@ pqisrc_process_event_intr_src(pqisrc_softstate_t *softs,int obq_id)
 		os_eventtaskqueue_enqueue(softs);
 	}
 
-	DBG_FUNC("OUT");
+	DBG_FUNC("OUT\n");
 	return PQI_STATUS_SUCCESS;
 
 
@@ -241,7 +252,7 @@ pqisrc_build_send_vendor_request(pqisrc_softstate_t *softs,
 {
 	int ret = PQI_STATUS_SUCCESS;
 	ib_queue_t *op_ib_q = &softs->op_raid_ib_q[PQI_DEFAULT_IB_QUEUE];
-	ob_queue_t *ob_q = &softs->op_ob_q[PQI_DEFAULT_IB_QUEUE];
+	ob_queue_t const *ob_q = &softs->op_ob_q[PQI_DEFAULT_IB_QUEUE];
 
 	rcb_t *rcb = NULL;
 
@@ -341,7 +352,7 @@ err_out:
 static int
 pqi_event_configure(pqisrc_softstate_t *softs ,
                               pqi_event_config_request_t *request,
-                              dma_mem_t *buff)
+                              dma_mem_t const *buff)
 {
         int ret = PQI_STATUS_SUCCESS;
 
@@ -385,7 +396,7 @@ pqisrc_report_event_config(pqisrc_softstate_t *softs)
 	pqi_event_config_request_t request;
 	pqi_event_config_t  *event_config_p ;
 	dma_mem_t  buf_report_event ;
-	/*bytes to be allocaed for report event config data-in buffer */
+	/*bytes to be allocated for report event config data-in buffer */
 	uint32_t alloc_size = sizeof(pqi_event_config_t) ;
 	memset(&request, 0 , sizeof(request));
 
@@ -417,7 +428,7 @@ pqisrc_report_event_config(pqisrc_softstate_t *softs)
 	softs->event_config.num_event_descriptors = MIN(event_config_p->num_event_descriptors,
 		                                            PQI_MAX_EVENT_DESCRIPTORS) ;
 
-        for (i=0; i < softs->event_config.num_event_descriptors ;i++){
+       for (i=0; i < softs->event_config.num_event_descriptors; i++) {
 		softs->event_config.descriptors[i].event_type =
 					event_config_p->descriptors[i].event_type;
 	}
@@ -446,7 +457,7 @@ pqisrc_set_event_config(pqisrc_softstate_t *softs)
 	pqi_event_config_request_t request;
 	pqi_event_config_t *event_config_p;
 	dma_mem_t buf_set_event;
-	/*bytes to be allocaed for set event config data-out buffer */
+	/*bytes to be allocated for set event config data-out buffer */
 	uint32_t alloc_size = sizeof(pqi_event_config_t);
 	memset(&request, 0 , sizeof(request));
 
@@ -477,7 +488,7 @@ pqisrc_set_event_config(pqisrc_softstate_t *softs)
 	event_config_p->num_event_descriptors = softs->event_config.num_event_descriptors;
 
 
-	for (i=0; i < softs->event_config.num_event_descriptors ; i++){
+	for (i=0; i < softs->event_config.num_event_descriptors; i++) {
 		event_config_p->descriptors[i].event_type =
 					softs->event_config.descriptors[i].event_type;
 		if( pqisrc_event_type_to_event_index(event_config_p->descriptors[i].event_type) != -1)

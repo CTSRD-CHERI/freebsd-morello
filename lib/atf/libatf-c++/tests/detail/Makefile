@@ -1,5 +1,7 @@
 .include <bsd.init.mk>
 
+PACKAGE=	tests
+
 TESTSDIR=	${TESTSBASE}/lib/atf/libatf-c++/detail
 
 ATF=		${SRCTOP}/contrib/atf
@@ -27,5 +29,5 @@ BINDIR.${p}=	${TESTSDIR}
 .endfor
 version_helper.o: atf-version
 
-.include "../../../common.mk"
+.include "${SRCTOP}/lib/atf/common.mk"
 .include <bsd.test.mk>

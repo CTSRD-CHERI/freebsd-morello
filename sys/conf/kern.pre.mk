@@ -8,7 +8,11 @@
 # the rest of /usr/src, but they still always process SRCCONF even though
 # the normal mechanisms to prevent that (compiling out of tree) won't
 # work. To ensure they do work, we have to duplicate thee few lines here.
+.if exists(${SRCTOP}/src.conf)
+SRCCONF?=	${SRCTOP}/src.conf
+.else
 SRCCONF?=	/etc/src.conf
+.endif
 .if (exists(${SRCCONF}) || ${SRCCONF} != "/etc/src.conf") && !target(_srcconf_included_)
 .include "${SRCCONF}"
 _srcconf_included_:
@@ -74,10 +78,9 @@ CFLAGS=	${COPTFLAGS} ${DEBUG}
 CFLAGS+= ${INCLUDES} -D_KERNEL -DHAVE_KERNEL_OPTION_HEADERS -include opt_global.h
 CFLAGS_PARAM_INLINE_UNIT_GROWTH?=100
 CFLAGS_PARAM_LARGE_FUNCTION_GROWTH?=1000
-CFLAGS.gcc+= -fms-extensions -finline-limit=${INLINE_LIMIT}
+CFLAGS.gcc+= -finline-limit=${INLINE_LIMIT}
 CFLAGS.gcc+= --param inline-unit-growth=${CFLAGS_PARAM_INLINE_UNIT_GROWTH}
 CFLAGS.gcc+= --param large-function-growth=${CFLAGS_PARAM_LARGE_FUNCTION_GROWTH}
-CFLAGS.gcc+= -fms-extensions
 .if defined(CFLAGS_ARCH_PARAMS)
 CFLAGS.gcc+=${CFLAGS_ARCH_PARAMS}
 .endif
@@ -111,16 +114,8 @@ CFLAGS+=	${GCOV_CFLAGS}
 # the others.
 CFLAGS+=	${CONF_CFLAGS}
 
-.if defined(LINKER_FEATURES) && ${LINKER_FEATURES:Mbuild-id}
 LDFLAGS+=	--build-id=sha1
-.endif
 
-.if (${MACHINE_CPUARCH} == "aarch64" || ${MACHINE_CPUARCH} == "amd64" || \
-    ${MACHINE_CPUARCH} == "i386" || ${MACHINE} == "powerpc") && \
-    defined(LINKER_FEATURES) && ${LINKER_FEATURES:Mifunc} == "" && \
-    !make(install)
-.error amd64/arm64/i386/ppc* kernel requires linker ifunc support
-.endif
 .if ${MACHINE_CPUARCH} == "amd64"
 LDFLAGS+=	-z max-page-size=2097152
 .if ${LINKER_TYPE} != "lld"
@@ -209,16 +204,20 @@ CDDL_C=		${CC} -c ${CDDL_CFLAGS} ${WERROR} ${.IMPSRC}
 
 # Special flags for managing the compat compiles for ZFS
 ZFS_CFLAGS+=	-I$S/contrib/openzfs/module/icp/include \
+	-include $S/contrib/openzfs/include/sys/simd_config.h \
 	${CDDL_CFLAGS} -DBUILDING_ZFS -DHAVE_UIO_ZEROCOPY \
 	-DWITH_NETDUMP -D__KERNEL__ -D_SYS_CONDVAR_H_ -DSMP
 
 .if ${MACHINE_ARCH} == "amd64"
-ZFS_CFLAGS+= -D__x86_64 -DHAVE_SSE2 -DHAVE_SSSE3 -DHAVE_SSE4_1 -DHAVE_SSE4_2 \
-	-DHAVE_AVX -DHAVE_AVX2 -DHAVE_AVX512F -DHAVE_AVX512VL -DHAVE_AVX512BW
+ZFS_CFLAGS+= -D__x86_64 -DHAVE_TOOLCHAIN_SSE2 -DHAVE_TOOLCHAIN_SSSE3 \
+	-DHAVE_TOOLCHAIN_SSE4_1 -DHAVE_TOOLCHAIN_AVX -DHAVE_TOOLCHAIN_AVX2 \
+	-DHAVE_TOOLCHAIN_AVX512F -DHAVE_TOOLCHAIN_AVX512VL \
+	-DHAVE_TOOLCHAIN_AVX512BW \
+	-DHAVE_TOOLCHAIN_VAES -DHAVE_TOOLCHAIN_VPCLMULQDQ
 .endif
 
 .if ${MACHINE_ARCH} == "i386" || ${MACHINE_ARCH} == "powerpc" || \
-	${MACHINE_ARCH} == "powerpcspe" || ${MACHINE_ARCH} == "arm"
+	${MACHINE_ARCH} == "arm"
 ZFS_CFLAGS+= -DBITS_PER_LONG=32
 .else
 ZFS_CFLAGS+= -DBITS_PER_LONG=64
@@ -274,7 +273,7 @@ LINUXKPI_C=		${NORMAL_C} ${LINUXKPI_INCLUDES}
 # Infiniband C flags.  Correct include paths and omit errors that linux
 # does not honor.
 OFEDINCLUDES=	-I$S/ofed/include -I$S/ofed/include/uapi ${LINUXKPI_INCLUDES}
-OFEDNOERR=	-Wno-cast-qual -Wno-pointer-arith
+OFEDNOERR=	-Wno-cast-qual -Wno-pointer-arith ${NO_WUNUSED_BUT_SET_VARIABLE}
 OFEDCFLAGS=	${CFLAGS:N-I*} -DCONFIG_INFINIBAND_USER_MEM \
 		${OFEDINCLUDES} ${CFLAGS:M-I*} ${OFEDNOERR}
 OFED_C_NOIMP=	${CC} -c -o ${.TARGET} ${OFEDCFLAGS} ${WERROR}

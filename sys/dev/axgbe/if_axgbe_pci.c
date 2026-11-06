@@ -59,8 +59,8 @@
 #include "opt_inet6.h"
 #include "opt_rss.h"
 
-#ifdef RSS
 #include <net/rss_config.h>
+#ifdef RSS
 #include <netinet/in_rss.h>
 #endif
 
@@ -93,7 +93,7 @@ static int axgbe_if_msix_intr_assign(if_ctx_t, int);
 static void xgbe_free_intr(struct xgbe_prv_data *, struct resource *, void *, int);
 
 /* Init and Iflib routines */
-static void axgbe_pci_init(struct xgbe_prv_data *);
+static int axgbe_pci_init(struct xgbe_prv_data *);
 static void axgbe_pci_stop(if_ctx_t);
 static void xgbe_disable_rx_tx_int(struct xgbe_prv_data *, struct xgbe_channel *);
 static void xgbe_disable_rx_tx_ints(struct xgbe_prv_data *);
@@ -187,6 +187,9 @@ static device_method_t ax_methods[] = {
 	DEVMETHOD(device_probe, iflib_device_probe),
 	DEVMETHOD(device_attach, iflib_device_attach),
 	DEVMETHOD(device_detach, iflib_device_detach),
+	DEVMETHOD(device_shutdown, iflib_device_shutdown),
+	DEVMETHOD(device_suspend, iflib_device_suspend),
+	DEVMETHOD(device_resume, iflib_device_resume),
 
 	/* MII interface */
 	DEVMETHOD(miibus_readreg, axgbe_miibus_readreg),
@@ -354,7 +357,7 @@ axgbe_miibus_statchg(device_t dev)
 	    pdata->phy_link);
 
 	if (mii == NULL || ifp == NULL ||
-	    (if_getdrvflags(ifp) & IFF_DRV_RUNNING) == 0)
+	    !iflib_is_running(sc->ctx))
 		return;
 
 	if ((mii->mii_media_status & (IFM_ACTIVE | IFM_AVALID)) ==
@@ -549,13 +552,6 @@ axgbe_if_attach_pre(if_ctx_t ctx)
 	/* Initialize IFLIB if_softc_ctx_t */
 	axgbe_init_iflib_softc_ctx(sc);
 
-	/* Alloc channels */
-	if (axgbe_alloc_channels(ctx)) {
-		axgbe_error("Unable to allocate channel memory\n");
-		ret = ENOMEM;
-		goto release_bus_resource;
-        }
-
 	TASK_INIT(&pdata->service_work, 0, xgbe_service, pdata);
 
 	/* create the workqueue */
@@ -576,13 +572,16 @@ axgbe_if_attach_pre(if_ctx_t ctx)
 
 free_task_queue:
 	taskqueue_free(pdata->dev_workqueue);
-	axgbe_free_channels(sc);
 
 release_bus_resource:
         bus_release_resources(dev, axgbe_pci_mac_spec, mac_res);
 
 free_vlans:
 	free(pdata->active_vlans, M_AXGBE);
+	pdata->active_vlans = NULL;
+	mtx_destroy(&pdata->xpcs_lock);
+	mtx_destroy(&pdata->rss_mutex);
+	mtx_destroy(&pdata->mdio_mutex);
 
 	return (ret);
 } /* axgbe_if_attach_pre */
@@ -724,13 +723,17 @@ axgbe_initialize_rss_mapping(struct xgbe_prv_data *pdata)
 {
 	int i;
 
-	/* Get RSS key */
 #ifdef	RSS
 	int	qid;
 	uint32_t	rss_hash_config = 0;
+#endif
 
+	/* Get RSS key independently of software RSS queue placement. */
+	_Static_assert(sizeof(pdata->rss_key) == RSS_KEYSIZE,
+	    "RSS key size mismatch");
 	rss_getkey((uint8_t *)&pdata->rss_key);
 
+#ifdef	RSS
 	rss_hash_config = rss_gethashconfig();
 
 	if (rss_hash_config & RSS_HASHTYPE_RSS_IPV4)
@@ -740,8 +743,6 @@ axgbe_initialize_rss_mapping(struct xgbe_prv_data *pdata)
 	if (rss_hash_config & RSS_HASHTYPE_RSS_UDP_IPV4)
 		XGMAC_SET_BITS(pdata->rss_options, MAC_RSSCR, UDP4TE, 1);
 #else
-	arc4rand(&pdata->rss_key, ARRAY_SIZE(pdata->rss_key), 0);
-
 	XGMAC_SET_BITS(pdata->rss_options, MAC_RSSCR, IP2TE, 1);
 	XGMAC_SET_BITS(pdata->rss_options, MAC_RSSCR, TCP4TE, 1);
 	XGMAC_SET_BITS(pdata->rss_options, MAC_RSSCR, UDP4TE, 1);
@@ -1501,9 +1502,8 @@ axgbe_if_attach_post(if_ctx_t ctx)
 	scctx->isc_max_frame_size = if_getmtu(ifp) + 18;
 	scctx->isc_min_frame_size = XGMAC_MIN_PACKET;
 
-	axgbe_pci_init(pdata);
-
-	return (0);
+	ret = axgbe_pci_init(pdata);
+	return (ret < 0 ? -ret : ret);
 } /* axgbe_if_attach_post */
 
 static void
@@ -1547,6 +1547,8 @@ axgbe_interrupts_free(if_ctx_t ctx)
 	for (i = 0; i < scctx->isc_nrxqsets; i++) {
 
 		channel = pdata->channel[i];
+		if (channel == NULL)
+			continue;
 		axgbe_printf(2, "%s: rid %d\n", __func__, channel->dma_irq_rid);
 		irq.ii_res = channel->dma_irq_res;
 		irq.ii_tag = channel->dma_irq_tag;
@@ -1565,47 +1567,57 @@ axgbe_if_detach(if_ctx_t ctx)
 	mac_res[0] = pdata->xgmac_res;
 	mac_res[1] = pdata->xpcs_res;
 
-	phy_if->phy_stop(pdata);
-	phy_if->phy_exit(pdata);
+	if (pdata->phy_data != NULL) {
+		phy_if->phy_stop(pdata);
+		phy_if->phy_exit(pdata);
+		pdata->phy_data = NULL;
+	}
 
 	/* Free Interrupts */
 	axgbe_interrupts_free(ctx);
 
 	/* Free workqueues */
 	taskqueue_free(pdata->dev_workqueue);
+	pdata->dev_workqueue = NULL;
 
 	/* Release bus resources */
 	bus_release_resources(iflib_get_dev(ctx), axgbe_pci_mac_spec, mac_res);
 
 	/* Free VLAN bitmap */
 	free(pdata->active_vlans, M_AXGBE);
+	pdata->active_vlans = NULL;
 
 	axgbe_sysctl_exit(pdata);
+	pdata->sys_op = NULL;
+	mtx_destroy(&pdata->xpcs_lock);
+	mtx_destroy(&pdata->rss_mutex);
+	mtx_destroy(&pdata->mdio_mutex);
 
 	return (0);
 } /* axgbe_if_detach */
 
-static void
+static int
 axgbe_pci_init(struct xgbe_prv_data *pdata)
 {
 	struct xgbe_phy_if	*phy_if = &pdata->phy_if;
 	struct xgbe_hw_if       *hw_if = &pdata->hw_if;
-	int ret = 0;
+	int ret, reset_ret;
 
 	if (!__predict_false((test_bit(XGBE_DOWN, &pdata->dev_state)))) {
 		axgbe_printf(1, "%s: Starting when XGBE_UP\n", __func__);
-		return;
+		return (0);
 	}
 
-	hw_if->init(pdata);
+	ret = hw_if->init(pdata);
+	if (ret != 0) {
+		axgbe_error("%s: hardware init error %d\n", __func__, ret);
+		goto fail;
+	}
 
-        ret = phy_if->phy_start(pdata);
-        if (ret) {
-		axgbe_error("%s:  phy start %d\n", __func__, ret);
-		ret = hw_if->exit(pdata);
-		if (ret)
-			axgbe_error("%s: exit error %d\n", __func__, ret);
-		return;
+	ret = phy_if->phy_start(pdata);
+	if (ret != 0) {
+		axgbe_error("%s: phy start error %d\n", __func__, ret);
+		goto fail;
 	}
 
 	hw_if->enable_tx(pdata);
@@ -1621,6 +1633,13 @@ axgbe_pci_init(struct xgbe_prv_data *pdata)
 	xgbe_dump_mtl_registers(pdata);
 	xgbe_dump_mac_registers(pdata);
 	xgbe_dump_rmon_counters(pdata);
+	return (0);
+
+fail:
+	reset_ret = hw_if->exit(pdata);
+	if (reset_ret != 0)
+		axgbe_error("%s: cleanup reset error %d\n", __func__, reset_ret);
+	return (ret);
 }
 
 static void
@@ -1629,7 +1648,8 @@ axgbe_if_init(if_ctx_t ctx)
 	struct axgbe_if_softc   *sc = iflib_get_softc(ctx);
 	struct xgbe_prv_data    *pdata = &sc->pdata;	
 
-	axgbe_pci_init(pdata);
+	if (axgbe_pci_init(pdata) != 0)
+		iflib_init_failed(ctx);
 }
 
 static void
@@ -1685,7 +1705,7 @@ axgbe_if_tx_queues_alloc(if_ctx_t ctx, caddr_t *va, uint64_t *pa, int ntxqs,
 	if_softc_ctx_t		scctx = sc->scctx;
 	struct xgbe_channel	*channel;
 	struct xgbe_ring	*tx_ring;
-	int			i, j, k;
+	int			i, j;
 
 	MPASS(scctx->isc_ntxqsets > 0);
 	MPASS(scctx->isc_ntxqsets == ntxqsets);
@@ -1693,6 +1713,10 @@ axgbe_if_tx_queues_alloc(if_ctx_t ctx, caddr_t *va, uint64_t *pa, int ntxqs,
 
 	axgbe_printf(1, "%s: txqsets %d/%d txqs %d\n", __func__,
 	    scctx->isc_ntxqsets, ntxqsets, ntxqs);	
+	if (axgbe_alloc_channels(ctx) != 0) {
+		axgbe_error("Unable to allocate channel memory\n");
+		return (ENOMEM);
+	}
 
 	for (i = 0 ; i < ntxqsets; i++) {
 
@@ -1712,6 +1736,10 @@ axgbe_if_tx_queues_alloc(if_ctx_t ctx, caddr_t *va, uint64_t *pa, int ntxqs,
 			tx_ring->rdata =
 			    (struct xgbe_ring_data*)malloc(scctx->isc_ntxd[j] *
 			    sizeof(struct xgbe_ring_data), M_AXGBE, M_NOWAIT);
+			if (tx_ring->rdata == NULL) {
+				axgbe_error("Unable to allocate TX ring data\n");
+				goto tx_ring_fail;
+			}
 
 			/* Get the virtual & physical address of hw queues */
 			tx_ring->rdesc = (struct xgbe_ring_desc *)va[i*ntxqs + j];
@@ -1726,21 +1754,7 @@ axgbe_if_tx_queues_alloc(if_ctx_t ctx, caddr_t *va, uint64_t *pa, int ntxqs,
 	return (0);
 
 tx_ring_fail:
-
-	for (j = 0; j < i ; j++) {
-
-		channel = pdata->channel[j];
-
-		tx_ring = channel->tx_ring;
-		for (k = 0; k < ntxqs ; k++, tx_ring++) {
-			if (tx_ring && tx_ring->rdata)
-				free(tx_ring->rdata, M_AXGBE);
-		}
-		free(channel->tx_ring, M_AXGBE);
-
-		channel->tx_ring = NULL;
-	}
-
+	axgbe_if_queues_free(ctx);
 	return (ENOMEM);
 
 } /* axgbe_if_tx_queues_alloc */
@@ -1754,7 +1768,7 @@ axgbe_if_rx_queues_alloc(if_ctx_t ctx, caddr_t *va, uint64_t *pa, int nrxqs,
 	if_softc_ctx_t		scctx = sc->scctx;
 	struct xgbe_channel	*channel;
 	struct xgbe_ring	*rx_ring;
-	int			i, j, k;
+	int			i, j;
 
 	MPASS(scctx->isc_nrxqsets > 0);
 	MPASS(scctx->isc_nrxqsets == nrxqsets);
@@ -1785,6 +1799,10 @@ axgbe_if_rx_queues_alloc(if_ctx_t ctx, caddr_t *va, uint64_t *pa, int nrxqs,
 			rx_ring->rdata =
 			    (struct xgbe_ring_data*)malloc(scctx->isc_nrxd[j] *
 			    sizeof(struct xgbe_ring_data), M_AXGBE, M_NOWAIT);
+			if (rx_ring->rdata == NULL) {
+				axgbe_error("Unable to allocate RX ring data\n");
+				goto rx_ring_fail;
+			}
 
 			/* Get the virtual and physical address of the hw queues */
 			rx_ring->rdesc = (struct xgbe_ring_desc *)va[i*nrxqs + j];
@@ -1799,21 +1817,7 @@ axgbe_if_rx_queues_alloc(if_ctx_t ctx, caddr_t *va, uint64_t *pa, int nrxqs,
 	return (0);
 
 rx_ring_fail:
-
-	for (j = 0 ; j < i ; j++) {
-
-		channel = pdata->channel[j];
-
-		rx_ring = channel->rx_ring;
-		for (k = 0; k < nrxqs ; k++, rx_ring++) {
-			if (rx_ring && rx_ring->rdata)
-				free(rx_ring->rdata, M_AXGBE);
-		}
-		free(channel->rx_ring, M_AXGBE);
-
-		channel->rx_ring = NULL;
-	}
-
+	axgbe_if_queues_free(ctx);
 	return (ENOMEM);
 
 } /* axgbe_if_rx_queues_alloc */
@@ -1833,6 +1837,8 @@ axgbe_if_queues_free(if_ctx_t ctx)
 	for (i = 0 ; i < scctx->isc_ntxqsets; i++) {
 
 		channel = pdata->channel[i];
+		if (channel == NULL || channel->tx_ring == NULL)
+			continue;
 
 		tx_ring = channel->tx_ring;
 		for (j = 0; j < sctx->isc_ntxqs ; j++, tx_ring++) {
@@ -1846,6 +1852,8 @@ axgbe_if_queues_free(if_ctx_t ctx)
 	for (i = 0 ; i < scctx->isc_nrxqsets; i++) {
 
 		channel = pdata->channel[i];
+		if (channel == NULL || channel->rx_ring == NULL)
+			continue;
 
 		rx_ring = channel->rx_ring;
 		for (j = 0; j < sctx->isc_nrxqs ; j++, rx_ring++) {
@@ -2359,11 +2367,9 @@ axgbe_if_promisc_set(if_ctx_t ctx, int flags)
 {
 	struct axgbe_if_softc *sc = iflib_get_softc(ctx);
 	struct xgbe_prv_data *pdata = &sc->pdata;
-	if_t ifp = pdata->netdev;
 
-	axgbe_printf(1, "%s: MAC_PFR 0x%x drv_flags 0x%x if_flags 0x%x\n",
-	    __func__, XGMAC_IOREAD(pdata, MAC_PFR), if_getdrvflags(ifp),
-	    flags);
+	axgbe_printf(1, "%s: MAC_PFR 0x%x if_flags 0x%x\n",
+	    __func__, XGMAC_IOREAD(pdata, MAC_PFR), flags);
 
 	if (flags & IFF_PROMISC) {
 
@@ -2415,7 +2421,8 @@ axgbe_if_get_counter(if_ctx_t ctx, ift_counter cnt)
         case IFCOUNTER_OPACKETS:
                 return (pstats->txframecount_gb);
         case IFCOUNTER_OERRORS:
-                return (pstats->txframecount_gb - pstats->txframecount_g);
+                return (if_get_counter_default(ifp, cnt) +
+		    pstats->txframecount_gb - pstats->txframecount_g);
         case IFCOUNTER_IBYTES:
                 return (pstats->rxoctetcount_gb);
         case IFCOUNTER_OBYTES:

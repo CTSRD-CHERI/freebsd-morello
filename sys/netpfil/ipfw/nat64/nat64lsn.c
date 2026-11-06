@@ -187,7 +187,7 @@ nat64lsn_log(struct pfloghdr *plog, struct mbuf *m, sa_family_t family,
 	    (state->proto << 8) | (state->ip_dst & 0xff));
 	plog->ruleset[0] = '\0';
 	strlcpy(plog->ifname, "NAT64LSN", sizeof(plog->ifname));
-	ipfw_bpf_mtap2(plog, PFLOG_HDRLEN, m);
+	ipfw_pflog_tap(plog, m);
 }
 
 #define	HVAL(p, n, s)	jenkins_hash32((const uint32_t *)(p), (n), (s))
@@ -421,8 +421,7 @@ inspect_icmp_mbuf(struct mbuf **mp, uint8_t *proto, uint32_t *addr,
 
 	ip = mtod(*mp, struct ip *); /* Outer IP header */
 	off = (ip->ip_hl << 2) + ICMP_MINLEN;
-	if ((*mp)->m_len < off)
-		*mp = m_pullup(*mp, off);
+	*mp = m_pullup(*mp, off);
 	if (*mp == NULL)
 		return (ENOMEM);
 
@@ -446,16 +445,14 @@ inspect_icmp_mbuf(struct mbuf **mp, uint8_t *proto, uint32_t *addr,
 	 */
 	if ((*mp)->m_pkthdr.len < off + sizeof(struct ip) + ICMP_MINLEN)
 		return (EINVAL);
-	if ((*mp)->m_len < off + sizeof(struct ip) + ICMP_MINLEN)
-		*mp = m_pullup(*mp, off + sizeof(struct ip) + ICMP_MINLEN);
+	*mp = m_pullup(*mp, off + sizeof(struct ip) + ICMP_MINLEN);
 	if (*mp == NULL)
 		return (ENOMEM);
 	ip = mtodo(*mp, off); /* Inner IP header */
 	inner_proto = ip->ip_p;
 	off += ip->ip_hl << 2; /* Skip inner IP header */
 	*addr = ntohl(ip->ip_src.s_addr);
-	if ((*mp)->m_len < off + ICMP_MINLEN)
-		*mp = m_pullup(*mp, off + ICMP_MINLEN);
+	*mp = m_pullup(*mp, off + ICMP_MINLEN);
 	if (*mp == NULL)
 		return (ENOMEM);
 	switch (inner_proto) {
@@ -578,14 +575,11 @@ nat64lsn_reassemble4(struct nat64lsn_cfg *cfg, struct mbuf *m,
 		NAT64STAT_INC(&cfg->base.stats, noproto);
 		return (NULL);
 	}
-	if (m->m_len < len) {
-		m = m_pullup(m, len);
-		if (m == NULL) {
-			NAT64STAT_INC(&cfg->base.stats, nomem);
-			return (NULL);
-		}
-		ip = mtod(m, struct ip *);
+	if ((m = m_pullup(m, len)) == NULL) {
+		NAT64STAT_INC(&cfg->base.stats, nomem);
+		return (NULL);
 	}
+	ip = mtod(m, struct ip *);
 	switch (ip->ip_p) {
 	case IPPROTO_TCP:
 		*port = ntohs(L3HDR(ip, struct tcphdr *)->th_dport);
@@ -1731,7 +1725,8 @@ ipfw_nat64lsn(struct ip_fw_chain *ch, struct ip_fw_args *args,
 	if (cmd->opcode != O_EXTERNAL_ACTION ||
 	    insntod(cmd, kidx)->kidx != V_nat64lsn_eid ||
 	    icmd->opcode != O_EXTERNAL_INSTANCE ||
-	    (i = NAT64_LOOKUP(ch, icmd)) == NULL)
+	    (i = NAT64_LOOKUP(ch, icmd)) == NULL ||
+	    i->no.etlv != IPFW_TLV_NAT64LSN_NAME)
 		return (IP_FW_DENY);
 
 	*done = 1;	/* terminate the search */

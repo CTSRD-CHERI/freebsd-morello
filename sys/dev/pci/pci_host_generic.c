@@ -250,15 +250,22 @@ err_resource:
 int
 pci_host_generic_core_detach(device_t dev)
 {
-	struct generic_pcie_core_softc *sc;
-	int error, rid, tuple;
-
-	sc = device_get_softc(dev);
+	int error;
 
 	error = bus_generic_detach(dev);
 	if (error != 0)
 		return (error);
 
+	return (pci_host_generic_core_free(dev));
+}
+
+int
+pci_host_generic_core_free(device_t dev)
+{
+	struct generic_pcie_core_softc *sc;
+	int rid, tuple;
+
+	sc = device_get_softc(dev);
 	for (tuple = 0; tuple < MAX_RANGES_TUPLES; tuple++) {
 		rid = sc->ranges[tuple].rid;
 		if (sc->ranges[tuple].size == 0) {
@@ -503,7 +510,7 @@ generic_pcie_translate_resource(device_t dev, int type, rman_res_t start,
 
 struct resource *
 pci_host_generic_core_alloc_resource(device_t dev, device_t child, int type,
-    int *rid, rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
+    int rid, rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
 {
 	struct generic_pcie_core_softc *sc;
 	struct resource *res;
@@ -528,7 +535,7 @@ pci_host_generic_core_alloc_resource(device_t dev, device_t child, int type,
 	if (res == NULL) {
 		device_printf(dev, "%s FAIL: type=%d, rid=%d, "
 		    "start=%016jx, end=%016jx, count=%016jx, flags=%x\n",
-		    __func__, type, *rid, start, end, count, flags);
+		    __func__, type, rid, start, end, count, flags);
 	}
 	return (res);
 }

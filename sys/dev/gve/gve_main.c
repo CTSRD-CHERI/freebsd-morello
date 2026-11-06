@@ -88,7 +88,7 @@ gve_verify_driver_compatibility(struct gve_priv *priv)
 	    "FreeBSD %u", __FreeBSD_version);
 
 	bus_dmamap_sync(driver_info_mem.tag, driver_info_mem.map,
-	    BUS_DMASYNC_PREREAD);
+	    BUS_DMASYNC_PREWRITE);
 
 	err = gve_adminq_verify_driver_compatibility(priv,
 	    sizeof(struct gve_driver_info), driver_info_mem.bus_addr);
@@ -694,13 +694,17 @@ gve_free_rings(struct gve_priv *priv)
 {
 	gve_free_irqs(priv);
 
-	gve_free_tx_rings(priv, 0, priv->tx_cfg.num_queues);
-	free(priv->tx, M_GVE);
-	priv->tx = NULL;
+	if (priv->tx != NULL) {
+		gve_free_tx_rings(priv, 0, priv->tx_cfg.num_queues);
+		free(priv->tx, M_GVE);
+		priv->tx = NULL;
+	}
 
-	gve_free_rx_rings(priv, 0, priv->rx_cfg.num_queues);
-	free(priv->rx, M_GVE);
-	priv->rx = NULL;
+	if (priv->rx != NULL) {
+		gve_free_rx_rings(priv, 0, priv->rx_cfg.num_queues);
+		free(priv->rx, M_GVE);
+		priv->rx = NULL;
+	}
 }
 
 static int

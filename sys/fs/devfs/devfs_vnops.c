@@ -59,6 +59,7 @@
 #include <sys/stat.h>
 #include <sys/sx.h>
 #include <sys/sysctl.h>
+#include <sys/sysent.h>
 #include <sys/time.h>
 #include <sys/ttycom.h>
 #include <sys/unistd.h>
@@ -67,6 +68,7 @@
 static struct vop_vector devfs_vnodeops;
 static struct vop_vector devfs_specops;
 static const struct fileops devfs_ops_f;
+static const struct fileops devfs_ops_nonpassable_f;
 
 #include <fs/devfs/devfs.h>
 #include <fs/devfs/devfs_int.h>
@@ -200,14 +202,25 @@ devfs_foreach_cdevpriv(struct cdev *dev, int (*cb)(void *data, void *arg),
 void
 devfs_destroy_cdevpriv(struct cdev_privdata *p)
 {
+	struct file *fp;
+	struct cdev_priv *cdp;
 
 	mtx_assert(&cdevpriv_mtx, MA_OWNED);
-	KASSERT(p->cdpd_fp->f_cdevpriv == p,
-	    ("devfs_destoy_cdevpriv %p != %p", p->cdpd_fp->f_cdevpriv, p));
-	p->cdpd_fp->f_cdevpriv = NULL;
+	fp = p->cdpd_fp;
+	KASSERT(fp->f_cdevpriv == p,
+	    ("devfs_destoy_cdevpriv %p != %p", fp->f_cdevpriv, p));
+	cdp = cdev2priv((struct cdev *)fp->f_data);
+	cdp->cdp_fdpriv_dtrc++;
+	fp->f_cdevpriv = NULL;
 	LIST_REMOVE(p, cdpd_list);
 	mtx_unlock(&cdevpriv_mtx);
 	(p->cdpd_dtr)(p->cdpd_data);
+	mtx_lock(&cdevpriv_mtx);
+	MPASS(cdp->cdp_fdpriv_dtrc >= 1);
+	cdp->cdp_fdpriv_dtrc--;
+	if (cdp->cdp_fdpriv_dtrc == 0)
+		wakeup(&cdp->cdp_fdpriv_dtrc);
+	mtx_unlock(&cdevpriv_mtx);
 	free(p, M_CDEVPDATA);
 }
 
@@ -355,6 +368,9 @@ devfs_populate_vp(struct vnode *vp)
 	int locked;
 
 	ASSERT_VOP_LOCKED(vp, "devfs_populate_vp");
+
+	if (VN_IS_DOOMED(vp))
+		return (ENOENT);
 
 	dmp = VFSTODEVFS(vp->v_mount);
 	if (!devfs_populate_needed(dmp)) {
@@ -701,8 +717,13 @@ devfs_close(struct vop_close_args *ap)
 	 * process' controlling terminal.  In that case,
 	 * if the reference count is 2 (this last descriptor
 	 * plus the session), release the reference from the session.
+	 *
+	 * Some ABIs keep the controlling terminal after the last
+	 * slave descriptor is closed.  A closer with SV_PERSISTENT_CTTY
+	 * leaves the session reference in place.
 	 */
-	if (de->de_usecount == 2 && td != NULL) {
+	if (!SV_PROC_FLAG(curproc, SV_PERSISTENT_CTTY) &&
+	    de->de_usecount == 2 && td != NULL) {
 		p = td->td_proc;
 		PROC_LOCK(p);
 		if (vp == p->p_session->s_ttyvp) {
@@ -907,6 +928,22 @@ fiodgname_buf_get_ptr(void *fgnp, u_long com)
 }
 
 static int
+devfs_inotify(struct vop_inotify_args *ap)
+{
+	/*
+	 * Don't provide inotify for devfs nodes.  Most of the inotify hooks
+	 * don't fire anyway since devfs files do not use the vnode I/O path.
+	 * If that were not the case, however, inotify could be abused to leak
+	 * sensitive timing information, e.g., by watching for reads from
+	 * /dev/input.  Thus, we make inotify do nothing here as a safeguard.
+	 *
+	 * At some point it may be desirable to enable inotify for specific
+	 * device files.
+	 */
+	return (0);
+}
+
+static int
 devfs_ioctl(struct vop_ioctl_args *ap)
 {
 	struct fiodgname_arg *fgn;
@@ -1061,7 +1098,7 @@ devfs_lookupx(struct vop_lookup_args *ap, int *dm_unlock)
 	mp = dvp->v_mount;
 	dmp = VFSTODEVFS(mp);
 	dd = dvp->v_data;
-	*vpp = NULLVP;
+	*vpp = NULL;
 
 	if ((flags & ISLASTCN) && nameiop == RENAME)
 		return (EOPNOTSUPP);
@@ -1080,7 +1117,7 @@ devfs_lookupx(struct vop_lookup_args *ap, int *dm_unlock)
 		if ((flags & ISLASTCN) && nameiop != LOOKUP)
 			return (EINVAL);
 		*vpp = dvp;
-		VREF(dvp);
+		vref(dvp);
 		return (0);
 	}
 
@@ -1117,8 +1154,25 @@ devfs_lookupx(struct vop_lookup_args *ap, int *dm_unlock)
 		cdev = NULL;
 		DEVFS_DMP_HOLD(dmp);
 		sx_xunlock(&dmp->dm_lock);
+		dvplocked = VOP_ISLOCKED(dvp);
+
+		/*
+		 * Invoke the dev_clone handler.  Unlock dvp around it
+		 * to simplify the cloner operations.
+		 *
+		 * If dvp is reclaimed while we unlocked it, we return
+		 * with ENOENT by some of the paths below.  If cloner
+		 * returned cdev, then devfs_populate_vp() notes the
+		 * reclamation.  Otherwise, note that either our devfs
+		 * mount is being unmounted, then DEVFS_DMP_DROP()
+		 * returns true, and we return ENOENT this way.  Or,
+		 * because de == NULL, the check for it after the loop
+		 * returns ENOENT.
+		 */
+		VOP_UNLOCK(dvp);
 		EVENTHANDLER_INVOKE(dev_clone,
 		    td->td_ucred, pname, strlen(pname), &cdev);
+		vn_lock(dvp, dvplocked | LK_RETRY);
 
 		if (cdev == NULL)
 			sx_xlock(&dmp->dm_lock);
@@ -1170,7 +1224,7 @@ devfs_lookupx(struct vop_lookup_args *ap, int *dm_unlock)
 		if (error)
 			return (error);
 		if (*vpp == dvp) {
-			VREF(dvp);
+			vref(dvp);
 			*vpp = dvp;
 			return (0);
 		}
@@ -1256,6 +1310,7 @@ devfs_open(struct vop_open_args *ap)
 	int error, ref, vlocked;
 	struct cdevsw *dsw;
 	struct file *fpop;
+	bool passable;
 
 	if (vp->v_type == VBLK)
 		return (ENXIO);
@@ -1274,6 +1329,7 @@ devfs_open(struct vop_open_args *ap)
 		dev_relthread(dev, ref);
 		return (ENXIO);
 	}
+	passable = (dsw->d_flags & D_NONPASSABLE) == 0;
 
 	if (vp->v_type == VCHR)
 		devfs_usecount_add(vp);
@@ -1313,8 +1369,10 @@ devfs_open(struct vop_open_args *ap)
 	if (fp == NULL)
 		return (error);
 #endif
-	if (fp->f_ops == &badfileops)
-		finit(fp, fp->f_flag, DTYPE_VNODE, dev, &devfs_ops_f);
+	if (fp->f_ops == &badfileops) {
+		finit(fp, fp->f_flag, DTYPE_VNODE, dev,
+		    passable ? &devfs_ops_f : &devfs_ops_nonpassable_f);
+	}
 	return (error);
 }
 
@@ -2065,12 +2123,32 @@ static const struct fileops devfs_ops_f = {
 	.fo_flags =	DFLAG_PASSABLE | DFLAG_SEEKABLE
 };
 
+static const struct fileops devfs_ops_nonpassable_f = {
+	.fo_read =	devfs_read_f,
+	.fo_write =	devfs_write_f,
+	.fo_truncate =	devfs_truncate_f,
+	.fo_ioctl =	devfs_ioctl_f,
+	.fo_poll =	devfs_poll_f,
+	.fo_kqfilter =	devfs_kqfilter_f,
+	.fo_stat =	devfs_stat_f,
+	.fo_close =	devfs_close_f,
+	.fo_chmod =	vn_chmod,
+	.fo_chown =	vn_chown,
+	.fo_sendfile =	vn_sendfile,
+	.fo_seek =	vn_seek,
+	.fo_fill_kinfo = vn_fill_kinfo,
+	.fo_mmap =	devfs_mmap_f,
+	.fo_cmp =	devfs_cmp_f,
+	.fo_flags =	DFLAG_SEEKABLE
+};
+
 /* Vops for non-CHR vnodes in /dev. */
 static struct vop_vector devfs_vnodeops = {
 	.vop_default =		&default_vnodeops,
 
 	.vop_access =		devfs_access,
 	.vop_getattr =		devfs_getattr,
+	.vop_inotify =		devfs_inotify,
 	.vop_ioctl =		devfs_rioctl,
 	.vop_lookup =		devfs_lookup,
 	.vop_mknod =		devfs_mknod,
@@ -2104,6 +2182,7 @@ static struct vop_vector devfs_specops = {
 	.vop_create =		VOP_PANIC,
 	.vop_fsync =		vop_stdfsync,
 	.vop_getattr =		devfs_getattr,
+	.vop_inotify =		devfs_inotify,
 	.vop_ioctl =		devfs_ioctl,
 	.vop_link =		VOP_PANIC,
 	.vop_mkdir =		VOP_PANIC,

@@ -32,6 +32,7 @@
 #define	_LINUXKPI_LINUX_UACCESS_H_
 
 #include <sys/param.h>
+#include <sys/systm.h>
 #include <sys/lock.h>
 #include <sys/proc.h>
 
@@ -111,5 +112,28 @@ __copy_from_user_inatomic(void *to, const void __user *from,
 }
 #define	__copy_from_user_inatomic_nocache(to, from, n)	\
 	__copy_from_user_inatomic((to), (from), (n))
+/*
+ * __copy_from_user_inatomic_nocache() was renamed to
+ * copy_from_user_inatomic_nontemporal() in Linux 7.1. The change was
+ * backported to at least several LTS branches.
+ */
+#define	copy_from_user_inatomic_nontemporal(to, from, n)	\
+	__copy_from_user_inatomic((to), (from), (n))
+
+static inline long
+strncpy_from_user(char *dst, const char __user *src, long count)
+{
+	size_t done;
+	int error;
+
+	if (count <= 0)
+		return (0);
+	error = copyinstr(src, dst, count, &done);
+	if (error == 0)
+		return ((long)done - 1);	/* done includes the NUL */
+	if (error == ENAMETOOLONG)
+		return (count);			/* truncated, as Linux */
+	return (-EFAULT);
+}
 
 #endif					/* _LINUXKPI_LINUX_UACCESS_H_ */

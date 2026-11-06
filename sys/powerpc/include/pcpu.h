@@ -45,6 +45,7 @@ struct pvo_entry;
 	struct thread	*pc_vecthread;		/* current vec user */  \
 	struct thread	*pc_htmthread;		/* current htm user */  \
 	uintptr_t	pc_hwref;					\
+	uintptr_t	pc_pic;						\
 	int		pc_bsp;						\
 	volatile int	pc_awake;					\
 	uint32_t	pc_ipimask;					\
@@ -53,7 +54,7 @@ struct pvo_entry;
 	register_t	pc_disisave[CPUSAVE_LEN];			\
 	register_t	pc_dbsave[CPUSAVE_LEN];				\
 	void		*pc_restore;					\
-	vm_offset_t	pc_qmap_addr;
+	void		*pc_qmap_addr;
 
 #define PCPU_MD_AIM32_FIELDS						\
 	struct pvo_entry *qmap_pvo;					\
@@ -68,7 +69,8 @@ struct pvo_entry;
 	struct pvo_entry *qmap_pvo;					\
 	struct mtx	qmap_lock;					\
 	uint64_t	opal_hmi_flags;					\
-	char		__pad[1337];
+	void		*dbstack;		/* KDB trap stack top */	\
+	char		__pad[1329];
 
 #ifdef __powerpc64__
 #define PCPU_MD_AIM_FIELDS	PCPU_MD_AIM64_FIELDS
@@ -84,17 +86,26 @@ struct pvo_entry;
 #define	BOOKE_TLB_SAVELEN	16
 #define	BOOKE_TLBSAVE_LEN	(BOOKE_TLB_SAVELEN * BOOKE_TLB_MAXNEST)
 
+/*
+ * Stack used by critical-class interrupts taken in kernel mode.  Sized for the
+ * full panic path (powerpc_interrupt -> trap_fatal -> printf -> backtrace),
+ * since that is the only thing that ever runs on it.
+ */
+#define	BOOKE_CRITSTACK_SIZE	16384
+
 #ifdef __powerpc64__
-#define	BOOKE_PCPU_PAD	901
+#define	BOOKE_PCPU_PAD	869
 #else
-#define	BOOKE_PCPU_PAD	365
+#define	BOOKE_PCPU_PAD	349
 #endif
 #define PCPU_MD_BOOKE_FIELDS						\
 	register_t	critsave[BOOKE_CRITSAVE_LEN];		\
-	register_t	mchksave[CPUSAVE_LEN];			\
+	register_t	mchksave[BOOKE_CRITSAVE_LEN];		\
 	register_t	tlbsave[BOOKE_TLBSAVE_LEN];		\
 	register_t	tlb_level;				\
 	uintptr_t	*tlb_lock;				\
+	void		*critstack;				\
+	void		*mchkstack;				\
 	int		tid_next;					\
 	char		__pad[BOOKE_PCPU_PAD];
 

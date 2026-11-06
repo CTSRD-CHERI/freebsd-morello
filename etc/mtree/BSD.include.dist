@@ -2,23 +2,25 @@
 # Please see the file src/etc/mtree/README before making changes to this file.
 #
 
-/set type=dir uname=root gname=wheel mode=0755
+/set type=dir uname=root gname=wheel mode=0755 tags=package=clibs-dev
 .
     arpa
     ..
-    atf-c
+    atf-c               tags=package=atf-dev
     ..
-    atf-c++
+    atf-c++             tags=package=atf-dev
     ..
-    bsm
+    bsm                 tags=package=audit-dev
     ..
-    bsnmp
+    bsnmp               tags=package=bsnmp-dev
     ..
     c++
         v1
             __algorithm
             ..
             __atomic
+                support
+                ..
             ..
             __bit
             ..
@@ -36,6 +38,70 @@
             ..
             __coroutine
             ..
+            __cstddef
+            ..
+            __cxx03
+                __algorithm
+                ..
+                __atomic
+                ..
+                __bit
+                ..
+                __chrono
+                ..
+                __condition_variable
+                ..
+                __configuration
+                ..
+                __debug_utils
+                ..
+                __exception
+                ..
+                __functional
+                ..
+                __fwd
+                ..
+                __ios
+                ..
+                __iterator
+                ..
+                __locale_dir
+                    locale_base_api
+                    ..
+                ..
+                __math
+                ..
+                __memory
+                ..
+                __mutex
+                ..
+                __numeric
+                ..
+                __ostream
+                ..
+                __random
+                ..
+                __string
+                ..
+                __system_error
+                ..
+                __thread
+                    support
+                    ..
+                ..
+                __tuple
+                ..
+                __type_traits
+                ..
+                __utility
+                ..
+                __variant
+                ..
+                experimental
+                ..
+                ext
+                ..
+            ..
             __debug_utils
             ..
             __exception
@@ -43,6 +109,10 @@
             __expected
             ..
             __filesystem
+            ..
+            __flat_map
+            ..
+            __flat_set
             ..
             __format
             ..
@@ -57,6 +127,10 @@
             __locale_dir
                 locale_base_api
                 ..
+                support
+                    no_locale
+                    ..
+                ..
             ..
             __math
             ..
@@ -67,6 +141,8 @@
             __memory_resource
             ..
             __mutex
+            ..
+            __new
             ..
             __numeric
             ..
@@ -100,6 +176,8 @@
             ..
             __variant
             ..
+            __vector
+            ..
             experimental
                 __simd
                 ..
@@ -118,7 +196,7 @@
         scsi
         ..
     ..
-    casper
+    casper              tags=package=libcasper-dev
     ..
     crypto
     ..
@@ -127,9 +205,9 @@
         ..
         agp
         ..
-        an
-        ..
         ciss
+        ..
+        coreboot
         ..
         evdev
         ..
@@ -159,6 +237,8 @@
             mpilib
             ..
         ..
+        ntsync
+        ..
         nvme
         ..
         nvmf
@@ -181,6 +261,8 @@
         ..
         tcp_log
         ..
+        ufshci
+        ..
         usb
         ..
         veriexec
@@ -191,13 +273,11 @@
         ..
         wg
         ..
-        wi
-        ..
     ..
-    devdctl
+    devdctl             tags=package=utilities-dev
     ..
-    edit
-        readline
+    edit                tags=package=runtime-dev
+        readline        tags=package=runtime-dev
         ..
     ..
     fs
@@ -255,42 +335,42 @@
         ..
         virstor
         ..
-    ..
-    gssapi
-    ..
-    gssrpc
-    ..
-    infiniband
-        complib
+        zoned
         ..
-        iba
+    ..
+    gssapi              tags=package=kerberos-dev
+    ..
+    gssrpc              tags=package=kerberos-dev
+    ..
+    infiniband          tags=package=utilities-dev
+        complib         tags=package=utilities-dev
         ..
-        opensm
+        iba             tags=package=utilities-dev
         ..
-        vendor
+        opensm          tags=package=utilities-dev
+        ..
+        vendor          tags=package=utilities-dev
         ..
     ..
     isofs
         cd9660
         ..
     ..
-    kadm5
+    kadm5               tags=package=kerberos-dev
     ..
-    kdb5
+    krb5                tags=package=kerberos-dev
     ..
-    krb5
+    lib80211            tags=package=runtime-dev
     ..
-    lib80211
+    lib9p               tags=package=lib9p-dev
     ..
-    lib9p
+    libipt              tags=package=libipt-dev
     ..
-    libipt
+    libmilter           tags=package=libmilter-dev
     ..
-    libmilter
+    libxo               tags=package=runtime-dev
     ..
-    libxo
-    ..
-    lzma
+    lzma                tags=package=xz-dev
     ..
     machine
         pc
@@ -305,8 +385,6 @@
     net80211
     ..
     netgraph
-        atm
-        ..
         bluetooth
             include
             ..
@@ -331,7 +409,7 @@
         ..
     ..
     netpfil
-        pf
+        pf              tags=package=pf-dev
         ..
     ..
     netsmb
@@ -356,20 +434,20 @@
         stm
         ..
     ..
-    openssl
+    openssl             tags=package=openssl-dev
     ..
-    pcap
+    pcap                tags=package=utilities-dev
     ..
     protocols
     ..
-    rdma
+    rdma                tags=package=utilities-dev
     ..
     rpc
     ..
     rpcsvc
     ..
     security
-        audit
+        audit           tags=package=audit-dev
         ..
         mac_biba
         ..

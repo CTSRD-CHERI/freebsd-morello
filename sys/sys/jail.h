@@ -99,12 +99,109 @@ enum prison_state {
 #define	JAIL_UPDATE	0x02	/* Update parameters of existing jail */
 #define	JAIL_ATTACH	0x04	/* Attach to jail upon creation */
 #define	JAIL_DYING	0x08	/* Allow getting a dying jail */
-#define	JAIL_SET_MASK	0x0f	/* JAIL_DYING is deprecated/ignored here */
-#define	JAIL_GET_MASK	0x08
+#define JAIL_USE_DESC	0x10	/* Get/set jail in descriptor */
+#define JAIL_AT_DESC	0x20	/* Find/add jail under descriptor */
+#define	JAIL_GET_DESC	0x40	/* Return a new jail descriptor */
+#define	JAIL_OWN_DESC	0x80	/* Return a new owning jail descriptor */
+#define	JAIL_SET_MASK	0xff	/* JAIL_DYING is deprecated/ignored here */
+#define	JAIL_GET_MASK	0xf8
 
 #define	JAIL_SYS_DISABLE	0
 #define	JAIL_SYS_NEW		1
 #define	JAIL_SYS_INHERIT	2
+
+/*
+ * Names of the static jail parameters registered by the base kernel.
+ * Runtime-registered parameters (allow.mount.*, modules) are only
+ * discoverable via the security.jail.param sysctl tree.
+ */
+#define	JAIL_PARAM_JID			"jid"
+#define	JAIL_PARAM_LASTJID		"lastjid"
+#define	JAIL_PARAM_NAME			"name"
+#define	JAIL_PARAM_PARENT		"parent"
+#define	JAIL_PARAM_PATH			"path"
+#define	JAIL_PARAM_DESC			"desc"
+#define	JAIL_PARAM_ERRMSG		"errmsg"
+#define	JAIL_PARAM_PERSIST		"persist"
+#define	JAIL_PARAM_NOPERSIST		"nopersist"
+#define	JAIL_PARAM_DYING		"dying"
+#define	JAIL_PARAM_NODYING		"nodying"
+#define	JAIL_PARAM_SECURELEVEL		"securelevel"
+#define	JAIL_PARAM_DEVFS_RULESET	"devfs_ruleset"
+#define	JAIL_PARAM_ENFORCE_STATFS	"enforce_statfs"
+#define	JAIL_PARAM_CHILDREN_CUR		"children.cur"
+#define	JAIL_PARAM_CHILDREN_MAX		"children.max"
+#define	JAIL_PARAM_CPUSET_ID		"cpuset.id"
+#define	JAIL_PARAM_OSRELDATE		"osreldate"
+#define	JAIL_PARAM_OSRELEASE		"osrelease"
+
+#define	JAIL_PARAM_HOST			"host"
+#define	JAIL_PARAM_HOST_HOSTNAME	"host.hostname"
+#define	JAIL_PARAM_HOST_DOMAINNAME	"host.domainname"
+#define	JAIL_PARAM_HOST_HOSTUUID	"host.hostuuid"
+#define	JAIL_PARAM_HOST_HOSTID		"host.hostid"
+
+#if !defined(_KERNEL) || defined(INET)
+#define	JAIL_PARAM_IP4			"ip4"
+#define	JAIL_PARAM_IP4_ADDR		"ip4.addr"
+#define	JAIL_PARAM_IP4_SADDRSEL		"ip4.saddrsel"
+#define	JAIL_PARAM_IP4_NOSADDRSEL	"ip4.nosaddrsel"
+#endif
+#if !defined(_KERNEL) || defined(INET6)
+#define	JAIL_PARAM_IP6			"ip6"
+#define	JAIL_PARAM_IP6_ADDR		"ip6.addr"
+#define	JAIL_PARAM_IP6_SADDRSEL		"ip6.saddrsel"
+#define	JAIL_PARAM_IP6_NOSADDRSEL	"ip6.nosaddrsel"
+#endif
+#if !defined(_KERNEL) || defined(VIMAGE)
+#define	JAIL_PARAM_VNET			"vnet"
+#endif
+
+#define	JAIL_PARAM_ALLOW_SET_HOSTNAME	"allow.set_hostname"
+#define	JAIL_PARAM_ALLOW_NOSET_HOSTNAME	"allow.noset_hostname"
+#define	JAIL_PARAM_ALLOW_SYSVIPC	"allow.sysvipc"
+#define	JAIL_PARAM_ALLOW_NOSYSVIPC	"allow.nosysvipc"
+#define	JAIL_PARAM_ALLOW_RAW_SOCKETS	"allow.raw_sockets"
+#define	JAIL_PARAM_ALLOW_NORAW_SOCKETS	"allow.noraw_sockets"
+#define	JAIL_PARAM_ALLOW_CHFLAGS	"allow.chflags"
+#define	JAIL_PARAM_ALLOW_NOCHFLAGS	"allow.nochflags"
+#define	JAIL_PARAM_ALLOW_MOUNT		"allow.mount"
+#define	JAIL_PARAM_ALLOW_NOMOUNT	"allow.nomount"
+#define	JAIL_PARAM_ALLOW_QUOTAS		"allow.quotas"
+#define	JAIL_PARAM_ALLOW_NOQUOTAS	"allow.noquotas"
+#define	JAIL_PARAM_ALLOW_SOCKET_AF	"allow.socket_af"
+#define	JAIL_PARAM_ALLOW_NOSOCKET_AF	"allow.nosocket_af"
+#define	JAIL_PARAM_ALLOW_MLOCK		"allow.mlock"
+#define	JAIL_PARAM_ALLOW_NOMLOCK	"allow.nomlock"
+#define	JAIL_PARAM_ALLOW_RESERVED_PORTS	"allow.reserved_ports"
+#define	JAIL_PARAM_ALLOW_NORESERVED_PORTS \
+					"allow.noreserved_ports"
+#define	JAIL_PARAM_ALLOW_READ_MSGBUF	"allow.read_msgbuf"
+#define	JAIL_PARAM_ALLOW_NOREAD_MSGBUF	"allow.noread_msgbuf"
+#define	JAIL_PARAM_ALLOW_UNPRIV_DEBUG	"allow.unprivileged_proc_debug"
+#define	JAIL_PARAM_ALLOW_NOUNPRIV_DEBUG	"allow.nounprivileged_proc_debug"
+#define	JAIL_PARAM_ALLOW_SUSER		"allow.suser"
+#define	JAIL_PARAM_ALLOW_NOSUSER	"allow.nosuser"
+#if !defined(_KERNEL) || defined(VIMAGE)
+#define	JAIL_PARAM_ALLOW_NFSD		"allow.nfsd"
+#define	JAIL_PARAM_ALLOW_NONFSD		"allow.nonfsd"
+#endif
+#define	JAIL_PARAM_ALLOW_EXTATTR	"allow.extattr"
+#define	JAIL_PARAM_ALLOW_NOEXTATTR	"allow.noextattr"
+#define	JAIL_PARAM_ALLOW_ADJTIME	"allow.adjtime"
+#define	JAIL_PARAM_ALLOW_NOADJTIME	"allow.noadjtime"
+#define	JAIL_PARAM_ALLOW_SETTIME	"allow.settime"
+#define	JAIL_PARAM_ALLOW_NOSETTIME	"allow.nosettime"
+#define	JAIL_PARAM_ALLOW_ROUTING	"allow.routing"
+#define	JAIL_PARAM_ALLOW_NOROUTING	"allow.norouting"
+#define	JAIL_PARAM_ALLOW_UNPRIV_PARENT_TAMPER \
+					"allow.unprivileged_parent_tampering"
+#define	JAIL_PARAM_ALLOW_NOUNPRIV_PARENT_TAMPER \
+					"allow.nounprivileged_parent_tampering"
+#if !defined(_KERNEL) || defined(AUDIT)
+#define	JAIL_PARAM_ALLOW_SETAUDIT	"allow.setaudit"
+#define	JAIL_PARAM_ALLOW_NOSETAUDIT	"allow.nosetaudit"
+#endif
 
 #ifndef _KERNEL
 
@@ -115,7 +212,9 @@ int jail(struct jail *);
 int jail_set(struct iovec *, unsigned int, int);
 int jail_get(struct iovec *, unsigned int, int);
 int jail_attach(int);
+int jail_attach_jd(int);
 int jail_remove(int);
+int jail_remove_jd(int);
 __END_DECLS
 
 #else /* _KERNEL */
@@ -144,6 +243,8 @@ MALLOC_DECLARE(M_PRISON);
 #define	JAIL_META_PRIVATE	"meta"
 #define	JAIL_META_SHARED	"env"
 
+struct jaildesc;
+struct knlist;
 struct racct;
 struct prison_racct;
 
@@ -189,7 +290,10 @@ struct prison {
 	struct vnode	*pr_root;			/* (c) vnode to rdir */
 	struct prison_ip  *pr_addrs[PR_FAMILY_MAX];	/* (p,n) IPs of jail */
 	struct prison_racct *pr_prison_racct;		/* (c) racct jail proxy */
-	void		*pr_sparep[3];
+	struct knlist	*pr_klist;			/* (m) attached knotes */
+	struct label	*pr_label;			/* (m) MAC label */
+	LIST_HEAD(, jaildesc) pr_descs;			/* (a) attached descriptors */
+	void		*pr_sparep;
 	int		 pr_childcount;			/* (a) number of child jails */
 	int		 pr_childmax;			/* (p) maximum child jails */
 	unsigned	 pr_allow;			/* (p) PR_ALLOW_* flags */
@@ -261,6 +365,7 @@ struct prison_racct {
 #define	PR_ALLOW_SETTIME		0x00100000
 #define	PR_ALLOW_ROUTING		0x00200000
 #define	PR_ALLOW_UNPRIV_PARENT_TAMPER	0x00400000
+#define	PR_ALLOW_SETAUDIT		0x00800000
 
 /*
  * PR_ALLOW_PRISON0 are the allow flags that we apply by default to prison0,
@@ -268,7 +373,15 @@ struct prison_racct {
  * build time.  PR_ALLOW_ALL_STATIC should contain any bit above that we expect
  * to be used on the system, while PR_ALLOW_PRISON0 will be some subset of that.
  */
-#define	PR_ALLOW_ALL_STATIC		0x007f87ff
+#define	PR_ALLOW_ALL_STATIC		\
+    (PR_ALLOW_SET_HOSTNAME | PR_ALLOW_SYSVIPC | PR_ALLOW_RAW_SOCKETS | \
+     PR_ALLOW_CHFLAGS | PR_ALLOW_MOUNT | PR_ALLOW_QUOTAS | \
+     PR_ALLOW_SOCKET_AF | PR_ALLOW_MLOCK | PR_ALLOW_READ_MSGBUF | \
+     PR_ALLOW_UNPRIV_DEBUG | PR_ALLOW_SUSER | PR_ALLOW_RESERVED_PORTS | \
+     PR_ALLOW_KMEM_ACCESS | PR_ALLOW_NFSD | PR_ALLOW_EXTATTR | \
+     PR_ALLOW_ADJTIME | PR_ALLOW_SETTIME | PR_ALLOW_ROUTING | \
+     PR_ALLOW_UNPRIV_PARENT_TAMPER | PR_ALLOW_SETAUDIT)
+
 #define	PR_ALLOW_PRISON0		\
     (PR_ALLOW_ALL_STATIC & ~(PR_ALLOW_UNPRIV_PARENT_TAMPER))
 
@@ -425,10 +538,11 @@ SYSCTL_DECL(_security_jail_param);
 /*
  * Kernel support functions for jail().
  */
-struct ucred;
+struct knote;
 struct mount;
 struct sockaddr;
 struct statfs;
+struct ucred;
 struct vfsconf;
 
 /*
@@ -463,6 +577,7 @@ void prison_proc_free(struct prison *);
 void prison_proc_link(struct prison *, struct proc *);
 void prison_proc_unlink(struct prison *, struct proc *);
 void prison_proc_iterate(struct prison *, void (*)(struct proc *, void *), void *);
+void prison_remove(struct prison *);
 void prison_set_allow(struct ucred *cred, unsigned flag, int enable);
 bool prison_ischild(struct prison *, struct prison *);
 bool prison_isalive(const struct prison *);

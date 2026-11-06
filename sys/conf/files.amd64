@@ -13,14 +13,14 @@ include 	"conf/files.x86"
 #
 elf-vdso.so.o			standard				\
 	dependency	"$S/amd64/amd64/sigtramp.S assym.inc $S/conf/vdso_amd64.ldscript $S/tools/amd64_vdso.sh" \
-	compile-with	"env AWK='${AWK}' NM='${NM}' LD='${LD}' CC='${CC}' DEBUG='${DEBUG}' OBJCOPY='${OBJCOPY}' ELFDUMP='${ELFDUMP}' S='${S}' sh $S/tools/amd64_vdso.sh" \
+	compile-with	"env AWK='${AWK}' NM='${NM}' LD='${LD}' CC='${CC}' OBJCOPY='${OBJCOPY}' ELFDUMP='${ELFDUMP}' S='${S}' sh $S/tools/amd64_vdso.sh" \
 	no-ctfconvert	\
 	no-implicit-rule before-depend	\
 	clean		"elf-vdso.so.o elf-vdso.so.1 vdso_offsets.h sigtramp.pico"
 #
 elf-vdso32.so.o			optional	compat_freebsd32		\
 	dependency	"$S/amd64/ia32/ia32_sigtramp.S ia32_assym.h $S/conf/vdso_amd64_ia32.ldscript $S/tools/amd64_ia32_vdso.sh" \
-	compile-with	"env AWK='${AWK}' NM='${NM}' LD='${LD}' CC='${CC}' DEBUG='${DEBUG}' OBJCOPY='${OBJCOPY}' ELFDUMP='${ELFDUMP}' S='${S}' sh $S/tools/amd64_ia32_vdso.sh" \
+	compile-with	"env AWK='${AWK}' NM='${NM}' LD='${LD}' CC='${CC}' OBJCOPY='${OBJCOPY}' ELFDUMP='${ELFDUMP}' S='${S}' sh $S/tools/amd64_ia32_vdso.sh" \
 	no-ctfconvert	\
 	no-implicit-rule before-depend	\
 	clean		"elf-vdso32.so.o elf-vdso32.so.1 vdso_ia32_offsets.h ia32_sigtramp.pico"
@@ -77,6 +77,8 @@ amd64/amd64/fpu.c		standard
 amd64/amd64/gdb_machdep.c	optional	gdb
 amd64/amd64/initcpu.c		standard
 amd64/amd64/io.c		optional	io
+amd64/amd64/kexec_support.c	standard
+amd64/amd64/kexec_tramp.S	standard
 amd64/amd64/locore.S		standard	no-obj
 amd64/amd64/xen-locore.S	optional	xenhvm \
 	compile-with "${NORMAL_S} -g0" \
@@ -107,8 +109,15 @@ crypto/openssl/amd64/poly1305-x86_64.S	optional ossl
 crypto/openssl/amd64/sha1-x86_64.S	optional ossl
 crypto/openssl/amd64/sha256-x86_64.S	optional ossl
 crypto/openssl/amd64/sha512-x86_64.S	optional ossl
-crypto/openssl/amd64/ossl_aes_gcm.c	optional ossl
+crypto/openssl/amd64/ossl_aes_gcm_avx512.c	optional ossl
+crypto/openssl/ossl_aes_gcm.c	optional ossl
 dev/amdgpio/amdgpio.c		optional	amdgpio
+dev/apple_bce/apple_bce.c	optional	apple_bce pci
+dev/apple_bce/apple_bce_mailbox.c	optional	apple_bce pci
+dev/apple_bce/apple_bce_queue.c	optional	apple_bce pci
+dev/apple_bce/apple_bce_vhci.c	optional	apple_bce pci usb
+dev/asmc/asmc.c			optional	asmc isa
+dev/asmc/asmcmmio.c		optional	asmc isa
 dev/axgbe/if_axgbe_pci.c	optional	axp
 dev/axgbe/xgbe-desc.c		optional	axp
 dev/axgbe/xgbe-dev.c		optional	axp
@@ -209,6 +218,8 @@ ice_ddp.fw			optional ice_ddp	\
 	compile-with	"${CP} $S/contrib/dev/ice/ice-1.3.41.0.pkg ice_ddp.fw" \
 	no-obj no-implicit-rule				\
 	clean		"ice_ddp.fw"
+dev/intel/hfsts.c	optional	hfsts pci
+dev/intel/hfsts_isa.c	optional	hfsts isa pci
 dev/ioat/ioat.c			optional	ioat pci
 dev/ioat/ioat_test.c		optional	ioat pci
 dev/ixl/if_ixl.c		optional	ixl pci \
@@ -376,9 +387,17 @@ dev/smartpqi/smartpqi_sis.c     optional 	smartpqi
 dev/smartpqi/smartpqi_tag.c     optional 	smartpqi
 dev/sume/if_sume.c		optional	sume
 dev/syscons/apm/apm_saver.c	optional	apm_saver apm
+dev/thunderbolt/hcm.c		optional	thunderbolt
+dev/thunderbolt/nhi.c		optional	thunderbolt
+dev/thunderbolt/nhi_pci.c	optional	thunderbolt
+dev/thunderbolt/nhi_wmi.c	optional	acpi acpi_wmi thunderbolt
+dev/thunderbolt/router.c	optional	thunderbolt
+dev/thunderbolt/tb_acpi_pcib.c	optional	acpi thunderbolt
+dev/thunderbolt/tb_debug.c	optional	thunderbolt
+dev/thunderbolt/tb_dev.c	optional	thunderbolt
+dev/thunderbolt/tb_if.m		optional	thunderbolt
+dev/thunderbolt/tb_pcib.c	optional	acpi thunderbolt
 dev/tpm/tpm_crb.c		optional	tpm acpi
-dev/tpm/tpm_acpi.c		optional	tpm acpi
-dev/tpm/tpm_isa.c		optional	tpm isa
 dev/p2sb/p2sb.c			optional	p2sb pci
 dev/p2sb/lewisburg_gpiocm.c	optional	lbggpiocm p2sb
 dev/p2sb/lewisburg_gpio.c	optional	lbggpio lbggpiocm
@@ -418,6 +437,9 @@ contrib/openzfs/module/icp/asm-x86_64/blake3/blake3_avx2.S      optional zfs com
 contrib/openzfs/module/icp/asm-x86_64/blake3/blake3_avx512.S    optional zfs compile-with "${ZFS_S}"
 contrib/openzfs/module/icp/asm-x86_64/blake3/blake3_sse2.S      optional zfs compile-with "${ZFS_S}"
 contrib/openzfs/module/icp/asm-x86_64/blake3/blake3_sse41.S     optional zfs compile-with "${ZFS_S}"
+
+# zfs AVX2 implementation of aes-gcm from BoringSSL
+contrib/openzfs/module/icp/asm-x86_64/modes/aesni-gcm-avx2-vaes.S	optional zfs compile-with "${ZFS_S}"
 
 # zfs sha2 hash support
 zfs-sha256-x86_64.o		optional	zfs			\

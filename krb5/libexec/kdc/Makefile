@@ -1,5 +1,5 @@
 #
-# SPDX-License-Idendifier: BSD-2-Clause
+# SPDX-License-Identifier: BSD-2-Clause
 #
 # Copyright (c) 2025 FreeBSD Foundation
 #
@@ -43,6 +43,7 @@ DEFINES=-DLIBDIR=\"${KRB5_LIBDIR}\"
 CFLAGS+=${DEFINES} \
 	-I${KRB5_DIR}/include \
 	-I${KRB5_SRCTOP}/include \
+	-I${KRB5_OBJTOP}/util/profile \
 	-I${.OBJDIR}
 
 CLEANFILES+=	krb5kdc.8

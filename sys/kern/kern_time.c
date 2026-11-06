@@ -90,7 +90,7 @@ static int	user_clock_nanosleep(struct thread *td, clockid_t clock_id,
 		    int flags, const struct timespec *ua_rqtp,
 		    struct timespec *ua_rmtp);
 
-static void	itimer_start(void);
+static void	itimer_start(void *);
 static int	itimer_init(void *, int, int);
 static void	itimer_fini(void *, int);
 static void	itimer_enter(struct itimer *);
@@ -601,7 +601,9 @@ kern_clock_nanosleep(struct thread *td, clockid_t clock_id, int flags,
 	} while (error == 0 && is_abs_real && td->td_rtcgen == 0);
 	td->td_rtcgen = 0;
 	if (error != EWOULDBLOCK) {
-		if (TIMESEL(&sbtt, tmp))
+		if (precise)
+			sbtt = sbinuptime();
+		else if (TIMESEL(&sbtt, tmp))
 			sbtt += tc_tick_sbt;
 		if (sbtt >= sbt)
 			return (0);
@@ -1170,7 +1172,7 @@ eventratecheck(struct timeval *lasttime, int *cureps, int maxeps)
 }
 
 static void
-itimer_start(void)
+itimer_start(void *dummy __unused)
 {
 	static const struct kclock rt_clock = {
 		.timer_create  = realtimer_create,
@@ -1183,6 +1185,7 @@ itimer_start(void)
 		NULL, NULL, itimer_init, itimer_fini, UMA_ALIGN_PTR, 0);
 	register_posix_clock(CLOCK_REALTIME,  &rt_clock);
 	register_posix_clock(CLOCK_MONOTONIC, &rt_clock);
+	register_posix_clock(CLOCK_UPTIME, &rt_clock);
 	register_posix_clock(CLOCK_TAI, &rt_clock);
 	p31b_setcfg(CTL_P1003_1B_TIMERS, 200112L);
 	p31b_setcfg(CTL_P1003_1B_DELAYTIMER_MAX, INT_MAX);
@@ -1631,8 +1634,11 @@ realtimer_settime(struct itimer *it, int flags, struct itimerspec *value,
 		timespecclear(&val.it_interval);
 	}
 
-	if (ovalue != NULL)
-		realtimer_gettime(it, ovalue);
+	if (ovalue != NULL) {
+		error = realtimer_gettime(it, ovalue);
+		if (error != 0)
+			return (error);
+	}
 
 	it->it_time = val;
 	if (timespecisset(&val.it_value)) {

@@ -54,10 +54,13 @@ _Static_assert(sizeof(struct pthread_mutex) <= THR_PAGE_SIZE_MIN,
     "pthread_mutex is too large for off-page");
 
 /*
- * For adaptive mutexes, how many times to spin doing trylock2
- * before entering the kernel to block
+ * Keep the thread-private linkage off the cache line holding the lock word;
+ * Only meaningful where cache line is 64 bytes.
  */
-#define MUTEX_ADAPTIVE_SPINS	2000
+#if defined(__LP64__) && CACHE_LINE_SIZE == 64
+_Static_assert(offsetof(struct pthread_mutex, m_qe) >= CACHE_LINE_SIZE,
+    "m_qe must not share a cache line with m_lock.m_owner");
+#endif
 
 /*
  * Prototypes
@@ -128,40 +131,49 @@ mutex_init_link(struct pthread_mutex *m __unused)
 #endif
 }
 
-static void
-mutex_assert_is_owned(struct pthread_mutex *m __unused)
-{
-
 #if defined(_PTHREADS_INVARIANTS)
-	if (__predict_false(m->m_qe.tqe_prev == NULL))
-		PANIC("mutex %p own %#x is not on list %p %p",
+static void
+mutex_assert_is_owned(struct pthread_mutex *m, int line)
+{
+	if (__predict_false(m->m_qe.tqe_prev == NULL)) {
+		_thread_exitf(__FILE__, line,
+		    "mutex %p own %#x is not on list %p %p",
 		    m, m->m_lock.m_owner, m->m_qe.tqe_prev, m->m_qe.tqe_next);
-#endif
+	}
 }
 
 static void
-mutex_assert_not_owned(struct pthread *curthread __unused,
-    struct pthread_mutex *m __unused)
+mutex_assert_not_owned(struct pthread_mutex *m, int line)
 {
+	struct pthread *curthread;
 
-#if defined(_PTHREADS_INVARIANTS)
+	curthread = _get_curthread();
 	if (__predict_false(m->m_qe.tqe_prev != NULL ||
-	    m->m_qe.tqe_next != NULL))
-		PANIC("mutex %p own %#x is on list %p %p",
+	    m->m_qe.tqe_next != NULL)) {
+		_thread_exitf(__FILE__, line,
+		    "mutex %p own %#x is on list %p %p",
 		    m, m->m_lock.m_owner, m->m_qe.tqe_prev, m->m_qe.tqe_next);
+	}
 	if (__predict_false(is_robust_mutex(m) &&
 	    (m->m_lock.m_rb_lnk != 0 || m->m_rb_prev != NULL ||
 	    (is_pshared_mutex(m) && curthread->robust_list ==
 	    (uintptr_t)&m->m_lock) ||
 	    (!is_pshared_mutex(m) && curthread->priv_robust_list ==
-	    (uintptr_t)&m->m_lock))))
-		PANIC(
-    "mutex %p own %#x is on robust linkage %p %p head %p phead %p",
+	    (uintptr_t)&m->m_lock)))) {
+		_thread_exitf(__FILE__, line,
+	    "mutex %p own %#x is on robust linkage %p %p head %p phead %p",
 		    m, m->m_lock.m_owner, (void *)m->m_lock.m_rb_lnk,
 		    m->m_rb_prev, (void *)curthread->robust_list,
 		    (void *)curthread->priv_robust_list);
-#endif
+	}
 }
+
+#define	MUTEX_ASSERT_IS_OWNED(m)	mutex_assert_is_owned(m, __LINE__)
+#define	MUTEX_ASSERT_NOT_OWNED(m)	mutex_assert_not_owned(m, __LINE__)
+#else
+#define	MUTEX_ASSERT_IS_OWNED(m)	do {} while (0)
+#define	MUTEX_ASSERT_NOT_OWNED(m)	do {} while (0)
+#endif
 
 static bool
 is_pshared_mutex(struct pthread_mutex *m)
@@ -265,8 +277,7 @@ mutex_init_body(struct pthread_mutex *pmutex,
 		pmutex->m_lock.m_flags |= UMUTEX_ROBUST;
 	}
 	if (PMUTEX_TYPE(pmutex->m_flags) == PTHREAD_MUTEX_ADAPTIVE_NP) {
-		pmutex->m_spinloops =
-		    _thr_spinloops ? _thr_spinloops: MUTEX_ADAPTIVE_SPINS;
+		pmutex->m_spinloops = _thr_spinloops;
 		pmutex->m_yieldloops = _thr_yieldloops;
 	}
 }
@@ -475,8 +486,7 @@ _thr_mutex_destroy(pthread_mutex_t *mutex)
 			if (m1 != NULL) {
 				if ((uint32_t)m1->m_lock.m_owner !=
 				    UMUTEX_RB_OWNERDEAD) {
-					mutex_assert_not_owned(
-					    _get_curthread(), m1);
+					MUTEX_ASSERT_NOT_OWNED(m1);
 				}
 				__thr_pshared_destroy(mutex);
 			}
@@ -488,7 +498,7 @@ _thr_mutex_destroy(pthread_mutex_t *mutex)
 			ret = EBUSY;
 		} else {
 			*mutex = THR_MUTEX_DESTROYED;
-			mutex_assert_not_owned(_get_curthread(), m);
+			MUTEX_ASSERT_NOT_OWNED(m);
 			__thr_free(m);
 			ret = 0;
 		}
@@ -528,7 +538,7 @@ enqueue_mutex(struct pthread *curthread, struct pthread_mutex *m,
 
 	/* Add to the list of owned mutexes: */
 	if (error != EOWNERDEAD)
-		mutex_assert_not_owned(curthread, m);
+		MUTEX_ASSERT_NOT_OWNED(m);
 	qidx = mutex_qidx(m);
 	TAILQ_INSERT_TAIL(&curthread->mq[qidx], m, m_qe);
 	if (!is_pshared_mutex(m))
@@ -556,7 +566,7 @@ dequeue_mutex(struct pthread *curthread, struct pthread_mutex *m)
 	struct pthread_mutex *mp, *mn;
 	int qidx;
 
-	mutex_assert_is_owned(m);
+	MUTEX_ASSERT_IS_OWNED(m);
 	qidx = mutex_qidx(m);
 	if (is_robust_mutex(m)) {
 		mp = m->m_rb_prev;
@@ -865,7 +875,7 @@ mutex_self_trylock(struct pthread_mutex *m)
 
 	case PTHREAD_MUTEX_RECURSIVE:
 		/* Increment the lock count: */
-		if (m->m_count + 1 > 0) {
+		if (m->m_count < INT_MAX) {
 			m->m_count++;
 			ret = 0;
 		} else
@@ -934,7 +944,7 @@ mutex_self_lock(struct pthread_mutex *m, const struct timespec *abstime)
 
 	case PTHREAD_MUTEX_RECURSIVE:
 		/* Increment the lock count: */
-		if (m->m_count + 1 > 0) {
+		if (m->m_count < INT_MAX) {
 			m->m_count++;
 			ret = 0;
 		} else
@@ -1052,7 +1062,7 @@ _pthread_mutex_setprioceiling(pthread_mutex_t * __restrict mutex,
 
 	curthread = _get_curthread();
 	if (PMUTEX_OWNER_ID(m) == TID(curthread)) {
-		mutex_assert_is_owned(m);
+		MUTEX_ASSERT_IS_OWNED(m);
 		m1 = TAILQ_PREV(m, mutex_queue, m_qe);
 		m2 = TAILQ_NEXT(m, m_qe);
 		if ((m1 != NULL && m1->m_lock.m_ceilings[0] > (u_int)ceiling) ||
@@ -1109,6 +1119,8 @@ __pthread_mutex_setspinloops_np(pthread_mutex_t *mutex, int count)
 	struct pthread_mutex *m;
 	int ret;
 
+	if (count < 0)
+		return (EINVAL);
 	ret = check_and_init_mutex(mutex, &m);
 	if (ret == 0)
 		m->m_spinloops = count;
@@ -1133,10 +1145,12 @@ __pthread_mutex_setyieldloops_np(pthread_mutex_t *mutex, int count)
 	struct pthread_mutex *m;
 	int ret;
 
+	if (count < 0)
+		return (EINVAL);
 	ret = check_and_init_mutex(mutex, &m);
 	if (ret == 0)
 		m->m_yieldloops = count;
-	return (0);
+	return (ret);
 }
 
 int

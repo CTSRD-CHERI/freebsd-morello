@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -78,6 +68,38 @@ libzfs_error_init(int error)
 	}
 }
 
+static int
+in_container(void)
+{
+	char buffer[4096];
+	ssize_t count;
+	int fd;
+
+	if (access("/run/systemd/container", R_OK) == 0)
+		return (1);
+
+	fd = open("/proc/1/cgroup", O_RDONLY);
+	if (fd == -1)
+		return (0);
+
+	count = read(fd, buffer, sizeof (buffer) - 1);
+	close(fd);
+
+	if (count <= 0)
+		return (0);
+
+	buffer[count] = '\0';
+
+	if (strstr(buffer, "docker") ||
+	    strstr(buffer, "containerd") ||
+	    strstr(buffer, "kubepods") ||
+	    strstr(buffer, "lxc")) {
+		return (1);
+	}
+
+	return (0);
+}
+
 /*
  * zfs(4) is loaded by udev if there's a fstype=zfs device present,
  * but if there isn't, load them automatically;
@@ -104,6 +126,11 @@ libzfs_load_module(void)
 
 	const char *timeout_str = getenv("ZFS_MODULE_TIMEOUT");
 	int seconds = 10;
+
+	/* Set timeout to zero if inside of a container */
+	if (in_container())
+		seconds = 0;
+
 	if (timeout_str)
 		seconds = MIN(strtol(timeout_str, NULL, 0), 600);
 	struct itimerspec timeout = {.it_value.tv_sec = MAX(seconds, 0)};

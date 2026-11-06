@@ -52,6 +52,7 @@ Options:
                   (default: update.FreeBSD.org)
   -t address   -- Mail output of cron command, if any, to address
                   (default: root)
+  -v level     -- Set output verbosity to stats, nostats, or debug
   --not-running-from-cron
                -- Run without a tty, for use by automated tools
   --currently-running release
@@ -512,13 +513,13 @@ parse_cmdline () {
 			if [ $# -eq 1 ]; then usage; fi; shift
 			config_KeyPrint $1 || usage
 			;;
-		-s)
-			if [ $# -eq 1 ]; then usage; fi; shift
-			config_ServerName $1 || usage
-			;;
 		-r)
 			if [ $# -eq 1 ]; then usage; fi; shift
 			config_TargetRelease $1 || usage
+			;;
+		-s)
+			if [ $# -eq 1 ]; then usage; fi; shift
+			config_ServerName $1 || usage
 			;;
 		-t)
 			if [ $# -eq 1 ]; then usage; fi; shift
@@ -755,6 +756,10 @@ fetchupgrade_check_params () {
 	esac
 	chmod 700 ${WORKDIR}
 	cd ${WORKDIR} || exit 1
+	if [ "$BASEDIR" != / ] && [ -z "$UNAME_r" ]; then
+		echo "$(basename $0): -b basedir requires --currently-running to be specified."
+		exit 1
+	fi
 
 	# Generate release number.  The s/SECURITY/RELEASE/ bit exists
 	# to provide an upgrade path for FreeBSD Update 1.x users, since
@@ -1103,7 +1108,7 @@ IDS_check_params () {
 check_pkgbase()
 {
 	# Packaged base requires that pkg is bootstrapped.
-	if ! pkg -r ${BASEDIR} -N >/dev/null 2>/dev/null; then
+	if ! pkg -N -r ${BASEDIR} >/dev/null 2>/dev/null; then
 		return 1
 	fi
 	# uname(1) is used by pkg to determine ABI, so it should exist.
@@ -1402,7 +1407,7 @@ fetch_metadata_index () {
 fetch_metadata_bogus () {
 	echo
 	echo "The update metadata$1 is correctly signed, but"
-	echo "failed an integrity check."
+	echo "failed an integrity check ($2)."
 	echo "Cowardly refusing to proceed any further."
 	return 1
 }
@@ -1413,7 +1418,7 @@ fetch_metadata_index_merge () {
 	for METAFILE in $@; do
 		if [ `grep -E "^${METAFILE}\|" ${TINDEXHASH} | wc -l`	\
 		    -ne 1 ]; then
-			fetch_metadata_bogus " index"
+			fetch_metadata_bogus " index" "${METAFILE} count not 1"
 			return 1
 		fi
 
@@ -1436,7 +1441,7 @@ fetch_metadata_index_merge () {
 # specifically grepped out of ${TINDEXHASH}.
 fetch_metadata_index_sanity () {
 	if grep -qvE '^[0-9A-Z.-]+\|[0-9a-f]{64}$' tINDEX.new; then
-		fetch_metadata_bogus " index"
+		fetch_metadata_bogus " index" "unexpected entry in tINDEX.new"
 		return 1
 	fi
 }
@@ -1453,7 +1458,7 @@ fetch_metadata_sanity () {
 	# Check that the first four fields make sense.
 	if gunzip -c < files/$1.gz |
 	    grep -qvE "^[a-z]+\|[0-9a-z-]+\|${P}+\|[fdL-]\|"; then
-		fetch_metadata_bogus ""
+		fetch_metadata_bogus "" "invalid initial fields"
 		return 1
 	fi
 
@@ -1464,28 +1469,28 @@ fetch_metadata_sanity () {
 	# Sanity check entries with type 'f'
 	if grep -E '^f' sanitycheck.tmp |
 	    grep -qvE "^f\|${M}\|${H}\|${P}*\$"; then
-		fetch_metadata_bogus ""
+		fetch_metadata_bogus "" "invalid type f entry"
 		return 1
 	fi
 
 	# Sanity check entries with type 'd'
 	if grep -E '^d' sanitycheck.tmp |
 	    grep -qvE "^d\|${M}\|\|\$"; then
-		fetch_metadata_bogus ""
+		fetch_metadata_bogus "" "invalid type d entry"
 		return 1
 	fi
 
 	# Sanity check entries with type 'L'
 	if grep -E '^L' sanitycheck.tmp |
 	    grep -qvE "^L\|${M}\|${P}*\|\$"; then
-		fetch_metadata_bogus ""
+		fetch_metadata_bogus "" "invalid type L entry"
 		return 1
 	fi
 
 	# Sanity check entries with type '-'
 	if grep -E '^-' sanitycheck.tmp |
 	    grep -qvE "^-\|\|\|\|\|\|"; then
-		fetch_metadata_bogus ""
+		fetch_metadata_bogus "" "invalid type - entry"
 		return 1
 	fi
 
@@ -2576,7 +2581,7 @@ upgrade_merge () {
 
 			# Some files need special treatment.
 			case ${F} in
-			/etc/spwd.db | /etc/pwd.db | /etc/login.conf.db)
+			/etc/spwd.db | /etc/pwd.db | /etc/login.conf.db | /etc/ssl/cert.pem)
 				# Don't merge these -- we're rebuild them
 				# after updates are installed.
 				cp merge/old/${F} merge/new/${F}
@@ -3000,7 +3005,7 @@ install_from_index () {
 			if [ -z "${LINK}" ]; then
 				# Create a file, without setting flags.
 				gunzip < files/${HASH}.gz > ${HASH}
-				install -S -o ${OWNER} -g ${GROUP}	\
+				install -o ${OWNER} -g ${GROUP}		\
 				    -m ${PERM} ${HASH} ${BASEDIR}/${FPATH}
 				rm ${HASH}
 			else
@@ -3111,10 +3116,28 @@ Kernel updates have been installed.  Please reboot and run
 		    grep -E '^/libexec/ld-elf[^|]*\.so\.[0-9]+\|' > INDEX-NEW
 		install_from_index INDEX-NEW || return 1
 
-		# Install new shared libraries next
+		# Next, in order, libsys, libc, and libthr.
 		grep -vE '^/boot/' $1/INDEX-NEW |
 		    grep -vE '^[^|]+\|d\|' |
 		    grep -vE '^/libexec/ld-elf[^|]*\.so\.[0-9]+\|' |
+		    grep -E '^[^|]*/lib/libsys\.so\.[0-9]+\|' > INDEX-NEW
+		install_from_index INDEX-NEW || return 1
+		grep -vE '^/boot/' $1/INDEX-NEW |
+		    grep -vE '^[^|]+\|d\|' |
+		    grep -vE '^/libexec/ld-elf[^|]*\.so\.[0-9]+\|' |
+		    grep -E '^[^|]*/lib/libc\.so\.[0-9]+\|' > INDEX-NEW
+		install_from_index INDEX-NEW || return 1
+		grep -vE '^/boot/' $1/INDEX-NEW |
+		    grep -vE '^[^|]+\|d\|' |
+		    grep -vE '^/libexec/ld-elf[^|]*\.so\.[0-9]+\|' |
+		    grep -E '^[^|]*/lib/libthr\.so\.[0-9]+\|' > INDEX-NEW
+		install_from_index INDEX-NEW || return 1
+
+		# Install the rest of the shared libraries next
+		grep -vE '^/boot/' $1/INDEX-NEW |
+		    grep -vE '^[^|]+\|d\|' |
+		    grep -vE '^/libexec/ld-elf[^|]*\.so\.[0-9]+\|' |
+		    grep -vE '^[^|]*/lib/(libsys|libc|libthr)\.so\.[0-9]+\|' |
 		    grep -E '^[^|]*/lib/[^|]*\.so\.[0-9]+\|' > INDEX-NEW
 		install_from_index INDEX-NEW || return 1
 
@@ -3178,8 +3201,8 @@ Kernel updates have been installed.  Please reboot and run
 			cat <<-EOF
 
 Completing this upgrade requires removing old shared object files.
-Please rebuild all installed 3rd party software (e.g., programs
-installed from the ports tree) and then run
+Please upgrade or rebuild all installed 3rd party software (e.g.,
+programs installed with pkg or from the ports tree) and then run
 '`basename $0` [options] install' again to finish installing updates.
 			EOF
 			rm newfiles

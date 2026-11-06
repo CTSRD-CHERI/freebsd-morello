@@ -81,6 +81,10 @@ static void  swap_header_copy(HASHHDR *, HASHHDR *);
 #define	ERROR	(-1)
 #define	ABNORMAL (1)
 
+/* Cursor status */
+#define CURSOR_NOT_SET -1
+#define CURSOR_OVERFLOW -2
+
 #ifdef HASH_STATISTICS
 int hash_accesses, hash_collisions, hash_expansions, hash_overflows;
 #endif
@@ -151,12 +155,32 @@ __hash_open(const char *file, int flags, int mode,
 			RETURN_ERROR(EFTYPE, error1);
 		if ((int32_t)hashp->hash(CHARKEY, sizeof(CHARKEY)) != hashp->H_CHARKEY)
 			RETURN_ERROR(EFTYPE, error1);
+		/* Validate the remaining header variables. */
+		if (hashp->OVFL_POINT < 0 || hashp->OVFL_POINT >= NCACHED)
+			RETURN_ERROR(EFTYPE, error1);
+		if (hashp->LAST_FREED < 0 && hashp->LAST_FREED >= NCACHED)
+			RETURN_ERROR(EFTYPE, error1);
+		if (hashp->BSIZE < 0 || hashp->BSIZE > MAX_BSIZE)
+			RETURN_ERROR(EFTYPE, error1);
+		/* Both masks should be derived from power-of-2 values. */
+		if (((hashp->HIGH_MASK + 1) & hashp->HIGH_MASK) != 0 ||
+		    ((hashp->LOW_MASK + 1) & hashp->LOW_MASK) != 0)
+			RETURN_ERROR(EFTYPE, error1);
+		if (hashp->LOW_MASK >= hashp->HIGH_MASK)
+			RETURN_ERROR(EFTYPE, error1);
+
+		hashp->BSHIFT = __log2(hashp->BSIZE);
+		hashp->SGSIZE = DEF_SEGSIZE;
+		hashp->SSHIFT = DEF_SEGSIZE_SHIFT;
 		/*
 		 * Figure out how many segments we need.  Max_Bucket is the
 		 * maximum bucket number, so the number of buckets is
 		 * max_bucket + 1.
 		 */
 		nsegs = howmany(hashp->MAX_BUCKET + 1, hashp->SGSIZE);
+		/* Verify that DSIZE can hold the required number of segments. */
+		if (hashp->DSIZE < nsegs)
+			RETURN_ERROR(EFTYPE, error1);
 		if (alloc_segs(hashp, nsegs))
 			/*
 			 * If alloc_segs fails, table will have been destroyed
@@ -167,6 +191,8 @@ __hash_open(const char *file, int flags, int mode,
 		bpages = (hashp->SPARES[hashp->OVFL_POINT] +
 		    (hashp->BSIZE << BYTE_SHIFT) - 1) >>
 		    (hashp->BSHIFT + BYTE_SHIFT);
+		if (bpages < 0 || bpages >= NCACHED)
+			RETURN_ERROR(EFTYPE, error1);
 
 		hashp->nmaps = bpages;
 		(void)memset(&hashp->mapp[0], 0, bpages * sizeof(u_int32_t *));
@@ -180,7 +206,7 @@ __hash_open(const char *file, int flags, int mode,
 
 	hashp->new_file = new_table;
 	hashp->save_file = file && (flags & O_RDWR);
-	hashp->cbucket = -1;
+	hashp->cbucket = CURSOR_NOT_SET;
 	if (!(dbp = (DB *)malloc(sizeof(DB)))) {
 		save_errno = errno;
 		hdestroy(hashp);
@@ -711,11 +737,11 @@ hash_seq(const DB *dbp, DBT *key, DBT *data, u_int32_t flag)
 #ifdef HASH_STATISTICS
 	hash_accesses++;
 #endif
-	if (flag == R_FIRST) {
+	if (flag == R_FIRST || hashp->cbucket == CURSOR_NOT_SET) {
 		hashp->cbucket = 0;
 		hashp->cndx = 1;
 		hashp->cpage = NULL;
-	} else if (hashp->cbucket < 0) { /* R_NEXT */
+	} else if (hashp->cbucket <= CURSOR_OVERFLOW) {
 		return (ABNORMAL);
 	}
 next_bucket:
@@ -734,7 +760,7 @@ next_bucket:
 			}
 			hashp->cbucket = bucket;
 			if ((u_int32_t)hashp->cbucket > hashp->MAX_BUCKET) {
-				hashp->cbucket = -1;
+				hashp->cbucket = CURSOR_OVERFLOW;
 				return (ABNORMAL);
 			}
 		} else {
@@ -882,26 +908,27 @@ alloc_segs(HTAB *hashp, int nsegs)
 
 	int save_errno;
 
-	if ((hashp->dir =
-	    calloc(hashp->DSIZE, sizeof(SEGMENT *))) == NULL) {
-		save_errno = errno;
-		(void)hdestroy(hashp);
-		errno = save_errno;
-		return (-1);
+	if (nsegs < 0) {
+		errno = EINVAL;
+		goto err_out;
 	}
+	if ((hashp->dir = calloc(hashp->DSIZE, sizeof(SEGMENT *))) == NULL)
+		goto err_out;
 	hashp->nsegs = nsegs;
 	if (nsegs == 0)
 		return (0);
 	/* Allocate segments */
-	if ((store = calloc(nsegs << hashp->SSHIFT, sizeof(SEGMENT))) == NULL) {
-		save_errno = errno;
-		(void)hdestroy(hashp);
-		errno = save_errno;
-		return (-1);
-	}
+	if ((store = calloc(nsegs << hashp->SSHIFT, sizeof(SEGMENT))) == NULL)
+		goto err_out;
 	for (i = 0; i < nsegs; i++)
 		hashp->dir[i] = &store[i << hashp->SSHIFT];
 	return (0);
+
+err_out:
+	save_errno = errno;
+	(void)hdestroy(hashp);
+	errno = save_errno;
+	return (-1);
 }
 
 #if BYTE_ORDER == LITTLE_ENDIAN

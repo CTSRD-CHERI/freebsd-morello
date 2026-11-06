@@ -36,21 +36,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-static const struct {
-	void	*addr;
-	int	ok[2];	/* Depending on security.bsd.map_at_zero {0, !=0}. */
-} map_at_zero_tests[] = {
-	{ (void *)0,			{ 0, 1 } }, /* Test sysctl. */
-	{ (void *)1,			{ 0, 0 } },
-	{ (void *)(PAGE_SIZE - 1),	{ 0, 0 } },
-	{ (void *)PAGE_SIZE,		{ 1, 1 } },
-	{ (void *)-1,			{ 0, 0 } },
-	{ (void *)(-PAGE_SIZE),		{ 0, 0 } },
-	{ (void *)(-1 - PAGE_SIZE),	{ 0, 0 } },
-	{ (void *)(-1 - PAGE_SIZE - 1),	{ 0, 0 } },
-	{ (void *)(0x1000 * PAGE_SIZE),	{ 1, 1 } },
-};
-
 #define	MAP_AT_ZERO	"security.bsd.map_at_zero"
 
 #ifdef __LP64__
@@ -68,6 +53,22 @@ ATF_TC_BODY(mmap__map_at_zero, tc)
 	int map_at_zero;
 	bool allow_wx;
 	int prot_flags;
+	size_t pgsz = getpagesize();
+
+	const struct {
+		void	*addr;
+		int	ok[2];	/* Depending on security.bsd.map_at_zero {0, !=0}. */
+	} map_at_zero_tests[] = {
+		{ (void *)0,			{ 0, 1 } }, /* Test sysctl. */
+		{ (void *)1,			{ 0, 0 } },
+		{ (void *)(pgsz - 1),		{ 0, 0 } },
+		{ (void *)pgsz,			{ 1, 1 } },
+		{ (void *)-1,			{ 0, 0 } },
+		{ (void *)(-pgsz),		{ 0, 0 } },
+		{ (void *)(-1 - pgsz),		{ 0, 0 } },
+		{ (void *)(-1 - pgsz - 1),	{ 0, 0 } },
+		{ (void *)(0x1000 * pgsz),	{ 1, 1 } },
+	};
 
 	len = sizeof(map_at_zero);
 	if (sysctlbyname(MAP_AT_ZERO, &map_at_zero, &len, NULL, 0) == -1) {
@@ -362,6 +363,35 @@ ATF_TC_BODY(mmap__maxprot_shm, tc)
 	ATF_REQUIRE(close(fd) == 0);
 }
 
+/* A regression test for a bug in the device pager. */
+ATF_TC_WITHOUT_HEAD(mmap__device_reinsert);
+ATF_TC_BODY(mmap__device_reinsert, tc)
+{
+	void *p;
+	int fd;
+
+	fd = open("/dev/devstat", O_RDONLY);
+	ATF_REQUIRE(fd >= 0);
+
+	p = mmap(NULL, getpagesize(), PROT_READ, MAP_SHARED, fd, 0);
+	ATF_REQUIRE(p != MAP_FAILED);
+
+	/*
+	 * Use mlock() to trigger a fault, since msync() will not actually
+	 * remove the page from the process page tables.
+	 */
+	ATF_REQUIRE(mlock(p, getpagesize()) == 0);
+	ATF_REQUIRE(munlock(p, getpagesize()) == 0);
+	ATF_REQUIRE(msync(p, getpagesize(), MS_INVALIDATE) == 0);
+	ATF_REQUIRE(mlock(p, getpagesize()) == 0);
+	ATF_REQUIRE(munlock(p, getpagesize()) == 0);
+	ATF_REQUIRE(msync(p, getpagesize(), MS_INVALIDATE) == 0);
+	ATF_REQUIRE(mlock(p, getpagesize()) == 0);
+	ATF_REQUIRE(munlock(p, getpagesize()) == 0);
+
+	ATF_REQUIRE(munmap(p, getpagesize()) == 0);
+}
+
 ATF_TP_ADD_TCS(tp)
 {
 	ATF_TP_ADD_TC(tp, mmap__map_at_zero);
@@ -371,6 +401,7 @@ ATF_TP_ADD_TCS(tp)
 	ATF_TP_ADD_TC(tp, mmap__write_only);
 	ATF_TP_ADD_TC(tp, mmap__maxprot_basic);
 	ATF_TP_ADD_TC(tp, mmap__maxprot_shm);
+	ATF_TP_ADD_TC(tp, mmap__device_reinsert);
 
 	return (atf_no_error());
 }

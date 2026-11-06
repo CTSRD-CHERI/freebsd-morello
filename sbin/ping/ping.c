@@ -829,7 +829,6 @@ ping(int argc, char *const *argv)
 			    sweepmin, sweepmax);
 		else
 			(void)printf(": %d data bytes\n", datalen);
-
 	} else {
 		if (sweepmax)
 			(void)printf("PING %s: (%d ... %d) data bytes\n",
@@ -837,6 +836,7 @@ ping(int argc, char *const *argv)
 		else
 			(void)printf("PING %s: %d data bytes\n", hostname, datalen);
 	}
+	(void)fflush(stdout);
 
 	/*
 	 * Use sigaction() instead of signal() to get unambiguous semantics,
@@ -982,8 +982,10 @@ ping(int argc, char *const *argv)
 			(void)clock_gettime(CLOCK_MONOTONIC, &last);
 			if (ntransmitted - nreceived - 1 > nmissedmax) {
 				nmissedmax = ntransmitted - nreceived - 1;
-				if (options & F_MISSED)
-					(void)write(STDOUT_FILENO, &BBELL, 1);
+				if (options & F_MISSED) {
+					(void)putc(BBELL, stdout);
+					(void)fflush(stdout);
+				}
 			}
 		}
 	}
@@ -1029,9 +1031,16 @@ pinger(void)
 		 */
 		tv32.tv32_sec = (uint32_t)htonl(now.tv_sec);
 		tv32.tv32_nsec = (uint32_t)htonl(now.tv_nsec);
-		if (options & F_TIME)
+		if (options & F_TIME) {
+			/*
+			 * However, per RFC 792 the Originate Timestamp (otime)
+			 * should be milliseconds since midnight UTC. Something,
+			 * that CLOCK_MONOTONIC does not guarantee.
+			 */
+			(void)clock_gettime(CLOCK_REALTIME, &now);
 			icp.icmp_otime = htonl((now.tv_sec % (24*60*60))
 				* 1000 + now.tv_nsec / 1000000);
+		}
 		if (timing)
 			bcopy((void *)&tv32,
 			    (void *)&outpack[ICMP_MINLEN + phdr_len],
@@ -1077,8 +1086,10 @@ pinger(void)
 	}
 	ntransmitted++;
 	sntransmitted++;
-	if (!(options & F_QUIET) && options & F_DOT)
-		(void)write(STDOUT_FILENO, &DOT[DOTidx++ % DOTlen], 1);
+	if (!(options & F_QUIET) && options & F_DOT) {
+		(void)putc(DOT[DOTidx++ % DOTlen], stdout);
+		(void)fflush(stdout);
+	}
 }
 
 /*
@@ -1098,7 +1109,7 @@ pr_pack(char *buf, ssize_t cc, struct sockaddr_in *from, struct timespec *tv)
 	const u_char *icmp_data_raw;
 	ssize_t icmp_data_raw_len;
 	double triptime;
-	int dupflag, i, j, recv_len;
+	int avail, dupflag, i, j, recv_len;
 	int8_t hlen;
 	uint16_t seq;
 	static int old_rrlen;
@@ -1108,6 +1119,7 @@ pr_pack(char *buf, ssize_t cc, struct sockaddr_in *from, struct timespec *tv)
 	struct icmp oicmp;
 	const u_char *oicmp_raw;
 
+	bzero(&icp, sizeof(icp));
 	/*
 	 * Get size of IP header of the received packet.
 	 * The header length is contained in the lower four bits of the first
@@ -1147,6 +1159,20 @@ pr_pack(char *buf, ssize_t cc, struct sockaddr_in *from, struct timespec *tv)
 	if (icp.icmp_type == icmp_type_rsp) {
 		if (icp.icmp_id != ident)
 			return;			/* 'Twas not our ECHO */
+		if (icmp_type_rsp == ICMP_MASKREPLY &&
+		    cc < (ssize_t)(ICMP_MINLEN + MASK_LEN)) {
+			if (options & F_VERBOSE)
+				warnx("truncated mask reply (%zd bytes) from %s",
+				    cc, inet_ntoa(from->sin_addr));
+			return;
+		}
+		if (icmp_type_rsp == ICMP_TSTAMPREPLY &&
+		    cc < (ssize_t)(ICMP_MINLEN + TS_LEN)) {
+			if (options & F_VERBOSE)
+				warnx("truncated timestamp reply (%zd bytes) from %s",
+				    cc, inet_ntoa(from->sin_addr));
+			return;
+		}
 		++nreceived;
 		triptime = 0.0;
 		if (timing) {
@@ -1200,9 +1226,10 @@ pr_pack(char *buf, ssize_t cc, struct sockaddr_in *from, struct timespec *tv)
 			return;
 		}
 
-		if (options & F_DOT)
-			(void)write(STDOUT_FILENO, &BSPACE, 1);
-		else {
+		if (options & F_DOT) {
+			(void)putc(BSPACE, stdout);
+			(void)fflush(stdout);
+		} else {
 			(void)printf("%zd bytes from %s: icmp_seq=%u", cc,
 			    pr_addr(from->sin_addr), seq);
 			(void)printf(" ttl=%d", ip.ip_ttl);
@@ -1210,8 +1237,10 @@ pr_pack(char *buf, ssize_t cc, struct sockaddr_in *from, struct timespec *tv)
 				(void)printf(" time=%.3f ms", triptime);
 			if (dupflag)
 				(void)printf(" (DUP!)");
-			if (options & F_AUDIBLE)
-				(void)write(STDOUT_FILENO, &BBELL, 1);
+			if (options & F_AUDIBLE) {
+				(void)putc(BBELL, stdout);
+				(void)fflush(stdout);
+			}
 			if (options & F_MASK) {
 				/* Just prentend this cast isn't ugly */
 				(void)printf(" mask=%s",
@@ -1244,9 +1273,11 @@ pr_pack(char *buf, ssize_t cc, struct sockaddr_in *from, struct timespec *tv)
 	(void)printf("\nwrong data byte #%d should be 0x%x but was 0x%x",
 	    i, *dp, *cp);
 					(void)printf("\ncp:");
+					avail = (int)MIN((ssize_t)datalen,
+					    i + cc);
 					cp = (u_char*)(buf + hlen +
 					    offsetof(struct icmp, icmp_data));
-					for (i = 0; i < datalen; ++i, ++cp) {
+					for (i = 0; i < avail; ++i, ++cp) {
 						if ((i % 16) == 8)
 							(void)printf("\n\t");
 						(void)printf(" %2x", *cp);

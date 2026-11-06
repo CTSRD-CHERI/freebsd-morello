@@ -183,7 +183,7 @@ mxge_enable_wc(mxge_softc_t *sc)
 
 	sc->wc = 1;
 	len = rman_get_size(sc->mem_res);
-	err = pmap_change_attr((vm_offset_t) sc->sram,
+	err = pmap_change_attr(__DEVOLATILE(void *, sc->sram),
 			       len, PAT_WRITE_COMBINING);
 	if (err != 0) {
 		device_printf(sc->dev, "pmap_change_attr failed, %d\n",
@@ -1804,7 +1804,7 @@ mxge_encap_tso(struct mxge_slice_state *ss, struct mbuf *m,
 	uint32_t low, high_swapped;
 	int len, seglen, cum_len, cum_len_next;
 	int next_is_first, chop, cnt, rdma_count, small;
-	uint16_t pseudo_hdr_offset, cksum_offset, mss, sum;
+	uint16_t pseudo_hdr_offset, cksum_offset, mss, sum = 0;
 	uint8_t flags, flags_next;
 	static int once;
 
@@ -2815,7 +2815,7 @@ mxge_media_init(mxge_softc_t *sc)
 	mxge_media_set(sc, IFM_AUTO);
 
 	/*
-	 * parse the product code to deterimine the interface type
+	 * parse the product code to determine the interface type
 	 * (CX4, XFP, Quad Ribbon Fiber) by looking at the character
 	 * after the 3rd dash in the driver's cached copy of the
 	 * EEPROM's product code string.
@@ -3872,7 +3872,7 @@ mxge_get_counter(if_t ifp, ift_counter cnt)
 		return (rv);
 	case IFCOUNTER_OQDROPS:
 		for (int s = 0; s < sc->num_slices; s++)
-			rv += sc->ss[s].tx.br->br_drops;
+			rv += buf_ring_drops(sc->ss[s].tx.br);
 		return (rv);
 	default:
 		return (if_get_counter_default(ifp, cnt));

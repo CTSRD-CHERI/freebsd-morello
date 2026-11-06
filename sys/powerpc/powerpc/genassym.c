@@ -69,6 +69,8 @@ ASSYM(PC_BOOKE_MCHKSAVE, offsetof(struct pcpu, pc_booke.mchksave));
 ASSYM(PC_BOOKE_TLBSAVE, offsetof(struct pcpu, pc_booke.tlbsave));
 ASSYM(PC_BOOKE_TLB_LEVEL, offsetof(struct pcpu, pc_booke.tlb_level));
 ASSYM(PC_BOOKE_TLB_LOCK, offsetof(struct pcpu, pc_booke.tlb_lock));
+ASSYM(PC_BOOKE_CRITSTACK, offsetof(struct pcpu, pc_booke.critstack));
+ASSYM(PC_BOOKE_MCHKSTACK, offsetof(struct pcpu, pc_booke.mchkstack));
 #endif
 
 ASSYM(CPUSAVE_R27, CPUSAVE_R27*sizeof(register_t));
@@ -112,6 +114,7 @@ ASSYM(PC_KERNSLB, offsetof(struct pcpu, pc_aim.slb));
 ASSYM(PC_USERSLB, offsetof(struct pcpu, pc_aim.userslb));
 ASSYM(PC_SLBSAVE, offsetof(struct pcpu, pc_aim.slbsave));
 ASSYM(PC_SLBSTACK, offsetof(struct pcpu, pc_aim.slbstack));
+ASSYM(PC_AIM_DBSTACK, offsetof(struct pcpu, pc_aim.dbstack));
 ASSYM(USER_SLB_SLOT, USER_SLB_SLOT);
 ASSYM(USER_SLB_SLBE, USER_SLB_SLBE);
 ASSYM(SEGMENT_MASK, SEGMENT_MASK);

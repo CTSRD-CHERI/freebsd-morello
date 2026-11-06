@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -152,7 +142,7 @@ zfs_obj_to_pobj(objset_t *osp, sa_handle_t *hdl, sa_attr_type_t *sa_table,
  * Given an object number, return some zpl level statistics
  */
 static int
-zfs_obj_to_stats_impl(sa_handle_t *hdl, sa_attr_type_t *sa_table,
+zfs_obj_to_stats_legacy(sa_handle_t *hdl, sa_attr_type_t *sa_table,
     zfs_stat_t *sb)
 {
 	sa_bulk_attr_t bulk[4];
@@ -280,9 +270,48 @@ zfs_obj_to_path(objset_t *osp, uint64_t obj, char *buf, int len)
 	return (error);
 }
 
+/* Taken from ZDB */
+static const char *
+zfs_obj_type_name(dmu_object_type_t type)
+{
+	if (type < DMU_OT_NUMTYPES)
+		return (dmu_ot[type].ot_name);
+	else if ((type & DMU_OT_NEWTYPE) &&
+	    ((type & DMU_OT_BYTESWAP_MASK) < DMU_BSWAP_NUMFUNCS))
+		return (dmu_ot_byteswap[type & DMU_OT_BYTESWAP_MASK].ob_name);
+	else
+		return ("UNKNOWN");
+}
+
+static void
+zfs_obj_to_stats_extended(sa_handle_t *hdl, nvlist_t *nv)
+{
+	dmu_object_info_t doi;
+	sa_object_info(hdl, &doi);
+
+	fnvlist_add_uint32(nv, ZFS_OBJ_STAT_DATA_BLOCK_SIZE,
+	    doi.doi_data_block_size);
+	fnvlist_add_uint32(nv, ZFS_OBJ_STAT_METADATA_BLOCK_SIZE,
+	    doi.doi_metadata_block_size);
+	fnvlist_add_uint64(nv, ZFS_OBJ_STAT_TYPE, doi.doi_type);
+	fnvlist_add_string(nv, ZFS_OBJ_STAT_TYPE_STR,
+	    zfs_obj_type_name(doi.doi_type));
+	fnvlist_add_uint64(nv, ZFS_OBJ_STAT_BONUS_TYPE, doi.doi_bonus_type);
+	fnvlist_add_string(nv, ZFS_OBJ_STAT_BONUS_TYPE_STR,
+	    zfs_obj_type_name(doi.doi_bonus_type));
+	fnvlist_add_uint64(nv, ZFS_OBJ_STAT_BONUS_SIZE, doi.doi_bonus_size);
+	fnvlist_add_uint8(nv, ZFS_OBJ_STAT_CHECKSUM, doi.doi_checksum);
+	fnvlist_add_uint8(nv, ZFS_OBJ_STAT_COMPRESS, doi.doi_compress);
+	fnvlist_add_uint64(nv, ZFS_OBJ_STAT_DNODE_SIZE, doi.doi_dnodesize);
+	fnvlist_add_uint64(nv, ZFS_OBJ_STAT_PHYSICAL_BLOCKS_512,
+	    doi.doi_physical_blocks_512);
+	fnvlist_add_uint64(nv, ZFS_OBJ_STAT_MAX_OFFSET, doi.doi_max_offset);
+	fnvlist_add_uint64(nv, ZFS_OBJ_STAT_FILL_COUNT, doi.doi_fill_count);
+}
+
 int
 zfs_obj_to_stats(objset_t *osp, uint64_t obj, zfs_stat_t *sb,
-    char *buf, int len)
+    char *buf, int len, nvlist_t *nv)
 {
 	char *path = buf + len - 1;
 	sa_attr_type_t *sa_table;
@@ -300,11 +329,15 @@ zfs_obj_to_stats(objset_t *osp, uint64_t obj, zfs_stat_t *sb,
 	if (error != 0)
 		return (error);
 
-	error = zfs_obj_to_stats_impl(hdl, sa_table, sb);
+	error = zfs_obj_to_stats_legacy(hdl, sa_table, sb);
+
 	if (error != 0) {
 		zfs_release_sa_handle(hdl, db, FTAG);
 		return (error);
 	}
+
+	if (nv != NULL)
+		zfs_obj_to_stats_extended(hdl, nv);
 
 	error = zfs_obj_to_path_impl(osp, obj, hdl, sa_table, buf, len);
 

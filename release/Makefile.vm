@@ -19,18 +19,12 @@ VMDK_DESC=	VMWare, VirtualBox disk image
 QCOW2_DESC=	Qemu, KVM disk image
 RAW_DESC=	Unformatted raw disk image
 
-.if defined(WITHOUT_QEMU)
-CLOUDWARE_TYPES?= \
-		BASIC-CI
-.else
 CLOUDWARE_TYPES?= AZURE \
 		BASIC-CI \
 		BASIC-CLOUDINIT \
 		EC2 \
 		GCE \
-		ORACLE \
 		VAGRANT
-.endif
 AZURE_FORMAT=	vhdf
 AZURE_FSLIST?=	ufs zfs
 AZURE_DESC=	Microsoft Azure platform image
@@ -40,19 +34,17 @@ BASIC-CI_DESC=		Image for CI
 BASIC-CLOUDINIT_FORMAT=	raw qcow2
 BASIC-CLOUDINIT_FSLIST?=	ufs zfs
 BASIC-CLOUDINIT_DESC?=	Images for VM with cloudinit disk config support
-EC2_FORMAT=	raw
+EC2_FORMAT=	vmdks
 EC2_FSLIST?=	ufs zfs
-EC2_FLAVOURS?=	BASE BUILDER CLOUD-INIT SMALL
+EC2_FLAVOURS?=	BASE BUILDER CLOUD-INIT DESKTOP SMALL
 EC2-BASE_DESC=	Amazon EC2 image
 EC2-BUILDER_DESC=	Amazon EC2 AMI Builder image
 EC2-CLOUD-INIT_DESC=	Amazon EC2 Cloud-Init image
+EC2-DESKTOP_DESC=	Amazon EC2 GUI image
 EC2-SMALL_DESC=	Amazon EC2 small image
 GCE_FORMAT=	raw
 GCE_FSLIST?=	ufs zfs
 GCE_DESC=	Google Compute Engine image
-ORACLE_FORMAT=	raw
-ORACLE_FSLIST?=	ufs zfs
-ORACLE_DESC=	Oracle Cloud Infrastructure image
 OPENSTACK_FORMAT=qcow2
 OPENSTACK_FSLIST?=	ufs
 OPENSTACK_DESC=	OpenStack platform image
@@ -78,7 +70,7 @@ CLOUDWARE?=	${CLOUDWARE_GEN}
 
 .for _V in TYPE BRANCH REVISION
 . if !defined(${_V}) || empty(${_V})
-${_V}!=	eval $$(awk '/^${_V}=/{print}' ${.CURDIR}/../sys/conf/newvers.sh); echo $$${_V}
+${_V}!=	eval $$(awk '/^${_V}=/{print}' ${.CURDIR:H}/sys/conf/newvers.sh); echo $$${_V}
 . endif
 .endfor
 
@@ -106,9 +98,13 @@ QEMUTGT=emulator-portinstall
 .endif
 QEMUTGT?=
 
-.if (defined(WITHOUT_QEMU) && !defined(NO_ROOT)) || \
-  (!defined(WITHOUT_QEMU) && defined(NO_ROOT))
-.error WITHOUT_QEMU requires NO_ROOT (and vice versa)
+.if (defined(WITH_CLOUDWARE) && !empty(WITH_CLOUDWARE)) || \
+    (defined(WITH_VMIMAGES) && !empty(WITH_VMIMAGES))
+.if (defined(WITHOUT_QEMU) && !defined(NO_ROOT))
+.error WITHOUT_QEMU requires NO_ROOT
+.elif (!defined(WITHOUT_QEMU) && defined(NO_ROOT))
+.error NO_ROOT requires WITHOUT_QEMU
+.endif
 .endif
 
 .if defined(WITH_CLOUDWARE) && !empty(WITH_CLOUDWARE) && !empty(CLOUDWARE)
@@ -131,14 +127,21 @@ ${_CW:tu}${_FS:tu}${_FMT:tu}IMAGE=	${_CW:tl}.${_FS}.${_FMT}
 cw-${_CW:tl}-${_FS}-${_FMT}: cw-ec2-base-${_FS}-${_FMT}
 .endif
 
-cw-${_CW:tl}-${_FS}-${_FMT}: ${QEMUTGT}
+cw-${_CW:tl}-${_FS}-${_FMT}: ${QEMUTGT} ${PKGBASE_REPO_DIR}
 	mkdir -p ${.OBJDIR}/${.TARGET}
 	env TARGET=${TARGET} TARGET_ARCH=${TARGET_ARCH} SWAPSIZE=${SWAPSIZE} \
 		QEMUSTATIC=${QEMUSTATIC} \
 		EC2BASEIMG=${.OBJDIR}/${EC2-BASE${_FS:tu}${_FMT:tu}IMAGE} \
 		${WITHOUT_QEMU:DWITHOUT_QEMU=true} \
 		${NO_ROOT:DNO_ROOT=true} \
+		PKG_CMD=${PKG_CMD:Upkg} \
+		PKG_ABI=${PKG_ABI} \
+		PKG_REPOS_DIR=${PKG_REPOS_DIR:U${.OBJDIR}/${.TARGET}/etc/pkg} \
+		PKG_REPO_NAME=${PKG_REPO_NAME:UFreeBSD-ports} \
 		PKG_INSTALL_EPOCH=${PKG_INSTALL_EPOCH:U${GITEPOCH}} \
+		NOPKGBASE=${NOPKGBASE} \
+		PKGBASE_REPO_DIR=${.OBJDIR}/pkgbase-repo-dir \
+		PORTSDIR=${PORTSDIR} \
 		${.CURDIR}/scripts/mk-vmimage.sh \
 		-C ${.CURDIR}/tools/vmimage.subr -d ${.OBJDIR}/${.TARGET} \
 		-F ${"${_CW:MEC2-BUILDER}" != "":?ufs:${_FS}} \
@@ -182,7 +185,7 @@ CLEANFILES+=	${VMBASE}.${FS}.${FORMAT}
 
 vm-base:	vm-image
 
-vm-image:	${QEMUTGT}
+vm-image:	${QEMUTGT} ${PKGBASE_REPO_DIR}
 .if defined(WITH_VMIMAGES) && !empty(WITH_VMIMAGES)
 . for FORMAT in ${VMFORMATS}
 .  for FS in ${VMFSLIST}
@@ -191,9 +194,16 @@ vm-image:	${QEMUTGT}
 		QEMUSTATIC=${QEMUSTATIC} \
 		${WITHOUT_QEMU:DWITHOUT_QEMU=true} \
 		${NO_ROOT:DNO_ROOT=true} \
+		PKG_CMD=${PKG_CMD:Upkg} \
+		PKG_ABI=${PKG_ABI} \
+		PKG_REPOS_DIR=${PKG_REPOS_DIR:U${.OBJDIR}/${.TARGET}-${FORMAT}-${FS}/etc/pkg} \
+		PKG_REPO_NAME=${PKG_REPO_NAME:UFreeBSD-ports} \
 		PKG_INSTALL_EPOCH=${PKG_INSTALL_EPOCH:U${GITEPOCH}} \
+		NOPKGBASE=${NOPKGBASE} \
+		PKGBASE_REPO_DIR=${.OBJDIR}/pkgbase-repo-dir \
 		${.CURDIR}/scripts/mk-vmimage.sh \
 		-C ${.CURDIR}/tools/vmimage.subr \
+		${VM_IMAGE_CONFIG:D-c ${VM_IMAGE_CONFIG}} \
 		-d ${.OBJDIR}/${.TARGET}-${FORMAT}-${FS} -F ${FS} \
 		-i ${.OBJDIR}/${FORMAT}.${FS}.img -s ${VMSIZE} -f ${FORMAT} \
 		-S ${WORLDDIR} -o ${.OBJDIR}/${VMBASE}.${FS}.${FORMAT} || true
@@ -297,6 +307,5 @@ cloudware-release:
 .include "${.CURDIR}/Makefile.ec2"
 .include "${.CURDIR}/Makefile.firecracker"
 .include "${.CURDIR}/Makefile.gce"
-.include "${.CURDIR}/Makefile.oracle"
 .include "${.CURDIR}/Makefile.vagrant"
 .include "${.CURDIR}/Makefile.inc1"

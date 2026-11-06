@@ -66,6 +66,17 @@ enum {
 	MLX5_IB_MMAP_CMD_MASK	= 0xff,
 };
 
+/*
+ * Reserved mmap command range used to encode rdma_user_mmap entry page
+ * offsets (e.g. dynamically allocated UARs).  Keeping these above the legacy
+ * MLX5_IB_MMAP_* commands ensures mlx5_ib_mmap() routes them to the
+ * rdma_user_mmap offset handler instead of the legacy bfreg uar_mmap() path.
+ */
+enum {
+	MLX5_IB_MMAP_OFFSET_START	= 9,
+	MLX5_IB_MMAP_OFFSET_END		= 255,
+};
+
 enum {
 	MLX5_RES_SCAT_DATA32_CQE	= 0x1,
 	MLX5_RES_SCAT_DATA64_CQE	= 0x2,
@@ -220,6 +231,14 @@ struct wr_list {
 	u16	next;
 };
 
+enum mlx5_ib_wq_flags {
+	MLX5_IB_WQ_FLAGS_STRIDING_RQ = 0x2,
+};
+
+enum mlx5_ib_rq_flags {
+	MLX5_IB_RQ_CVLAN_STRIPPING  = 1 << 0,
+};
+
 struct mlx5_ib_wq {
 	u64		       *wrid;
 	u32		       *wr_data;
@@ -242,6 +261,11 @@ struct mlx5_ib_wq {
 	void		       *qend;
 };
 
+#define MLX5_MIN_SINGLE_WQE_LOG_NUM_STRIDES 9
+#define MLX5_MAX_SINGLE_WQE_LOG_NUM_STRIDES 16
+#define MLX5_MIN_SINGLE_STRIDE_LOG_NUM_BYTES 6
+#define MLX5_MAX_SINGLE_STRIDE_LOG_NUM_BYTES 13
+
 struct mlx5_ib_rwq {
 	struct ib_wq		ibwq;
 	struct mlx5_core_qp	core_qp;
@@ -250,6 +274,9 @@ struct mlx5_ib_rwq {
 	u32			log_rq_size;
 	u32			rq_page_offset;
 	u32			log_page_size;
+	u32			log_num_strides;
+	u32			two_byte_shift_en;
+	u32			single_stride_log_num_of_bytes;
 	struct ib_umem		*umem;
 	size_t			buf_size;
 	unsigned int		page_shift;
@@ -259,6 +286,7 @@ struct mlx5_ib_rwq {
 	u32			wqe_count;
 	u32			wqe_shift;
 	int			wq_sig;
+	u32			create_flags; /* Use enum mlx5_ib_wq_flags */
 };
 
 enum {
@@ -332,6 +360,7 @@ struct mlx5_ib_rq {
 	struct mlx5_db		*doorbell;
 	u32			tirn;
 	u8			state;
+	u32			flags;
 };
 
 struct mlx5_ib_sq {
@@ -416,6 +445,7 @@ struct mlx5_ib_qp {
 	struct list_head	qps_list;
 	struct list_head	cq_recv_list;
 	struct list_head	cq_send_list;
+	bool			tunnel_offload_en;
 };
 
 struct mlx5_ib_cq_buf {
@@ -436,6 +466,7 @@ enum mlx5_ib_qp_flags {
 	MLX5_IB_QP_SQPN_QP1			= 1 << 6,
 	MLX5_IB_QP_CAP_SCATTER_FCS		= 1 << 7,
 	MLX5_IB_QP_RSS				= 1 << 8,
+	MLX5_IB_QP_CVLAN_STRIPPING		= 1 << 9,
 	MLX5_IB_QP_UNDERLAY			= 1 << 10,
 };
 
@@ -448,7 +479,7 @@ struct mlx5_umr_wr {
 	struct ib_pd		       *pd;
 	unsigned int			page_shift;
 	unsigned int			npages;
-	u32				length;
+	u64				length;
 	int				access_flags;
 	u32				mkey;
 };
@@ -901,9 +932,9 @@ void mlx5_ib_free_srq_wqe(struct mlx5_ib_srq *srq, int wqe_index);
 int mlx5_MAD_IFC(struct mlx5_ib_dev *dev, int ignore_mkey, int ignore_bkey,
 		 u8 port, const struct ib_wc *in_wc, const struct ib_grh *in_grh,
 		 const void *in_mad, void *response_mad);
-int mlx5_ib_create_ah(struct ib_ah *ah, struct ib_ah_attr *ah_attr, u32 flags,
+int mlx5_ib_create_ah(struct ib_ah *ah, struct rdma_ah_attr *ah_attr, u32 flags,
 				struct ib_udata *udata);
-int mlx5_ib_query_ah(struct ib_ah *ibah, struct ib_ah_attr *ah_attr);
+int mlx5_ib_query_ah(struct ib_ah *ibah, struct rdma_ah_attr *ah_attr);
 void mlx5_ib_destroy_ah(struct ib_ah *ah, u32 flags);
 int mlx5_ib_create_srq(struct ib_srq *srq, struct ib_srq_init_attr *init_attr,
 		       struct ib_udata *udata);
@@ -1050,10 +1081,8 @@ int mlx5_ib_get_vf_stats(struct ib_device *device, int vf,
 int mlx5_ib_set_vf_guid(struct ib_device *device, int vf, u8 port,
 			u64 guid, int type);
 
-__be16 mlx5_get_roce_udp_sport(struct mlx5_ib_dev *dev, u8 port_num,
-			       int index);
-int mlx5_get_roce_gid_type(struct mlx5_ib_dev *dev, u8 port_num,
-			   int index, enum ib_gid_type *gid_type);
+__be16 mlx5_get_roce_udp_sport(struct mlx5_ib_dev *dev,
+			       const struct ib_gid_attr *attr);
 
 /* GSI QP helper functions */
 struct ib_qp *mlx5_ib_gsi_create_qp(struct ib_pd *pd,
@@ -1082,6 +1111,7 @@ void mlx5_ib_devx_init_event_table(struct mlx5_ib_dev *dev);
 void mlx5_ib_devx_cleanup_event_table(struct mlx5_ib_dev *dev);
 bool mlx5_ib_devx_is_flow_dest(void *obj, int *dest_id, int *dest_type);
 bool mlx5_ib_devx_is_flow_counter(void *obj, u32 offset, u32 *counter_id);
+extern const struct uapi_definition mlx5_ib_devx_defs[];
 #else
 static inline int
 mlx5_ib_devx_create(struct mlx5_ib_dev *dev,

@@ -36,8 +36,8 @@ CFLAGS+=	-DNDEBUG
 TARGET_ARCH?=	${MACHINE_ARCH}
 BUILD_ARCH?=	${MACHINE_ARCH}
 
-# Armv6 and armv7 uses hard float abi, unless the CPUTYPE has soft in it.
-# For all other targets, we stick with 'unknown'.
+# Arm uses hard float abi, unless the CPUTYPE has soft in it.  For all other
+# targets, we stick with 'unknown'.
 .if ${TARGET_ARCH:Marm*}
 .if !defined(CPUTYPE) || ${CPUTYPE:M*soft*} == ""
 TARGET_TRIPLE_ABI=-gnueabihf
@@ -71,9 +71,6 @@ LLVM_NATIVE_ARCH=	ARM
 .if ${MK_LLVM_TARGET_BPF} != "no"
 CFLAGS+=	-DLLVM_TARGET_ENABLE_BPF
 .endif
-.if ${MK_LLVM_TARGET_MIPS} != "no"
-CFLAGS+=	-DLLVM_TARGET_ENABLE_MIPS
-.endif
 .if ${MK_LLVM_TARGET_POWERPC} != "no"
 CFLAGS+=	-DLLVM_TARGET_ENABLE_POWERPC
 . if ${MACHINE_CPUARCH} == "powerpc"
@@ -84,6 +81,12 @@ LLVM_NATIVE_ARCH=	PowerPC
 CFLAGS+=	-DLLVM_TARGET_ENABLE_RISCV
 . if ${MACHINE_CPUARCH} == "riscv"
 LLVM_NATIVE_ARCH=	RISCV
+. endif
+.endif
+.if ${MK_LLVM_TARGET_LOONGARCH} != "no"
+CFLAGS+=	-DLLVM_TARGET_ENABLE_LOONGARCH
+. if ${MACHINE_CPUARCH} == "loongarch"
+LLVM_NATIVE_ARCH=	LoongArch
 . endif
 .endif
 .if ${MK_LLVM_TARGET_X86} != "no"
@@ -122,6 +125,7 @@ LDFLAGS+=	-Wl,-m,elf64lriscv_fbsd
 CXXSTD=		c++17
 CXXFLAGS+=	-fno-exceptions
 CXXFLAGS+=	-fno-rtti
+CXXFLAGS+=	-fvisibility-inlines-hidden
 .if ${.MAKE.OS} == "FreeBSD" || !defined(BOOTSTRAPPING)
 CXXFLAGS.clang+= -stdlib=libc++
 .else

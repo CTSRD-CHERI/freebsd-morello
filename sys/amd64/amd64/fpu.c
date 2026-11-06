@@ -51,15 +51,15 @@
 
 #include <machine/cputypes.h>
 #include <machine/frame.h>
+#include <machine/ifunc.h>
 #include <machine/intr_machdep.h>
 #include <machine/md_var.h>
 #include <machine/pcb.h>
 #include <machine/psl.h>
 #include <machine/resource.h>
-#include <machine/specialreg.h>
 #include <machine/segments.h>
+#include <machine/specialreg.h>
 #include <machine/ucontext.h>
-#include <x86/ifunc.h>
 
 /*
  * Floating point support.
@@ -142,13 +142,6 @@ xsaveopt64(char *addr, uint64_t mask)
 CTASSERT(sizeof(struct savefpu) == 512);
 CTASSERT(sizeof(struct xstate_hdr) == 64);
 CTASSERT(sizeof(struct savefpu_ymm) == 832);
-
-/*
- * This requirement is to make it easier for asm code to calculate
- * offset of the fpu save area from the pcb address. FPU save area
- * must be 64-byte aligned.
- */
-CTASSERT(sizeof(struct pcb) % XSAVE_AREA_ALIGN == 0);
 
 /*
  * Ensure the copy of XCR0 saved in a core is contained in the padding

@@ -60,7 +60,6 @@ __DEFAULT_YES_OPTIONS = \
     MAKE_CHECK_USE_SANDBOX \
     MAN \
     MANCOMPRESS \
-    MANSPLITPKG \
     NIS \
     NLS \
     OPENSSH \
@@ -78,6 +77,9 @@ __DEFAULT_NO_OPTIONS = \
     CCACHE_BUILD \
     CTF \
     INSTALL_AS_USER \
+    MANSPLITPKG \
+    REPRODUCIBLE_BUILD \
+    REPRODUCIBLE_PATHS \
     RETPOLINE \
     RUN_TESTS \
     STALE_STAGED \
@@ -97,8 +99,7 @@ __DEFAULT_DEPENDENT_OPTIONS = \
 # some memory-hungry workloads.
 #
 .if ${MACHINE_ARCH} == "armv7" \
-    || ${MACHINE_ARCH} == "i386" || ${MACHINE_ARCH} == "powerpc" \
-    || ${MACHINE_ARCH} == "powerpcspe"
+    || ${MACHINE_ARCH} == "i386" || ${MACHINE_ARCH} == "powerpc"
 __DEFAULT_NO_OPTIONS+= PIE
 .else
 __DEFAULT_YES_OPTIONS+=PIE

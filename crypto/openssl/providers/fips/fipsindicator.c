@@ -1,5 +1,5 @@
 /*
- * Copyright 2024 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2024-2026 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -37,7 +37,7 @@ void ossl_FIPS_IND_set_settable(OSSL_FIPS_IND *ind, int id, int state)
     if (!ossl_assert(id < OSSL_FIPS_IND_SETTABLE_MAX))
         return;
     if (!ossl_assert(state == OSSL_FIPS_IND_STATE_STRICT
-                     || state == OSSL_FIPS_IND_STATE_TOLERANT))
+            || state == OSSL_FIPS_IND_STATE_TOLERANT))
         return;
     ind->settable[id] = state;
 }
@@ -56,9 +56,9 @@ int ossl_FIPS_IND_get_settable(const OSSL_FIPS_IND *ind, int id)
  * ossl_FIPS_IND_on_unapproved() functions may be required.
  */
 int ossl_FIPS_IND_on_unapproved(OSSL_FIPS_IND *ind, int id,
-                                OSSL_LIB_CTX *libctx,
-                                const char *algname, const char *opname,
-                                OSSL_FIPS_IND_CHECK_CB *config_check_fn)
+    OSSL_LIB_CTX *libctx,
+    const char *algname, const char *opname,
+    OSSL_FIPS_IND_CHECK_CB *config_check_fn)
 {
     /* Set to unapproved. Once unapproved mode is set this will not be reset */
     ind->approved = 0;
@@ -78,7 +78,7 @@ int ossl_FIPS_IND_on_unapproved(OSSL_FIPS_IND *ind, int id,
 }
 
 int ossl_FIPS_IND_set_ctx_param(OSSL_FIPS_IND *ind, int id,
-                                const OSSL_PARAM params[], const char *name)
+    const OSSL_PARAM params[], const char *name)
 {
     int in = 0;
     const OSSL_PARAM *p = OSSL_PARAM_locate_const(params, name);
@@ -98,13 +98,42 @@ int ossl_FIPS_IND_get_ctx_param(const OSSL_FIPS_IND *ind, OSSL_PARAM params[])
     return p == NULL || OSSL_PARAM_set_int(p, ind->approved);
 }
 
+int ossl_FIPS_IND_get_ctx_param_conditional(const OSSL_FIPS_IND *ind,
+    OSSL_PARAM params[], int condition)
+{
+    OSSL_PARAM *p = OSSL_PARAM_locate(params,
+        OSSL_ALG_PARAM_FIPS_APPROVED_INDICATOR);
+
+    return p == NULL || OSSL_PARAM_set_int(p, condition && (ind == NULL || ind->approved));
+}
+
+const OSSL_PARAM *ossl_FIPS_IND_gettable_ctx_params(ossl_unused void *ctx,
+    ossl_unused void *provctx)
+{
+    static const OSSL_PARAM gettable_ctx_params[] = {
+        OSSL_PARAM_int(OSSL_ALG_PARAM_FIPS_APPROVED_INDICATOR, NULL),
+        OSSL_PARAM_END
+    };
+
+    return gettable_ctx_params;
+}
+
+int ossl_FIPS_IND_get_ctx_param_approved(ossl_unused void *ctx,
+    OSSL_PARAM params[])
+{
+    OSSL_PARAM *p = OSSL_PARAM_locate(params,
+        OSSL_ALG_PARAM_FIPS_APPROVED_INDICATOR);
+
+    return p == NULL || OSSL_PARAM_set_int(p, 1);
+}
+
 /*
  * Can be used during application testing to log that an indicator was
  * triggered. The callback will return 1 if the application wants an error
  * to occur based on the indicator type and description.
  */
 int ossl_FIPS_IND_callback(OSSL_LIB_CTX *libctx, const char *type,
-                           const char *desc)
+    const char *desc)
 {
     OSSL_INDICATOR_CALLBACK *cb = NULL;
 

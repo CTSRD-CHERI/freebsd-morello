@@ -145,6 +145,7 @@ r88eu_attach(struct rtwn_usb_softc *uc)
 	sc->sc_rf_write			= r88e_rf_write;
 	sc->sc_check_condition		= r92c_check_condition;
 	sc->sc_efuse_postread		= rtwn_nop_softc;
+	sc->sc_efuse_preread		= rtwn_nop_int_softc;
 	sc->sc_parse_rom		= r88e_parse_rom;
 	sc->sc_set_led			= r88e_set_led;
 	sc->sc_power_on			= r88eu_power_on;
@@ -154,6 +155,7 @@ r88eu_attach(struct rtwn_usb_softc *uc)
 	sc->sc_fw_download_enable	= r88e_fw_download_enable;
 #endif
 	sc->sc_llt_init			= r92c_llt_init;
+	sc->sc_enable_mac_txrx		= rtwn_nop_softc;
 	sc->sc_set_page_size		= r92c_set_page_size;
 	sc->sc_lc_calib			= r92c_lc_calib;
 	sc->sc_iq_calib			= r88e_iq_calib;
@@ -177,6 +179,7 @@ r88eu_attach(struct rtwn_usb_softc *uc)
 	sc->sc_temp_read		= r88e_temp_read;
 	sc->sc_init_tx_agg		= r92cu_init_tx_agg;
 	sc->sc_init_rx_agg		= r88eu_init_rx_agg;
+	sc->sc_init_beacon_timer	= r92c_init_beacon_timer;
 	sc->sc_init_ampdu		= rtwn_nop_softc;
 	sc->sc_init_intr		= r88eu_init_intr;
 	sc->sc_init_edca		= r92c_init_edca;

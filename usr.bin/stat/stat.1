@@ -6,6 +6,8 @@
 .\" This code is derived from software contributed to The NetBSD Foundation
 .\" by Andrew Brown and Jan Schaumann.
 .\"
+.\" Copyright (c) 2025 Klara, Inc.
+.\"
 .\" Redistribution and use in source and binary forms, with or without
 .\" modification, are permitted provided that the following conditions
 .\" are met:
@@ -27,22 +29,26 @@
 .\" ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 .\" POSSIBILITY OF SUCH DAMAGE.
 .\"
-.Dd June 22, 2017
+.Dd October 1, 2026
 .Dt STAT 1
 .Os
 .Sh NAME
 .Nm stat ,
-.Nm readlink
+.Nm readlink ,
+.Nm mountpoint
 .Nd display file status
 .Sh SYNOPSIS
 .Nm
-.Op Fl FHLnq
+.Op Fl FHhLnq
 .Op Fl f Ar format | Fl l | r | s | x
 .Op Fl t Ar timefmt
 .Op Ar
 .Nm readlink
 .Op Fl fn
 .Op Ar
+.Nm mountpoint
+.Op Fl q
+.Ar file
 .Sh DESCRIPTION
 The
 .Nm
@@ -73,9 +79,34 @@ corresponding to
 .Ar file .
 In this case, the argument does not need to be a symbolic link.
 .Pp
+When invoked as
+.Nm mountpoint ,
+the utility checks whether
+.Ar file
+is the root of a mounted file system.
+This is usually a directory, but file systems such as
+.Xr nullfs 5
+can also be mounted over regular files and sockets.
+Symbolic links are followed.
+Unless the
+.Fl q
+option is given, a message stating whether
+.Ar file
+is a mount point is written to the standard output.
+Error messages are written to the standard error even with
+.Fl q .
+.Pp
 The information displayed is obtained by calling
 .Xr lstat 2
 with the given argument and evaluating the returned structure.
+When invoked as
+.Nm mountpoint ,
+.Xr stat 2
+is called instead and the
+.Dv SFBSD_MNTPOINT
+flag in the
+.Fa st_bsdflags
+field is checked.
 The default format displays the
 .Fa st_dev ,
 .Fa st_ino ,
@@ -129,6 +160,45 @@ and use
 instead of
 .Xr lstat 2 .
 This requires root privileges.
+.It Fl h
+For each file argument, print a line consisting of a comma-separated
+list of holes, a space, and the file name.
+Each hole is reported as its starting offset as a decimal number
+followed by a hyphen and the ending offset (one less than the starting
+offset of the data region that follows the hole) as a decimal number.
+If the file ends in a hole, the ending offset of the final hole will
+be one less than the size of the file.
+Otherwise, the final entry in the list (indeed, the only entry in the
+list, if the file is not sparse), is a single decimal number
+corresponding to the size of the file, representing the virtual hole
+at the end of the file.
+.Pp
+If the argument is a directory, instead of a list of holes, a single
+number is printed, corresponding to the minimum hole size for that
+directory as reported by
+.Xr pathconf 2 ,
+followed by a space and the directory name.
+.Pp
+Please note that the only way to retrieve information about the holes
+in a file is to open it and walk the list of holes and data regions
+using
+.Xr lseek 2 .
+If the file is being modified by another process at the same time as
+.Nm
+is inspecting it, the result may be inconsistent.
+.Pp
+This option cannot be combined with the
+.Fl F ,
+.Fl f ,
+.Fl H ,
+.Fl L ,
+.Fl l ,
+.Fl r ,
+.Fl s ,
+.Fl t ,
+or
+.Fl x
+options.
 .It Fl L
 Use
 .Xr stat 2
@@ -156,6 +226,11 @@ fail.
 When run as
 .Nm readlink ,
 error messages are automatically suppressed.
+When run as
+.Nm mountpoint ,
+.Fl q
+suppresses the normal output instead;
+error messages are still written to the standard error.
 .It Fl f Ar format
 Display information using the specified format.
 See the
@@ -472,6 +547,12 @@ which default to
 .Cm S .
 .Sh EXIT STATUS
 .Ex -std stat readlink
+.Pp
+The
+.Nm mountpoint
+utility exits 0 if
+.Ar file
+is a mount point, 1 if it is not, and 2 if an error occurred.
 .Sh EXAMPLES
 If no options are specified, the default format is
 "%d %i %Sp %l %Su %Sg %r %z \e"%Sa\e" \e"%Sm\e" \e"%Sc\e" \e"%SB\e" %k %b %#Xf %N".
@@ -579,6 +660,19 @@ To display the same in UTC:
 $ TZ= stat -f %Sm -t %Y%m%d%H%M%S /tmp/foo
 20070427181533
 .Ed
+.Pp
+To check whether a directory is a mount point:
+.Bd -literal -offset indent
+\*[Gt] mountpoint /dev
+/dev is a mount point
+\*[Gt] mountpoint /usr/bin
+/usr/bin is not a mount point
+.Ed
+.Pp
+To mount a file system only if nothing is mounted there yet:
+.Bd -literal -offset indent
+$ mountpoint -q /mnt || mount /dev/md0 /mnt
+.Ed
 .Sh SEE ALSO
 .Xr file 1 ,
 .Xr ls 1 ,
@@ -586,7 +680,9 @@ $ TZ= stat -f %Sm -t %Y%m%d%H%M%S /tmp/foo
 .Xr readlink 2 ,
 .Xr stat 2 ,
 .Xr printf 3 ,
-.Xr strftime 3
+.Xr strftime 3 ,
+.Xr nullfs 5 ,
+.Xr mount 8
 .Sh HISTORY
 The
 .Nm

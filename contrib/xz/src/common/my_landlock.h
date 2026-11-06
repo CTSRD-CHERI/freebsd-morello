@@ -4,6 +4,10 @@
 //
 /// \file       my_landlock.h
 /// \brief      Linux Landlock sandbox helper functions
+///
+/// \note       This uses static variables to cache the Landlock ABI version.
+///             Only one file in an application should include this header.
+///             Only one thread should call these functions.
 //
 //  Author:     Lasse Collin
 //
@@ -17,6 +21,30 @@
 #include <linux/landlock.h>
 #include <sys/syscall.h>
 #include <sys/prctl.h>
+#include <sys/utsname.h>
+
+
+// In case we are being compiled against an old <linux/landlock.h>,
+// provide fallbacks for handled_access_fs flags that were added in
+// Landlock ABI versions 2, 3, 5, and 9. This way we need fewer #ifdefs
+// later on and, more importantly, these flags are then supported if
+// the program is run under a kernel that supports a newer Landlock ABI
+// than the current <linux/landlock.h>.
+//
+// NOTE: There are no fallbacks for ABI 4 and 6 features because they
+// require an extended struct landlock_ruleset_attr.
+#ifndef LANDLOCK_ACCESS_FS_REFER
+#	define LANDLOCK_ACCESS_FS_REFER         (1ULL << 13)
+#endif
+#ifndef LANDLOCK_ACCESS_FS_TRUNCATE
+#	define LANDLOCK_ACCESS_FS_TRUNCATE      (1ULL << 14)
+#endif
+#ifndef LANDLOCK_ACCESS_FS_IOCTL_DEV
+#	define LANDLOCK_ACCESS_FS_IOCTL_DEV     (1ULL << 15)
+#endif
+#ifndef LANDLOCK_ACCESS_FS_RESOLVE_UNIX
+#	define LANDLOCK_ACCESS_FS_RESOLVE_UNIX  (1ULL << 16)
+#endif
 
 
 /// \brief      Initialize Landlock ruleset attributes to forbid everything
@@ -32,8 +60,38 @@ my_landlock_ruleset_attr_forbid_all(struct landlock_ruleset_attr *attr)
 {
 	memzero(attr, sizeof(*attr));
 
-	const int abi_version = syscall(SYS_landlock_create_ruleset,
+	// Cache the Landlock ABI version:
+	//  0 = not checked yet
+	// -1 = Landlock not supported
+	// >0 = Landlock ABI version
+	static int abi_version = 0;
+
+#ifdef LANDLOCK_SCOPE_SIGNAL
+	// Red Hat Enterprise Linux 9 kernel since 5.14.0-603.el9 (2025-07-30)
+	// claims ABI version 6 support, but as of 5.14.0-643.el9 (2025-11-22)
+	// it lacks LANDLOCK_SCOPE_SIGNAL. ABI version 6 was added in upstream
+	// Linux 6.12 while RHEL 9 has Linux 5.14 with lots of backports.
+	// We assume that any kernel version 5.14 with ABI version 6 is buggy.
+	static bool is_rhel9 = false;
+#endif
+
+	if (abi_version == 0) {
+		abi_version = syscall(SYS_landlock_create_ruleset,
 			(void *)NULL, 0, LANDLOCK_CREATE_RULESET_VERSION);
+
+#ifdef LANDLOCK_SCOPE_SIGNAL
+		if (abi_version == 6) {
+			static const char rel[] = "5.14.";
+			const size_t rel_len = sizeof(rel) - 1;
+
+			struct utsname un;
+			if (uname(&un) == 0 && strncmp(
+					un.release, rel, rel_len) == 0)
+				is_rhel9 = true;
+		}
+#endif
+	}
+
 	if (abi_version <= 0)
 		return -1;
 
@@ -52,15 +110,10 @@ my_landlock_ruleset_attr_forbid_all(struct landlock_ruleset_attr *attr)
 			| LANDLOCK_ACCESS_FS_MAKE_FIFO
 			| LANDLOCK_ACCESS_FS_MAKE_BLOCK
 			| LANDLOCK_ACCESS_FS_MAKE_SYM
-#ifdef LANDLOCK_ACCESS_FS_REFER
 			| LANDLOCK_ACCESS_FS_REFER // ABI 2
-#endif
-#ifdef LANDLOCK_ACCESS_FS_TRUNCATE
 			| LANDLOCK_ACCESS_FS_TRUNCATE // ABI 3
-#endif
-#ifdef LANDLOCK_ACCESS_FS_IOCTL_DEV
 			| LANDLOCK_ACCESS_FS_IOCTL_DEV // ABI 5
-#endif
+			| LANDLOCK_ACCESS_FS_RESOLVE_UNIX // ABI 9
 			;
 
 #ifdef LANDLOCK_ACCESS_NET_BIND_TCP
@@ -80,15 +133,11 @@ my_landlock_ruleset_attr_forbid_all(struct landlock_ruleset_attr *attr)
 	// Disable flags that require a new ABI version.
 	switch (abi_version) {
 	case 1:
-#ifdef LANDLOCK_ACCESS_FS_REFER
 		attr->handled_access_fs &= ~LANDLOCK_ACCESS_FS_REFER;
-#endif
 		FALLTHROUGH;
 
 	case 2:
-#ifdef LANDLOCK_ACCESS_FS_TRUNCATE
 		attr->handled_access_fs &= ~LANDLOCK_ACCESS_FS_TRUNCATE;
-#endif
 		FALLTHROUGH;
 
 	case 3:
@@ -98,15 +147,26 @@ my_landlock_ruleset_attr_forbid_all(struct landlock_ruleset_attr *attr)
 		FALLTHROUGH;
 
 	case 4:
-#ifdef LANDLOCK_ACCESS_FS_IOCTL_DEV
 		attr->handled_access_fs &= ~LANDLOCK_ACCESS_FS_IOCTL_DEV;
-#endif
 		FALLTHROUGH;
 
 	case 5:
 #ifdef LANDLOCK_SCOPE_SIGNAL
 		attr->scoped = 0;
 #endif
+		FALLTHROUGH;
+
+	case 6:
+#ifdef LANDLOCK_SCOPE_SIGNAL
+		if (is_rhel9)
+			attr->scoped &= ~LANDLOCK_SCOPE_SIGNAL;
+#endif
+
+		FALLTHROUGH;
+
+	case 7:
+	case 8:
+		attr->handled_access_fs &= ~LANDLOCK_ACCESS_FS_RESOLVE_UNIX;
 		FALLTHROUGH;
 
 	default:

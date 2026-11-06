@@ -1,28 +1,18 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2012, 2020 by Delphix. All rights reserved.
- * Copyright (c) 2024, Rob Norris <robn@despairlabs.com>
- * Copyright (c) 2024, Klara, Inc.
+ * Copyright (c) 2024, 2025, Rob Norris <robn@despairlabs.com>
+ * Copyright (c) 2024, 2025, Klara, Inc.
  */
 
 #include <sys/dataset_kstats.h>
@@ -337,16 +327,14 @@ zvol_discard(zv_request_t *zvr)
 	}
 
 	/*
-	 * Align the request to volume block boundaries when a secure erase is
-	 * not required.  This will prevent dnode_free_range() from zeroing out
-	 * the unaligned parts which is slow (read-modify-write) and useless
-	 * since we are not freeing any space by doing so.
+	 * Align the request to volume block boundaries. This will prevent
+	 * dnode_free_range() from zeroing out the unaligned parts which is
+	 * slow (read-modify-write) and useless since we are not freeing any
+	 * space by doing so.
 	 */
-	if (!io_is_secure_erase(bio, rq)) {
-		start = P2ROUNDUP(start, zv->zv_volblocksize);
-		end = P2ALIGN_TYPED(end, zv->zv_volblocksize, uint64_t);
-		size = end - start;
-	}
+	start = P2ROUNDUP(start, zv->zv_volblocksize);
+	end = P2ALIGN_TYPED(end, zv->zv_volblocksize, uint64_t);
+	size = end - start;
 
 	if (start >= end)
 		goto unlock;
@@ -467,6 +455,24 @@ zvol_read_task(void *arg)
 	zv_request_task_free(task);
 }
 
+/*
+ * Note:
+ *
+ * The kernel uses different enum names for the IO opcode, depending on the
+ * kernel version ('req_opf', 'req_op').  To sidestep this, use macros rather
+ * than inline functions for these checks.
+ */
+/* Should this IO go down the zvol write path? */
+#define	ZVOL_OP_IS_WRITE(op) \
+	(op == REQ_OP_WRITE || \
+	op == REQ_OP_FLUSH || \
+	op == REQ_OP_DISCARD)
+
+/* Is this IO type supported by zvols? */
+#define	ZVOL_OP_IS_SUPPORTED(op) (op == REQ_OP_READ || ZVOL_OP_IS_WRITE(op))
+
+/* Get the IO opcode */
+#define	ZVOL_OP(bio, rq) (bio != NULL ? bio_op(bio) : req_op(rq))
 
 /*
  * Process a BIO or request
@@ -484,7 +490,33 @@ zvol_request_impl(zvol_state_t *zv, struct bio *bio, struct request *rq,
 	fstrans_cookie_t cookie = spl_fstrans_mark();
 	uint64_t offset = io_offset(bio, rq);
 	uint64_t size = io_size(bio, rq);
-	int rw = io_data_dir(bio, rq);
+	int rw;
+
+	if (unlikely(!ZVOL_OP_IS_SUPPORTED(ZVOL_OP(bio, rq)))) {
+		zfs_dbgmsg("Unsupported zvol %s, op=%d, flags=0x%x",
+		    rq != NULL ? "request" : "BIO",
+		    ZVOL_OP(bio, rq),
+		    rq != NULL ? rq->cmd_flags : bio->bi_opf);
+		ASSERT(ZVOL_OP_IS_SUPPORTED(ZVOL_OP(bio, rq)));
+		zvol_end_io(bio, rq, SET_ERROR(ENOTSUPP));
+		goto out;
+	}
+
+	if (ZVOL_OP_IS_WRITE(ZVOL_OP(bio, rq))) {
+		rw = WRITE;
+	} else {
+		rw = READ;
+	}
+
+	/*
+	 * Sanity check
+	 *
+	 * If we're a BIO, check our rw matches the kernel's
+	 * bio_data_dir(bio) rw.  We need to check because we support fewer
+	 * IO operations, and want to verify that what we think are reads and
+	 * writes from those operations match what the kernel thinks.
+	 */
+	ASSERT(rq != NULL || rw == bio_data_dir(bio));
 
 	if (unlikely(zv->zv_flags & ZVOL_REMOVING)) {
 		zvol_end_io(bio, rq, SET_ERROR(ENXIO));
@@ -589,7 +621,7 @@ zvol_request_impl(zvol_state_t *zv, struct bio *bio, struct request *rq,
 		 * interfaces lack this functionality (they block waiting for
 		 * the i/o to complete).
 		 */
-		if (io_is_discard(bio, rq) || io_is_secure_erase(bio, rq)) {
+		if (io_is_discard(bio, rq)) {
 			if (force_sync) {
 				zvol_discard(&zvr);
 			} else {
@@ -679,28 +711,19 @@ zvol_open(struct block_device *bdev, fmode_t flag)
 
 retry:
 #endif
-	rw_enter(&zvol_state_lock, RW_READER);
-	/*
-	 * Obtain a copy of private_data under the zvol_state_lock to make
-	 * sure that either the result of zvol free code path setting
-	 * disk->private_data to NULL is observed, or zvol_os_free()
-	 * is not called on this zv because of the positive zv_open_count.
-	 */
+
 #ifdef HAVE_BLK_MODE_T
-	zv = disk->private_data;
+	zv = atomic_load_ptr(&disk->private_data);
 #else
-	zv = bdev->bd_disk->private_data;
+	zv = atomic_load_ptr(&bdev->bd_disk->private_data);
 #endif
 	if (zv == NULL) {
-		rw_exit(&zvol_state_lock);
 		return (-SET_ERROR(ENXIO));
 	}
 
 	mutex_enter(&zv->zv_state_lock);
-
 	if (unlikely(zv->zv_flags & ZVOL_REMOVING)) {
 		mutex_exit(&zv->zv_state_lock);
-		rw_exit(&zvol_state_lock);
 		return (-SET_ERROR(ENXIO));
 	}
 
@@ -712,8 +735,28 @@ retry:
 	if (zv->zv_open_count == 0) {
 		if (!rw_tryenter(&zv->zv_suspend_lock, RW_READER)) {
 			mutex_exit(&zv->zv_state_lock);
+
+			/*
+			 * Removal may happen while the locks are down, so
+			 * we can't trust zv any longer; we have to start over.
+			 */
+#ifdef HAVE_BLK_MODE_T
+			zv = atomic_load_ptr(&disk->private_data);
+#else
+			zv = atomic_load_ptr(&bdev->bd_disk->private_data);
+#endif
+			if (zv == NULL)
+				return (-SET_ERROR(ENXIO));
+
 			rw_enter(&zv->zv_suspend_lock, RW_READER);
 			mutex_enter(&zv->zv_state_lock);
+
+			if (unlikely(zv->zv_flags & ZVOL_REMOVING)) {
+				mutex_exit(&zv->zv_state_lock);
+				rw_exit(&zv->zv_suspend_lock);
+				return (-SET_ERROR(ENXIO));
+			}
+
 			/* check to see if zv_suspend_lock is needed */
 			if (zv->zv_open_count != 0) {
 				rw_exit(&zv->zv_suspend_lock);
@@ -724,7 +767,6 @@ retry:
 			drop_suspend = B_TRUE;
 		}
 	}
-	rw_exit(&zvol_state_lock);
 
 	ASSERT(MUTEX_HELD(&zv->zv_state_lock));
 
@@ -757,8 +799,8 @@ retry:
 		 * the kernel so the only option is to return the error for
 		 * the caller to handle it.
 		 */
-		if (!mutex_owned(&spa_namespace_lock)) {
-			if (!mutex_tryenter(&spa_namespace_lock)) {
+		if (!spa_namespace_held()) {
+			if (!spa_namespace_tryenter(FTAG)) {
 				mutex_exit(&zv->zv_state_lock);
 				rw_exit(&zv->zv_suspend_lock);
 				drop_suspend = B_FALSE;
@@ -782,7 +824,7 @@ retry:
 		error = -zvol_first_open(zv, !(blk_mode_is_open_write(flag)));
 
 		if (drop_namespace)
-			mutex_exit(&spa_namespace_lock);
+			spa_namespace_exit(FTAG);
 	}
 
 	if (error == 0) {
@@ -821,11 +863,11 @@ zvol_release(struct gendisk *disk, fmode_t unused)
 #if !defined(HAVE_BLOCK_DEVICE_OPERATIONS_RELEASE_1ARG)
 	(void) unused;
 #endif
-	zvol_state_t *zv;
 	boolean_t drop_suspend = B_TRUE;
 
-	rw_enter(&zvol_state_lock, RW_READER);
-	zv = disk->private_data;
+	zvol_state_t *zv = atomic_load_ptr(&disk->private_data);
+	if (zv == NULL)
+		return;
 
 	mutex_enter(&zv->zv_state_lock);
 	ASSERT3U(zv->zv_open_count, >, 0);
@@ -839,6 +881,15 @@ zvol_release(struct gendisk *disk, fmode_t unused)
 			mutex_exit(&zv->zv_state_lock);
 			rw_enter(&zv->zv_suspend_lock, RW_READER);
 			mutex_enter(&zv->zv_state_lock);
+
+			/*
+			 * Unlike in zvol_open(), we don't check if removal
+			 * started here, because we might be one of the openers
+			 * that needs to be thrown out! If we're the last, we
+			 * need to call zvol_last_close() below to finish
+			 * cleanup. So, no special treatment for us.
+			 */
+
 			/* check to see if zv_suspend_lock is needed */
 			if (zv->zv_open_count != 1) {
 				rw_exit(&zv->zv_suspend_lock);
@@ -848,7 +899,6 @@ zvol_release(struct gendisk *disk, fmode_t unused)
 	} else {
 		drop_suspend = B_FALSE;
 	}
-	rw_exit(&zvol_state_lock);
 
 	ASSERT(MUTEX_HELD(&zv->zv_state_lock));
 
@@ -868,9 +918,10 @@ static int
 zvol_ioctl(struct block_device *bdev, fmode_t mode,
     unsigned int cmd, unsigned long arg)
 {
-	zvol_state_t *zv = bdev->bd_disk->private_data;
 	int error = 0;
 
+	zvol_state_t *zv = atomic_load_ptr(&bdev->bd_disk->private_data);
+	ASSERT3P(zv, !=, NULL);
 	ASSERT3U(zv->zv_open_count, >, 0);
 
 	switch (cmd) {
@@ -923,9 +974,8 @@ zvol_check_events(struct gendisk *disk, unsigned int clearing)
 {
 	unsigned int mask = 0;
 
-	rw_enter(&zvol_state_lock, RW_READER);
+	zvol_state_t *zv = atomic_load_ptr(&disk->private_data);
 
-	zvol_state_t *zv = disk->private_data;
 	if (zv != NULL) {
 		mutex_enter(&zv->zv_state_lock);
 		mask = zv->zv_changed ? DISK_EVENT_MEDIA_CHANGE : 0;
@@ -933,25 +983,20 @@ zvol_check_events(struct gendisk *disk, unsigned int clearing)
 		mutex_exit(&zv->zv_state_lock);
 	}
 
-	rw_exit(&zvol_state_lock);
-
 	return (mask);
 }
 
 static int
 zvol_revalidate_disk(struct gendisk *disk)
 {
-	rw_enter(&zvol_state_lock, RW_READER);
+	zvol_state_t *zv = atomic_load_ptr(&disk->private_data);
 
-	zvol_state_t *zv = disk->private_data;
 	if (zv != NULL) {
 		mutex_enter(&zv->zv_state_lock);
 		set_capacity(zv->zv_zso->zvo_disk,
 		    zv->zv_volsize >> SECTOR_BITS);
 		mutex_exit(&zv->zv_state_lock);
 	}
-
-	rw_exit(&zvol_state_lock);
 
 	return (0);
 }
@@ -971,28 +1016,19 @@ zvol_os_update_volsize(zvol_state_t *zv, uint64_t volsize)
 	return (0);
 }
 
-void
-zvol_os_clear_private(zvol_state_t *zv)
-{
-	/*
-	 * Cleared while holding zvol_state_lock as a writer
-	 * which will prevent zvol_open() from opening it.
-	 */
-	zv->zv_zso->zvo_disk->private_data = NULL;
-}
-
 /*
  * Provide a simple virtual geometry for legacy compatibility.  For devices
  * smaller than 1 MiB a small head and sector count is used to allow very
  * tiny devices.  For devices over 1 Mib a standard head and sector count
  * is used to keep the cylinders count reasonable.
  */
-static int
-zvol_getgeo(struct block_device *bdev, struct hd_geometry *geo)
+static inline int
+zvol_getgeo_impl(struct gendisk *disk, struct hd_geometry *geo)
 {
-	zvol_state_t *zv = bdev->bd_disk->private_data;
+	zvol_state_t *zv = atomic_load_ptr(&disk->private_data);
 	sector_t sectors;
 
+	ASSERT3P(zv, !=, NULL);
 	ASSERT3U(zv->zv_open_count, >, 0);
 
 	sectors = get_capacity(zv->zv_zso->zvo_disk);
@@ -1010,6 +1046,20 @@ zvol_getgeo(struct block_device *bdev, struct hd_geometry *geo)
 
 	return (0);
 }
+
+#ifdef HAVE_BLOCK_DEVICE_OPERATIONS_GETGEO_GENDISK
+static int
+zvol_getgeo(struct gendisk *disk, struct hd_geometry *geo)
+{
+	return (zvol_getgeo_impl(disk, geo));
+}
+#else
+static int
+zvol_getgeo(struct block_device *bdev, struct hd_geometry *geo)
+{
+	return (zvol_getgeo_impl(bdev->bd_disk, geo));
+}
+#endif
 
 /*
  * Why have two separate block_device_operations structs?
@@ -1417,17 +1467,50 @@ out_kmem:
 	return (ret);
 }
 
-/*
- * Cleanup then free a zvol_state_t which was created by zvol_alloc().
- * At this time, the structure is not opened by anyone, is taken off
- * the zvol_state_list, and has its private data set to NULL.
- * The zvol_state_lock is dropped.
- *
- * This function may take many milliseconds to complete (e.g. we've seen
- * it take over 256ms), due to the calls to "blk_cleanup_queue" and
- * "del_gendisk". Thus, consumers need to be careful to account for this
- * latency when calling this function.
- */
+void
+zvol_os_remove_minor(zvol_state_t *zv)
+{
+	ASSERT(MUTEX_HELD(&zv->zv_state_lock));
+	ASSERT0(zv->zv_open_count);
+	ASSERT0(atomic_read(&zv->zv_suspend_ref));
+	ASSERT(zv->zv_flags & ZVOL_REMOVING);
+
+	struct zvol_state_os *zso = zv->zv_zso;
+	zv->zv_zso = NULL;
+
+	/* Clearing private_data will make new callers return immediately. */
+	atomic_store_ptr(&zso->zvo_disk->private_data, NULL);
+
+	/*
+	 * Drop the state lock before calling del_gendisk(). There may be
+	 * callers waiting to acquire it, but del_gendisk() will block until
+	 * they exit, which would deadlock.
+	 */
+	mutex_exit(&zv->zv_state_lock);
+
+	del_gendisk(zso->zvo_disk);
+#if defined(HAVE_SUBMIT_BIO_IN_BLOCK_DEVICE_OPERATIONS) && \
+	(defined(HAVE_BLK_ALLOC_DISK) || defined(HAVE_BLK_ALLOC_DISK_2ARG))
+#if defined(HAVE_BLK_CLEANUP_DISK)
+	blk_cleanup_disk(zso->zvo_disk);
+#else
+	put_disk(zso->zvo_disk);
+#endif
+#else
+	blk_cleanup_queue(zso->zvo_queue);
+	put_disk(zso->zvo_disk);
+#endif
+
+	if (zso->use_blk_mq)
+		blk_mq_free_tag_set(&zso->tag_set);
+
+	ida_free(&zvol_ida, MINOR(zso->zvo_dev) >> ZVOL_MINOR_BITS);
+
+	kmem_free(zso, sizeof (struct zvol_state_os));
+
+	mutex_enter(&zv->zv_state_lock);
+}
+
 void
 zvol_os_free(zvol_state_t *zv)
 {
@@ -1435,35 +1518,19 @@ zvol_os_free(zvol_state_t *zv)
 	ASSERT(!RW_LOCK_HELD(&zv->zv_suspend_lock));
 	ASSERT(!MUTEX_HELD(&zv->zv_state_lock));
 	ASSERT0(zv->zv_open_count);
-	ASSERT0P(zv->zv_zso->zvo_disk->private_data);
+	ASSERT0P(zv->zv_zso);
+
+	ASSERT0P(zv->zv_objset);
+	ASSERT0P(zv->zv_zilog);
+	ASSERT0P(zv->zv_dn);
 
 	rw_destroy(&zv->zv_suspend_lock);
 	zfs_rangelock_fini(&zv->zv_rangelock);
-
-	del_gendisk(zv->zv_zso->zvo_disk);
-#if defined(HAVE_SUBMIT_BIO_IN_BLOCK_DEVICE_OPERATIONS) && \
-	(defined(HAVE_BLK_ALLOC_DISK) || defined(HAVE_BLK_ALLOC_DISK_2ARG))
-#if defined(HAVE_BLK_CLEANUP_DISK)
-	blk_cleanup_disk(zv->zv_zso->zvo_disk);
-#else
-	put_disk(zv->zv_zso->zvo_disk);
-#endif
-#else
-	blk_cleanup_queue(zv->zv_zso->zvo_queue);
-	put_disk(zv->zv_zso->zvo_disk);
-#endif
-
-	if (zv->zv_zso->use_blk_mq)
-		blk_mq_free_tag_set(&zv->zv_zso->tag_set);
-
-	ida_simple_remove(&zvol_ida,
-	    MINOR(zv->zv_zso->zvo_dev) >> ZVOL_MINOR_BITS);
 
 	cv_destroy(&zv->zv_removing_cv);
 	mutex_destroy(&zv->zv_state_lock);
 	dataset_kstats_destroy(&zv->zv_kstat);
 
-	kmem_free(zv->zv_zso, sizeof (struct zvol_state_os));
 	kmem_free(zv, sizeof (zvol_state_t));
 }
 
@@ -1592,7 +1659,7 @@ zvol_os_create_minor(const char *name)
 	if (zvol_inhibit_dev)
 		return (0);
 
-	idx = ida_simple_get(&zvol_ida, 0, 0, kmem_flags_convert(KM_SLEEP));
+	idx = ida_alloc(&zvol_ida, kmem_flags_convert(KM_SLEEP));
 	if (idx < 0)
 		return (SET_ERROR(-idx));
 	minor = idx << ZVOL_MINOR_BITS;
@@ -1600,7 +1667,7 @@ zvol_os_create_minor(const char *name)
 		/* too many partitions can cause an overflow */
 		zfs_dbgmsg("zvol: create minor overflow: %s, minor %u/%u",
 		    name, minor, MINOR(minor));
-		ida_simple_remove(&zvol_ida, idx);
+		ida_free(&zvol_ida, idx);
 		return (SET_ERROR(EINVAL));
 	}
 
@@ -1608,7 +1675,7 @@ zvol_os_create_minor(const char *name)
 	if (zv) {
 		ASSERT(MUTEX_HELD(&zv->zv_state_lock));
 		mutex_exit(&zv->zv_state_lock);
-		ida_simple_remove(&zvol_ida, idx);
+		ida_free(&zvol_ida, idx);
 		return (SET_ERROR(EEXIST));
 	}
 
@@ -1708,7 +1775,7 @@ out_doi:
 		rw_exit(&zvol_state_lock);
 		error = zvol_os_add_disk(zv->zv_zso->zvo_disk);
 	} else {
-		ida_simple_remove(&zvol_ida, idx);
+		ida_free(&zvol_ida, idx);
 	}
 
 	return (error);
@@ -1719,7 +1786,7 @@ zvol_os_rename_minor(zvol_state_t *zv, const char *newname)
 {
 	int readonly = get_disk_ro(zv->zv_zso->zvo_disk);
 
-	ASSERT(RW_LOCK_HELD(&zvol_state_lock));
+	ASSERT(RW_WRITE_HELD(&zvol_state_lock));
 	ASSERT(MUTEX_HELD(&zv->zv_state_lock));
 
 	strlcpy(zv->zv_name, newname, sizeof (zv->zv_name));

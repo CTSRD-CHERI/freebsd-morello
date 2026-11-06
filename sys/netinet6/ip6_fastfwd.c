@@ -24,7 +24,6 @@
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <sys/cdefs.h>
 #include "opt_inet6.h"
 #include "opt_ipstealth.h"
 #include "opt_sctp.h"
@@ -114,7 +113,7 @@ ip6_tryforward(struct mbuf *m)
 	    IN6_IS_ADDR_LINKLOCAL(&ip6->ip6_src) ||
 	    IN6_IS_ADDR_UNSPECIFIED(&ip6->ip6_dst) ||
 	    IN6_IS_ADDR_UNSPECIFIED(&ip6->ip6_src) ||
-	    in6_localip(&ip6->ip6_dst))
+	    in6_localip_fib(&ip6->ip6_dst, M_GETFIB(m)))
 		return (m);
 	/*
 	 * Check that the amount of data in the buffers
@@ -144,19 +143,6 @@ ip6_tryforward(struct mbuf *m)
 		} else
 			m_adj(m, sizeof(struct ip6_hdr) + plen -
 			    m->m_pkthdr.len);
-	}
-
-	/*
-	 * Hop limit.
-	 */
-#ifdef IPSTEALTH
-	if (!V_ip6stealth)
-#endif
-	if (ip6->ip6_hlim <= IPV6_HLIMDEC) {
-		icmp6_error(m, ICMP6_TIME_EXCEEDED,
-		    ICMP6_TIME_EXCEED_TRANSIT, 0);
-		m = NULL;
-		goto dropin;
 	}
 
 	bzero(&dst, sizeof(dst));
@@ -199,6 +185,19 @@ ip6_tryforward(struct mbuf *m)
 	}
 passin:
 	/*
+	 * Hop limit, checked after the inbound hooks as on the other
+	 * forwarding paths: a packet they drop gets no time exceeded error.
+	 */
+#ifdef IPSTEALTH
+	if (!V_ip6stealth)
+#endif
+	if (ip6->ip6_hlim <= IPV6_HLIMDEC) {
+		icmp6_error(m, ICMP6_TIME_EXCEEDED,
+		    ICMP6_TIME_EXCEED_TRANSIT, 0);
+		m = NULL;
+		goto dropin;
+	}
+	/*
 	 * Find route to destination.
 	 */
 	if (ip6_findroute(&nh, &dst, m) != 0) {
@@ -219,7 +218,7 @@ passin:
 	/*
 	 * Outgoing packet firewall processing.
 	 */
-	if (pfil_mbuf_out(V_inet6_pfil_head, &m, nh->nh_ifp,
+	if (pfil_mbuf_fwd(V_inet6_pfil_head, &m, nh->nh_ifp,
 	    NULL) != PFIL_PASS)
 		goto dropout;
 

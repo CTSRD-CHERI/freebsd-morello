@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -78,9 +68,7 @@
 #include <libzutil.h>
 
 #include "libzfs_impl.h"
-#include <thread_pool.h>
 
-#include <libshare.h>
 #include <sys/systeminfo.h>
 #define	MAXISALEN	257	/* based on sysinfo(2) man page */
 
@@ -99,7 +87,52 @@ static const enum sa_protocol share_all_proto[SA_PROTOCOL_COUNT + 1] = {
 	SA_NO_PROTOCOL
 };
 
+const char *
+zfs_share_protocol_name(enum sa_protocol protocol)
+{
+	return (sa_protocol_names[protocol]);
+}
 
+/*
+ * Returns B_TRUE if the property is a namespace property that requires
+ * a remount to take effect.
+ */
+boolean_t
+zfs_is_namespace_prop(zfs_prop_t prop)
+{
+	switch (prop) {
+	case ZFS_PROP_ATIME:
+	case ZFS_PROP_RELATIME:
+	case ZFS_PROP_DEVICES:
+	case ZFS_PROP_EXEC:
+	case ZFS_PROP_SETUID:
+	case ZFS_PROP_READONLY:
+	case ZFS_PROP_XATTR:
+	case ZFS_PROP_NBMAND:
+		return (B_TRUE);
+	default:
+		return (B_FALSE);
+	}
+}
+
+/*
+ * Returns the ZFS_MNT_PROP_* flag for a namespace property.
+ */
+uint32_t
+zfs_namespace_prop_flag(zfs_prop_t prop)
+{
+	switch (prop) {
+	case ZFS_PROP_ATIME:	return (ZFS_MNT_PROP_ATIME);
+	case ZFS_PROP_RELATIME:	return (ZFS_MNT_PROP_RELATIME);
+	case ZFS_PROP_DEVICES:	return (ZFS_MNT_PROP_DEVICES);
+	case ZFS_PROP_EXEC:	return (ZFS_MNT_PROP_EXEC);
+	case ZFS_PROP_SETUID:	return (ZFS_MNT_PROP_SETUID);
+	case ZFS_PROP_READONLY:	return (ZFS_MNT_PROP_READONLY);
+	case ZFS_PROP_XATTR:	return (ZFS_MNT_PROP_XATTR);
+	case ZFS_PROP_NBMAND:	return (ZFS_MNT_PROP_NBMAND);
+	default:		return (0);
+	}
+}
 
 static boolean_t
 dir_is_empty_stat(const char *dirname)
@@ -223,7 +256,7 @@ zfs_is_mounted(zfs_handle_t *zhp, char **where)
  * that the caller has verified the sanity of mounting the dataset at
  * its mountpoint to the extent the caller wants.
  */
-static boolean_t
+boolean_t
 zfs_is_mountable_internal(zfs_handle_t *zhp)
 {
 	if (zfs_prop_get_int(zhp, ZFS_PROP_ZONED) &&
@@ -1071,7 +1104,7 @@ non_descendant_idx(zfs_handle_t **handles, size_t num_handles, int idx)
 
 typedef struct mnt_param {
 	libzfs_handle_t	*mnt_hdl;
-	tpool_t		*mnt_tp;
+	taskq_t		*mnt_tq;
 	zfs_handle_t	**mnt_zhps; /* filesystems to mount */
 	size_t		mnt_num_handles;
 	int		mnt_idx;	/* Index of selected entry to mount */
@@ -1085,19 +1118,20 @@ typedef struct mnt_param {
  */
 static void
 zfs_dispatch_mount(libzfs_handle_t *hdl, zfs_handle_t **handles,
-    size_t num_handles, int idx, zfs_iter_f func, void *data, tpool_t *tp)
+    size_t num_handles, int idx, zfs_iter_f func, void *data, taskq_t *tq)
 {
 	mnt_param_t *mnt_param = zfs_alloc(hdl, sizeof (mnt_param_t));
 
 	mnt_param->mnt_hdl = hdl;
-	mnt_param->mnt_tp = tp;
+	mnt_param->mnt_tq = tq;
 	mnt_param->mnt_zhps = handles;
 	mnt_param->mnt_num_handles = num_handles;
 	mnt_param->mnt_idx = idx;
 	mnt_param->mnt_func = func;
 	mnt_param->mnt_data = data;
 
-	if (tpool_dispatch(tp, zfs_mount_task, (void*)mnt_param)) {
+	if (taskq_dispatch(tq, zfs_mount_task, (void*)mnt_param,
+	    TQ_SLEEP) == TASKQID_INVALID) {
 		/* Could not dispatch to thread pool; execute directly */
 		zfs_mount_task((void*)mnt_param);
 	}
@@ -1188,7 +1222,7 @@ zfs_mount_task(void *arg)
 		if (!libzfs_path_contains(mountpoint, child))
 			break; /* not a descendant, return */
 		zfs_dispatch_mount(mp->mnt_hdl, handles, num_handles, i,
-		    mp->mnt_func, mp->mnt_data, mp->mnt_tp);
+		    mp->mnt_func, mp->mnt_data, mp->mnt_tq);
 	}
 
 out:
@@ -1246,7 +1280,8 @@ zfs_foreach_mountpoint(libzfs_handle_t *hdl, zfs_handle_t **handles,
 	 * Issue the callback function for each dataset using a parallel
 	 * algorithm that uses a thread pool to manage threads.
 	 */
-	tpool_t *tp = tpool_create(1, nthr, 0, NULL);
+	taskq_t *tq = taskq_create("zfs_foreach_mountpoint", nthr, minclsyspri,
+	    1, INT_MAX, TASKQ_DYNAMIC);
 
 	/*
 	 * There may be multiple "top level" mountpoints outside of the pool's
@@ -1264,11 +1299,11 @@ zfs_foreach_mountpoint(libzfs_handle_t *hdl, zfs_handle_t **handles,
 		    zfs_prop_get_int(handles[i], ZFS_PROP_ZONED))
 			break;
 		zfs_dispatch_mount(hdl, handles, num_handles, i, func, data,
-		    tp);
+		    tq);
 	}
 
-	tpool_wait(tp);	/* wait for all scheduled mounts to complete */
-	tpool_destroy(tp);
+	taskq_wait(tq);	/* wait for all scheduled mounts to complete */
+	taskq_destroy(tq);
 }
 
 /*

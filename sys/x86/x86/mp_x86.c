@@ -52,6 +52,7 @@
 #include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/memrange.h>
+#include <sys/msan.h>
 #include <sys/mutex.h>
 #include <sys/pcpu.h>
 #include <sys/proc.h>
@@ -124,7 +125,7 @@ volatile cpuset_t resuming_cpus;
 volatile cpuset_t toresume_cpus;
 
 /* used to hold the AP's until we are ready to release them */
-struct mtx ap_boot_mtx;
+static int ap_boot_lock;
 
 /* Set to 1 once we're ready to let the APs out of the pen. */
 volatile int aps_ready = 0;
@@ -359,7 +360,7 @@ topo_probe_amd(void)
  * using CPUID Leaf 1 and Leaf 4, if supported.
  * See:
  *  - Intel 64 Architecture Processor Topology Enumeration
- *  - Intel 64 and IA-32 ArchitecturesSoftware Developer’s Manual,
+ *  - Intel 64 and IA-32 Architectures Software Developer's Manual,
  *    Volume 3A: System Programming Guide, PROGRAMMING CONSIDERATIONS
  *    FOR HARDWARE MULTI-THREADING CAPABLE PROCESSORS
  */
@@ -393,7 +394,7 @@ topo_probe_intel_0x4(void)
  * using CPUID Leaf 1Fh or 0Bh, if supported.
  * See:
  *  - Intel 64 Architecture Processor Topology Enumeration
- *  - Intel 64 and IA-32 ArchitecturesSoftware Developer’s Manual,
+ *  - Intel 64 and IA-32 Architectures Software Developer's Manual,
  *    Volume 3A: System Programming Guide, PROGRAMMING CONSIDERATIONS
  *    FOR HARDWARE MULTI-THREADING CAPABLE PROCESSORS
  */
@@ -450,7 +451,7 @@ topo_probe_intel_0xb(void)
  * Determine topology of caches for Intel CPUs.
  * See:
  *  - Intel 64 Architecture Processor Topology Enumeration
- *  - Intel 64 and IA-32 Architectures Software Developer’s Manual
+ *  - Intel 64 and IA-32 Architectures Software Developer's Manual
  *    Volume 2A: Instruction Set Reference, A-M,
  *    CPUID instruction
  */
@@ -1084,9 +1085,7 @@ init_secondary_tail(void)
 	/* Initialize curthread. */
 	KASSERT(PCPU_GET(idlethread) != NULL, ("no idle thread"));
 	PCPU_SET(curthread, PCPU_GET(idlethread));
-	schedinit_ap();
-
-	mtx_lock_spin(&ap_boot_mtx);
+	sched_init_ap();
 
 	mca_init();
 
@@ -1095,6 +1094,15 @@ init_secondary_tail(void)
 
 	/* Set memory range attributes for this CPU to match the BSP */
 	mem_range_AP_init();
+
+	/*
+	 * Use naive spinning lock instead of the real spinlock, since
+	 * printfs() below might take a very long time and trigger
+	 * spinlock timeout panics.  This is the only use of the
+	 * ap_boot_lock anyway.
+	 */
+	while (atomic_cmpset_acq_int(&ap_boot_lock, 0, 1) == 0)
+		ia32_pause();
 
 	smp_cpus++;
 
@@ -1117,6 +1125,8 @@ init_secondary_tail(void)
 		atomic_store_rel_int(&smp_started, 1);
 	}
 
+	atomic_store_rel_int(&ap_boot_lock, 0);
+
 #ifdef __amd64__
 	if (pmap_pcid_enabled)
 		load_cr4(rcr4() | CR4_PCIDE);
@@ -1124,8 +1134,6 @@ init_secondary_tail(void)
 	load_es(_udatasel);
 	load_fs(_ufssel);
 #endif
-
-	mtx_unlock_spin(&ap_boot_mtx);
 
 	/* Wait until all the AP's are up. */
 	while (atomic_load_acq_int(&smp_started) == 0)
@@ -1321,58 +1329,67 @@ ipi_send_cpu(int cpu, u_int ipi)
 }
 
 void
-ipi_bitmap_handler(struct trapframe frame)
+ipi_bitmap_handler(struct trapframe *frame)
 {
 	struct trapframe *oldframe;
 	struct thread *td;
 	int cpu = PCPU_GET(cpuid);
 	u_int ipi_bitmap;
+	bool do_preempt = true;
 
-	kasan_mark(&frame, sizeof(frame), sizeof(frame), 0);
+	kasan_mark(frame, sizeof(*frame), sizeof(*frame), 0);
+	kmsan_mark(frame, sizeof(*frame), KMSAN_STATE_INITED);
 
 	td = curthread;
 	ipi_bitmap = atomic_readandclear_int(&cpuid_to_pcpu[cpu]->
 	    pc_ipi_bitmap);
 
-	/*
-	 * sched_preempt() must be called to clear the pending preempt
-	 * IPI to enable delivery of further preempts.  However, the
-	 * critical section will cause extra scheduler lock thrashing
-	 * when used unconditionally.  Only critical_enter() if
-	 * hardclock must also run, which requires the section entry.
-	 */
-	if (ipi_bitmap & (1 << IPI_HARDCLOCK))
-		critical_enter();
-
 	td->td_intr_nesting_level++;
 	oldframe = td->td_intr_frame;
-	td->td_intr_frame = &frame;
+	td->td_intr_frame = frame;
+
+#ifdef COUNT_IPIS
+	if (ipi_bitmap & (1 << IPI_AST))
+		(*ipi_ast_counts[cpu])++;
+	if (ipi_bitmap & (1 << IPI_HARDCLOCK))
+		(*ipi_hardclock_counts[cpu])++;
+	if (ipi_bitmap & (1 << IPI_PREEMPT))
+		(*ipi_preempt_counts[cpu])++;
+#endif
+
 #if defined(STACK) || defined(DDB)
 	if (ipi_bitmap & (1 << IPI_TRACE))
 		stack_capture_intr();
 #endif
-	if (ipi_bitmap & (1 << IPI_PREEMPT)) {
-#ifdef COUNT_IPIS
-		(*ipi_preempt_counts[cpu])++;
-#endif
-		sched_preempt(td);
+	if (ipi_bitmap & (1 << IPI_HARDCLOCK)) {
+		/*
+		 * Enter a critical section so that hardclockintr() can execute
+		 * entirely without preemption (as it calls code that can enter
+		 * critical sections).
+		 */
+		critical_enter();
+		hardclockintr();
+		/*
+		 * If we are going to preempt now, do not let sched_preempt() do
+		 * an unnecessary extra preemption below.
+		 */
+		if (td->td_owepreempt != 0)
+			do_preempt = false;
+		critical_exit();
 	}
 	if (ipi_bitmap & (1 << IPI_AST)) {
-#ifdef COUNT_IPIS
-		(*ipi_ast_counts[cpu])++;
-#endif
 		/* Nothing to do for AST */
 	}
-	if (ipi_bitmap & (1 << IPI_HARDCLOCK)) {
-#ifdef COUNT_IPIS
-		(*ipi_hardclock_counts[cpu])++;
-#endif
-		hardclockintr();
-	}
+	/*
+	 * sched_preempt() causes an immediate switch to another thread when not
+	 * executing in a critical section.  In order to ensure that all other
+	 * IPIs are processed in due course (in particular, hardclockintr()), it
+	 * has to be called last.
+	 */
+	if (ipi_bitmap & (1 << IPI_PREEMPT) && do_preempt)
+		sched_preempt(td);
 	td->td_intr_frame = oldframe;
 	td->td_intr_nesting_level--;
-	if (ipi_bitmap & (1 << IPI_HARDCLOCK))
-		critical_exit();
 }
 
 /*
@@ -1696,14 +1713,36 @@ cpususpend_handler(void)
 	CPU_CLR_ATOMIC(cpu, &toresume_cpus);
 }
 
+void
+cpuoff_handler(void)
+{
+	u_int cpu;
+
+	cpu = PCPU_GET(cpuid);
+
+	/* Time to go catatonic.  A reset will be required to leave. */
+	disable_intr();
+	lapic_disable();
+	CPU_SET_ATOMIC(cpu, &suspended_cpus);
+
+	/*
+	 * There technically should be no need for the `while` here, since it
+	 * cannot be interrupted (interrupts are disabled).  Be safe anyway.
+	 * Any interrupt at this point will likely be fatal, as the page tables
+	 * are likely going away shortly.
+	 */
+	while (1)
+		halt();
+}
+
 /*
  * Handle an IPI_SWI by waking delayed SWI thread.
  */
 void
-ipi_swi_handler(struct trapframe frame)
+ipi_swi_handler(struct trapframe *frame)
 {
 
-	intr_event_handle(clk_intr_event, &frame);
+	intr_event_handle(clk_intr_event, frame);
 }
 
 /*

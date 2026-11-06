@@ -166,8 +166,7 @@ nptv6_translate_icmpv6(struct nptv6_cfg *cfg, struct mbuf **mp, int offset)
 	offset += sizeof(*icmp6);
 	if (offset + sizeof(*ip6) > m->m_pkthdr.len)
 		return (-1);
-	if (offset + sizeof(*ip6) > m->m_len)
-		*mp = m = m_pullup(m, offset + sizeof(*ip6));
+	*mp = m = m_pullup(m, offset + sizeof(*ip6));
 	if (m == NULL)
 		return (-1);
 	ip6 = mtodo(m, offset);
@@ -593,8 +592,8 @@ ifaddr_cb(struct namedobj_instance *ni, struct named_object *no,
 		if ((cfg->flags & NPTV6_READY) == 0)
 			return (0);
 		/* If address does not match the external prefix, ignore */
-		if (IN6_ARE_MASKED_ADDR_EQUAL(&cfg->external, args->addr,
-		    &cfg->mask) != 0)
+		if (!IN6_ARE_MASKED_ADDR_EQUAL(&cfg->external, args->addr,
+		    &cfg->mask))
 			return (0);
 		/* Otherwise clear READY flag */
 		cfg->flags &= ~NPTV6_READY;

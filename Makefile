@@ -22,7 +22,7 @@
 # kernel              - buildkernel + installkernel.
 # kernel-toolchain    - Builds the subset of world necessary to build a kernel
 # kernel-toolchains   - Build kernel-toolchain for all universe targets.
-# doxygen             - Build API documentation of the kernel, needs doxygen.
+# doxygen             - Build API documentation of the kernel, needs doxygen, TeX, and graphviz.
 # checkworld          - Run test suite on installed world.
 # check-old           - List obsolete directories/files/libraries.
 # check-old-dirs      - List obsolete directories.
@@ -85,7 +85,7 @@
 #  5.  `reboot'        (in single user mode: boot -s from the loader prompt).
 #  6.  `etcupdate -p'
 #  7.  `make installworld'
-#  8.  `etcupdate -B'
+#  8.  `etcupdate'
 #  9.  `make delete-old'
 # 10.  `reboot'
 # 11.  `make delete-old-libs' (in case no 3rd party program uses them anymore)
@@ -175,7 +175,7 @@ TGTS=	all all-man buildenv buildenvvars buildetc buildkernel buildworld \
 	create-packages-world create-packages-kernel \
 	create-packages-kernel-repo create-packages-world-repo \
 	create-packages-source create-packages \
-	update-packages packages installconfig real-packages real-update-packages \
+	installconfig real-packages real-update-packages \
 	sign-packages package-pkg print-dir test-system-compiler test-system-linker \
 	test-includes
 
@@ -219,6 +219,8 @@ META_TGT_WHITELIST+=	build${libcompat}
 .ORDER: buildworld distribute
 .ORDER: buildworld distributeworld
 .ORDER: buildworld buildkernel
+.ORDER: buildworld packages
+.ORDER: buildworld update-packages
 .ORDER: distrib-dirs distribute
 .ORDER: distrib-dirs distributeworld
 .ORDER: distrib-dirs installworld
@@ -232,6 +234,8 @@ META_TGT_WHITELIST+=	build${libcompat}
 .ORDER: buildkernel installkernel.debug
 .ORDER: buildkernel reinstallkernel
 .ORDER: buildkernel reinstallkernel.debug
+.ORDER: buildkernel packages
+.ORDER: buildkernel update-packages
 .ORDER: kernel-toolchain buildkernel
 
 # Only sanitize PATH on FreeBSD.
@@ -517,6 +521,9 @@ kernels: .PHONY
 worlds: .PHONY
 	@cd ${.CURDIR}; ${SUB_MAKE} UNIVERSE_TARGET=buildworld universe
 
+packages update-packages: .PHONY
+	${_+_}@cd ${.CURDIR}; ${_MAKE} DISTDIR=/ ${.TARGET}
+
 #
 # universe
 #
@@ -530,7 +537,7 @@ worlds: .PHONY
 # Don't build rarely used, semi-supported architectures unless requested.
 #
 .if defined(EXTRA_TARGETS)
-EXTRA_ARCHES_powerpc=	powerpc powerpcspe
+EXTRA_ARCHES_powerpc=	powerpc
 .endif
 TARGETS?= ${TARGET_MACHINE_LIST}
 _UNIVERSE_TARGETS=	${TARGETS}
@@ -539,7 +546,7 @@ TARGET_ARCHES_${target}= ${MACHINE_ARCH_LIST_${target}}
 .endfor
 
 .if defined(USE_GCC_TOOLCHAINS)
-_DEFAULT_GCC_VERSION=	gcc14
+_DEFAULT_GCC_VERSION=	gcc15
 _GCC_VERSION=		${"${USE_GCC_TOOLCHAINS:Mgcc*}" != "":?${USE_GCC_TOOLCHAINS}:${_DEFAULT_GCC_VERSION}}
 TOOLCHAINS_amd64=	amd64-${_GCC_VERSION}
 TOOLCHAINS_arm=		armv7-${_GCC_VERSION}
@@ -592,8 +599,9 @@ targets:	.PHONY
 .endfor
 .endfor
 
+UNIVERSE_LOGDIR?=${.CURDIR}
 .if defined(DOING_TINDERBOX)
-FAILFILE=${.CURDIR}/_.tinderbox.failed
+FAILFILE=${UNIVERSE_LOGDIR}/_.tinderbox.failed
 MAKEFAIL=tee -a ${FAILFILE}
 .else
 MAKEFAIL=cat
@@ -605,9 +613,7 @@ universe_prologue: .PHONY
 	@echo "--------------------------------------------------------------"
 	@echo ">>> make universe started on ${STARTTIME}"
 	@echo "--------------------------------------------------------------"
-.if defined(DOING_TINDERBOX)
 	@rm -f ${FAILFILE}
-.endif
 
 universe-toolchain: .PHONY universe_prologue
 	@echo "--------------------------------------------------------------"
@@ -623,9 +629,9 @@ universe-toolchain: .PHONY universe_prologue
 	    TOOLS_PREFIX_UNDEF= \
 	    kernel-toolchain \
 	    MK_LLVM_TARGET_ALL=yes \
-	    > _.${.TARGET} 2>&1 || \
+	    > ${UNIVERSE_LOGDIR}/_.${.TARGET} 2>&1 || \
 	    (echo "${.TARGET} failed," \
-	    "check _.${.TARGET} for details" | \
+	    "check ${UNIVERSE_LOGDIR}/_.${.TARGET} for details" | \
 	    ${MAKEFAIL}; false)
 	@if [ ! -e "${HOST_OBJTOP}/tmp/usr/bin/cc" ]; then \
 	    echo "Missing host compiler at ${HOST_OBJTOP}/tmp/usr/bin/cc?" >&2; \
@@ -709,9 +715,9 @@ universe_${target}_${target_arch}: universe_${target}_prologue .MAKE .PHONY
 	    TARGET=${target} \
 	    TARGET_ARCH=${target_arch} \
 	    ${MAKE_PARAMS_${target_arch}} \
-	    > _.${target}.${target_arch}.${UNIVERSE_TARGET} 2>&1 || \
+	    > ${UNIVERSE_LOGDIR}/_.${target}.${target_arch}.${UNIVERSE_TARGET} 2>&1 || \
 	    (echo "${target}.${target_arch} ${UNIVERSE_TARGET} failed," \
-	    "check _.${target}.${target_arch}.${UNIVERSE_TARGET} for details" | \
+	    "check ${UNIVERSE_LOGDIR}/_.${target}.${target_arch}.${UNIVERSE_TARGET} for details" | \
 	    ${MAKEFAIL}))
 	@echo ">> ${target}.${target_arch} ${UNIVERSE_TARGET} completed on `LC_ALL=C date`"
 .endfor
@@ -752,12 +758,16 @@ KERNCONFS!=	cd ${KERNSRCDIR}/${TARGET}/conf && \
 		${_THINNER}
 universe_kernconfs: universe_kernels_prologue .PHONY
 .for kernel in ${KERNCONFS}
+.if !exists(${KERNSRCDIR}/${TARGET}/conf/${kernel})
+.warning ${TARGET}/conf/${kernel} missing; skipping.
+.else
 TARGET_ARCH_${kernel}!=	cd ${KERNSRCDIR}/${TARGET}/conf && \
 	env PATH=${HOST_OBJTOP}/tmp/legacy/bin:${PATH:Q} \
 	config -m ${KERNSRCDIR}/${TARGET}/conf/${kernel} 2> /dev/null | \
 	grep -v WARNING: | cut -f 2
 .if empty(TARGET_ARCH_${kernel})
-.error Target architecture for ${TARGET}/conf/${kernel} unknown.  config(8) likely too old.
+.error Target architecture for ${TARGET}/conf/${kernel} cannot be determined, kernconf file may be invalid!
+.endif
 .endif
 universe_kernconfs_${TARGET_ARCH_${kernel}}: universe_kernconf_${TARGET}_${kernel}
 universe_kernconf_${TARGET}_${kernel}: .MAKE
@@ -768,9 +778,9 @@ universe_kernconf_${TARGET}_${kernel}: .MAKE
 	    TARGET_ARCH=${TARGET_ARCH_${kernel}} \
 	    ${MAKE_PARAMS_${TARGET_ARCH_${kernel}}} \
 	    KERNCONF=${kernel} \
-	    > _.${TARGET}.${kernel} 2>&1 || \
+	    > ${UNIVERSE_LOGDIR}/_.${TARGET}.${kernel} 2>&1 || \
 	    (echo "${TARGET} ${kernel} kernel failed," \
-	    "check _.${TARGET}.${kernel} for details"| ${MAKEFAIL}))
+	    "check ${UNIVERSE_LOGDIR}/_.${TARGET}.${kernel} for details"| ${MAKEFAIL}))
 	@echo ">> ${TARGET}.${TARGET_ARCH_${kernel}} ${kernel} kernel completed on `LC_ALL=C date`"
 .endfor
 .for target_arch in ${TARGET_ARCHES_${TARGET}}
@@ -797,7 +807,7 @@ universe_epilogue: .PHONY
 .MAKE.MODE= normal
 # Normally the things we run from here don't either.
 # Using -DWITH_META_MODE
-# we can buildworld with meta files created which are useful 
+# we can buildworld with meta files created which are useful
 # for debugging, but without any of the rest of a meta mode build.
 MK_DIRDEPS_BUILD= no
 MK_STAGING= no

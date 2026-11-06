@@ -30,18 +30,6 @@ local core = require("core")
 
 local cli = {}
 
-if not pager then
-	-- shim for the pager module that just doesn't do it.
-	-- XXX Remove after 12.2 goes EoL.
-	pager = {
-		open = function() end,
-		close = function() end,
-		output = function(str)
-			printc(str)
-		end,
-	}
-end
-
 -- Internal function
 -- Parses arguments to boot and returns two values: kernel_name, argstr
 -- Defaults to nil and "" respectively.
@@ -172,6 +160,29 @@ cli["disable-module"] = function(...)
 	setModule(argv[1], false)
 end
 
+cli['be-list'] = function(...)
+	local _, argv = cli.arguments(...)
+	if #argv ~= 0 then
+		print("usage error: be-list")
+		return
+	end
+
+	for _, bootenv in core.bootenvIter() do
+		print(bootenv)
+	end
+end
+
+cli['be-switch'] = function(...)
+	local _, argv = cli.arguments(...)
+	if #argv == 0 then
+		print("usage error: be-switch beName")
+		return
+	end
+
+	local env = argv[1]
+	core.switchBE(env)
+end
+
 cli["toggle-module"] = function(...)
 	local _, argv = cli.arguments(...)
 	if #argv == 0 then
@@ -247,9 +258,17 @@ cli["disable-device"] = function(...)
 		return
 	end
 
+	if #argv > 1 then
+		print("Too many arguments")
+		print("usage error: disable-device device")
+		return
+	end
+
 	d, u = string.match(argv[1], "(%w*%a)(%d+)")
-	if d ~= nil then
+	if d ~= nil and u ~= nil then
 		loader.setenv("hint." .. d .. "." .. u .. ".disabled", "1")
+	else
+		print("Cannot parse " .. argv[1] .." into driver and unit number.")
 	end
 end
 

@@ -1,6 +1,6 @@
 PACKAGE=	tests
 
-TAP_TESTS_SH=	legacy_test
+ATF_TESTS_SH=	ncal_test
 
 ${PACKAGE}FILES+=		regress.b-3m200901-jd-nhl.out
 ${PACKAGE}FILES+=		regress.b-3m200901-md-nhl.out
@@ -91,6 +91,10 @@ ${PACKAGE}FILES+=		regress.s-r-B-nhl.out
 ${PACKAGE}FILES+=		regress.s-r-gmgy-nhl.out
 ${PACKAGE}FILES+=		regress.s-r-m-nhl.out
 ${PACKAGE}FILES+=		regress.s-r-mgy-nhl.out
-${PACKAGE}FILES+=		regress.sh
+${PACKAGE}FILES+=		regress.se-J-170002-nhl.out
+${PACKAGE}FILES+=		regress.se-r-3-1700-nhl.out
+${PACKAGE}FILES+=		regress.se-r-3-1712-nhl.out
+${PACKAGE}FILES+=		regress.se-r-jd-170003-nhl.out
+${PACKAGE}FILES+=		regress.se-r-jd-171202-nhl.out
 
 .include <bsd.test.mk>

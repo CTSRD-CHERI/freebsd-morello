@@ -1,7 +1,7 @@
 #
 # SPDX-License-Identifier: BSD-2-Clause
 #
-# Copyright (c) 2024 The FreeBSD Foundation
+# Copyright (c) 2024-2026 The FreeBSD Foundation
 #
 # This software was developed by Christos Margiolis <christos@FreeBSD.org>
 # under sponsorship from the FreeBSD Foundation.
@@ -45,13 +45,6 @@ restore_conf()
 	test -r "test_mixer_conf" && mixer $(cat test_mixer_conf)
 }
 
-load_dummy()
-{
-	if ! kldload -n snd_dummy; then
-		atf_skip "cannot load snd_dummy.ko"
-	fi
-}
-
 set_default()
 {
 	deflt_unit="$(mixer | grep ^pcm | cut -f1 -d:)"
@@ -75,10 +68,10 @@ o_flag_head()
 {
 	atf_set "descr" "Verify that the output of the -o flag can be used " \
 		"as valid input"
+	atf_set "require.progs" mixer
 }
 o_flag_body()
 {
-	load_dummy
 	mixer_exists
 	set_default
 
@@ -93,10 +86,10 @@ atf_test_case d_flag cleanup
 d_flag_head()
 {
 	atf_set "descr" "Test default unit setting"
+	atf_set "require.progs" mixer
 }
 d_flag_body()
 {
-	load_dummy
 	mixer_exists
 	set_default
 
@@ -115,10 +108,10 @@ atf_test_case volume cleanup
 volume_head()
 {
 	atf_set "descr" "Test volume setting"
+	atf_set "require.progs" mixer
 }
 volume_body()
 {
-	load_dummy
 	mixer_exists
 	set_default
 	save_conf
@@ -201,10 +194,10 @@ atf_test_case mute cleanup
 mute_head()
 {
 	atf_set "descr" "Test muting"
+	atf_set "require.progs" mixer
 }
 mute_body()
 {
-	load_dummy
 	mixer_exists
 	set_default
 	save_conf
@@ -221,16 +214,6 @@ mute_body()
 	atf_check -o ignore -e empty mixer vol.mute=toggle
 	atf_check -o match:"=off" mixer vol.mute
 
-	# Test deprecated interface
-	atf_check -o ignore -e empty mixer vol.mute=0
-	atf_check -o match:"=off" mixer vol.mute
-
-	atf_check -o ignore -e empty mixer vol.mute=1
-	atf_check -o match:"=on" mixer vol.mute
-
-	atf_check -o ignore -e empty mixer vol.mute=^
-	atf_check -o match:"=off" mixer vol.mute
-
 	# Test wrong values
 	atf_check -o ignore -e not-empty mixer vol.mute=foobar
 	atf_check -o ignore -e not-empty mixer vol.mute=10
@@ -245,10 +228,10 @@ atf_test_case recsrc cleanup
 recsrc_head()
 {
 	atf_set "descr" "Test recording source handling"
+	atf_set "require.progs" mixer
 }
 recsrc_body()
 {
-	load_dummy
 	mixer_exists
 	set_default
 	save_conf
@@ -259,12 +242,6 @@ recsrc_body()
 	atf_check -o ignore -e empty mixer ${recsrc}.recsrc=remove
 	atf_check -o ignore -e empty mixer ${recsrc}.recsrc=set
 	atf_check -o ignore -e empty mixer ${recsrc}.recsrc=toggle
-
-	# Test deprecated interface
-	atf_check -o ignore -e empty mixer ${recsrc}.recsrc=+
-	atf_check -o ignore -e empty mixer ${recsrc}.recsrc=-
-	atf_check -o ignore -e empty mixer ${recsrc}.recsrc==
-	atf_check -o ignore -e empty mixer ${recsrc}.recsrc=^
 
 	# Test wrong values
 	atf_check -o ignore -e not-empty mixer ${recsrc}.recsrc=foobar

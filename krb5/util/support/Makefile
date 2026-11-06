@@ -1,5 +1,5 @@
 #
-# SPDX-License-Idendifier: BSD-2-Clause
+# SPDX-License-Identifier: BSD-2-Clause
 #
 # Copyright (c) 2025 FreeBSD Foundation
 #
@@ -7,15 +7,13 @@
 # under sponsorship from the FreeBSD Foundation.
 #
 
-PACKAGE=	kerberos-lib
-
 .include <src.opts.mk>
 
 .include "../Makefile.inc"
 
 LIB=	krb5support
 # SHLIB_MAJOR=	0
-LDFLAGS=-Wl,--no-undefined
+LDFLAGS+=-Wl,--no-undefined
 VERSION_MAP=	${.CURDIR}/version.map
 
 .PATH: ${KRB5_DIR}/util/support

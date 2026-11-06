@@ -1,5 +1,5 @@
 /*
- * Copyright 2024-2025 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2024-2026 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -35,6 +35,7 @@ typedef struct {
     uint8_t entropy_buf[ML_KEM_RANDOM_BYTES];
     uint8_t *entropy;
     int op;
+    int test_entropy_used;
 } PROV_ML_KEM_CTX;
 
 static void *ml_kem_newctx(void *provctx)
@@ -47,6 +48,7 @@ static void *ml_kem_newctx(void *provctx)
     ctx->key = NULL;
     ctx->entropy = NULL;
     ctx->op = 0;
+    ctx->test_entropy_used = 0;
     return ctx;
 }
 
@@ -60,7 +62,7 @@ static void ml_kem_freectx(void *vctx)
 }
 
 static int ml_kem_init(void *vctx, int op, void *key,
-                       const OSSL_PARAM params[])
+    const OSSL_PARAM params[])
 {
     PROV_ML_KEM_CTX *ctx = vctx;
 
@@ -68,11 +70,24 @@ static int ml_kem_init(void *vctx, int op, void *key,
         return 0;
     ctx->key = key;
     ctx->op = op;
+    ctx->test_entropy_used = 0;
     return ml_kem_set_ctx_params(vctx, params);
 }
 
+#ifdef FIPS_MODULE
+static int ml_kem_get_ctx_params(void *vctx, OSSL_PARAM params[])
+{
+    PROV_ML_KEM_CTX *ctx = vctx;
+
+    if (ctx == NULL)
+        return 0;
+    return ossl_FIPS_IND_get_ctx_param_conditional(NULL, params,
+        !ctx->test_entropy_used);
+}
+#endif
+
 static int ml_kem_encapsulate_init(void *vctx, void *vkey,
-                                   const OSSL_PARAM params[])
+    const OSSL_PARAM params[])
 {
     ML_KEM_KEY *key = vkey;
 
@@ -84,7 +99,7 @@ static int ml_kem_encapsulate_init(void *vctx, void *vkey,
 }
 
 static int ml_kem_decapsulate_init(void *vctx, void *vkey,
-                                   const OSSL_PARAM params[])
+    const OSSL_PARAM params[])
 {
     ML_KEM_KEY *key = vkey;
 
@@ -119,12 +134,15 @@ static int ml_kem_set_ctx_params(void *vctx, const OSSL_PARAM params[])
 
         ctx->entropy = ctx->entropy_buf;
         if (OSSL_PARAM_get_octet_string(p, (void **)&ctx->entropy,
-                                        len, &len)
-            && len == ML_KEM_RANDOM_BYTES)
+                len, &len)
+            && len == ML_KEM_RANDOM_BYTES) {
+            ctx->test_entropy_used = 1;
             return 1;
+        }
 
         /* Possibly, but much less likely wrong type */
         ERR_raise(ERR_LIB_PROV, PROV_R_INVALID_SEED_LENGTH);
+        OPENSSL_cleanse((void *)ctx->entropy_buf, sizeof(ctx->entropy_buf));
         ctx->entropy = NULL;
         return 0;
     }
@@ -133,7 +151,7 @@ static int ml_kem_set_ctx_params(void *vctx, const OSSL_PARAM params[])
 }
 
 static const OSSL_PARAM *ml_kem_settable_ctx_params(ossl_unused void *vctx,
-                                                    ossl_unused void *provctx)
+    ossl_unused void *provctx)
 {
     static const OSSL_PARAM params[] = {
         OSSL_PARAM_octet_string(OSSL_KEM_PARAM_IKME, NULL, 0),
@@ -144,7 +162,7 @@ static const OSSL_PARAM *ml_kem_settable_ctx_params(ossl_unused void *vctx,
 }
 
 static int ml_kem_encapsulate(void *vctx, unsigned char *ctext, size_t *clen,
-                              unsigned char *shsec, size_t *slen)
+    unsigned char *shsec, size_t *slen)
 {
     PROV_ML_KEM_CTX *ctx = vctx;
     ML_KEM_KEY *key = ctx->key;
@@ -171,18 +189,18 @@ static int ml_kem_encapsulate(void *vctx, unsigned char *ctext, size_t *clen,
         return 1;
     }
     if (shsec == NULL) {
-        ERR_raise_data(ERR_LIB_PROV, PROV_R_OUTPUT_BUFFER_TOO_SMALL,
-                       "NULL shared-secret buffer");
+        ERR_raise_data(ERR_LIB_PROV, PROV_R_NULL_OUTPUT_BUFFER,
+            "NULL shared-secret buffer");
         goto end;
     }
 
     if (clen == NULL) {
         ERR_raise_data(ERR_LIB_PROV, PROV_R_NULL_LENGTH_POINTER,
-                       "null ciphertext input/output length pointer");
+            "null ciphertext input/output length pointer");
         goto end;
     } else if (*clen < encap_clen) {
         ERR_raise_data(ERR_LIB_PROV, PROV_R_OUTPUT_BUFFER_TOO_SMALL,
-                       "ciphertext buffer too small");
+            "ciphertext buffer too small");
         goto end;
     } else {
         *clen = encap_clen;
@@ -190,11 +208,11 @@ static int ml_kem_encapsulate(void *vctx, unsigned char *ctext, size_t *clen,
 
     if (slen == NULL) {
         ERR_raise_data(ERR_LIB_PROV, PROV_R_NULL_LENGTH_POINTER,
-                       "null shared secret input/output length pointer");
+            "null shared secret input/output length pointer");
         goto end;
     } else if (*slen < encap_slen) {
         ERR_raise_data(ERR_LIB_PROV, PROV_R_OUTPUT_BUFFER_TOO_SMALL,
-                       "shared-secret buffer too small");
+            "shared-secret buffer too small");
         goto end;
     } else {
         *slen = encap_slen;
@@ -202,11 +220,11 @@ static int ml_kem_encapsulate(void *vctx, unsigned char *ctext, size_t *clen,
 
     if (ctx->entropy != NULL)
         ret = ossl_ml_kem_encap_seed(ctext, encap_clen, shsec, encap_slen,
-                                     ctx->entropy, ML_KEM_RANDOM_BYTES, key);
+            ctx->entropy, ML_KEM_RANDOM_BYTES, key);
     else
         ret = ossl_ml_kem_encap_rand(ctext, encap_clen, shsec, encap_slen, key);
 
- end:
+end:
     /*
      * One shot entropy, each encapsulate call must either provide a new
      * "ikmE", or else will use a random value.  If a caller sets an explicit
@@ -222,7 +240,7 @@ static int ml_kem_encapsulate(void *vctx, unsigned char *ctext, size_t *clen,
 }
 
 static int ml_kem_decapsulate(void *vctx, uint8_t *shsec, size_t *slen,
-                              const uint8_t *ctext, size_t clen)
+    const uint8_t *ctext, size_t clen)
 {
     PROV_ML_KEM_CTX *ctx = vctx;
     ML_KEM_KEY *key = ctx->key;
@@ -245,7 +263,7 @@ static int ml_kem_decapsulate(void *vctx, uint8_t *shsec, size_t *slen,
         slen = &decap_slen;
     } else if (*slen < decap_slen) {
         ERR_raise_data(ERR_LIB_PROV, PROV_R_OUTPUT_BUFFER_TOO_SMALL,
-                       "shared-secret buffer too small");
+            "shared-secret buffer too small");
         return 0;
     } else {
         *slen = decap_slen;
@@ -256,13 +274,19 @@ static int ml_kem_decapsulate(void *vctx, uint8_t *shsec, size_t *slen,
 }
 
 const OSSL_DISPATCH ossl_ml_kem_asym_kem_functions[] = {
-    { OSSL_FUNC_KEM_NEWCTX, (OSSL_FUNC) ml_kem_newctx },
-    { OSSL_FUNC_KEM_ENCAPSULATE_INIT, (OSSL_FUNC) ml_kem_encapsulate_init },
-    { OSSL_FUNC_KEM_ENCAPSULATE, (OSSL_FUNC) ml_kem_encapsulate },
-    { OSSL_FUNC_KEM_DECAPSULATE_INIT, (OSSL_FUNC) ml_kem_decapsulate_init },
-    { OSSL_FUNC_KEM_DECAPSULATE, (OSSL_FUNC) ml_kem_decapsulate },
-    { OSSL_FUNC_KEM_FREECTX, (OSSL_FUNC) ml_kem_freectx },
-    { OSSL_FUNC_KEM_SET_CTX_PARAMS, (OSSL_FUNC) ml_kem_set_ctx_params },
-    { OSSL_FUNC_KEM_SETTABLE_CTX_PARAMS, (OSSL_FUNC) ml_kem_settable_ctx_params },
+    { OSSL_FUNC_KEM_NEWCTX, (OSSL_FUNC)ml_kem_newctx },
+    { OSSL_FUNC_KEM_ENCAPSULATE_INIT, (OSSL_FUNC)ml_kem_encapsulate_init },
+    { OSSL_FUNC_KEM_ENCAPSULATE, (OSSL_FUNC)ml_kem_encapsulate },
+    { OSSL_FUNC_KEM_DECAPSULATE_INIT, (OSSL_FUNC)ml_kem_decapsulate_init },
+    { OSSL_FUNC_KEM_DECAPSULATE, (OSSL_FUNC)ml_kem_decapsulate },
+    { OSSL_FUNC_KEM_FREECTX, (OSSL_FUNC)ml_kem_freectx },
+    { OSSL_FUNC_KEM_SET_CTX_PARAMS, (OSSL_FUNC)ml_kem_set_ctx_params },
+    { OSSL_FUNC_KEM_SETTABLE_CTX_PARAMS, (OSSL_FUNC)ml_kem_settable_ctx_params },
+#ifdef FIPS_MODULE
+    { OSSL_FUNC_KEM_GET_CTX_PARAMS,
+        (OSSL_FUNC)ml_kem_get_ctx_params },
+    { OSSL_FUNC_KEM_GETTABLE_CTX_PARAMS,
+        (OSSL_FUNC)ossl_FIPS_IND_gettable_ctx_params },
+#endif
     OSSL_DISPATCH_END
 };

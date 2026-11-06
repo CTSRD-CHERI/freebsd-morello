@@ -17,7 +17,7 @@
 #endif
 
 #define _LIBUNWIND_HIGHEST_DWARF_REGISTER_X86       8
-#define _LIBUNWIND_HIGHEST_DWARF_REGISTER_X86_64    32
+#define _LIBUNWIND_HIGHEST_DWARF_REGISTER_X86_64    59
 #define _LIBUNWIND_HIGHEST_DWARF_REGISTER_PPC       112
 #define _LIBUNWIND_HIGHEST_DWARF_REGISTER_PPC64     116
 #define _LIBUNWIND_HIGHEST_DWARF_REGISTER_ARM64     95
@@ -36,6 +36,9 @@
 # if defined(__linux__)
 #  define _LIBUNWIND_TARGET_LINUX 1
 # endif
+# if defined(__FreeBSD__)
+#  define _LIBUNWIND_TARGET_FREEBSD 1
+# endif
 # if defined(__HAIKU__)
 #  define _LIBUNWIND_TARGET_HAIKU 1
 # endif
@@ -53,6 +56,9 @@
 #    else
 #      define _LIBUNWIND_CURSOR_SIZE 66
 #    endif
+#  elif defined(__ILP32__)
+#    define _LIBUNWIND_CONTEXT_SIZE 21
+#    define _LIBUNWIND_CURSOR_SIZE 28
 #  else
 #    define _LIBUNWIND_CONTEXT_SIZE 21
 #    define _LIBUNWIND_CURSOR_SIZE 33

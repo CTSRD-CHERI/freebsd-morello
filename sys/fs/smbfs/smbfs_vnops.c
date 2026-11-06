@@ -577,6 +577,11 @@ smbfs_rename(struct vop_rename_args *ap)
 		goto out;
 	}
 
+	if (ap->a_flags != 0) {
+		error = EOPNOTSUPP;
+		goto out;
+	}
+
 	if (tvp && vrefcnt(tvp) > 1) {
 		error = EBUSY;
 		goto out;
@@ -1121,13 +1126,13 @@ smbfs_lookup(struct vop_lookup_args *ap)
 			vput(vp);
 		else
 			vrele(vp);
-		*vpp = NULLVP;
+		*vpp = NULL;
 	}
 	/* 
 	 * entry is not in the cache or has been expired
 	 */
 	error = 0;
-	*vpp = NULLVP;
+	*vpp = NULL;
 	scred = smbfs_malloc_scred();
 	smb_makescred(scred, td, cnp->cn_cred);
 	fap = &fattr;
@@ -1174,7 +1179,7 @@ smbfs_lookup(struct vop_lookup_args *ap)
 		if (error)
 			goto out;
 		if (isdot) {
-			VREF(dvp);
+			vref(dvp);
 			*vpp = dvp;
 			goto out;
 		}

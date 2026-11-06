@@ -36,7 +36,9 @@
 #define	_SYS_SYSCTL_H_
 
 #ifdef _KERNEL
-#include <sys/cdefs.h>
+#include <sys/types.h>
+#include <sys/_null.h>
+#include <sys/kassert.h>
 #include <sys/queue.h>
 #include <sys/tree.h>
 #endif
@@ -270,9 +272,6 @@ struct sysctl_ctx_entry {
 };
 
 TAILQ_HEAD(sysctl_ctx_list, sysctl_ctx_entry);
-
-#define	SYSCTL_NODE_CHILDREN(parent, name) \
-	sysctl__##parent##_##name.oid_children
 
 #ifndef NO_SYSCTL_DESCR
 #define	__DESCR(d) d

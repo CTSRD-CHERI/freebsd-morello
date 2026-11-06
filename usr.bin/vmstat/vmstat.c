@@ -73,15 +73,15 @@ enum x_stats { X_SUM, X_HZ, X_STATHZ, X_NCHSTATS, X_INTRNAMES, X_SINTRNAMES,
     X_INTRCNT, X_SINTRCNT, X_NINTRCNT };
 
 static struct nlist namelist[] = {
-	[X_SUM] = { .n_name = "_vm_cnt", },
-	[X_HZ] = { .n_name = "_hz", },
-	[X_STATHZ] = { .n_name = "_stathz", },
-	[X_NCHSTATS] = { .n_name = "_nchstats", },
-	[X_INTRNAMES] = { .n_name = "_intrnames", },
-	[X_SINTRNAMES] = { .n_name = "_sintrnames", },
-	[X_INTRCNT] = { .n_name = "_intrcnt", },
-	[X_SINTRCNT] = { .n_name = "_sintrcnt", },
-	[X_NINTRCNT] = { .n_name = "_nintrcnt", },
+	[X_SUM] = { .n_name = "vm_cnt", },
+	[X_HZ] = { .n_name = "hz", },
+	[X_STATHZ] = { .n_name = "stathz", },
+	[X_NCHSTATS] = { .n_name = "nchstats", },
+	[X_INTRNAMES] = { .n_name = "intrnames", },
+	[X_SINTRNAMES] = { .n_name = "sintrnames", },
+	[X_INTRCNT] = { .n_name = "intrcnt", },
+	[X_SINTRCNT] = { .n_name = "sintrcnt", },
+	[X_NINTRCNT] = { .n_name = "nintrcnt", },
 	{ .n_name = NULL, },
 };
 
@@ -294,21 +294,10 @@ main(int argc, char *argv[])
 			xo_errx(1, "kvm_openfiles: %s", errbuf);
 	}
 
-retry_nlist:
 	if (kd != NULL && (c = kvm_nlist(kd, namelist)) != 0) {
 		if (c > 0) {
 			bufsize = 0;
 			len = 0;
-
-			/*
-			 * 'cnt' was renamed to 'vm_cnt'.  If 'vm_cnt' is not
-			 * found try looking up older 'cnt' symbol.
-			 * */
-			if (namelist[X_SUM].n_type == 0 &&
-			    strcmp(namelist[X_SUM].n_name, "_vm_cnt") == 0) {
-				namelist[X_SUM].n_name = "_cnt";
-				goto retry_nlist;
-			}
 
 			/*
 			 * 'nintrcnt' doesn't exist in older kernels, but
@@ -1465,6 +1454,7 @@ display_object(struct kinfo_vmobject *kvo)
 	xo_emit("{:active/%5ju} ", (uintmax_t)kvo->kvo_active);
 	xo_emit("{:inactive/%5ju} ", (uintmax_t)kvo->kvo_inactive);
 	xo_emit("{:laundry/%5ju} ", (uintmax_t)kvo->kvo_laundry);
+	xo_emit("{:wired/%5ju} ", (uintmax_t)kvo->kvo_wired);
 	xo_emit("{:refcount/%3d} ", kvo->kvo_ref_count);
 	xo_emit("{:shadowcount/%3d} ", kvo->kvo_shadow_count);
 
@@ -1568,7 +1558,8 @@ doobjstat(void)
 		return;
 	}
 	xo_emit("{T:RES/%5s} {T:ACT/%5s} {T:INACT/%5s} {T:LAUND/%5s} "
-	    "{T:REF/%3s} {T:SHD/%3s} {T:CM/%2s} {T:TP/%3s} {T:PATH/%s}\n");
+	    "{T:WIRED/%5s} {T:REF/%3s} {T:SHD/%3s} {T:CM/%2s} {T:TP/%3s} "
+	    "{T:PATH/%s}\n");
 	xo_open_list("object");
 	for (i = 0; i < cnt; i++)
 		display_object(&kvo[i]);

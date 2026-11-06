@@ -34,18 +34,23 @@
 #include <sys/kernel.h>
 #include <sys/rman.h>
 
+#include <machine/bus.h>
+
 #include <dev/ofw/openfirm.h>
 #include <dev/ofw/ofw_bus.h>
 #include <dev/ofw/ofw_bus_subr.h>
 
 #include <dev/fdt/simplebus.h>
 
+#include "pci_if.h"
+#include "pcib_if.h"
+
 /*
  * Bus interface.
  */
 static int		simplebus_probe(device_t dev);
 static struct resource *simplebus_alloc_resource(device_t, device_t, int,
-    int *, rman_res_t, rman_res_t, rman_res_t, u_int);
+    int, rman_res_t, rman_res_t, rman_res_t, u_int);
 static void		simplebus_probe_nomatch(device_t bus, device_t child);
 static int		simplebus_print_child(device_t bus, device_t child);
 static device_t		simplebus_add_child(device_t dev, u_int order,
@@ -61,6 +66,21 @@ static ssize_t		simplebus_get_property(device_t bus, device_t child,
  */
 static const struct ofw_bus_devinfo *simplebus_get_devinfo(device_t bus,
     device_t child);
+
+/*
+ * PCI interface for MSI interrupts
+ */
+static pci_get_id_t simplebus_get_id;
+static pci_alloc_msi_t simplebus_alloc_msi;
+
+/*
+ * PCIB interface
+ */
+static pcib_alloc_msi_t simplebus_pcib_alloc_msi;
+static pcib_release_msi_t simplebus_pcib_release_msi;
+static pcib_alloc_msix_t simplebus_pcib_alloc_msix;
+static pcib_release_msix_t simplebus_pcib_release_msix;
+static pcib_map_msi_t simplebus_pcib_map_msi;
 
 /*
  * Driver methods.
@@ -104,6 +124,17 @@ static device_method_t	simplebus_methods[] = {
 	DEVMETHOD(ofw_bus_get_name,	ofw_bus_gen_get_name),
 	DEVMETHOD(ofw_bus_get_node,	ofw_bus_gen_get_node),
 	DEVMETHOD(ofw_bus_get_type,	ofw_bus_gen_get_type),
+
+	/* PCI interface for MSI interrupts */
+	DEVMETHOD(pci_get_id,		simplebus_get_id),
+	DEVMETHOD(pci_alloc_msi,	simplebus_alloc_msi),
+
+	/* PCIB interface */
+	DEVMETHOD(pcib_alloc_msi,	simplebus_pcib_alloc_msi),
+	DEVMETHOD(pcib_release_msi,	simplebus_pcib_release_msi),
+	DEVMETHOD(pcib_alloc_msix,	simplebus_pcib_alloc_msix),
+	DEVMETHOD(pcib_release_msix,	simplebus_pcib_release_msix),
+	DEVMETHOD(pcib_map_msi,		simplebus_pcib_map_msi),
 
 	DEVMETHOD_END
 };
@@ -149,13 +180,16 @@ simplebus_probe(device_t dev)
 }
 
 int
-simplebus_attach_impl(device_t dev)
+simplebus_attach_impl(device_t dev, int flags, phandle_t node)
 {
 	struct		simplebus_softc *sc;
-	phandle_t	node;
 
-	sc = device_get_softc(dev);
-	simplebus_init(dev, 0);
+	if (node == 0)
+		node = ofw_bus_get_node(dev);
+	sc = device_get_softc_class(dev, &simplebus_driver);
+	sc->flags |=flags;
+
+	simplebus_init(dev, node);
 	if ((sc->flags & SB_FLAG_NO_RANGES) == 0 &&
 	    simplebus_fill_ranges(sc->node, sc) < 0) {
 		device_printf(dev, "could not get ranges\n");
@@ -178,7 +212,7 @@ simplebus_attach(device_t dev)
 {
 	int	rv;
 
-	rv = simplebus_attach_impl(dev);
+	rv = simplebus_attach_impl(dev, 0, 0);
 	if (rv != 0)
 		return (rv);
 
@@ -196,7 +230,7 @@ simplebus_detach(device_t dev)
 	if (rv != 0)
 		return (rv);
 
-	sc = device_get_softc(dev);
+	sc = device_get_softc_class(dev, &simplebus_driver);
 	if (sc->ranges != NULL)
 		free(sc->ranges, M_DEVBUF);
 
@@ -207,8 +241,7 @@ void
 simplebus_init(device_t dev, phandle_t node)
 {
 	struct simplebus_softc *sc;
-
-	sc = device_get_softc(dev);
+	sc = device_get_softc_class(dev, &simplebus_driver);
 	if (node == 0)
 		node = ofw_bus_get_node(dev);
 	sc->dev = dev;
@@ -221,6 +254,7 @@ simplebus_init(device_t dev, phandle_t node)
 	OF_getencprop(node, "#address-cells", &sc->acells, sizeof(sc->acells));
 	sc->scells = 1;
 	OF_getencprop(node, "#size-cells", &sc->scells, sizeof(sc->scells));
+
 }
 
 int
@@ -279,7 +313,7 @@ simplebus_setup_dinfo(device_t dev, phandle_t node,
 	struct simplebus_softc *sc;
 	struct simplebus_devinfo *ndi;
 
-	sc = device_get_softc(dev);
+	sc = device_get_softc_class(dev, &simplebus_driver);
 	if (di == NULL)
 		ndi = malloc(sizeof(*ndi), M_DEVBUF, M_WAITOK | M_ZERO);
 	else
@@ -431,7 +465,7 @@ simplebus_get_property(device_t bus, device_t child, const char *propname,
 }
 
 static struct resource *
-simplebus_alloc_resource(device_t bus, device_t child, int type, int *rid,
+simplebus_alloc_resource(device_t bus, device_t child, int type, int rid,
     rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
 {
 	struct simplebus_softc *sc;
@@ -439,7 +473,7 @@ simplebus_alloc_resource(device_t bus, device_t child, int type, int *rid,
 	struct resource_list_entry *rle;
 	int j;
 
-	sc = device_get_softc(bus);
+	sc = device_get_softc_class(bus, &simplebus_driver);
 
 	/*
 	 * Request for the default allocation with a given rid: use resource
@@ -449,11 +483,11 @@ simplebus_alloc_resource(device_t bus, device_t child, int type, int *rid,
 		if ((di = device_get_ivars(child)) == NULL)
 			return (NULL);
 
-		rle = resource_list_find(&di->rl, type, *rid);
+		rle = resource_list_find(&di->rl, type, rid);
 		if (rle == NULL) {
 			if (bootverbose)
 				device_printf(bus, "no default resources for "
-				    "rid = %d, type = %d\n", *rid, type);
+				    "rid = %d, type = %d\n", rid, type);
 			return (NULL);
 		}
 		start = rle->start;
@@ -533,4 +567,109 @@ simplebus_print_child(device_t bus, device_t child)
 		rv += printf(" disabled");
 	rv += bus_print_child_footer(bus, child);
 	return (rv);
+}
+
+static int
+simplebus_get_id(device_t dev, device_t child, enum pci_id_type type,
+    uintptr_t *id)
+{
+	phandle_t node, xref;
+	pcell_t *cells;
+	uintptr_t rid;
+	int error, ncells;
+
+	if (type != PCI_ID_MSI)
+		return (EINVAL);
+
+	node = ofw_bus_get_node(child);
+	error = ofw_bus_parse_xref_list_alloc(node, "msi-parent", "#msi-cells",
+	    0, &xref, &ncells, &cells);
+	if (error != 0)
+		return (error);
+
+	rid = 0;
+	if (ncells > 0)
+		rid = cells[0];
+
+	*id = rid;
+	return (0);
+}
+
+static int
+simplebus_alloc_msi(device_t bus, device_t child, int *count)
+{
+	struct simplebus_devinfo *ndi;
+	struct resource_list_entry *rle;
+	int error, i, irq_count, *irqs;
+
+	if (*count < 1)
+		return (EINVAL);
+
+	ndi = device_get_ivars(child);
+	if (ndi == NULL)
+		return (ENXIO);
+
+	/* Only MSI or non-MSI for now */
+	rle = resource_list_find(&ndi->rl, SYS_RES_IRQ, 0);
+	if (rle != NULL && rle->res != NULL)
+		return (ENXIO);
+
+	irq_count = *count;
+	irqs = mallocarray(irq_count, sizeof(int), M_DEVBUF, M_WAITOK | M_ZERO);
+
+	error = PCIB_ALLOC_MSI(bus, child, irq_count, irq_count, irqs);
+	if (error != 0)
+		goto out;
+
+	for (i = 0; i < irq_count; i++) {
+		error = bus_generic_rl_set_resource(bus, child, SYS_RES_IRQ,
+		    i + 1, irqs[i], 1);
+		if (error != 0)
+			break;
+	}
+
+	/* Clean up resources if something failed */
+	if (error != 0) {
+		for (int j = 0; j < i; j++) {
+			bus_generic_rl_delete_resource(bus, child, SYS_RES_IRQ,
+			    j + 1);
+		}
+	}
+out:
+	free(irqs, M_DEVBUF);
+	return (error);
+}
+
+static int
+simplebus_pcib_alloc_msi(device_t dev, device_t child, int count, int maxcount,
+    int *irqs)
+{
+	return (PCIB_ALLOC_MSI(device_get_parent(dev), child, count, maxcount,
+	    irqs));
+}
+
+static int
+simplebus_pcib_release_msi(device_t dev, device_t child, int count, int *irqs)
+{
+	return (PCIB_RELEASE_MSI(device_get_parent(dev), child, count, irqs));
+}
+
+static int
+simplebus_pcib_alloc_msix(device_t dev, device_t child, int *irq)
+{
+	return (PCIB_ALLOC_MSIX(device_get_parent(dev), child, irq));
+}
+
+static int
+simplebus_pcib_release_msix(device_t dev, device_t child, int irq)
+{
+	return (PCIB_RELEASE_MSIX(device_get_parent(dev), child, irq));
+}
+
+static int
+simplebus_pcib_map_msi(device_t dev, device_t child, int irq, uint64_t *addr,
+    uint32_t *data)
+{
+	return (PCIB_MAP_MSI(device_get_parent(dev), child, irq, addr,
+	    data));
 }

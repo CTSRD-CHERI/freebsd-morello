@@ -66,13 +66,7 @@ struct feeder_chain_desc {
 #define FEEDER_CHAIN_FULLMULTI		4
 #define FEEDER_CHAIN_LAST		5
 
-#if defined(SND_FEEDER_FULL_MULTIFORMAT)
 #define FEEDER_CHAIN_DEFAULT		FEEDER_CHAIN_FULLMULTI
-#elif defined(SND_FEEDER_MULTIFORMAT)
-#define FEEDER_CHAIN_DEFAULT		FEEDER_CHAIN_MULTI
-#else
-#define FEEDER_CHAIN_DEFAULT		FEEDER_CHAIN_LEAN
-#endif
 
 /*
  * List of preferred formats that might be required during
@@ -126,7 +120,7 @@ static uint32_t *feeder_chain_formats[FEEDER_CHAIN_LAST] = {
 
 static int feeder_chain_mode = FEEDER_CHAIN_DEFAULT;
 
-#if defined(_KERNEL) && defined(SND_DEBUG) && defined(SND_FEEDER_FULL_MULTIFORMAT)
+#if defined(_KERNEL)
 SYSCTL_INT(_hw_snd, OID_AUTO, feeder_chain_mode, CTLFLAG_RWTUN,
     &feeder_chain_mode, 0,
     "feeder chain mode "
@@ -144,12 +138,10 @@ feeder_build_format(struct pcm_channel *c, struct feeder_chain_desc *cdesc)
 	int ret;
 
 	desc = &(cdesc->desc);
-	desc->type = FEEDER_FORMAT;
 	desc->in = 0;
 	desc->out = 0;
-	desc->flags = 0;
 
-	fc = feeder_getclass(desc);
+	fc = feeder_getclass(FEEDER_FORMAT);
 	if (fc == NULL) {
 		device_printf(c->dev,
 		    "%s(): can't find feeder_format\n", __func__);
@@ -217,12 +209,10 @@ feeder_build_rate(struct pcm_channel *c, struct feeder_chain_desc *cdesc)
 		return (ret);
 
 	desc = &(cdesc->desc);
-	desc->type = FEEDER_RATE;
 	desc->in = 0;
 	desc->out = 0;
-	desc->flags = 0;
 
-	fc = feeder_getclass(desc);
+	fc = feeder_getclass(FEEDER_RATE);
 	if (fc == NULL) {
 		device_printf(c->dev,
 		    "%s(): can't find feeder_rate\n", __func__);
@@ -295,12 +285,10 @@ feeder_build_matrix(struct pcm_channel *c, struct feeder_chain_desc *cdesc)
 		return (ret);
 
 	desc = &(cdesc->desc);
-	desc->type = FEEDER_MATRIX;
 	desc->in = 0;
 	desc->out = 0;
-	desc->flags = 0;
 
-	fc = feeder_getclass(desc);
+	fc = feeder_getclass(FEEDER_MATRIX);
 	if (fc == NULL) {
 		device_printf(c->dev,
 		    "%s(): can't find feeder_matrix\n", __func__);
@@ -352,12 +340,10 @@ feeder_build_volume(struct pcm_channel *c, struct feeder_chain_desc *cdesc)
 		return (ret);
 
 	desc = &(cdesc->desc);
-	desc->type = FEEDER_VOLUME;
 	desc->in = 0;
 	desc->out = 0;
-	desc->flags = 0;
 
-	fc = feeder_getclass(desc);
+	fc = feeder_getclass(FEEDER_VOLUME);
 	if (fc == NULL) {
 		device_printf(c->dev,
 		    "%s(): can't find feeder_volume\n", __func__);
@@ -420,12 +406,10 @@ feeder_build_eq(struct pcm_channel *c, struct feeder_chain_desc *cdesc)
 		return (ret);
 
 	desc = &(cdesc->desc);
-	desc->type = FEEDER_EQ;
 	desc->in = 0;
 	desc->out = 0;
-	desc->flags = 0;
 
-	fc = feeder_getclass(desc);
+	fc = feeder_getclass(FEEDER_EQ);
 	if (fc == NULL) {
 		device_printf(c->dev,
 		    "%s(): can't find feeder_eq\n", __func__);
@@ -467,7 +451,7 @@ feeder_build_root(struct pcm_channel *c, struct feeder_chain_desc *cdesc)
 	struct feeder_class *fc;
 	int ret;
 
-	fc = feeder_getclass(NULL);
+	fc = feeder_getclass(FEEDER_ROOT);
 	if (fc == NULL) {
 		device_printf(c->dev,
 		    "%s(): can't find feeder_root\n", __func__);
@@ -483,8 +467,8 @@ feeder_build_root(struct pcm_channel *c, struct feeder_chain_desc *cdesc)
 
 	c->feederflags |= 1 << FEEDER_ROOT;
 
-	c->feeder->desc->in = cdesc->current.afmt;
-	c->feeder->desc->out = cdesc->current.afmt;
+	c->feeder->desc.in = cdesc->current.afmt;
+	c->feeder->desc.out = cdesc->current.afmt;
 
 	return (0);
 }
@@ -500,12 +484,10 @@ feeder_build_mixer(struct pcm_channel *c, struct feeder_chain_desc *cdesc)
 	int ret;
 
 	desc = &(cdesc->desc);
-	desc->type = FEEDER_MIXER;
 	desc->in = 0;
 	desc->out = 0;
-	desc->flags = 0;
 
-	fc = feeder_getclass(desc);
+	fc = feeder_getclass(FEEDER_MIXER);
 	if (fc == NULL) {
 		device_printf(c->dev,
 		    "%s(): can't find feeder_mixer\n", __func__);
@@ -601,12 +583,8 @@ feeder_chain(struct pcm_channel *c)
 	case FEEDER_CHAIN_LEAN:
 	case FEEDER_CHAIN_16:
 	case FEEDER_CHAIN_32:
-#if defined(SND_FEEDER_MULTIFORMAT) || defined(SND_FEEDER_FULL_MULTIFORMAT)
 	case FEEDER_CHAIN_MULTI:
-#endif
-#if defined(SND_FEEDER_FULL_MULTIFORMAT)
 	case FEEDER_CHAIN_FULLMULTI:
-#endif
 		break;
 	default:
 		feeder_chain_mode = FEEDER_CHAIN_DEFAULT;
@@ -672,7 +650,7 @@ feeder_chain(struct pcm_channel *c)
 		softmatrix = feeder_matrix_format_map(softfmt);
 		if (softmatrix == NULL) {
 			/* setup a default matrix */
-		  	softmatrix = &c->matrix;
+			softmatrix = &c->matrix;
 			feeder_default_matrix(softmatrix, softfmt,
 			    SND_CHN_MATRIX_PCMCHANNEL);
 		} else {
@@ -695,11 +673,11 @@ feeder_chain(struct pcm_channel *c)
 		cdesc.origin.rate    = c->speed;
 		cdesc.target.afmt    = hwfmt;
 		cdesc.target.matrix  = hwmatrix;
-		cdesc.target.rate    = sndbuf_getspd(c->bufhard);
+		cdesc.target.rate    = c->bufhard->spd;
 	} else {
 		cdesc.origin.afmt    = hwfmt;
 		cdesc.origin.matrix  = hwmatrix;
-		cdesc.origin.rate    = sndbuf_getspd(c->bufhard);
+		cdesc.origin.rate    = c->bufhard->spd;
 		cdesc.target.afmt    = softfmt;
 		cdesc.target.matrix  = softmatrix;
 		cdesc.target.rate    = c->speed;
@@ -736,8 +714,8 @@ feeder_chain(struct pcm_channel *c)
 			cdesc.dummy = 1;
 
 		if ((softfmt & AFMT_CONVERTIBLE) &&
-		    (((d->flags & SD_F_VPC) && !(c->flags & CHN_F_HAS_VCHAN)) ||
-		    (!(d->flags & SD_F_VPC) && (d->flags & SD_F_SOFTPCMVOL) &&
+		    (!(c->flags & CHN_F_HAS_VCHAN) ||
+		    ((d->flags & SD_F_SOFTPCMVOL) &&
 		    !(c->flags & CHN_F_VIRTUAL))))
 			cdesc.use_volume = 1;
 
@@ -747,10 +725,8 @@ feeder_chain(struct pcm_channel *c)
 
 		/* Soft EQ only applicable for PLAY. */
 		if (cdesc.dummy == 0 &&
-		    c->direction == PCMDIR_PLAY && (d->flags & SD_F_EQ) &&
-		    (((d->flags & SD_F_EQ_PC) &&
-		    !(c->flags & CHN_F_HAS_VCHAN)) ||
-		    (!(d->flags & SD_F_EQ_PC) && !(c->flags & CHN_F_VIRTUAL))))
+		    c->direction == PCMDIR_PLAY &&
+		    (d->flags & SD_F_EQ) && !(c->flags & CHN_F_VIRTUAL))
 			cdesc.use_eq = 1;
 
 		if (FEEDFORMAT_NE_REQUIRED(&cdesc)) {

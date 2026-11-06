@@ -94,6 +94,7 @@ ${PACKAGE}FILES+=		export1.0
 ${PACKAGE}FILES+=		fc1.0
 ${PACKAGE}FILES+=		fc2.0
 ${PACKAGE}FILES+=		fc3.0 fc3.0.stdout fc3.0.stderr
+${PACKAGE}FILES+=		fc4.0
 ${PACKAGE}FILES+=		for1.0
 ${PACKAGE}FILES+=		for2.0
 ${PACKAGE}FILES+=		for3.0
@@ -143,6 +144,7 @@ ${PACKAGE}FILES+=		read8.0
 ${PACKAGE}FILES+=		read9.0
 ${PACKAGE}FILES+=		read10.0
 ${PACKAGE}FILES+=		read11.0
+${PACKAGE}FILES+=		read12.0
 ${PACKAGE}FILES+=		return1.0
 ${PACKAGE}FILES+=		return2.1
 ${PACKAGE}FILES+=		return3.1
@@ -188,5 +190,6 @@ ${PACKAGE}FILES+=		wait7.0
 ${PACKAGE}FILES+=		wait8.0
 ${PACKAGE}FILES+=		wait9.127
 ${PACKAGE}FILES+=		wait10.0
+${PACKAGE}FILES+=		wait11.0
 
 .include <bsd.test.mk>

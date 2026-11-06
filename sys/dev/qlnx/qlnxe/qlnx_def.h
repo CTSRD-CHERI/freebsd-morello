@@ -319,7 +319,6 @@ typedef struct qlnx_link_output qlnx_link_output_t;
 
 #define QLNX_TPA_MAX_AGG_BUFFERS             (20)
 
-#define QLNX_MAX_NUM_MULTICAST_ADDRS	ECORE_MAX_MC_ADDRS
 typedef struct _qlnx_mcast {
         uint16_t        rsrvd;
         uint8_t         addr[6];
@@ -328,6 +327,8 @@ typedef struct _qlnx_mcast {
 typedef struct _qlnx_vf_attr {
 	uint8_t		mac_addr[ETHER_ADDR_LEN];
 	uint32_t	num_rings;
+	bool		configured;
+	bool		queues_valid;
 } qlnx_vf_attr_t;
 
 typedef struct _qlnx_sriov_task {
@@ -370,7 +371,6 @@ struct qlnx_host {
 	uint16_t		device_id;
 
 	if_t			ifp;
-	int			if_flags;
 	volatile int		link_up;
 	struct ifmedia		media;
 	uint16_t		max_frame_size;
@@ -443,9 +443,7 @@ struct qlnx_host {
 	qlnx_ivec_t              irq_vec[QLNX_MAX_RSS];
 
 	uint8_t			filter;
-	uint32_t                nmcast;
-	qlnx_mcast_t            mcast[QLNX_MAX_NUM_MULTICAST_ADDRS];
-	struct ecore_filter_mcast ecore_mcast;
+	uint32_t		ecore_mcast_bins[ETH_MULTICAST_MAC_BINS_IN_REGS];
 	uint8_t			primary_mac[ETH_ALEN];
 	uint8_t			prio_to_tc[MAX_NUM_PRI];
 	struct ecore_eth_stats	hw_stats;
@@ -683,7 +681,6 @@ extern int qlnx_grc_dump(qlnx_host_t *ha, uint32_t *num_dumped_dwords,
 		int hwfn_index);
 extern int qlnx_idle_chk(qlnx_host_t *ha, uint32_t *num_dumped_dwords,
 		int hwfn_index);
-extern uint8_t *qlnx_get_mac_addr(qlnx_host_t *ha);
 extern void qlnx_fill_link(qlnx_host_t *ha, struct ecore_hwfn *hwfn,
                           struct qlnx_link_output *if_link);
 extern int qlnx_set_lldp_tlvx(qlnx_host_t *ha, qlnx_lldp_sys_tlvs_t *lldp_tlvs);
@@ -696,22 +693,6 @@ extern int qlnx_alloc_mem_sb(qlnx_host_t *ha, struct ecore_sb_info *sb_info,
  * Some OS specific stuff
  */
 
-#if (defined IFM_100G_SR4)
-#define QLNX_IFM_100G_SR4 IFM_100G_SR4
-#define QLNX_IFM_100G_LR4 IFM_100G_LR4
-#define QLNX_IFM_100G_CR4 IFM_100G_CR4
-#else
-#define QLNX_IFM_100G_SR4 IFM_UNKNOWN
-#define QLNX_IFM_100G_LR4 IFM_UNKNOWN
-#endif /* #if (defined IFM_100G_SR4) */
-
-#if (defined IFM_25G_SR)
-#define QLNX_IFM_25G_SR IFM_25G_SR
-#define QLNX_IFM_25G_CR IFM_25G_CR
-#else
-#define QLNX_IFM_25G_SR IFM_UNKNOWN
-#define QLNX_IFM_25G_CR IFM_UNKNOWN
-#endif /* #if (defined IFM_25G_SR) */
 
 #define QLNX_INC_IERRORS(ifp)	if_inc_counter(ifp, IFCOUNTER_IERRORS, 1)
 #define QLNX_INC_IQDROPS(ifp)	if_inc_counter(ifp, IFCOUNTER_IQDROPS, 1)

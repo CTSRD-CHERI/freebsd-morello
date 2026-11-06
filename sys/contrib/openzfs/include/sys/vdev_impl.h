@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -67,7 +57,7 @@ typedef int	vdev_init_func_t(spa_t *spa, nvlist_t *nv, void **tsd);
 typedef void	vdev_kobj_post_evt_func_t(vdev_t *vd);
 typedef void	vdev_fini_func_t(vdev_t *vd);
 typedef int	vdev_open_func_t(vdev_t *vd, uint64_t *size, uint64_t *max_size,
-    uint64_t *ashift, uint64_t *pshift);
+    uint64_t *ashift, uint64_t *pshift, cred_t *cr);
 typedef void	vdev_close_func_t(vdev_t *vd);
 typedef uint64_t vdev_asize_func_t(vdev_t *vd, uint64_t psize, uint64_t txg);
 typedef uint64_t vdev_min_asize_func_t(vdev_t *vd);
@@ -154,14 +144,6 @@ struct vdev_queue {
 	zio_t		vq_io_search; /* used as local for stack reduction */
 	kmutex_t	vq_lock;
 };
-
-typedef enum vdev_alloc_bias {
-	VDEV_BIAS_NONE,
-	VDEV_BIAS_LOG,		/* dedicated to ZIL data (SLOG) */
-	VDEV_BIAS_SPECIAL,	/* dedicated to ddt, metadata, and small blks */
-	VDEV_BIAS_DEDUP		/* dedicated to dedup metadata */
-} vdev_alloc_bias_t;
-
 
 /*
  * On-disk indirect vdev state.
@@ -279,10 +261,12 @@ struct vdev {
 	uint64_t	vdev_noalloc;	/* device is passivated?	*/
 	uint64_t	vdev_removing;	/* device is being removed?	*/
 	uint64_t	vdev_failfast;	/* device failfast setting	*/
+	boolean_t	vdev_autosit;	/* automatic sitout management	*/
 	boolean_t	vdev_rz_expanding; /* raidz is being expanded?	*/
 	boolean_t	vdev_ishole;	/* is a hole in the namespace	*/
 	uint64_t	vdev_top_zap;
 	vdev_alloc_bias_t vdev_alloc_bias; /* metaslab allocation bias	*/
+	uint64_t	vdev_last_latency_check;
 
 	/* pool checkpoint related */
 	space_map_t	*vdev_checkpoint_sm;	/* contains reserved blocks */
@@ -297,6 +281,8 @@ struct vdev {
 	kcondvar_t	vdev_initialize_cv;
 	uint64_t	vdev_initialize_offset[TXG_SIZE];
 	uint64_t	vdev_initialize_last_offset;
+	/* value written to free space by the initializing thread */
+	uint64_t	vdev_initialize_value;
 	/* valid while initializing */
 	zfs_range_tree_t	*vdev_initialize_tree;
 	uint64_t	vdev_initialize_bytes_est;
@@ -420,9 +406,11 @@ struct vdev {
 	boolean_t	vdev_isspare;	/* was a hot spare		*/
 	boolean_t	vdev_isl2cache;	/* was a l2cache device		*/
 	boolean_t	vdev_copy_uberblocks;  /* post expand copy uberblocks */
+	boolean_t	vdev_tail_labels_foreign; /* labels 2-3 are not ours */
 	boolean_t	vdev_resilver_deferred;  /* resilver deferred */
 	boolean_t	vdev_kobj_flag; /* kobj event record */
 	boolean_t	vdev_attaching; /* vdev attach ashift handling */
+	boolean_t	vdev_is_blkdev; /* vdev is backed by block device */
 	vdev_queue_t	vdev_queue;	/* I/O deadline schedule queue	*/
 	spa_aux_vdev_t	*vdev_aux;	/* for l2cache and spares vdevs	*/
 	zio_t		*vdev_probe_zio; /* root of current probe	*/
@@ -431,6 +419,10 @@ struct vdev {
 	hrtime_t	vdev_mmp_pending; /* 0 if write finished	*/
 	uint64_t	vdev_mmp_kstat_id;	/* to find kstat entry */
 	uint64_t	vdev_expansion_time;	/* vdev's last expansion time */
+	/* used to calculate average read latency */
+	uint64_t	*vdev_prev_histo;
+	int64_t		vdev_outlier_count;	/* read outlier amongst peers */
+	hrtime_t	vdev_read_sit_out_expire; /* end of sit out period    */
 	list_node_t	vdev_leaf_node;		/* leaf vdev list */
 
 	/*
@@ -464,8 +456,10 @@ struct vdev {
 	uint64_t	vdev_checksum_t;
 	uint64_t	vdev_io_n;
 	uint64_t	vdev_io_t;
+	boolean_t	vdev_slow_io_events;
 	uint64_t	vdev_slow_io_n;
 	uint64_t	vdev_slow_io_t;
+	uint64_t	vdev_scheduler; /* control how I/Os are submitted */
 };
 
 #define	VDEV_PAD_SIZE		(8 << 10)
@@ -554,6 +548,25 @@ typedef struct vdev_label {
 #define	VDEV_LABEL_END_SIZE	(2 * sizeof (vdev_label_t))
 #define	VDEV_LABELS		4
 #define	VDEV_BEST_LABEL		VDEV_LABELS
+
+/*
+ * Subsets of the labels, for the routines which read them.  Labels 0 and 1
+ * sit at fixed offsets from the start of the device; labels 2 and 3 sit at
+ * offsets relative to its end, and so move whenever the device is resized.
+ */
+#define	VDEV_LABELS_HEAD	0x3
+#define	VDEV_LABELS_TAIL	0xc
+#define	VDEV_LABELS_ALL		(VDEV_LABELS_HEAD | VDEV_LABELS_TAIL)
+
+/*
+ * The labels of a vdev which are known to describe the pool it belongs to.
+ * vdev_validate() drops the trailing pair when it finds another pool's
+ * labels there, which is what a vdev grown over an older pool is left with
+ * until the next sync rewrites them.
+ */
+#define	VDEV_TRUSTED_LABELS(vd)	\
+	((vd)->vdev_tail_labels_foreign ? VDEV_LABELS_HEAD : VDEV_LABELS_ALL)
+
 #define	VDEV_OFFSET_IS_LABEL(vd, off)                           \
 	(((off) < VDEV_LABEL_START_SIZE) ||                     \
 	((off) >= ((vd)->vdev_psize - VDEV_LABEL_END_SIZE)))
@@ -591,6 +604,7 @@ extern boolean_t vdev_log_state_valid(vdev_t *vd);
 extern int vdev_load(vdev_t *vd);
 extern int vdev_dtl_load(vdev_t *vd);
 extern void vdev_sync(vdev_t *vd, uint64_t txg);
+extern void vdev_sync_dispatch(vdev_t *vd, uint64_t txg);
 extern void vdev_sync_done(vdev_t *vd, uint64_t txg);
 extern void vdev_dirty(vdev_t *vd, int flags, void *arg, uint64_t txg);
 extern void vdev_dirty_leaves(vdev_t *vd, int flags, uint64_t txg);

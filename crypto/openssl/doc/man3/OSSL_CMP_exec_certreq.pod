@@ -51,8 +51,9 @@ OSSL_CMP_get1_certReqTemplate
                                    OSSL_CMP_ATAVS **keySpec);
 =head1 DESCRIPTION
 
-This is the OpenSSL API for doing CMP (Certificate Management Protocol)
-client-server transactions, i.e., sequences of CMP requests and responses.
+This is the OpenSSL main API for Certificate Management Protocol (CMP) clients.
+Each of the OSSL_CMP_exec_*() functions performs a whole CMP transaction,
+which is a sequence of related CMP request messages and response messages.
 
 All functions take a populated OSSL_CMP_CTX structure as their first argument.
 Usually the server name, port, and path ("CMP alias") need to be set, as well as
@@ -119,7 +120,7 @@ otherwise the issuer DN and serial number
 of the certificate set by L<OSSL_CMP_CTX_set1_oldCert(3)>,
 otherwise the subject DN and public key
 of the certificate signing request set by L<OSSL_CMP_CTX_set1_p10CSR(3)>.
-RFC 4210 is vague in which PKIStatus should be returned by the server.
+RFC 9810 is vague in which PKIStatus should be returned by the server.
 We take "accepted" and "grantedWithMods" as clear success and handle
 "revocationWarning" and "revocationNotification" just as warnings because CAs
 typically return them as an indication that the certificate was already revoked.
@@ -138,7 +139,7 @@ and returns the list of B<ITAV>s received in a genp response message.
 This can be used, for instance,
 with infoType C<signKeyPairTypes> to obtain the set of signature
 algorithm identifiers that the CA will certify for subject public keys.
-See RFC 4210 section 5.3.19 and appendix E.5 for details.
+See RFC 9810 section 5.3.19 and appendix D.5 for details.
 Functions implementing more specific genm/genp exchanges are described next.
 
 OSSL_CMP_get1_caCerts() uses a genm/genp message exchange with infoType caCerts
@@ -151,7 +152,7 @@ OSSL_CMP_get1_rootCaKeyUpdate() uses a genm request message
 with infoType rootCaCert to obtain from the CMP server referenced by I<ctx>
 in a genp response message with infoType rootCaKeyUpdate any update of the
 given root CA certificate I<oldWithOld> and verifies it as far as possible.
-See RFC 4210 section 4.4 for details.
+See RFC 9810 section 4.4 for details.
 On success it assigns to I<*newWithNew> the root certificate received.
 When the I<newWithOld> and I<oldWithNew> output parameters are not NULL,
 it assigns to them the corresponding transition certificates.
@@ -183,10 +184,11 @@ Both must be freed by the caller.
 
 =head1 NOTES
 
-CMP is defined in RFC 4210 (and CRMF in RFC 4211).
+CMP is defined in RFC 9810 (and CRMF in RFC 4211).
 
-The CMP client implementation is limited to one request per CMP message
-(and consequently to at most one response component per CMP message).
+This CMP implementation focuses on the Lightweight CMP Profile (RFC 9483).
+Among other things, this implies that only commonly used CMP message types are supported
+and that each CMP message may not contain multiple certificate requests or responses.
 
 When a client obtains from a CMP server CA certificates that it is going to
 trust, for instance via the caPubs field of a certificate response or using
@@ -253,7 +255,7 @@ were added in OpenSSL 3.4.
 
 =head1 COPYRIGHT
 
-Copyright 2007-2024 The OpenSSL Project Authors. All Rights Reserved.
+Copyright 2007-2026 The OpenSSL Project Authors. All Rights Reserved.
 
 Licensed under the Apache License 2.0 (the "License").  You may not use
 this file except in compliance with the License.  You can obtain a copy

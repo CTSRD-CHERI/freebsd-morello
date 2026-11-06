@@ -35,9 +35,12 @@ struct arm_gic_range {
 	uint64_t size;
 };
 
-#define	GIC_IVAR_HW_REV		500
-#define	GIC_IVAR_BUS		501
-#define	GIC_IVAR_VGIC		502
+enum {
+	GIC_IVAR_HW_REV = BUS_IVARS_GIC,
+	GIC_IVAR_BUS,
+	GIC_IVAR_VGIC,
+	GIC_IVAR_SUPPORT_LPIS
+};
 
 /* GIC_IVAR_BUS values */
 #define	GIC_BUS_UNKNOWN		0
@@ -48,6 +51,7 @@ struct arm_gic_range {
 __BUS_ACCESSOR(gic, hw_rev, GIC, HW_REV, u_int);
 __BUS_ACCESSOR(gic, bus, GIC, BUS, u_int);
 __BUS_ACCESSOR(gic, vgic, GIC, VGIC, u_int);
+__BUS_ACCESSOR(gic, support_lpis, GIC, SUPPORT_LPIS, bool);
 
 /* Software Generated Interrupts */
 #define	GIC_FIRST_SGI		 0	/* Irqs 0-15 are SGIs/IPIs. */

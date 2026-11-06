@@ -159,7 +159,7 @@ struct a10codec_chinfo {
 struct a10codec_info {
 	device_t		dev;
 	struct resource		*res[2];
-	struct mtx		*lock;
+	struct mtx		lock;
 	bus_dma_tag_t		dmat;
 	unsigned		dmasize;
 	void			*ih;
@@ -680,7 +680,7 @@ a10codec_dmaintr(void *priv)
 	struct a10codec_chinfo *ch = priv;
 	unsigned bufsize;
 
-	bufsize = sndbuf_getsize(ch->buffer);
+	bufsize = ch->buffer->bufsize;
 
 	ch->pos += ch->blocksize;
 	if (ch->pos >= bufsize)
@@ -949,7 +949,7 @@ a10codec_chan_trigger(kobj_t obj, void *data, int go)
 	if (!PCMTRIG_COMMON(go))
 		return (0);
 
-	snd_mtxlock(sc->lock);
+	mtx_lock(&sc->lock);
 	switch (go) {
 	case PCMTRIG_START:
 		ch->run = 1;
@@ -964,7 +964,7 @@ a10codec_chan_trigger(kobj_t obj, void *data, int go)
 	default:
 		break;
 	}
-	snd_mtxunlock(sc->lock);
+	mtx_unlock(&sc->lock);
 
 	return (0);
 }
@@ -1075,7 +1075,7 @@ a10codec_attach(device_t dev)
 	sc = malloc(sizeof(*sc), M_DEVBUF, M_WAITOK | M_ZERO);
 	sc->cfg = (void *)ofw_bus_search_compatible(dev, compat_data)->ocd_data;
 	sc->dev = dev;
-	sc->lock = snd_mtxcreate(device_get_nameunit(dev), "a10codec softc");
+	mtx_init(&sc->lock, device_get_nameunit(dev), "a10codec_softc", MTX_DEF);
 
 	if (bus_alloc_resources(dev, a10codec_spec, sc->res)) {
 		device_printf(dev, "cannot allocate resources for device\n");
@@ -1150,6 +1150,8 @@ a10codec_attach(device_t dev)
 	val |= DAC_DPC_EN_DA;
 	CODEC_WRITE(sc, AC_DAC_DPC(sc), val);
 
+	pcm_init(dev, sc);
+
 	if (mixer_init(dev, sc->cfg->mixer_class, sc)) {
 		device_printf(dev, "mixer_init failed\n");
 		goto fail;
@@ -1165,8 +1167,6 @@ a10codec_attach(device_t dev)
 
 	pcm_setflags(dev, pcm_getflags(dev) | SD_F_MPSAFE);
 
-	pcm_init(dev, sc);
-
 	pcm_addchan(dev, PCMDIR_PLAY, &a10codec_chan_class, sc);
 	pcm_addchan(dev, PCMDIR_REC, &a10codec_chan_class, sc);
 
@@ -1180,7 +1180,7 @@ a10codec_attach(device_t dev)
 
 fail:
 	bus_release_resources(dev, a10codec_spec, sc->res);
-	snd_mtxfree(sc->lock);
+	mtx_destroy(&sc->lock);
 	free(sc, M_DEVBUF);
 
 	return (ENXIO);
@@ -1201,5 +1201,5 @@ static driver_t a10codec_pcm_driver = {
 };
 
 DRIVER_MODULE(a10codec, simplebus, a10codec_pcm_driver, 0, 0);
-MODULE_DEPEND(a10codec, sound, SOUND_MINVER, SOUND_PREFVER, SOUND_MAXVER);
+MODULE_DEPEND(a10codec, sound, 1, 1, 1);
 MODULE_VERSION(a10codec, 1);

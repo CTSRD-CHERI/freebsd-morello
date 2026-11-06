@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -155,11 +145,11 @@ chksum_run(chksum_stat_t *cs, abd_t *abd, void *ctx, int round,
 	switch (round) {
 	case 1: /* 1k */
 		size = 1<<10; loops = 128; break;
-	case 2: /* 2k */
+	case 2: /* 4k */
 		size = 1<<12; loops = 64; break;
-	case 3: /* 4k */
+	case 3: /* 16k */
 		size = 1<<14; loops = 32; break;
-	case 4: /* 16k */
+	case 4: /* 64k */
 		size = 1<<16; loops = 16; break;
 	case 5: /* 256k */
 		size = 1<<18; loops = 8; break;
@@ -212,6 +202,7 @@ chksum_benchit(chksum_stat_t *cs)
 	chksum_run(cs, abd, ctx, 2, &cs->bs4k);
 	chksum_run(cs, abd, ctx, 3, &cs->bs16k);
 	chksum_run(cs, abd, ctx, 4, &cs->bs64k);
+	chksum_run(cs, abd, ctx, 5, &cs->bs256k);
 	chksum_run(cs, abd, ctx, 6, &cs->bs1m);
 	abd_free(abd);
 
@@ -249,15 +240,16 @@ chksum_benchmark(void)
 	if (chksum_stat_limit == AT_DONE)
 		return;
 
-
 	/* count implementations */
-	chksum_stat_cnt = 1;  /* edonr */
-	chksum_stat_cnt += 1; /* skein */
-	chksum_stat_cnt += sha256->getcnt();
-	chksum_stat_cnt += sha512->getcnt();
-	chksum_stat_cnt += blake3->getcnt();
-	chksum_stat_data = kmem_zalloc(
-	    sizeof (chksum_stat_t) * chksum_stat_cnt, KM_SLEEP);
+	if (chksum_stat_limit == AT_STARTUP) {
+		chksum_stat_cnt = 1;  /* edonr */
+		chksum_stat_cnt += 1; /* skein */
+		chksum_stat_cnt += sha256->getcnt();
+		chksum_stat_cnt += sha512->getcnt();
+		chksum_stat_cnt += blake3->getcnt();
+		chksum_stat_data = kmem_zalloc(
+		    sizeof (chksum_stat_t) * chksum_stat_cnt, KM_SLEEP);
+	}
 
 	/* edonr - needs to be the first one here (slow CPU check) */
 	cs = &chksum_stat_data[cbid++];

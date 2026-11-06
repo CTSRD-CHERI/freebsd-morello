@@ -369,8 +369,6 @@ start_all_aps(void)
 	u_int32_t mpbioswarmvec;
 	int apic_id, cpu;
 
-	mtx_init(&ap_boot_mtx, "ap boot", NULL, MTX_SPIN);
-
 	pmap_remap_lower(true);
 
 	/* install the AP 1st level boot code */
@@ -737,4 +735,18 @@ invlcache_handler(void)
 	generation = smp_tlb_generation;
 	wbinvd();
 	PCPU_SET(smp_tlb_done, generation);
+}
+
+void ipi_bitmap_handler_i386(struct trapframe frame);
+void
+ipi_bitmap_handler_i386(struct trapframe frame)
+{
+	ipi_bitmap_handler(&frame);
+}
+
+void ipi_swi_handler_i386(struct trapframe frame);
+void
+ipi_swi_handler_i386(struct trapframe frame)
+{
+	ipi_swi_handler(&frame);
 }

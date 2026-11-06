@@ -212,7 +212,7 @@ ipcomp_input(struct mbuf *m, struct secasvar *sav, int skip, int protoff)
 	 * compression it means someone is playing tricks on us.
 	 */
 	error = ENOBUFS;
-	if (m->m_len < skip + hlen && (m = m_pullup(m, skip + hlen)) == NULL) {
+	if ((m = m_pullup(m, skip + hlen)) == NULL) {
 		IPCOMPSTAT_INC(ipcomps_hdrops);		/*XXX*/
 		DPRINTF(("%s: m_pullup failed\n", __func__));
 		key_freesav(&sav);
@@ -283,6 +283,7 @@ static int
 ipcomp_input_cb(struct cryptop *crp)
 {
 	IPSEC_DEBUG_DECLARE(char buf[IPSEC_ADDRSTRLEN]);
+	struct rm_priotracker sahtree_tracker;
 	struct xform_data *xd;
 	struct mbuf *m;
 	struct secasvar *sav;
@@ -300,6 +301,14 @@ ipcomp_input_cb(struct cryptop *crp)
 	skip = xd->skip;
 	protoff = xd->protoff;
 	cryptoid = xd->cryptoid;
+	ipsec_sahtree_rlock(&sahtree_tracker);
+	if (sav->state >= SADB_SASTATE_DEAD) {
+		/* saidx is freed */
+		DPRINTF(("%s: dead SA %p spi %#x\n", __func__, sav, sav->spi));
+		IPCOMPSTAT_INC(ipcomps_notdb);
+		error = ESRCH;
+		goto bad;
+	}
 	saidx = &sav->sah->saidx;
 	IPSEC_ASSERT(saidx->dst.sa.sa_family == AF_INET ||
 		saidx->dst.sa.sa_family == AF_INET6,
@@ -338,7 +347,7 @@ ipcomp_input_cb(struct cryptop *crp)
 	/* In case it's not done already, adjust the size of the mbuf chain */
 	m->m_pkthdr.len = clen + hlen + skip;
 
-	if (m->m_len < skip + hlen && (m = m_pullup(m, skip + hlen)) == NULL) {
+	if ((m = m_pullup(m, skip + hlen)) == NULL) {
 		IPCOMPSTAT_INC(ipcomps_hdrops);		/*XXX*/
 		DPRINTF(("%s: m_pullup failed\n", __func__));
 		error = EINVAL;				/*XXX*/
@@ -365,12 +374,14 @@ ipcomp_input_cb(struct cryptop *crp)
 	switch (saidx->dst.sa.sa_family) {
 #ifdef INET6
 	case AF_INET6:
-		error = ipsec6_common_input_cb(m, sav, skip, protoff);
+		error = ipsec6_common_input_cb(m, sav, skip, protoff,
+		    &sahtree_tracker);
 		break;
 #endif
 #ifdef INET
 	case AF_INET:
-		error = ipsec4_common_input_cb(m, sav, skip, protoff);
+		error = ipsec4_common_input_cb(m, sav, skip, protoff,
+		    &sahtree_tracker);
 		break;
 #endif
 	default:
@@ -380,6 +391,7 @@ ipcomp_input_cb(struct cryptop *crp)
 	CURVNET_RESTORE();
 	return error;
 bad:
+	ipsec_sahtree_runlock(&sahtree_tracker);
 	CURVNET_RESTORE();
 	if (sav != NULL)
 		key_freesav(&sav);
@@ -710,7 +722,7 @@ ipcomp6_nonexp_encapcheck(const struct mbuf *m, int off, int proto,
 		return (0);
 	bzero(&src, sizeof(src));
 	bzero(&dst, sizeof(dst));
-	src.sa.sa_family = dst.sa.sa_family = AF_INET;
+	src.sa.sa_family = dst.sa.sa_family = AF_INET6;
 	src.sin6.sin6_len = dst.sin6.sin6_len = sizeof(struct sockaddr_in6);
 	ip6 = mtod(m, const struct ip6_hdr *);
 	src.sin6.sin6_addr = ip6->ip6_src;
@@ -750,7 +762,7 @@ static struct xformsw ipcomp_xformsw = {
 };
 
 static void
-ipcomp_attach(void)
+ipcomp_attach(void *dummy __unused)
 {
 
 #ifdef INET
@@ -763,7 +775,7 @@ ipcomp_attach(void)
 }
 
 static void
-ipcomp_detach(void)
+ipcomp_detach(void *dummy __unused)
 {
 
 #ifdef INET

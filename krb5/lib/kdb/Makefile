@@ -1,5 +1,5 @@
 #
-# SPDX-License-Idendifier: BSD-2-Clause
+# SPDX-License-Identifier: BSD-2-Clause
 #
 # Copyright (c) 2025 FreeBSD Foundation
 #
@@ -10,12 +10,14 @@
 .include <src.opts.mk>
 
 .include "../Makefile.inc"
+.include "${KRB5_SRCTOP}/Makefile.pc"
 
 LIB=		kdb5
-# SHLIB_MAJOR=	10
-LDFLAGS=-Wl,--no-undefined
-LIBADD=	krb5profile gssrpc krb5 k5crypto com_err krb5support gssapi_krb5
+LDFLAGS+=	-Wl,--no-undefined
+LIBADD=		krb5profile gssrpc krb5 k5crypto com_err krb5support gssapi_krb5
 VERSION_MAP=	${.CURDIR}/version.map
+PCFILES=	kdb.pc
+CLEANFILES+=	${PCFILES}
 
 SRCS=	decrypt_key.c \
 	encrypt_key.c \
@@ -35,7 +37,8 @@ CFLAGS+=${DEFINES} \
 	-I${KRB5_DIR}/lib/kdb \
 	-I${KRB5_OBJTOP}/lib/kdb \
 	-I${KRB5_DIR}/include \
-	-I${KRB5_SRCTOP}/include
+	-I${KRB5_SRCTOP}/include \
+	-I${KRB5_OBJTOP}/util/profile
 
 ADB_ERR=	adb_err.et
 ADB_ERR_C=	${ADB_ERR:S/.et$/.c/}
@@ -60,6 +63,9 @@ ${ADB_ERR_C}: ${ADB_ERR}
 
 .include <bsd.lib.mk>
 
+all: ${PCFILES}
+
 .SUFFIXES: .h .c
 
-.PATH:	${KRB5_DIR}/lib/kdb
+.PATH:	${KRB5_DIR}/build-tools \
+	${KRB5_DIR}/lib/kdb

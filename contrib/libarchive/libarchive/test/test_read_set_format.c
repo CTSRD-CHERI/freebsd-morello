@@ -102,18 +102,13 @@ DEFINE_TEST(test_read_set_format)
 DEFINE_TEST(test_read_set_wrong_format)
 {
   const char reffile[] = "test_read_format_zip.zip";
-  struct archive_entry *ae;
   struct archive *a;
 
   extract_reference_file(reffile);
   assert((a = archive_read_new()) != NULL);
-  assertA(0 == archive_read_set_format(a, ARCHIVE_FORMAT_RAR));
-  assertA(0 == archive_read_append_filter(a, ARCHIVE_FILTER_NONE));
-  assertA(0 == archive_read_open_filename(a, reffile, 10240));
-
-  /* Check that this actually fails, then close the archive. */
-  assertA(archive_read_next_header(a, &ae) < (ARCHIVE_WARN));
-  assertEqualIntA(a, ARCHIVE_OK, archive_read_close(a));
+  assertEqualIntA(a, ARCHIVE_OK, archive_read_set_format(a, ARCHIVE_FORMAT_CPIO));
+  assertEqualIntA(a, ARCHIVE_OK, archive_read_append_filter(a, ARCHIVE_FILTER_NONE));
+  assertEqualIntA(a, ARCHIVE_FATAL, archive_read_open_filename(a, reffile, 10240));
   assertEqualInt(ARCHIVE_OK, archive_read_free(a));
 }
 
@@ -138,40 +133,234 @@ DEFINE_TEST(test_read_append_filter)
     assertEqualInt(ARCHIVE_OK, archive_read_free(a));
     return;
   }
-  assertEqualIntA(a, ARCHIVE_OK, r);
+  if (r == ARCHIVE_WARN && canGzip())
+    assertEqualString(archive_error_string(a), "Using external gzip program");
+  else
+    assertEqualIntA(a, ARCHIVE_OK, r);
   assertEqualInt(ARCHIVE_OK,
       archive_read_open_memory(a, archive, sizeof(archive)));
   assertEqualInt(ARCHIVE_OK, archive_read_next_header(a, &ae));
   assertEqualInt(1, archive_file_count(a));
   assertEqualInt(archive_filter_code(a, 0), ARCHIVE_COMPRESSION_GZIP);
   assertEqualInt(archive_format(a), ARCHIVE_FORMAT_TAR_USTAR);
-  assertEqualInt(ARCHIVE_OK, archive_read_close(a));
+  assertEqualIntA(a, ARCHIVE_OK, archive_read_close(a));
   assertEqualInt(ARCHIVE_OK,archive_read_free(a));
 }
 
 DEFINE_TEST(test_read_append_wrong_filter)
 {
-  struct archive_entry *ae;
+  struct archive *a;
+
+  assert((a = archive_read_new()) != NULL);
+  assertEqualIntA(a, ARCHIVE_OK,
+      archive_read_set_format(a, ARCHIVE_FORMAT_RAW));
+  assertEqualIntA(a, ARCHIVE_OK,
+      archive_read_append_filter(a, ARCHIVE_FILTER_UU));
+  assertEqualIntA(a, ARCHIVE_FATAL,
+      archive_read_open_memory(a, archive, sizeof(archive)));
+  assertEqualInt(ARCHIVE_OK, archive_read_free(a));
+}
+
+DEFINE_TEST(test_read_append_lzop_filter)
+{
   struct archive *a;
   int r;
 
   assert((a = archive_read_new()) != NULL);
   assertA(0 == archive_read_set_format(a, ARCHIVE_FORMAT_TAR));
-  r = archive_read_append_filter(a, ARCHIVE_FILTER_XZ);
-  if (r == ARCHIVE_WARN && !canXz()) {
-    skipping("xz reading not fully supported on this platform");
-    assertEqualInt(ARCHIVE_OK, archive_read_free(a));
+  r = archive_read_append_filter(a, ARCHIVE_FILTER_LZOP);
+  if (archive_liblzo2_version() != NULL) {
+    assertEqualIntA(a, ARCHIVE_OK, r);
+  } else if (canLzop()) {
+    // We're using an external program
+    assertEqualIntA(a, ARCHIVE_WARN, r);
+  }
+
+  archive_read_free(a);
+}
+
+DEFINE_TEST(test_read_append_grzip_filter)
+{
+  struct archive *a;
+  int r;
+
+  assert((a = archive_read_new()) != NULL);
+  assertA(0 == archive_read_set_format(a, ARCHIVE_FORMAT_TAR));
+  r = archive_read_append_filter(a, ARCHIVE_FILTER_GRZIP);
+  // Grzip currently always uses an external program.
+  if (canGrzip()) {
+    assertEqualIntA(a, ARCHIVE_WARN, r);
+  }
+
+  archive_read_free(a);
+}
+
+DEFINE_TEST(test_read_append_compress_filter)
+{
+  struct archive *a;
+  int r;
+
+  assert((a = archive_read_new()) != NULL);
+  assertA(0 == archive_read_set_format(a, ARCHIVE_FORMAT_TAR));
+  r = archive_read_append_filter(a, ARCHIVE_FILTER_COMPRESS);
+  assertEqualIntA(a, ARCHIVE_OK, r);
+  assertEqualInt(ARCHIVE_OK, archive_read_free(a));
+}
+
+DEFINE_TEST(test_read_append_bzip2_filter)
+{
+  struct archive *a;
+  int r;
+
+  assert((a = archive_read_new()) != NULL);
+  assertA(0 == archive_read_set_format(a, ARCHIVE_FORMAT_TAR));
+  r = archive_read_append_filter(a, ARCHIVE_FILTER_BZIP2);
+  if (r != ARCHIVE_OK && archive_bzlib_version() == NULL && !canBzip2()) {
+    skipping("bzip2 tests require bzlib or working bzip2 command");
+    archive_read_free(a);
     return;
   }
-  assertEqualInt(ARCHIVE_OK,
-      archive_read_open_memory(a, archive, sizeof(archive)));
-  assertA(archive_read_next_header(a, &ae) < (ARCHIVE_WARN));
-  if (r == ARCHIVE_WARN && canXz()) {
-    assertEqualIntA(a, ARCHIVE_WARN, archive_read_close(a));
-  } else {
-    assertEqualIntA(a, ARCHIVE_OK, archive_read_close(a));
+  if (r == ARCHIVE_WARN && canBzip2())
+    assertEqualString(archive_error_string(a), "Using external bzip2 program");
+  else
+    assertEqualIntA(a, ARCHIVE_OK, r);
+  archive_read_free(a);
+}
+
+DEFINE_TEST(test_read_append_lrzip_filter)
+{
+  struct archive *a;
+  int r;
+
+  assert((a = archive_read_new()) != NULL);
+  assertA(0 == archive_read_set_format(a, ARCHIVE_FORMAT_TAR));
+  r = archive_read_append_filter(a, ARCHIVE_FILTER_LRZIP);
+  if (r != ARCHIVE_OK && !canLrzip()) {
+    skipping("lrzip tests require working lrzip command");
+    archive_read_free(a);
+    return;
   }
-  assertEqualInt(ARCHIVE_OK,archive_read_free(a));
+  if (r == ARCHIVE_WARN && canLrzip())
+    assertEqualString(archive_error_string(a), "Using external lrzip program for lrzip decompression");
+  else
+    assertEqualIntA(a, ARCHIVE_OK, r);
+  archive_read_free(a);
+}
+
+DEFINE_TEST(test_read_append_lz4_filter)
+{
+  struct archive *a;
+  int r;
+
+  assert((a = archive_read_new()) != NULL);
+  assertA(0 == archive_read_set_format(a, ARCHIVE_FORMAT_TAR));
+  r = archive_read_append_filter(a, ARCHIVE_FILTER_LZ4);
+  if (r != ARCHIVE_OK && archive_liblz4_version() == NULL && !canLz4()) {
+    skipping("lz4 tests require liblz4 or working lz4 command");
+    archive_read_free(a);
+    return;
+  }
+  if (r == ARCHIVE_WARN && canLz4())
+    assertEqualString(archive_error_string(a), "Using external lz4 program");
+  else
+    assertEqualIntA(a, ARCHIVE_OK, r);
+  archive_read_free(a);
+}
+
+DEFINE_TEST(test_read_append_lzip_filter)
+{
+  struct archive *a;
+  int r;
+
+  assert((a = archive_read_new()) != NULL);
+  assertA(0 == archive_read_set_format(a, ARCHIVE_FORMAT_TAR));
+  r = archive_read_append_filter(a, ARCHIVE_FILTER_LZIP);
+  if (r != ARCHIVE_OK && archive_liblzma_version() == NULL && !canLzip()) {
+    skipping("lzip tests require liblzma or working lzip command");
+    archive_read_free(a);
+    return;
+  }
+  if (r == ARCHIVE_WARN && canLzip())
+    assertEqualString(archive_error_string(a), "Using external lzip program for lzip decompression");
+  else
+    assertEqualIntA(a, ARCHIVE_OK, r);
+  archive_read_free(a);
+}
+
+DEFINE_TEST(test_read_append_lzma_filter)
+{
+  struct archive *a;
+  int r;
+
+  assert((a = archive_read_new()) != NULL);
+  assertA(0 == archive_read_set_format(a, ARCHIVE_FORMAT_TAR));
+  r = archive_read_append_filter(a, ARCHIVE_FILTER_LZMA);
+  if (r != ARCHIVE_OK && archive_liblzma_version() == NULL && !canLzma()) {
+    skipping("lzma tests require liblzma or working lzma command");
+    archive_read_free(a);
+    return;
+  }
+  if (r == ARCHIVE_WARN && canLzma())
+    assertEqualString(archive_error_string(a), "Using external lzma program for lzma decompression");
+  else
+    assertEqualIntA(a, ARCHIVE_OK, r);
+  archive_read_free(a);
+}
+
+DEFINE_TEST(test_read_append_zstd_filter)
+{
+  struct archive *a;
+  int r;
+
+  assert((a = archive_read_new()) != NULL);
+  assertA(0 == archive_read_set_format(a, ARCHIVE_FORMAT_TAR));
+  r = archive_read_append_filter(a, ARCHIVE_FILTER_ZSTD);
+  if (r != ARCHIVE_OK && archive_libzstd_version() == NULL && !canZstd()) {
+    skipping("zstd tests require libzstd or working zstd command");
+    archive_read_free(a);
+    return;
+  }
+  if (r == ARCHIVE_WARN && canZstd())
+    assertEqualString(archive_error_string(a), "Using external zstd program for zstd decompression");
+  else
+    assertEqualIntA(a, ARCHIVE_OK, r);
+  archive_read_free(a);
+}
+
+DEFINE_TEST(test_read_append_rpm_filter)
+{
+  struct archive *a;
+  int r;
+
+  assert((a = archive_read_new()) != NULL);
+  assertA(0 == archive_read_set_format(a, ARCHIVE_FORMAT_TAR));
+  r = archive_read_append_filter(a, ARCHIVE_FILTER_RPM);
+  assertEqualIntA(a, ARCHIVE_OK, r);
+  archive_read_free(a);
+}
+
+DEFINE_TEST(test_read_append_uu_filter)
+{
+  struct archive *a;
+  int r;
+
+  assert((a = archive_read_new()) != NULL);
+  assertA(0 == archive_read_set_format(a, ARCHIVE_FORMAT_TAR));
+  r = archive_read_append_filter(a, ARCHIVE_FILTER_UU);
+  assertEqualIntA(a, ARCHIVE_OK, r);
+  archive_read_free(a);
+}
+
+DEFINE_TEST(test_read_append_none_filter)
+{
+  struct archive *a;
+  int r;
+
+  assert((a = archive_read_new()) != NULL);
+  assertA(0 == archive_read_set_format(a, ARCHIVE_FORMAT_TAR));
+  r = archive_read_append_filter(a, ARCHIVE_FILTER_NONE);
+  assertEqualIntA(a, ARCHIVE_OK, r);
+  archive_read_free(a);
 }
 
 DEFINE_TEST(test_read_append_filter_program)
@@ -199,9 +388,9 @@ DEFINE_TEST(test_read_append_filter_program)
 
 DEFINE_TEST(test_read_append_filter_wrong_program)
 {
-  struct archive_entry *ae;
   struct archive *a;
-#if !defined(_WIN32) || defined(__CYGWIN__)
+#if (!defined(_WIN32) || defined(__CYGWIN__)) && \
+    !(defined(__ANDROID__) && __ANDROID_API__ < 24)
   FILE * fp;
   int fd;
   fpos_t pos;
@@ -210,12 +399,13 @@ DEFINE_TEST(test_read_append_filter_wrong_program)
   /*
    * If we have "bunzip2 -q", try using that.
    */
-  if (!canRunCommand("bunzip2 -h")) {
+  if (!canRunCommand("bunzip2 -h", NULL)) {
     skipping("Can't run bunzip2 program on this platform");
     return;
   }
 
-#if !defined(_WIN32) || defined(__CYGWIN__)
+#if (!defined(_WIN32) || defined(__CYGWIN__)) && \
+    !(defined(__ANDROID__) && __ANDROID_API__ < 24)
   /* bunzip2 will write to stderr, redirect it to a file */
   fflush(stderr);
   fgetpos(stderr, &pos);
@@ -224,16 +414,15 @@ DEFINE_TEST(test_read_append_filter_wrong_program)
 #endif
 
   assert((a = archive_read_new()) != NULL);
-  assertA(0 == archive_read_set_format(a, ARCHIVE_FORMAT_TAR));
+  assertA(0 == archive_read_set_format(a, ARCHIVE_FORMAT_RAW));
   assertEqualIntA(a, ARCHIVE_OK,
       archive_read_append_filter_program(a, "bunzip2 -q"));
-  assertEqualIntA(a, ARCHIVE_OK,
+  assertEqualIntA(a, ARCHIVE_FATAL,
       archive_read_open_memory(a, archive, sizeof(archive)));
-  assertA(archive_read_next_header(a, &ae) < (ARCHIVE_WARN));
-  assertEqualIntA(a, ARCHIVE_WARN, archive_read_close(a));
   assertEqualInt(ARCHIVE_OK, archive_read_free(a));
 
-#if !defined(_WIN32) || defined(__CYGWIN__)
+#if (!defined(_WIN32) || defined(__CYGWIN__)) && \
+    !(defined(__ANDROID__) && __ANDROID_API__ < 24)
   /* restore stderr */
   if (fp != NULL) {
     fflush(stderr);

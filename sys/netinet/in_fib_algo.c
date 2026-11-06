@@ -25,7 +25,6 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/cdefs.h>
 #include "opt_inet.h"
 
 #include <sys/param.h>
@@ -583,13 +582,24 @@ lradix4_init(uint32_t fibnum, struct fib_data *fd, void *_old_data, void **_data
 	return (FLM_SUCCESS);
 }
 
+static int
+lradix4_free_route(struct radix_node *rn, void *arg)
+{
+	struct radix_head *head = arg;
+
+	rn_delete(rn->rn_key, rn->rn_mask, head);
+	return (0);
+}
+
 static void
 lradix4_destroy(void *_data)
 {
 	struct lradix4_data *lr = (struct lradix4_data *)_data;
 
-	if (lr->rnh != NULL)
+	if (lr->rnh != NULL) {
+		rn_walktree(&lr->rnh->rh, lradix4_free_route, &lr->rnh->rh);
 		rn_detachhead((void **)&lr->rnh);
+	}
 	if (lr->mem != NULL)
 		free(lr->mem, M_RTABLE);
 	free(lr, M_RTABLE);
@@ -767,7 +777,7 @@ struct fib_lookup_module flm_radix4 = {
 };
 
 static void
-fib4_algo_init(void)
+fib4_algo_init(void *dummy __unused)
 {
 
 	fib_module_register(&flm_bsearch4);

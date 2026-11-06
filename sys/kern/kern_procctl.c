@@ -40,16 +40,17 @@
 #include <sys/priv.h>
 #include <sys/proc.h>
 #include <sys/procctl.h>
+#include <sys/ptrace.h>
 #include <sys/sx.h>
 #include <sys/syscallsubr.h>
 #include <sys/sysproto.h>
-#include <sys/taskqueue.h>
 #include <sys/wait.h>
 
 #include <vm/vm.h>
 #include <vm/pmap.h>
 #include <vm/vm_map.h>
 #include <vm/vm_extern.h>
+#include <vm/uma.h>
 
 static int
 protect_setchild(struct thread *td, struct proc *p, int flags)
@@ -133,6 +134,13 @@ protect_set(struct thread *td, struct proc *p, void *data)
 	return (0);
 }
 
+static struct proc *
+get_reaper_or_p(struct proc *p)
+{
+	sx_assert(&proctree_lock, SX_LOCKED);
+	return ((p->p_treeflag & P_TREE_REAPER) == 0 ? p->p_reaper : p);
+}
+
 static int
 reap_acquire(struct thread *td, struct proc *p, void *data __unused)
 {
@@ -173,12 +181,9 @@ reap_status(struct thread *td, struct proc *p, void *data)
 
 	rs = data;
 	sx_assert(&proctree_lock, SX_LOCKED);
-	if ((p->p_treeflag & P_TREE_REAPER) == 0) {
-		reap = p->p_reaper;
-	} else {
-		reap = p;
+	reap = get_reaper_or_p(p);
+	if (reap == p)
 		rs->rs_flags |= REAPER_STATUS_OWNED;
-	}
 	if (reap == initproc)
 		rs->rs_flags |= REAPER_STATUS_REALINIT;
 	rs->rs_reaper = reap->p_pid;
@@ -201,27 +206,48 @@ reap_status(struct thread *td, struct proc *p, void *data)
 }
 
 static int
+reap_getpids_count(struct proc **reapp, struct proc *p,
+    const struct procctl_reaper_pids *rp)
+{
+	struct proc *reap, *p2;
+	int n;
+
+	sx_assert(&proctree_lock, SX_LOCKED);
+
+	reap = get_reaper_or_p(p);
+	n = 0;
+	LIST_FOREACH(p2, &reap->p_reaplist, p_reapsibling)
+		n++;
+	if (rp->rp_count < n)
+		n = rp->rp_count;
+	*reapp = reap;
+	return (n);
+}
+
+static int
 reap_getpids(struct thread *td, struct proc *p, void *data)
 {
 	struct proc *reap, *p2;
 	struct procctl_reaper_pidinfo *pi, *pip;
 	struct procctl_reaper_pids *rp;
-	u_int i, n;
+	u_int i, n, n1;
 	int error;
 
 	rp = data;
 	sx_assert(&proctree_lock, SX_LOCKED);
 	PROC_UNLOCK(p);
-	reap = (p->p_treeflag & P_TREE_REAPER) == 0 ? p->p_reaper : p;
-	n = i = 0;
-	error = 0;
-	LIST_FOREACH(p2, &reap->p_reaplist, p_reapsibling)
-		n++;
-	sx_unlock(&proctree_lock);
-	if (rp->rp_count < n)
-		n = rp->rp_count;
-	pi = malloc(n * sizeof(*pi), M_TEMP, M_WAITOK);
-	sx_slock(&proctree_lock);
+	i = 0;
+	for (;;) {
+		n1 = reap_getpids_count(&reap, p, rp);
+		sx_unlock(&proctree_lock);
+		pi = mallocarray(n1, sizeof(*pi), M_TEMP, M_WAITOK);
+		sx_slock(&proctree_lock);
+		n = reap_getpids_count(&reap, p, rp);
+		if (n <= n1)
+			break;
+		free(pi, M_TEMP);
+	}
+
 	LIST_FOREACH(p2, &reap->p_reaplist, p_reapsibling) {
 		if (i == n)
 			break;
@@ -256,68 +282,78 @@ struct reap_kill_proc_work {
 	ksiginfo_t *ksi;
 	struct procctl_reaper_kill *rk;
 	int *error;
-	struct task t;
 };
 
 static void
 reap_kill_proc_locked(struct reap_kill_proc_work *w)
 {
-	int error1;
-	bool need_stop;
+	int error;
 
 	PROC_LOCK_ASSERT(w->target, MA_OWNED);
 	PROC_ASSERT_HELD(w->target);
 
-	error1 = cr_cansignal(w->cr, w->target, w->rk->rk_sig);
-	if (error1 != 0) {
-		if (*w->error == ESRCH) {
+	error = cr_cansignal(w->cr, w->target, w->rk->rk_sig);
+	if (error != 0) {
+		/*
+		 * Hide ESRCH errors to ensure that this function
+		 * cannot be used as an oracle for process visibility.
+		 */
+		if (error != ESRCH && *w->error == 0) {
 			w->rk->rk_fpid = w->target->p_pid;
-			*w->error = error1;
+			*w->error = error;
 		}
 		return;
 	}
 
-	/*
-	 * The need_stop indicates if the target process needs to be
-	 * suspended before being signalled.  This is needed when we
-	 * guarantee that all processes in subtree are signalled,
-	 * avoiding the race with some process not yet fully linked
-	 * into all structures during fork, ignored by iterator, and
-	 * then escaping signalling.
-	 *
-	 * The thread cannot usefully stop itself anyway, and if other
-	 * thread of the current process forks while the current
-	 * thread signals the whole subtree, it is an application
-	 * race.
-	 */
-	if ((w->target->p_flag & (P_KPROC | P_SYSTEM | P_STOPPED)) == 0)
-		need_stop = thread_single(w->target, SINGLE_ALLPROC) == 0;
-	else
-		need_stop = false;
-
 	(void)pksignal(w->target, w->rk->rk_sig, w->ksi);
 	w->rk->rk_killed++;
-	*w->error = error1;
-
-	if (need_stop)
-		thread_single_end(w->target, SINGLE_ALLPROC);
+	*w->error = error;
 }
 
 static void
-reap_kill_proc_work(void *arg, int pending __unused)
+reap_kill_proc(struct reap_kill_proc_work *w, bool *proctree_dropped)
 {
-	struct reap_kill_proc_work *w;
+	struct pgrp *pgrp;
+	int xlocked;
 
-	w = arg;
-	PROC_LOCK(w->target);
-	if ((w->target->p_flag2 & P2_WEXIT) == 0)
-		reap_kill_proc_locked(w);
-	PROC_UNLOCK(w->target);
+	sx_assert(&proctree_lock, SX_LOCKED);
+	xlocked = sx_xlocked(&proctree_lock);
+	PROC_LOCK_ASSERT(w->target, MA_OWNED);
+	PROC_ASSERT_HELD(w->target);
 
-	sx_xlock(&proctree_lock);
-	w->target = NULL;
-	wakeup(&w->target);
-	sx_xunlock(&proctree_lock);
+	/* Sync with forks. */
+	for (;;) {
+		/*
+		 * Short-circuit handling of the exiting process, do
+		 * not wait for it to single-thread (hold prevents it
+		 * from exiting further).  This avoids
+		 * locking pg_killsx for it, and reduces the
+		 * proctree_lock contention.
+		 */
+		if ((w->target->p_flag2 & P2_WEXIT) != 0)
+			return;
+
+		pgrp = w->target->p_pgrp;
+		if (pgrp == NULL || sx_try_xlock(&pgrp->pg_killsx))
+			break;
+
+		PROC_UNLOCK(w->target);
+		sx_unlock(&proctree_lock);
+		/* This is safe because pgrp zone is nofree. */
+		sx_xlock(&pgrp->pg_killsx);
+		sx_xunlock(&pgrp->pg_killsx);
+		*proctree_dropped = true;
+		if (xlocked)
+			sx_xlock(&proctree_lock);
+		else
+			sx_slock(&proctree_lock);
+		PROC_LOCK(w->target);
+	}
+
+	reap_kill_proc_locked(w);
+
+	if (pgrp != NULL)
+		sx_xunlock(&pgrp->pg_killsx);
 }
 
 struct reap_kill_tracker {
@@ -332,13 +368,7 @@ reap_kill_sched(struct reap_kill_tracker_head *tracker, struct proc *p2)
 {
 	struct reap_kill_tracker *t;
 
-	PROC_LOCK(p2);
-	if ((p2->p_flag2 & P2_WEXIT) != 0) {
-		PROC_UNLOCK(p2);
-		return;
-	}
-	_PHOLD(p2);
-	PROC_UNLOCK(p2);
+	PROC_TREE_REF(p2);
 	t = malloc(sizeof(struct reap_kill_tracker), M_TEMP, M_WAITOK);
 	t->parent = p2;
 	TAILQ_INSERT_TAIL(tracker, t, link);
@@ -347,7 +377,7 @@ reap_kill_sched(struct reap_kill_tracker_head *tracker, struct proc *p2)
 static void
 reap_kill_sched_free(struct reap_kill_tracker *t)
 {
-	PRELE(t->parent);
+	PROC_TREE_UNREF(t->parent);
 	free(t, M_TEMP);
 }
 
@@ -382,21 +412,22 @@ reap_kill_children(struct thread *td, struct proc *reaper,
 }
 
 static bool
-reap_kill_subtree_once(struct thread *td, struct proc *p, struct proc *reaper,
+reap_kill_subtree_once(struct thread *td, struct proc *p, struct proc **reaperp,
     struct unrhdr *pids, struct reap_kill_proc_work *w)
 {
 	struct reap_kill_tracker_head tracker;
 	struct reap_kill_tracker *t;
-	struct proc *p2;
-	int r, xlocked;
-	bool res, st;
+	struct proc *p2, *reaper, *old_reaper;
+	bool proctree_dropped, res;
 
 	res = false;
 	TAILQ_INIT(&tracker);
+	reaper = *reaperp;
 	reap_kill_sched(&tracker, reaper);
 	while ((t = TAILQ_FIRST(&tracker)) != NULL) {
 		TAILQ_REMOVE(&tracker, t, link);
 
+again:
 		/*
 		 * Since reap_kill_proc() drops proctree_lock sx, it
 		 * is possible that the tracked reaper is no longer.
@@ -432,54 +463,41 @@ reap_kill_subtree_once(struct thread *td, struct proc *p, struct proc *reaper,
 			    (P2_REAPKILLED | P2_WEXIT)) != 0)
 				continue;
 
-			if (p2 == td->td_proc) {
-				if ((p2->p_flag & P_HADTHREADS) != 0 &&
-				    (p2->p_flag2 & P2_WEXIT) == 0) {
-					xlocked = sx_xlocked(&proctree_lock);
-					sx_unlock(&proctree_lock);
-					st = true;
-				} else {
-					st = false;
-				}
-				PROC_LOCK(p2);
+			proctree_dropped = false;
+			PROC_LOCK(p2);
+			if ((p2->p_flag2 & P2_WEXIT) == 0) {
+				_PHOLD(p2);
+
 				/*
 				 * sapblk ensures that only one thread
 				 * in the system sets this flag.
 				 */
 				p2->p_flag2 |= P2_REAPKILLED;
-				if (st)
-					r = thread_single(p2, SINGLE_NO_EXIT);
-				(void)pksignal(p2, w->rk->rk_sig, w->ksi);
-				w->rk->rk_killed++;
-				if (st && r == 0)
-					thread_single_end(p2, SINGLE_NO_EXIT);
-				PROC_UNLOCK(p2);
-				if (st) {
-					if (xlocked)
-						sx_xlock(&proctree_lock);
-					else
-						sx_slock(&proctree_lock);
-				}
-			} else {
-				PROC_LOCK(p2);
-				if ((p2->p_flag2 & P2_WEXIT) == 0) {
-					_PHOLD(p2);
-					p2->p_flag2 |= P2_REAPKILLED;
-					PROC_UNLOCK(p2);
-					w->target = p2;
-					taskqueue_enqueue(taskqueue_thread,
-					    &w->t);
-					while (w->target != NULL) {
-						sx_sleep(&w->target,
-						    &proctree_lock, PWAIT,
-						    "reapst", 0);
-					}
-					PROC_LOCK(p2);
-					_PRELE(p2);
-				}
-				PROC_UNLOCK(p2);
+
+				w->target = p2;
+				reap_kill_proc(w, &proctree_dropped);
+				_PRELE(p2);
 			}
+			PROC_UNLOCK(p2);
 			res = true;
+			if (proctree_dropped) {
+				old_reaper = reaper;
+				reaper = get_reaper_or_p(p);
+				if (old_reaper != reaper) {
+					*reaperp = reaper;
+					PROC_TREE_REF(reaper);
+					PROC_TREE_UNREF(old_reaper);
+					reap_kill_sched(&tracker, reaper);
+					/*
+					 * Already scheduled kill
+					 * actions should be kept on
+					 * the schedule, the processes
+					 * are inherited by the new
+					 * reaper.
+					 */
+				}
+				goto again;
+			}
 		}
 		reap_kill_sched_free(t);
 	}
@@ -487,7 +505,7 @@ reap_kill_subtree_once(struct thread *td, struct proc *p, struct proc *reaper,
 }
 
 static void
-reap_kill_subtree(struct thread *td, struct proc *p, struct proc *reaper,
+reap_kill_subtree(struct thread *td, struct proc *p, struct proc **reaperp,
     struct reap_kill_proc_work *w)
 {
 	struct unrhdr pids;
@@ -507,7 +525,7 @@ reap_kill_subtree(struct thread *td, struct proc *p, struct proc *reaper,
 		goto out;
 	}
 	PROC_UNLOCK(td->td_proc);
-	while (reap_kill_subtree_once(td, p, reaper, &pids, w))
+	while (reap_kill_subtree_once(td, p, reaperp, &pids, w))
 	       ;
 
 	ihandle = create_iter_unr(&pids);
@@ -556,7 +574,8 @@ reap_kill(struct thread *td, struct proc *p, void *data)
 	    (REAPER_KILL_CHILDREN | REAPER_KILL_SUBTREE))
 		return (EINVAL);
 	PROC_UNLOCK(p);
-	reaper = (p->p_treeflag & P_TREE_REAPER) == 0 ? p->p_reaper : p;
+	reaper = get_reaper_or_p(p);
+
 	ksiginfo_init(&ksi);
 	ksi.ksi_signo = rk->rk_sig;
 	ksi.ksi_code = SI_USER;
@@ -572,8 +591,9 @@ reap_kill(struct thread *td, struct proc *p, void *data)
 		w.ksi = &ksi;
 		w.rk = rk;
 		w.error = &error;
-		TASK_INIT(&w.t, 0, reap_kill_proc_work, &w);
-		reap_kill_subtree(td, p, reaper, &w);
+		PROC_TREE_REF(reaper);
+		reap_kill_subtree(td, p, &reaper, &w);
+		PROC_TREE_UNREF(reaper);
 		crfree(w.cr);
 	}
 	PROC_LOCK(p);
@@ -786,19 +806,15 @@ aslr_status(struct thread *td, struct proc *p, void *data)
 		d = PROC_ASLR_FORCE_DISABLE;
 		break;
 	}
-	if ((p->p_flag & P_WEXIT) == 0) {
-		_PHOLD(p);
-		PROC_UNLOCK(p);
-		vm = vmspace_acquire_ref(p);
-		if (vm != NULL) {
-			if ((vm->vm_map.flags & MAP_ASLR) != 0)
-				d |= PROC_ASLR_ACTIVE;
-			vmspace_free(vm);
-		}
-		PROC_LOCK(p);
-		_PRELE(p);
+	PROC_UNLOCK(p);
+	vm = vmspace_acquire_ref(p);
+	if (vm != NULL) {
+		if ((vm->vm_map.flags & MAP_ASLR) != 0)
+			d |= PROC_ASLR_ACTIVE;
+		vmspace_free(vm);
 	}
 	*(int *)data = d;
+	PROC_LOCK(p);
 	return (0);
 }
 
@@ -862,37 +878,39 @@ wxmap_ctl(struct thread *td, struct proc *p, void *data)
 {
 	struct vmspace *vm;
 	vm_map_t map;
-	int state;
+	int error, state;
 
 	PROC_LOCK_ASSERT(p, MA_OWNED);
-	if ((p->p_flag & P_WEXIT) != 0)
-		return (ESRCH);
 	state = *(int *)data;
+	error = 0;
 
 	switch (state) {
 	case PROC_WX_MAPPINGS_PERMIT:
-		p->p_flag2 |= P2_WXORX_DISABLE;
-		_PHOLD(p);
 		PROC_UNLOCK(p);
-		vm = vmspace_acquire_ref(p);
-		if (vm != NULL) {
+		error = proc_vmspace_ref(td, p, PRVM_BLOCK_EXEC |
+		    PRVM_CHECK_DEBUG, &vm);
+		if (error == 0) {
 			map = &vm->vm_map;
 			vm_map_lock(map);
 			map->flags &= ~MAP_WXORX;
 			vm_map_unlock(map);
-			vmspace_free(vm);
+			PROC_LOCK(p);
+			p->p_flag2 |= P2_WXORX_DISABLE;
+			PROC_UNLOCK(p);
+			proc_vmspace_unref(td, p, PRVM_BLOCK_EXEC |
+			    PRVM_CHECK_DEBUG, vm);
 		}
 		PROC_LOCK(p);
-		_PRELE(p);
 		break;
 	case PROC_WX_MAPPINGS_DISALLOW_EXEC:
 		p->p_flag2 |= P2_WXORX_ENABLE_EXEC;
 		break;
 	default:
-		return (EINVAL);
+		error = EINVAL;
+		break;
 	}
 
-	return (0);
+	return (error);
 }
 
 static int
@@ -902,15 +920,12 @@ wxmap_status(struct thread *td, struct proc *p, void *data)
 	int d;
 
 	PROC_LOCK_ASSERT(p, MA_OWNED);
-	if ((p->p_flag & P_WEXIT) != 0)
-		return (ESRCH);
 
 	d = 0;
 	if ((p->p_flag2 & P2_WXORX_DISABLE) != 0)
 		d |= PROC_WX_MAPPINGS_PERMIT;
 	if ((p->p_flag2 & P2_WXORX_ENABLE_EXEC) != 0)
 		d |= PROC_WX_MAPPINGS_DISALLOW_EXEC;
-	_PHOLD(p);
 	PROC_UNLOCK(p);
 	vm = vmspace_acquire_ref(p);
 	if (vm != NULL) {
@@ -918,9 +933,8 @@ wxmap_status(struct thread *td, struct proc *p, void *data)
 			d |= PROC_WXORX_ENFORCE;
 		vmspace_free(vm);
 	}
-	PROC_LOCK(p);
-	_PRELE(p);
 	*(int *)data = d;
+	PROC_LOCK(p);
 	return (0);
 }
 
@@ -1196,9 +1210,15 @@ sys_procctl(struct thread *td, struct procctl_args *uap)
 static int
 kern_procctl_single(struct thread *td, struct proc *p, int com, void *data)
 {
+	int error;
 
 	PROC_LOCK_ASSERT(p, MA_OWNED);
-	return (procctl_cmds_info[com].exec(td, p, data));
+	if ((p->p_flag & P_WEXIT) != 0)
+		return (ESRCH);
+	_PHOLD(p);
+	error = procctl_cmds_info[com].exec(td, p, data);
+	_PRELE(p);
+	return (error);
 }
 
 int

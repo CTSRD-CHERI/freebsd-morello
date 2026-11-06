@@ -1,6 +1,4 @@
 SYSDIR?=${SRCTOP}/sys
-.include "${SYSDIR}/conf/kern.opts.mk"
-
 .PATH:	${SYSDIR}/dev/iser/
 
 KMOD=	iser
@@ -19,7 +17,6 @@ CFLAGS+= -I${SYSDIR}/ofed/include/uapi
 CFLAGS+= ${LINUXKPI_INCLUDES}
 CFLAGS+= -DCONFIG_INFINIBAND_USER_MEM
 CFLAGS+= -DINET6 -DINET
-CFLAGS+= -fms-extensions
 
 CFLAGS+=-DICL_KERNEL_PROXY
 

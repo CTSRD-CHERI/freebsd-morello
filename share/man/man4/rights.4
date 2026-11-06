@@ -281,7 +281,8 @@ Permit
 and
 .Xr openat 2
 with
-.Dv O_FSYNC
+.Dv O_DSYNC ,
+.Dv O_FSYNC ,
 or
 .Dv O_SYNC
 flag.
@@ -483,6 +484,12 @@ Permit
 .It Dv CAP_PDKILL
 Permit
 .Xr pdkill 2 .
+.It Dv CAP_PTRACE
+Permit debugging using
+.Xr pdptrace 2 .
+.It Dv CAP_PDWAIT
+Permit
+.Xr pdwait 2 .
 .It Dv CAP_PEELOFF
 Permit
 .Xr sctp_peeloff 2 .

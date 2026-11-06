@@ -3,7 +3,7 @@
 .\"
 .\" SPDX-License-Identifier: BSD-2-Clause
 .\"
-.Dd August 21, 2023
+.Dd October 20, 2026
 .Dt TIMESPEC_GETRES 3
 .Os
 .Sh NAME
@@ -36,14 +36,18 @@ if successful and zero otherwise.
 .Sh SEE ALSO
 .Xr clock_getres 2 ,
 .Xr timespec_get 3
-.\" .Sh STANDARDS
-.\" The
-.\" .Nm
-.\" function conforms to
-.\" .St -isoC-2023 .
+.Sh STANDARDS
+The
+.Nm
+function conforms to
+.St -isoC-2023 .
 .Sh HISTORY
 This interface first appeared in
-.Fx 14 .
+.Fx 14.0 ,
+but it was not exported from the shared C library until
+.Fx 14.6
+and
+.Fx 15.2 .
 .Sh AUTHORS
 The
 .Nm

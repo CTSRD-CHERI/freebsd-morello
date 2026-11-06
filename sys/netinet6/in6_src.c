@@ -60,7 +60,6 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/cdefs.h>
 #include "opt_inet.h"
 #include "opt_inet6.h"
 #include <sys/param.h>
@@ -132,8 +131,8 @@ static int in6_selectif(struct sockaddr_in6 *, struct ip6_pktopts *,
 	struct ip6_moptions *, struct ifnet **,
 	struct ifnet *, u_int);
 static int in6_selectsrc(uint32_t, struct sockaddr_in6 *,
-	struct ip6_pktopts *, struct inpcb *, struct ucred *,
-	struct ifnet **, struct in6_addr *);
+	struct ip6_pktopts *, struct ip6_moptions *, struct inpcb *,
+	struct ucred *, struct ifnet **, struct in6_addr *);
 
 static struct in6_addrpolicy *lookup_addrsel_policy(struct sockaddr_in6 *);
 
@@ -173,8 +172,8 @@ static struct in6_addrpolicy *match_addrsel_policy(struct sockaddr_in6 *);
 
 static int
 in6_selectsrc(uint32_t fibnum, struct sockaddr_in6 *dstsock,
-    struct ip6_pktopts *opts, struct inpcb *inp, struct ucred *cred,
-    struct ifnet **ifpp, struct in6_addr *srcp)
+    struct ip6_pktopts *opts, struct ip6_moptions *mopts, struct inpcb *inp,
+    struct ucred *cred, struct ifnet **ifpp, struct in6_addr *srcp)
 {
 	struct rm_priotracker in6_ifa_tracker;
 	struct in6_addr dst, tmp;
@@ -186,7 +185,6 @@ in6_selectsrc(uint32_t fibnum, struct sockaddr_in6 *dstsock,
 	u_int32_t odstzone;
 	int prefer_tempaddr;
 	int error;
-	struct ip6_moptions *mopts;
 
 	NET_EPOCH_ASSERT();
 	KASSERT(srcp != NULL, ("%s: srcp is NULL", __func__));
@@ -203,13 +201,6 @@ in6_selectsrc(uint32_t fibnum, struct sockaddr_in6 *dstsock,
 		if (*ifpp != NULL)
 			oifp = *ifpp;
 		*ifpp = NULL;
-	}
-
-	if (inp != NULL) {
-		INP_LOCK_ASSERT(inp);
-		mopts = inp->in6p_moptions;
-	} else {
-		mopts = NULL;
 	}
 
 	/*
@@ -375,7 +366,7 @@ in6_selectsrc(uint32_t fibnum, struct sockaddr_in6 *dstsock,
 		 */
 
 		/* Rule 5: Prefer outgoing interface */
-		if (!(ND_IFINFO(ifp)->flags & ND6_IFF_NO_PREFER_IFACE)) {
+		if (!(ifp->if_inet6->nd_flags & ND6_IFF_NO_PREFER_IFACE)) {
 			if (ia_best->ia_ifp == ifp && ia->ia_ifp != ifp)
 				NEXT(5);
 			if (ia_best->ia_ifp != ifp && ia->ia_ifp == ifp)
@@ -552,10 +543,13 @@ in6_selectsrc_socket(struct sockaddr_in6 *dstsock, struct ip6_pktopts *opts,
 	uint32_t fibnum;
 	int error;
 
+	INP_LOCK_ASSERT(inp);
+
 	fibnum = inp->inp_inc.inc_fibnum;
 	retifp = NULL;
 
-	error = in6_selectsrc(fibnum, dstsock, opts, inp, cred, &retifp, srcp);
+	error = in6_selectsrc(fibnum, dstsock, opts, inp->in6p_moptions,
+	    inp, cred, &retifp, srcp);
 	if (error != 0)
 		return (error);
 
@@ -583,7 +577,7 @@ in6_selectsrc_socket(struct sockaddr_in6 *dstsock, struct ip6_pktopts *opts,
  * Stores selected address to @srcp.
  * Returns 0 on success.
  *
- * Used by non-socket based consumers (ND code mostly)
+ * Used by non-socket based consumers
  */
 int
 in6_selectsrc_addr(uint32_t fibnum, const struct in6_addr *dst,
@@ -602,10 +596,39 @@ in6_selectsrc_addr(uint32_t fibnum, const struct in6_addr *dst,
 	dst_sa.sin6_scope_id = scopeid;
 	sa6_embedscope(&dst_sa, 0);
 
-	error = in6_selectsrc(fibnum, &dst_sa, NULL, NULL, NULL, &retifp, srcp);
+	error = in6_selectsrc(fibnum, &dst_sa, NULL, NULL,
+	    NULL, NULL, &retifp, srcp);
 	if (hlim != NULL)
 		*hlim = in6_selecthlim(NULL, retifp);
 
+	return (error);
+}
+
+/*
+ * Select source address based on @fibnum, @dst and @mopts.
+ * Stores selected address to @srcp.
+ * Returns 0 on success.
+ *
+ * Used by non-socket based consumers (ND code mostly)
+ */
+int
+in6_selectsrc_nbr(uint32_t fibnum, const struct in6_addr *dst,
+    struct ip6_moptions *mopts, struct ifnet *ifp, struct in6_addr *srcp)
+{
+	struct sockaddr_in6 dst_sa;
+	struct ifnet *retifp;
+	int error;
+
+	retifp = ifp;
+	bzero(&dst_sa, sizeof(dst_sa));
+	dst_sa.sin6_family = AF_INET6;
+	dst_sa.sin6_len = sizeof(dst_sa);
+	dst_sa.sin6_addr = *dst;
+	dst_sa.sin6_scope_id = ntohs(in6_getscope(dst));
+	sa6_embedscope(&dst_sa, 0);
+
+	error = in6_selectsrc(fibnum, &dst_sa, NULL, mopts,
+	    NULL, NULL, &retifp, srcp);
 	return (error);
 }
 
@@ -673,7 +696,7 @@ lookup_route(uint32_t fibnum, struct sockaddr_in6 *dst, struct route_in6 *ro,
 		 */
 		struct in6_pktinfo *pi;
 		if (opts && (pi = opts->ip6po_pktinfo) != NULL && pi->ipi6_ifindex) {
-			if (nh->nh_aifp->if_index != pi->ipi6_ifindex)
+			if (nh->nh_ifp->if_index != pi->ipi6_ifindex)
 				nh = NULL;
 		}
 	}
@@ -845,7 +868,7 @@ in6_selecthlim(struct inpcb *inp, struct ifnet *ifp)
 	if (inp && inp->in6p_hops >= 0)
 		return (inp->in6p_hops);
 	else if (ifp)
-		return (ND_IFINFO(ifp)->chlim);
+		return (ifp->if_inet6->nd_curhoplimit);
 	else if (inp && !IN6_IS_ADDR_UNSPECIFIED(&inp->in6p_faddr)) {
 		struct nhop_object *nh;
 		struct in6_addr dst;
@@ -856,12 +879,28 @@ in6_selecthlim(struct inpcb *inp, struct ifnet *ifp)
 		in6_splitscope(&inp->in6p_faddr, &dst, &scopeid);
 		nh = fib6_lookup(fibnum, &dst, scopeid, 0, 0);
 		if (nh != NULL) {
-			hlim = ND_IFINFO(nh->nh_ifp)->chlim;
+			hlim = nh->nh_ifp->if_inet6->nd_curhoplimit;
 			return (hlim);
 		}
 	}
 	return (V_ip6_defhlim);
 }
+
+/*
+ * The followings are implementation of the policy table using a
+ * simple tail queue.
+ * XXX such details should be hidden.
+ * XXX implementation using binary tree should be more efficient.
+ */
+struct addrsel_policyent {
+	TAILQ_ENTRY(addrsel_policyent) ape_entry;
+	struct in6_addrpolicy ape_policy;
+};
+
+TAILQ_HEAD(addrsel_policyhead, addrsel_policyent);
+
+VNET_DEFINE_STATIC(struct addrsel_policyhead, addrsel_policytab);
+#define	V_addrsel_policytab		VNET(addrsel_policytab)
 
 void
 addrsel_policy_init(void)
@@ -878,6 +917,18 @@ addrsel_policy_init(void)
 
 	ADDRSEL_LOCK_INIT();
 	ADDRSEL_SXLOCK_INIT();
+}
+
+void
+addrsel_policy_destroy(void)
+{
+	struct addrsel_policyent *pol, *tpol;
+
+	TAILQ_FOREACH_SAFE(pol, &V_addrsel_policytab, ape_entry, tpol) {
+		TAILQ_REMOVE(&V_addrsel_policytab, pol, ape_entry);
+		free(pol, M_IFADDR);
+	}
+	/* TODO: Perform matching destruction of locks elsewhere. */
 }
 
 static struct in6_addrpolicy *
@@ -952,22 +1003,6 @@ in6_src_ioctl(u_long cmd, caddr_t data)
 
 	return (0);		/* XXX: compromise compilers */
 }
-
-/*
- * The followings are implementation of the policy table using a
- * simple tail queue.
- * XXX such details should be hidden.
- * XXX implementation using binary tree should be more efficient.
- */
-struct addrsel_policyent {
-	TAILQ_ENTRY(addrsel_policyent) ape_entry;
-	struct in6_addrpolicy ape_policy;
-};
-
-TAILQ_HEAD(addrsel_policyhead, addrsel_policyent);
-
-VNET_DEFINE_STATIC(struct addrsel_policyhead, addrsel_policytab);
-#define	V_addrsel_policytab		VNET(addrsel_policytab)
 
 static void
 init_policy_queue(void)
