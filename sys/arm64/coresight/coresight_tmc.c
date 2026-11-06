@@ -111,7 +111,7 @@ tmc_alloc_pages(struct tmc_softc *sc, vm_page_t *pages, int npages)
 	vm_paddr_t low, high, boundary;
 	vm_memattr_t memattr;
 	int alignment;
-	uintptr_t va;
+	void *va;
 	int pflags;
 	vm_page_t m;
 	int tries;
