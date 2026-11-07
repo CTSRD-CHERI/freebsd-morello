@@ -778,12 +778,9 @@ pt_send_buffer_record(void *arg)
 static void
 pt_topa_status_clear(void)
 {
-	uint64_t reg;
 
-	reg = rdmsr(MSR_IA_GLOBAL_STATUS_RESET);
-	reg &= ~GLOBAL_STATUS_FLAG_TRACETOPAPMI;
-	reg |= GLOBAL_STATUS_FLAG_TRACETOPAPMI;
-	wrmsr(MSR_IA_GLOBAL_STATUS_RESET, reg);
+	wrmsr(MSR_IA_GLOBAL_STATUS_RESET,
+	    GLOBAL_STATUS_FLAG_TRACETOPAPMI);
 }
 
 /*
