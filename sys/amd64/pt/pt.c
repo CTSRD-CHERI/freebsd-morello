@@ -128,6 +128,7 @@ struct pt_ctx {
 };
 /* PT tracing contexts used for CPU mode. */
 static struct pt_ctx *pt_pcpu_ctx;
+static struct hwt_context *active_cpu_mode_session = NULL;
 
 enum pt_cpu_state { PT_INACTIVE = 0, PT_ACTIVE };
 
@@ -153,7 +154,6 @@ static struct pt_cpu_info {
 } pt_info  __read_mostly;
 
 static bool initialized = false;
-static int cpu_mode_ctr = 0;
 
 static __inline enum pt_cpu_state
 pt_cpu_get_state(int cpu_id)
@@ -494,6 +494,10 @@ pt_backend_configure(struct hwt_context *ctx, int cpu_id, int thread_id)
 	cfg = (struct pt_cpu_config *)ctx->config;
 	pt_ctx = NULL;
 	if (ctx->mode == HWT_MODE_CPU) {
+		if ((struct hwt_context *)atomic_load_ptr((uintptr_t *)&active_cpu_mode_session) !=
+		    ctx)
+			return (EALREADY);
+
 		TAILQ_FOREACH(hwt_cpu, &ctx->cpus, next) {
 			if (hwt_cpu->cpu_id != cpu_id)
 				continue;
@@ -576,8 +580,8 @@ pt_backend_enable_smp(struct hwt_context *ctx)
 
 	KASSERT(ctx->mode == HWT_MODE_CPU,
 	    ("%s: should only be used for CPU mode", __func__));
-	if (ctx->mode == HWT_MODE_CPU &&
-	    atomic_swap_32(&cpu_mode_ctr, 1) != 0)
+	if ((struct hwt_context *)atomic_load_ptr((uintptr_t *)&active_cpu_mode_session) !=
+	    ctx)
 		return (-1);
 
 	smp_rendezvous_cpus(ctx->cpu_map, NULL, pt_cpu_start, NULL, NULL);
@@ -594,8 +598,10 @@ pt_backend_disable_smp(struct hwt_context *ctx)
 	struct pt_cpu *cpu;
 
 	dprintf("%s\n", __func__);
+
 	if (ctx->mode == HWT_MODE_CPU &&
-	    atomic_swap_32(&cpu_mode_ctr, 0) == 0)
+	    (struct hwt_context *)atomic_load_ptr((uintptr_t *)&active_cpu_mode_session) !=
+	    ctx)
 		return (-1);
 
 	if (CPU_EMPTY(&ctx->cpu_map)) {
@@ -630,6 +636,11 @@ pt_backend_init(struct hwt_context *ctx)
 	dprintf("%s\n", __func__);
 	if (ctx->mode != HWT_MODE_CPU)
 		return (0);
+
+	if (atomic_cmpset_ptr((uintptr_t *) &active_cpu_mode_session,
+	    (uintptr_t)NULL, (uintptr_t)ctx) == 0)
+		return (EALREADY);
+
 	TAILQ_FOREACH(hwt_cpu, &ctx->cpus, next) {
 		error = pt_init_ctx(&pt_pcpu_ctx[hwt_cpu->cpu_id], hwt_cpu->vm,
 		    hwt_cpu->cpu_id);
@@ -676,6 +687,7 @@ pt_backend_deinit(struct hwt_context *ctx)
 			pt_deinit_ctx(pt_ctx);
 			atomic_set_int(&pt_pcpu[cpu_id].in_pcint_handler, 0);
 		}
+		atomic_store_ptr((uintptr_t *)&active_cpu_mode_session, (uintptr_t) NULL);
 	}
 
 	return (0);
