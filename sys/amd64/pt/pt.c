@@ -648,14 +648,15 @@ pt_backend_deinit(struct hwt_context *ctx)
 		}
 	} else {
 		CPU_FOREACH_ISSET(cpu_id, &ctx->cpu_map) {
-			if (pt_pcpu[cpu_id].ctx == NULL)
+			pt_ctx = pt_pcpu[cpu_id].ctx;
+			if (pt_ctx == NULL)
 				continue;
-			KASSERT(pt_pcpu[cpu_id].ctx == &pt_pcpu_ctx[cpu_id],
+			KASSERT(pt_ctx == &pt_pcpu_ctx[cpu_id],
 			    ("%s: CPU mode tracing with non-cpu mode PT"
 			     "context active",
 				__func__));
-			pt_deinit_ctx(pt_pcpu[cpu_id].ctx);
 			pt_pcpu[cpu_id].ctx = NULL;
+			pt_deinit_ctx(pt_ctx);
 			atomic_set_int(&pt_pcpu[cpu_id].in_pcint_handler, 0);
 		}
 	}
@@ -764,6 +765,13 @@ pt_send_buffer_record(void *arg)
 	struct hwt_record_entry record;
 
 	struct pt_ctx *ctx = cpu->ctx;
+	if (cpu->ctx == NULL) {
+		/*
+		 * We've disabled the backend but a previously
+		 * scheduled SWI still fired.
+		 */
+		return;
+	}
 	pt_fill_buffer_record(ctx->id, &ctx->buf, &record);
 	hwt_record_ctx(ctx->hwt_ctx, &record, M_ZERO | M_NOWAIT);
 }
