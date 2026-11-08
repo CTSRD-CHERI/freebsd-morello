@@ -466,6 +466,7 @@ pt_ctx_shutdown_cb(struct trace_context *tc, struct pt_dec_ctx *dctx,
 	vm_offset_t offset;
 	int curpage;
 
+	bzero(&bget, sizeof(bget));
 	bget.ident = &curpage;
 	bget.offset = &offset;
 	error = ioctl(dctx->dev_fd, HWT_IOC_BUFPTR_GET, &bget);
