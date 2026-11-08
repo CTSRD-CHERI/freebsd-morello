@@ -63,6 +63,7 @@ hwt_switch_in(struct thread *td)
 	struct hwt_thread *thr;
 	struct proc *p;
 	int cpu_id;
+	int err;
 
 	p = td->td_proc;
 
@@ -86,7 +87,14 @@ hwt_switch_in(struct thread *td)
 	dprintf("%s: thr %p index %d tid %d on cpu_id %d\n", __func__, thr,
 	    thr->thread_id, td->td_tid, cpu_id);
 
-	hwt_backend_configure(ctx, cpu_id, thr->thread_id);
+	err = hwt_backend_configure(ctx, cpu_id, thr->thread_id);
+	if (err != 0) {
+		printf("%s: failed to configure tracing for thread %d: %d\n",
+		    __func__, thr->thread_id, err);
+		hwt_ctx_put(ctx);
+		return;
+	}
+
 	hwt_backend_enable(ctx, cpu_id);
 
 	hwt_ctx_put(ctx);

@@ -108,6 +108,7 @@ struct arm_spe_info {
 	struct task             flush_task;
 	bool                    enabled : 1;
 	bool                    stopped : 1;
+	bool                    configured : 1;
 
 	/* buffer is split in half as a ping-pong buffer */
 	vm_object_t             bufobj;

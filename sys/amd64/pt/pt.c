@@ -414,28 +414,16 @@ pt_deinit_ctx(struct pt_ctx *pt_ctx)
 	memset(pt_ctx, 0, sizeof(*pt_ctx));
 }
 
-/*
- * HWT backend configuration method.
- *
- * Checks and translates the user-defined configuration to a
- * set of PT tracing features. Uses the feature set to initialize
- * the tracing context for the target CPU or thread.
- */
 static int
-pt_backend_configure(struct hwt_context *ctx, int cpu_id, int thread_id)
+pt_configure_ctx(struct pt_ctx *pt_ctx, struct hwt_context *ctx,
+    struct pt_cpu_config *cfg)
 {
-	struct hwt_cpu *hwt_cpu;
-	struct hwt_thread *thr;
-	struct pt_ctx *pt_ctx;
-	struct pt_cpu_config *cfg;
 	struct pt_ext_area *pt_ext;
 	struct xstate_hdr *hdr;
 	int error;
 
-	dprintf("%s\n", __func__);
-
-	cfg = (struct pt_cpu_config *)ctx->config;
-	pt_ctx = NULL;
+	KASSERT(pt_ctx->hwt_ctx == NULL,
+	    ("%s: tracing context was already configured", __func__));
 
 	/* Clear any flags we don't support yet. */
 	cfg->rtit_ctl &= PT_SUPPORTED_FLAGS;
@@ -463,6 +451,48 @@ pt_backend_configure(struct hwt_context *ctx, int cpu_id, int thread_id)
 	}
 	/* TODO: support for more config bits. */
 
+	dprintf("%s: preparing MSRs\n", __func__);
+	pt_ext = pt_ctx_get_ext_area(pt_ctx);
+	hdr = pt_ctx_get_xstate_hdr(pt_ctx);
+
+	pt_ext->rtit_ctl |= cfg->rtit_ctl;
+	if (cfg->nranges != 0) {
+		dprintf("%s: preparing IPF ranges\n", __func__);
+		if ((error = pt_configure_ranges(pt_ctx, cfg)) != 0)
+			return (error);
+	}
+	pt_ctx->hwt_ctx = ctx;
+	pt_ext->rtit_ctl |= RTIT_CTL_TOPA;
+	pt_ext->rtit_output_base = (uint64_t)vtophys(pt_ctx->buf.topa_hw);
+	pt_ext->rtit_output_mask_ptrs = PT_TOPA_MASK_PTRS;
+	hdr->xstate_bv = XFEATURE_ENABLED_PT;
+	hdr->xstate_xcomp_bv = XFEATURE_ENABLED_PT |
+	    XSTATE_XCOMP_BV_COMPACT;
+	pt_ext->rtit_ctl |= RTIT_CTL_TRACEEN;
+
+	return (0);
+}
+
+/*
+ * HWT backend configuration method.
+ *
+ * Checks and translates the user-defined configuration to a
+ * set of PT tracing features. Uses the feature set to initialize
+ * the tracing context for the target CPU or thread.
+ */
+static int
+pt_backend_configure(struct hwt_context *ctx, int cpu_id, int thread_id)
+{
+	struct hwt_cpu *hwt_cpu;
+	struct hwt_thread *thr;
+	struct pt_ctx *pt_ctx;
+	struct pt_cpu_config *cfg;
+	int error;
+
+	dprintf("%s\n", __func__);
+
+	cfg = (struct pt_cpu_config *)ctx->config;
+	pt_ctx = NULL;
 	if (ctx->mode == HWT_MODE_CPU) {
 		TAILQ_FOREACH(hwt_cpu, &ctx->cpus, next) {
 			if (hwt_cpu->cpu_id != cpu_id)
@@ -485,24 +515,11 @@ pt_backend_configure(struct hwt_context *ctx, int cpu_id, int thread_id)
 	if (pt_ctx == NULL)
 		return (ENOENT);
 
-	dprintf("%s: preparing MSRs\n", __func__);
-	pt_ext = pt_ctx_get_ext_area(pt_ctx);
-	hdr = pt_ctx_get_xstate_hdr(pt_ctx);
-
-	pt_ext->rtit_ctl |= cfg->rtit_ctl;
-	if (cfg->nranges != 0) {
-		dprintf("%s: preparing IPF ranges\n", __func__);
-		if ((error = pt_configure_ranges(pt_ctx, cfg)) != 0)
+	if (pt_ctx->hwt_ctx == NULL) {
+		error = pt_configure_ctx(pt_ctx, ctx, cfg);
+		if (error)
 			return (error);
 	}
-	pt_ctx->hwt_ctx = ctx;
-	pt_ext->rtit_ctl |= RTIT_CTL_TOPA;
-	pt_ext->rtit_output_base = (uint64_t)vtophys(pt_ctx->buf.topa_hw);
-	pt_ext->rtit_output_mask_ptrs = PT_TOPA_MASK_PTRS;
-	hdr->xstate_bv = XFEATURE_ENABLED_PT;
-	hdr->xstate_xcomp_bv = XFEATURE_ENABLED_PT |
-	    XSTATE_XCOMP_BV_COMPACT;
-	pt_ext->rtit_ctl |= RTIT_CTL_TRACEEN;
 	pt_pcpu[cpu_id].ctx = pt_ctx;
 
 	return (0);
