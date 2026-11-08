@@ -261,10 +261,10 @@ pt_cpu_start(void *dummy)
 	MPASS(cpu->ctx != NULL);
 
 	dprintf("%s: curcpu %d\n", __func__, curcpu);
-	pt_cpu_set_state(curcpu, PT_ACTIVE);
 	load_cr4(rcr4() | CR4_XSAVE);
 	wrmsr(MSR_IA32_RTIT_STATUS, 0);
 	pt_cpu_toggle_local(cpu->ctx->save_area, true);
+	pt_cpu_set_state(curcpu, PT_ACTIVE);
 }
 
 /*
