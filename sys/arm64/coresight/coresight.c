@@ -388,8 +388,7 @@ coresight_get_output_endpoint(struct coresight_platform_data *pdata)
 }
 
 struct coresight_device *
-coresight_get_output_device(struct coresight_device *cs_dev0,
-    struct endpoint *endp, struct endpoint **out_endp)
+coresight_get_output_device(struct endpoint *endp, struct endpoint **out_endp)
 {
 	struct coresight_platform_data *pdata;
 	struct coresight_device *cs_dev;
