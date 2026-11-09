@@ -48,7 +48,6 @@
 #include <dev/hwt/hwt_record.h>
 
 #define	HWT_RECORD_DEBUG
-#undef	HWT_RECORD_DEBUG
 
 #ifdef	HWT_RECORD_DEBUG
 #define	dprintf(fmt, ...)	printf(fmt, ##__VA_ARGS__)

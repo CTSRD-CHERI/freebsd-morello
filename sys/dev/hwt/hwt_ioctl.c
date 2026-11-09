@@ -56,7 +56,6 @@
 #include <dev/hwt/hwt_vm.h>
 
 #define	HWT_IOCTL_DEBUG
-#undef	HWT_IOCTL_DEBUG
 
 #ifdef	HWT_IOCTL_DEBUG
 #define	dprintf(fmt, ...)	printf(fmt, ##__VA_ARGS__)

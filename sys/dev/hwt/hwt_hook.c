@@ -48,7 +48,6 @@
 #include <dev/hwt/hwt_vm.h>
 
 #define	HWT_DEBUG
-#undef	HWT_DEBUG
 
 #ifdef	HWT_DEBUG
 #define	dprintf(fmt, ...)	printf(fmt, ##__VA_ARGS__)
