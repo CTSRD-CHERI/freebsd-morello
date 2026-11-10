@@ -87,6 +87,9 @@ hwt_record_to_user(struct hwt_record_entry *ent,
 	usr->record_type = ent->record_type;
 	switch (ent->record_type) {
 	case HWT_RECORD_MMAP:
+		usr->size = ent->size;
+		usr->foffset = ent->foffset;
+		/* Fallthrough. */
 	case HWT_RECORD_EXECUTABLE:
 	case HWT_RECORD_KERNEL:
 		usr->addr = ent->addr;

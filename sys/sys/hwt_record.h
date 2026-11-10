@@ -52,8 +52,10 @@ struct hwt_record_entry {
 		 */
 		struct {
 			char *fullpath;
+			size_t size;
 			uintptr_t addr;
 			uintptr_t baseaddr;
+			vm_ooffset_t foffset;
 		};
 		/* Used for BUFFER records. */
 		struct {
