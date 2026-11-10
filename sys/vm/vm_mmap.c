@@ -582,10 +582,9 @@ sys_munmap(struct thread *td, struct munmap_args *uap)
 int
 kern_munmap(struct thread *td, uintptr_t addr0, size_t size)
 {
-#ifdef HWPMC_HOOKS
-	struct pmckern_map_out pkm;
+#if defined(HWPMC_HOOKS) || defined(HWT_HOOKS)
+	bool has_exec_region;
 	vm_map_entry_t entry;
-	bool pmc_handled;
 #endif
 	vm_offset_t addr, end;
 	vm_size_t pageoff;
@@ -606,50 +605,60 @@ kern_munmap(struct thread *td, uintptr_t addr0, size_t size)
 		return (EINVAL);
 
 	vm_map_lock(map);
+
+#if defined(HWPMC_HOOKS) || defined(HWT_HOOKS)
+	/*
+	 * Inform hwpmc or hwt if the address range
+	 * being unmapped contains an executable region.
+	 */
+	bool have_hw_hooks = false
 #ifdef HWPMC_HOOKS
-	pmc_handled = false;
-	if (PMC_HOOK_INSTALLED(PMC_FN_MUNMAP)) {
-		pmc_handled = true;
-		/*
-		 * Inform hwpmc if the address range being unmapped contains
-		 * an executable region.
-		 */
-		pkm.pm_address = (uintptr_t) NULL;
-		if (vm_map_lookup_entry(map, addr, &entry)) {
-			for (; entry->start < end;
-			    entry = vm_map_entry_succ(entry)) {
-				if (vm_map_check_protection(map, entry->start,
-					entry->end, VM_PROT_EXECUTE) == TRUE) {
-					pkm.pm_address = (uintptr_t) addr;
-					pkm.pm_size = (size_t) size;
-					break;
-				}
+		| PMC_HOOK_INSTALLED(PMC_FN_MUNMAP)
+#endif
+#ifdef HWT_HOOKS
+		| HWT_HOOK_INSTALLED
+#endif
+	;
+	has_exec_region = false;
+	if (have_hw_hooks && vm_map_lookup_entry(map, addr, &entry)) {
+		for (; entry->start < end; entry = vm_map_entry_succ(entry)) {
+			if (vm_map_check_protection(map, entry->start,
+			    entry->end, VM_PROT_EXECUTE) == TRUE) {
+				has_exec_region = true;
+				break;
 			}
 		}
 	}
 #endif
 	rv = vm_map_delete(map, addr, end);
 
-#ifdef HWT_HOOKS
-	if (HWT_HOOK_INSTALLED && rv == KERN_SUCCESS) {
-		struct hwt_record_entry ent;
-
-		ent.addr = (uintptr_t) addr;
-		ent.fullpath = NULL;
-		ent.record_type = HWT_RECORD_MUNMAP;
-		HWT_CALL_HOOK(td, HWT_RECORD, &ent);
-	}
-#endif
-
-#ifdef HWPMC_HOOKS
-	if (rv == KERN_SUCCESS && __predict_false(pmc_handled)) {
+#if defined(HWPMC_HOOKS) || defined(HWT_HOOKS)
+	if (rv == KERN_SUCCESS && has_exec_region) {
 		/* downgrade the lock to prevent a LOR with the pmc-sx lock */
 		vm_map_lock_downgrade(map);
-		if (pkm.pm_address != (uintptr_t) NULL)
+#ifdef HWT_HOOKS
+		if (HWT_HOOK_INSTALLED) {
+			struct hwt_record_entry hrec;
+
+			hrec.record_type = HWT_RECORD_MUNMAP;
+			hrec.addr = (uintptr_t) addr;
+			hrec.size = (size_t) size;
+			hrec.fullpath = NULL;
+			HWT_CALL_HOOK(td, HWT_RECORD, &hrec);
+		}
+#endif /* HWT_HOOKS */
+#ifdef HWPMC_HOOKS
+		if (PMC_HOOK_INSTALLED(PMC_FN_MUNMAP)) {
+			struct pmckern_map_out pkm;
+
+			pkm.pm_address = (uintptr_t) addr;
+			pkm.pm_size = (size_t) size;
 			PMC_CALL_HOOK(td, PMC_FN_MUNMAP, (void *) &pkm);
+		}
+#endif /* HWPMC_HOOKS */
 		vm_map_unlock_read(map);
 	} else
-#endif
+#endif /* HWPMC_HOOKS || HWT_HOOKS */
 		vm_map_unlock(map);
 
 	return (vm_mmap_to_errno(rv));
