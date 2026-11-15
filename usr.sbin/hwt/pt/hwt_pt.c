@@ -180,24 +180,39 @@ pt_update_image_cb(struct trace_context *tc __unused, struct pt_dec_ctx *dctx,
 }
 
 /*
- * Add all ELF sections to the trace decoder.
- * Invoked as a callback from 'pt_foreach_ctx'.
+ * Update the image caches for individual decoders according to the
+ * address space change described in 'hwt_record_as_event'
  */
 static int
-pt_image_load_cb(struct trace_context *tc, struct hwt_exec_img *img)
+pt_as_event_cb(struct trace_context *tc, struct hwt_record_user_entry *ev)
 {
 	int isid;
 
 	if (tc->raw)
 		return (0);
-	isid = pt_iscache_add_file(pt_iscache, img->path, img->offs, img->size,
-	    img->addr);
-	if (isid < 0) {
-		printf("%s: error adding file '%s' to the section cache: %s\n",
-		    __func__, img->path, pt_strerror(isid));
-		return (-1);
+
+	switch (ev->record_type) {
+		case HWT_RECORD_MMAP:
+		case HWT_RECORD_KERNEL:
+			isid = pt_iscache_add_file(pt_iscache,
+			    ev->fullpath, ev->foffset, ev->size,
+			    ev->addr);
+			if (isid < 0) {
+				fprintf(stderr,
+				    "%s: error adding file '%s' to the section cache: %s\n",
+				    __func__, ev->fullpath, pt_strerror(isid));
+				return (-1);
+			}
+			pt_foreach_ctx(tc, pt_update_image_cb, &isid);
+		case HWT_RECORD_EXECUTABLE:
+		case HWT_RECORD_MUNMAP:
+			// TODO;
+			break;
+		default:
+			errx(EXIT_FAILURE,
+			    "%s: unsupported record type %d\n",
+			    __func__, ev->record_type);
 	}
-	pt_foreach_ctx(tc, pt_update_image_cb, &isid);
 
 	return (0);
 }
@@ -489,5 +504,5 @@ struct backend_methods pt_methods = {
 	.shutdown = pt_shutdown,
 	.process_buffer = pt_process_buffer,
 	.set_config = pt_set_config,
-	.image_load_cb = pt_image_load_cb
+	.as_event_cb = pt_as_event_cb
 };

@@ -439,11 +439,9 @@ hwt_mode_cpu(struct trace_context *tc)
 }
 
 static int
-hwt_new_proc(struct trace_context *tc, int *sockpair, char **cmd, char **env,
-    uint32_t *nlibs0)
+hwt_new_proc(struct trace_context *tc, int *sockpair, char **cmd, char **env)
 {
 	struct stat st;
-	uint32_t nlibs;
 	int error;
 
 	error = stat(*cmd, &st);
@@ -453,23 +451,13 @@ hwt_new_proc(struct trace_context *tc, int *sockpair, char **cmd, char **env,
 		return (error);
 	}
 
-	error = hwt_elf_count_libs(*cmd, &nlibs);
-	if (error != 0) {
-		printf("Could not count libs in the executable provided.\n");
-		return (error);
-	}
-
-	nlibs += 1; /* add binary itself. */
-
-	dprintf("cmd is %s, nlibs %d\n", *cmd, nlibs);
+	dprintf("cmd is %s\n", *cmd, nlibs);
 
 	error = hwt_process_create(sockpair, cmd, env, &tc->pid);
 	if (error != 0)
 		return (error);
 
 	printf("%s: process pid %d created\n", __func__, tc->pid);
-
-	*nlibs0 = nlibs;
 
 	return (0);
 }
@@ -526,17 +514,13 @@ hwt_get_vmmap(struct trace_context *tc)
 static int
 hwt_mode_thread(struct trace_context *tc, char **cmd, char **env)
 {
-	uint32_t tot_rec;
-	uint32_t nrec;
-	uint32_t nlibs;
 	int sockpair[NSOCKPAIRFD];
-	int timeout;
+	uint32_t nrec;
+	int nretries;
 	int error;
 
-	nlibs = 0;
-
 	if (tc->attach == 0) {
-		error = hwt_new_proc(tc, sockpair, cmd, env, &nlibs);
+		error = hwt_new_proc(tc, sockpair, cmd, env);
 		if (error)
 			return (error);
 
@@ -587,8 +571,6 @@ hwt_mode_thread(struct trace_context *tc, char **cmd, char **env)
 			return (error);
 	}
 
-	printf("Expect at least %d records.\n", nlibs);
-
 	/*
 	 * Ensure we got expected amount of mmap/interp records so that
 	 * mapping tables constructed before we do symbol lookup.
@@ -596,22 +578,15 @@ hwt_mode_thread(struct trace_context *tc, char **cmd, char **env)
 	 * Also receive any records about threads that were created in the
 	 * meantime.
 	 */
-	timeout = 10;
-	tot_rec = 0;
+	nretries = 10;
 	do {
 		error = hwt_get_records(tc, &nrec, 0);
 		if (error != 0)
 			break;
 		if (nrec == 0)
-			timeout--;
-		tot_rec += nrec;
+			nretries--;
 		hwt_sleep(10);
-	} while (timeout);
-
-	if (tot_rec < nlibs) {
-		errx(EX_DATAERR,
-		    "Failed to receive expected amount of HWT records.");
-	}
+	} while (nretries >= 0);
 
 	return (hwt_process(tc));
 }

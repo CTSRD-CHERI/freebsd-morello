@@ -64,101 +64,11 @@
 #define	dprintf(fmt, ...)
 #endif
 
-static int
-hwt_record_to_elf_img(struct trace_context *tc,
-    struct hwt_record_user_entry *entry, struct hwt_exec_img *img,
-    struct hwt_exec_img *img2)
-{
-	pmcstat_interned_string path;
-	struct pmcstat_image *rtldimage;
-	struct pmcstat_image *image;
-	struct pmc_plugins plugins;
-	struct pmcstat_args args;
-	unsigned long addr;
-	char imagepath[PATH_MAX];
-
-	dprintf("  path %s addr %lx\n", entry->fullpath,
-	    (unsigned long)entry->addr);
-
-	memset(&plugins, 0, sizeof(struct pmc_plugins));
-	memset(&args, 0, sizeof(struct pmcstat_args));
-	args.pa_fsroot = "/";
-	snprintf(imagepath, sizeof(imagepath), "%s/%s", tc->fs_root,
-	    entry->fullpath);
-	path = pmcstat_string_intern(imagepath);
-
-	image = pmcstat_image_from_path(path,
-	    !!(entry->record_type == HWT_RECORD_KERNEL), &args, &plugins);
-	if (image == NULL)
-		return (-1);
-
-	if (image->pi_type == PMCSTAT_IMAGE_UNKNOWN)
-		pmcstat_image_determine_type(image, &args);
-
-	if (image->pi_end == 0) {
-		printf("  image '%s' has no executable sections, skipping\n",
-		    imagepath);
-		free(image);
-		image = NULL;
-		img->size = 0;
-		return (0);
-	}
-	addr = (unsigned long)entry->addr & ~1;
-	if (tc->mode == HWT_MODE_THREAD)
-		addr += image->pi_vaddr;
-
-	pmcstat_image_link(tc->pp, image, addr);
-	dprintf("image pi_vaddr %lx pi_start %lx"
-		" pi_end %lx pi_entry %lx\n",
-	    (unsigned long)image->pi_vaddr, (unsigned long)image->pi_start,
-	    (unsigned long)image->pi_end, (unsigned long)image->pi_entry);
-	if (tc->mode == HWT_MODE_CPU)
-		addr = image->pi_start;
-
-	if (hwt_elf_get_text_offs(imagepath, &img->offs))
-		return (-1);
-	img->size = image->pi_end - image->pi_start;
-	img->addr = addr;
-	img->path = entry->fullpath;
-
-	if (image->pi_isdynamic && image->pi_dynlinkerpath != NULL) {
-		rtldimage = pmcstat_image_from_path(image->pi_dynlinkerpath,
-		    0, &args, &plugins);
-		if (rtldimage == NULL) {
-			warnx("WARNING: rtld not found \"%s\".",
-			    pmcstat_string_unintern(image->pi_dynlinkerpath));
-			return (-1);
-		}
-
-		if (rtldimage->pi_type == PMCSTAT_IMAGE_UNKNOWN)
-			pmcstat_image_get_elf_params(rtldimage, &args);
-
-		if (rtldimage->pi_type != PMCSTAT_IMAGE_ELF32 &&
-		    rtldimage->pi_type != PMCSTAT_IMAGE_ELF64) {
-			warnx("WARNING: rtld not an ELF object \"%s\".",
-			    pmcstat_string_unintern(image->pi_dynlinkerpath));
-			return (-2);
-		}
-
-		pmcstat_image_link(tc->pp, rtldimage, entry->baseaddr +
-		    rtldimage->pi_vaddr);
-
-		img2->path = pmcstat_string_unintern(image->pi_dynlinkerpath);
-		if (hwt_elf_get_text_offs(img2->path, &img2->offs))
-			return (-1);
-		img2->size = image->pi_end - image->pi_start;
-		img2->addr = entry->baseaddr + rtldimage->pi_vaddr;
-	}
-
-	return (0);
-}
-
 int
 hwt_record_fetch(struct trace_context *tc, int *nrecords, int wait)
 {
 	struct hwt_record_user_entry *entry;
 	struct hwt_record_get record_get;
-	struct hwt_exec_img img, img2;
 	struct hwt_wakeup w;
 	int nentries;
 	int error;
@@ -180,25 +90,38 @@ hwt_record_fetch(struct trace_context *tc, int *nrecords, int wait)
 
 	dprintf("%s: error %d: nent %d\n", __func__, error, nentries);
 
+	*nrecords = 0;
 	for (j = 0; j < nentries; j++) {
 		entry = &tc->records[j];
 
 		switch (entry->record_type) {
+		case HWT_RECORD_MUNMAP:
 		case HWT_RECORD_MMAP:
-		case HWT_RECORD_EXECUTABLE:
-		case HWT_RECORD_KERNEL:
-			if (hwt_record_to_elf_img(tc, entry, &img, &img2) != 0)
-				continue;
-			/* Invoke backend callback, if any. */
-			if (tc->backend->methods->image_load_cb != NULL &&
-			    (error = tc->backend->methods->image_load_cb(tc,
-				&img))) {
+			printf("%s: address space record\n", __func__);
+			/*
+			 * The traced process' address space has changed.
+			 * Allow the backend-specific decoders to update their
+			 * internal maps by invoking the 'as_event_cb' callback.
+			 */
+			if (tc->backend->methods->as_event_cb != NULL &&
+			    (error = tc->backend->methods->as_event_cb(tc, entry))) {
 				ioctl(tc->thr_fd, HWT_IOC_WAKEUP, &w);
 				return (error);
 			}
+			hwt_elf_link_pmcstat_img(tc, entry);
 
 			if (entry->record_type != HWT_RECORD_KERNEL)
 				hwt_mmap_received(tc, entry);
+			break;
+		case HWT_RECORD_KERNEL:
+		case HWT_RECORD_EXECUTABLE:
+			printf("%s: exec record\n", __func__);
+			error = hwt_elf_process_exec(tc, entry);
+			if (error) {
+				warnx("%s: failed to process executable '%s'",
+				    __func__, entry->fullpath);
+				return (error);
+			}
 			break;
 		case HWT_RECORD_THREAD_CREATE:
 			/* Let the backend register the newly created thread. */
@@ -207,9 +130,9 @@ hwt_record_fetch(struct trace_context *tc, int *nrecords, int wait)
 				return (error);
 			break;
 		case HWT_RECORD_THREAD_SET_NAME:
-		case HWT_RECORD_MUNMAP:
 			break;
 		case HWT_RECORD_BUFFER:
+			printf("%s: buffer record\n", __func__);
 			/* Invoke backend process method. */
 			assert(tc->backend->methods->process_buffer != NULL);
 			if ((error = tc->backend->methods->process_buffer(tc,
