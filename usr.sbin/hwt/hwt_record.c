@@ -92,6 +92,7 @@ hwt_record_fetch(struct trace_context *tc, int *nrecords, int wait)
 
 	*nrecords = 0;
 	for (j = 0; j < nentries; j++) {
+		error = 0;
 		entry = &tc->records[j];
 
 		switch (entry->record_type) {
@@ -108,10 +109,8 @@ hwt_record_fetch(struct trace_context *tc, int *nrecords, int wait)
 				ioctl(tc->thr_fd, HWT_IOC_WAKEUP, &w);
 				return (error);
 			}
-			hwt_elf_link_pmcstat_img(tc, entry);
-
-			if (entry->record_type != HWT_RECORD_KERNEL)
-				hwt_mmap_received(tc, entry);
+			hwt_elf_link_pmcstat_img(tc, entry, false);
+			hwt_mmap_received(tc, entry);
 			break;
 		case HWT_RECORD_KERNEL:
 		case HWT_RECORD_EXECUTABLE:
@@ -135,10 +134,11 @@ hwt_record_fetch(struct trace_context *tc, int *nrecords, int wait)
 			printf("%s: buffer record\n", __func__);
 			/* Invoke backend process method. */
 			assert(tc->backend->methods->process_buffer != NULL);
-			if ((error = tc->backend->methods->process_buffer(tc,
+			if (tc->backend->methods->process_buffer(tc,
 				entry->buf_id, entry->curpage,
-				entry->offset)) != 0)
-				return (error);
+				entry->offset) != 0)
+				return (-1);
+			break;
 		default:
 			break;
 		}

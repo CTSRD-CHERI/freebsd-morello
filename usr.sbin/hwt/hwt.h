@@ -29,6 +29,7 @@
 #ifndef	_HWTVAR_H_
 #define	_HWTVAR_H_
 
+#include <stdbool.h>
 #include "hwt_fmt.h"
 #define	TC_MAX_ADDR_RANGES	16
 
@@ -118,6 +119,7 @@ struct trace_context {
 	/* Trace file. */
 	char *filename;
 
+	bool shutdown;
 	int mode;
 	const char *fs_root;
 	enum hwt_fmt_column fmt;

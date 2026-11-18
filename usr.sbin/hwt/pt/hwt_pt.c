@@ -431,6 +431,7 @@ pt_process_buffer(struct trace_context *tc, int id, int curpage,
 		    __func__);
 		dctx->curoff = (ts - dctx->ts) & (tc->bufsize - 1);
 		dctx->ts = ts;
+		dctx->needs_sync = true;
 		return (0);
 	}
 	len = ts - dctx->ts;
@@ -450,23 +451,25 @@ pt_process_buffer(struct trace_context *tc, int id, int curpage,
 	} else if (newoff < curoff) {
 		/* New entries in the trace buffer. Buffer wrapped. */
 		len = tc->bufsize - curoff;
-		error = pt_decode_ops.decode_chunk(tc, dctx, curoff, len,
-		    &processed);
-		if (error != 0)
-			return (error);
+		if (len > 0) {
+			error = pt_decode_ops.decode_chunk(tc, dctx, curoff, len,
+			    &processed);
+			if (error != 0)
+				return (error);
 
-		dctx->curoff += processed;
-		dctx->ts += processed;
+			dctx->ts += processed;
+			curoff = (curoff + processed) % tc->bufsize;
+		}
+		if (newoff > 0) {
+			error = pt_decode_ops.decode_chunk(tc, dctx, 0, newoff,
+			    &processed);
+			if (error != 0)
+				return (error);
 
-		curoff = 0;
-		len = newoff;
-		error = pt_decode_ops.decode_chunk(tc, dctx, curoff, len,
-		    &processed);
-		if (error != 0)
-			return (error);
-
-		dctx->curoff = processed;
-		dctx->ts += processed;
+			dctx->ts += processed;
+			curoff = processed;
+		}
+		dctx->curoff = curoff;
 	}
 
 	return (0);

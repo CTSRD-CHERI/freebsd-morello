@@ -343,6 +343,7 @@ hwt_process_loop(struct trace_context *tc)
 		if (errno == EINTR || tc->terminate) {
 			/* Fetch any remaining records */
 			hwt_record_fetch(tc, &nrec, 0);
+			tc->shutdown = true;
 			if (tc->backend->methods->shutdown != NULL)
 				tc->backend->methods->shutdown(tc);
 			printf("%s: tracing terminated - exiting\n", __func__);
