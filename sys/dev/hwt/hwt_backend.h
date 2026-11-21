@@ -36,6 +36,7 @@ struct hwt_backend_ops {
 	    int thread_id);
 	int (*hwt_backend_svc_buf)(struct hwt_context *, void *data,
 	    size_t data_size, int data_version);
+	void (*hwt_backend_activate_thread)(struct hwt_context *, int cpu_id);
 	void (*hwt_backend_enable)(struct hwt_context *, int cpu_id);
 	void (*hwt_backend_disable)(struct hwt_context *, int cpu_id);
 	int (*hwt_backend_read)(struct hwt_vm *, int *ident,

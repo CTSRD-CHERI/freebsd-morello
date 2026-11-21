@@ -27,6 +27,8 @@
 #ifndef _HWT_PT_H_
 #define _HWT_PT_H_
 
+#include <stdbool.h>
+
 #include <amd64/pt/pt.h>
 
 #define pt_strerror(errcode) pt_errstr(pt_errcode((errcode)))
@@ -41,7 +43,10 @@ struct pt_dec_ctx {
 	void *tracebuf;
 	struct pt_insn_decoder *dec;
 	int dev_fd;
-
+	bool enabled;
+	bool needs_sync;
+	bool at_eos;
+	uint64_t resume_off;
 	int id;
 	RB_ENTRY(pt_dec_ctx) entry;
 

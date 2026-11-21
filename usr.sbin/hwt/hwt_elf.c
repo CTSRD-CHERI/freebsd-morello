@@ -1,33 +1,3 @@
-/*-
- * SPDX-License-Identifier: BSD-2-Clause
- *
- * Copyright (c) 2023-2025 Ruslan Bukin <br@bsdpad.com>
- *
- * This work was supported by Innovate UK project 105694, "Digital Security
- * by Design (DSbD) Technology Platform Prototype".
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- */
-
 #include <sys/param.h>
 #include <sys/types.h>
 #include <sys/cpuset.h>
@@ -43,38 +13,35 @@
 #include <gelf.h>
 #include <err.h>
 #include <stdio.h>
+#include <string.h>
 #include <unistd.h>
 #include <stdlib.h>
-#include <string.h>
+#include <stdbool.h>
 
 #include "hwt.h"
 #include "hwt_elf.h"
-#include "sys/hwt_record.h"
+#include "hwt_record.h"
 
 #include "libpmcstat_stubs.h"
 #include <libpmcstat.h>
 
-int
-hwt_elf_count_libs(const char *elf_path, uint32_t *nlibs0)
+static int
+hwt_elf_find_exec_seg(const char *fullpath, uint64_t *vaddr, uint64_t *foffset,
+    size_t *size, uint64_t *base_vaddr, char **dynlinker_path)
 {
-	GElf_Shdr shdr;
+	int error;
 	GElf_Phdr ph;
 	GElf_Ehdr eh;
-	Elf_Scn *scn;
+	GElf_Shdr sh;
 	Elf *elf;
-	size_t sh_entsize;
-	Elf_Data *data;
-	GElf_Dyn dyn;
-	int is_dynamic;
-	uint32_t nlibs;
+	Elf_Scn *scn;
 	int fd;
 	size_t i;
+	uint64_t start, end;
+	const char *elfbase;
+	bool have_phdr, have_base;
 
-	nlibs = 0;
-
-	assert(elf_version(EV_CURRENT) != EV_NONE);
-
-	fd = open(elf_path, O_RDONLY, 0);
+	fd = open(fullpath, O_RDONLY, 0);
 
 	assert(fd >= 0);
 
@@ -83,114 +50,207 @@ hwt_elf_count_libs(const char *elf_path, uint32_t *nlibs0)
 	assert(elf != NULL);
 	assert(elf_kind(elf) == ELF_K_ELF);
 
+	/*
+	 * ET_REL objects are linked at address 0 and don't have any headers.
+	 */
+	*vaddr = 0;
+	*base_vaddr = 0;
+	error = 0;
+	if (dynlinker_path != NULL)
+		*dynlinker_path = NULL;
 	if (gelf_getehdr(elf, &eh) != &eh) {
-		printf("could not find elf header\n");
-		return (-1);
+		fprintf(stderr, "%s: Could not find elf header\n",
+		    __func__);
+		error = -1;
+		goto done;
 	}
 
-	if (eh.e_type != ET_EXEC && eh.e_type != ET_DYN) {
-		printf("unsupported image\n");
-		return (-2);
+	if (eh.e_type != ET_EXEC && eh.e_type != ET_DYN &&
+	    eh.e_type != ET_REL) {
+		fprintf(stderr, "%s: Unsupported image type\n", __func__);
+		error = -1;
+		goto done;
 	}
 
 	if (eh.e_ident[EI_CLASS] != ELFCLASS32 &&
-	    eh.e_ident[EI_CLASS] != ELFCLASS64)
-		return (-3);
-
-	is_dynamic = 0;
-
-	for (i = 0; i < eh.e_phnum; i++) {
-		if (gelf_getphdr(elf, i, &ph) != &ph) {
-			printf("could not get program header %zu\n", i);
-			return (-4);
-		}
-		switch (ph.p_type) {
-		case PT_DYNAMIC:
-			is_dynamic = 1;
-			break;
-		case PT_INTERP:
-			nlibs++;
-			break;
-		}
+	    eh.e_ident[EI_CLASS] != ELFCLASS64) {
+		fprintf(stderr, "%s: Unsupported ELF class\n", __func__);
+		error = -1;
+		goto done;
 	}
 
-	if (!is_dynamic)
-		goto done;
+	have_phdr = false;
+	have_base = false;
+	if (eh.e_type != ET_REL) {
+		for (i = 0; i < eh.e_phnum; i++) {
+			if (gelf_getphdr(elf, i, &ph) != &ph) {
+				warnx("WARNING: Cannot read program header for \"%s\": %s.",
+					  fullpath, elf_errmsg(-1));
+				error = -1;
+				goto done;
+			}
 
-	scn = NULL;
-	data = NULL;
+			if (ph.p_type == PT_INTERP && dynlinker_path != NULL) {
+				if ((elfbase = elf_rawfile(elf, NULL)) == NULL) {
+					warnx(
+						"WARNING: Cannot retrieve the interpreter for \"%s\": %s.",
+						fullpath, elf_errmsg(-1));
+					goto done;
+				}
+				*dynlinker_path = strdup(elfbase + ph.p_offset);
+				continue;
+			}
 
-	while ((scn = elf_nextscn(elf, scn)) != NULL) {
-		assert(gelf_getshdr(scn, &shdr) == &shdr);
-
-		if (shdr.sh_type == SHT_DYNAMIC) {
-			data = elf_getdata(scn, data);
-			assert(data != NULL);
-
-			sh_entsize = gelf_fsize(elf, ELF_T_DYN, 1, EV_CURRENT);
-
-			for (i = 0; i < shdr.sh_size / sh_entsize; i++) {
-				assert(gelf_getdyn(data, i, &dyn) == &dyn);
-				if (dyn.d_tag == DT_NEEDED)
-					nlibs++;
+			if (ph.p_type == PT_LOAD) {
+				if ((ph.p_flags & PF_X) != 0 && !have_phdr) {
+					*vaddr = ph.p_vaddr;
+					*foffset = ph.p_offset;
+					have_phdr = true;
+				}
+				if (!have_base) {
+					*base_vaddr = ph.p_vaddr;
+					have_base = true;
+				}
 			}
 		}
+
+		if (!have_phdr) {
+			warnx("Skipping empty image \"%s\"", fullpath);
+			error = -1;
+			goto done;
+		}
 	}
+
+	size_t nsh;
+	if (elf_getshnum(elf, &nsh) == 0) {
+		error = -1;
+		goto done;
+	}
+	start = ~(uint64_t) 0;
+	end = (uint64_t) 0;
+	for (i = 0; i < nsh; i++) {
+		if ((scn = elf_getscn(elf, i)) == NULL ||
+			gelf_getshdr(scn, &sh) != &sh) {
+			warnx(
+				"WARNING: Could not retrieve section header #%ju in \"%s\": %s.",
+				(uintmax_t) i, fullpath, elf_errmsg(-1));
+			error = -1;
+			goto done;
+		}
+		if (sh.sh_flags & SHF_EXECINSTR) {
+			if (eh.e_type == ET_REL && start == ~(uint64_t) 0 &&
+				!have_phdr){
+				*foffset = sh.sh_offset;
+			}
+			start = MIN(start, sh.sh_addr);
+			end = MAX(end, sh.sh_addr + sh.sh_size);
+		}
+	}
+	*size = end - start;
 
 done:
 	assert(elf_end(elf) == 0);
 	assert(close(fd) == 0);
 
-	*nlibs0 = nlibs;
+	return (error);
+}
 
+int
+hwt_elf_process_exec(struct trace_context *tc,
+    struct hwt_record_user_entry *rec)
+{
+	uint64_t seg_vaddr, foffset, base_vaddr;
+	struct hwt_record_user_entry mmap_rec;
+	struct hwt_wakeup wakeup;
+	char* dynlinker_path;
+	int error;
+
+	assert(elf_version(EV_CURRENT) != EV_NONE);
+
+	if (hwt_elf_find_exec_seg(rec->fullpath, &seg_vaddr,
+	    &foffset, &mmap_rec.size, &base_vaddr, &dynlinker_path) != 0)
+		return (0);
+	strlcpy(mmap_rec.fullpath, rec->fullpath, PATH_MAX);
+	if (rec->record_type == HWT_RECORD_KERNEL)
+		mmap_rec.addr = rec->addr + (seg_vaddr - base_vaddr);
+	else
+		mmap_rec.addr = rec->addr + seg_vaddr;
+	mmap_rec.foffset = foffset;
+	mmap_rec.record_type = HWT_RECORD_MMAP;
+
+	if (tc->backend->methods->as_event_cb != NULL &&
+	    (error = tc->backend->methods->as_event_cb(tc, &mmap_rec))) {
+		ioctl(tc->thr_fd, HWT_IOC_WAKEUP, &wakeup);
+		return (error);
+	}
+	hwt_elf_link_pmcstat_img(tc, &mmap_rec,
+	    rec->record_type == HWT_RECORD_KERNEL);
+
+	if (dynlinker_path == NULL ||
+	    rec->record_type == HWT_RECORD_KERNEL)
+		return (0);
+
+	/* Fetch and register RTLD. */
+	if (hwt_elf_find_exec_seg(dynlinker_path,
+	    &seg_vaddr, &foffset, &mmap_rec.size, &base_vaddr, NULL) != 0) {
+		free(dynlinker_path);
+		return (-1);
+	}
+	strlcpy(mmap_rec.fullpath, dynlinker_path,
+	    PATH_MAX);
+	mmap_rec.addr = rec->baseaddr + (seg_vaddr - base_vaddr);
+	mmap_rec.foffset = foffset;
+	mmap_rec.record_type = HWT_RECORD_MMAP;
+	free(dynlinker_path);
+
+	if (tc->backend->methods->as_event_cb != NULL &&
+	    (error = tc->backend->methods->as_event_cb(tc, &mmap_rec))) {
+		ioctl(tc->thr_fd, HWT_IOC_WAKEUP, &wakeup);
+		return (error);
+	}
+
+	hwt_elf_link_pmcstat_img(tc, &mmap_rec,
+	    false);
 	return (0);
 }
 
 int
-hwt_elf_get_text_offs(const char *elf_path, uint64_t *offs)
+hwt_elf_link_pmcstat_img(struct trace_context *tc,
+    struct hwt_record_user_entry *entry, bool is_kernel_image)
 {
-	const char *scnname;
-	GElf_Shdr shdr;
-	int fd, error;
-	Elf_Scn *scn;
-	size_t ndx;
-	Elf *elf;
+	pmcstat_interned_string path;
+	struct pmcstat_image *image;
+	struct pmc_plugins plugins;
+	struct pmcstat_args args;
+	unsigned long addr;
+	char imagepath[PATH_MAX];
 
-	elf = NULL;
-	scn = NULL;
-	fd = open(elf_path, O_RDONLY, 0);
-	if (fd < 0) {
-		warnx("%s: cannot open \"%s\": %s", __func__, elf_path,
-		    elf_errmsg(elf_errno()));
+	memset(&plugins, 0, sizeof(struct pmc_plugins));
+	memset(&args, 0, sizeof(struct pmcstat_args));
+	args.pa_fsroot = "/";
+	snprintf(imagepath, sizeof(imagepath), "%s/%s", tc->fs_root,
+	    entry->fullpath);
+	path = pmcstat_string_intern(imagepath);
+
+	image = pmcstat_image_from_path(path,
+	    is_kernel_image, &args, &plugins);
+	if (image == NULL)
 		return (-1);
+
+	if (image->pi_type == PMCSTAT_IMAGE_UNKNOWN)
+		pmcstat_image_determine_type(image, &args);
+
+	if (image->pi_end == 0) {
+		printf("  image '%s' has no executable sections, skipping\n",
+		    imagepath);
+		free(image);
+		return (1);
 	}
-	if ((elf = elf_begin(fd, ELF_C_READ, NULL)) == NULL) {
-		warnx("%s: cannot read \"%s\": %s", __func__, elf_path,
-		    elf_errmsg(elf_errno()));
-		error = -1;
-		goto out;
-	}
-
-	error = -1;
-	while ((scn = elf_nextscn(elf, scn)) != NULL) {
-		if (elf_getshdrstrndx(elf, &ndx) != 0) {
-			warnx("%s: elf_getshdrstrndx failed: %s", __func__,
-			    elf_errmsg(elf_errno()));
-			goto out;
-		}
-		gelf_getshdr(scn, &shdr);
-		if ((scnname = elf_strptr(elf, ndx, shdr.sh_name)) == NULL)
-			continue;
-
-		if (strncmp(scnname, ".text", strlen(".text")) == 0) {
-			error = 0;
-			*offs = shdr.sh_offset;
-			break;
-		}
-	}
-
-out:
-	close(fd);
-
-	return (error);
+	addr = (unsigned long)entry->addr & ~1;
+	if (tc->mode == HWT_MODE_THREAD)
+		addr += image->pi_vaddr;
+	if (is_kernel_image)
+		addr = image->pi_vaddr;
+	pmcstat_image_link(tc->pp, image, addr);
+	return (0);
 }

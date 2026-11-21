@@ -54,7 +54,7 @@ coresight_next_device(struct coresight_device *cs_dev,
 		if (endp->input != 0)
 			continue;
 
-		out = coresight_get_output_device(cs_dev, endp, &out_endp);
+		out = coresight_get_output_device(endp, &out_endp);
 		if (out != NULL) {
 			if (TAILQ_EMPTY(&pipeline->endplist)) {
 

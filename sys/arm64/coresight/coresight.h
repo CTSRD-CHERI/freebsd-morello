@@ -160,8 +160,7 @@ struct coresight_platform_data *coresight_acpi_get_platform_data(device_t dev);
 struct endpoint *
     coresight_get_output_endpoint(struct coresight_platform_data *pdata);
 struct coresight_device *
-    coresight_get_output_device(struct coresight_device *cs_dev,
-    struct endpoint *endp, struct endpoint **);
+    coresight_get_output_device(struct endpoint *endp, struct endpoint **);
 int coresight_register(struct coresight_desc *desc);
 
 int coresight_init_pipeline(struct coresight_pipeline *pipeline, int cpu);

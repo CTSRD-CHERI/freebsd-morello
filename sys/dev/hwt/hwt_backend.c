@@ -43,7 +43,6 @@
 #include <dev/hwt/hwt_backend.h>
 
 #define	HWT_BACKEND_DEBUG
-#undef	HWT_BACKEND_DEBUG
 
 #ifdef	HWT_BACKEND_DEBUG
 #define	dprintf(fmt, ...)	printf(fmt, ##__VA_ARGS__)

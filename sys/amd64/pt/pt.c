@@ -56,6 +56,7 @@
 #include <vm/vm_page.h>
 
 #include <machine/atomic.h>
+#include <machine/cpu.h>
 #include <machine/cpufunc.h>
 #include <machine/fpu.h>
 #include <machine/smp.h>
@@ -74,6 +75,8 @@
 
 #include <amd64/pt/pt.h>
 
+/* PT driver tracing. Comment out to silence. */
+#define	PT_DEBUG
 #ifdef PT_DEBUG
 #define dprintf(fmt, ...) printf(fmt, ##__VA_ARGS__)
 #else
@@ -127,6 +130,7 @@ struct pt_ctx {
 };
 /* PT tracing contexts used for CPU mode. */
 static struct pt_ctx *pt_pcpu_ctx;
+static struct hwt_context *active_cpu_mode_session = NULL;
 
 enum pt_cpu_state { PT_INACTIVE = 0, PT_ACTIVE };
 
@@ -152,7 +156,6 @@ static struct pt_cpu_info {
 } pt_info  __read_mostly;
 
 static bool initialized = false;
-static int cpu_mode_ctr = 0;
 
 static __inline enum pt_cpu_state
 pt_cpu_get_state(int cpu_id)
@@ -259,11 +262,15 @@ pt_cpu_start(void *dummy)
 	cpu = &pt_pcpu[curcpu];
 	MPASS(cpu->ctx != NULL);
 
-	dprintf("%s: curcpu %d\n", __func__, curcpu);
-	pt_cpu_set_state(curcpu, PT_ACTIVE);
+	dprintf("%s: curcpu %d, rtit_ctl 0x%lx, output base 0x%lx, mask ptrs "
+	    "0x%lx\n", __func__, curcpu,
+	    (unsigned long)pt_ctx_get_ext_area(cpu->ctx)->rtit_ctl,
+	    (unsigned long)pt_ctx_get_ext_area(cpu->ctx)->rtit_output_base,
+	    (unsigned long)pt_ctx_get_ext_area(cpu->ctx)->rtit_output_mask_ptrs);
 	load_cr4(rcr4() | CR4_XSAVE);
 	wrmsr(MSR_IA32_RTIT_STATUS, 0);
 	pt_cpu_toggle_local(cpu->ctx->save_area, true);
+	pt_cpu_set_state(curcpu, PT_ACTIVE);
 }
 
 /*
@@ -290,6 +297,8 @@ pt_cpu_stop(void *dummy)
 	}
 	pt_cpu_toggle_local(cpu->ctx->save_area, false);
 	pt_update_buffer(&ctx->buf);
+	dprintf("%s: curcpu %d, final trace offset %lu\n", __func__, curcpu,
+	    (unsigned long)atomic_load_acq_64(&ctx->buf.offset));
 }
 
 /*
@@ -311,10 +320,13 @@ pt_topa_prepare(struct pt_ctx *ctx, struct hwt_vm *vm)
 
 	KASSERT(buf->topa_hw == NULL,
 	    ("%s: ToPA info already exists", __func__));
-	buf->topa_hw = mallocarray(vm->npages + 1, sizeof(uint64_t), M_PT,
+	buf->topa_hw = malloc_aligned((vm->npages + 1) * sizeof(uint64_t), PAGE_SIZE, M_PT,
 	    M_ZERO | M_WAITOK);
 	dprintf("%s: ToPA virt addr %p\n", __func__, buf->topa_hw);
 	buf->size = vm->npages * PAGE_SIZE;
+	dprintf("%s: ctx %p, buffer %p: %d pages, %lu bytes\n", __func__,
+	    (void *)ctx, (void *)buf->topa_hw, vm->npages,
+	    (unsigned long)buf->size);
 	for (i = 0; i < vm->npages; i++) {
 		buf->topa_hw[i] = VM_PAGE_TO_PHYS(vm->pages[i]) | topa_size;
 		/*
@@ -340,6 +352,7 @@ pt_configure_ranges(struct pt_ctx *ctx, struct pt_cpu_config *cfg)
 {
 	struct pt_ext_area *pt_ext;
 	int nranges_supp, n, error = 0;
+	int i;
 
 	pt_ext = pt_ctx_get_ext_area(ctx);
 	if (pt_info.l0_ebx & CPUPT_IPF) {
@@ -355,6 +368,12 @@ pt_configure_ranges(struct pt_ctx *ctx, struct pt_cpu_config *cfg)
 			    __func__, n, nranges_supp);
 			n = nranges_supp;
 		}
+		dprintf("%s: programming %d IP filtering ranges\n", __func__,
+		    n);
+		for (i = 0; i < n; i++)
+			dprintf("%s: range %d: 0x%lx-0x%lx\n", __func__, i,
+			    (unsigned long)cfg->ip_ranges[i].start,
+			    (unsigned long)cfg->ip_ranges[i].end);
 
 		switch (n) {
 		case 2:
@@ -391,6 +410,9 @@ pt_init_ctx(struct pt_ctx *pt_ctx, struct hwt_vm *vm, int ctx_id)
 	    M_PT, M_NOWAIT | M_ZERO);
 	if (pt_ctx->save_area == NULL)
 		return (ENOMEM);
+	dprintf("%s: ctx %p, id %d, save area %p (%lu bytes)\n", __func__,
+	    (void *)pt_ctx, ctx_id, (void *)pt_ctx->save_area,
+	    (unsigned long)pt_info.xsave_area_size);
 	dprintf("%s: preparing ToPA buffer\n", __func__);
 	if (pt_topa_prepare(pt_ctx, vm) != 0) {
 		free(pt_ctx->save_area, M_PT);
@@ -413,31 +435,21 @@ pt_deinit_ctx(struct pt_ctx *pt_ctx)
 	memset(pt_ctx, 0, sizeof(*pt_ctx));
 }
 
-/*
- * HWT backend configuration method.
- *
- * Checks and translates the user-defined configuration to a
- * set of PT tracing features. Uses the feature set to initialize
- * the tracing context for the target CPU or thread.
- */
 static int
-pt_backend_configure(struct hwt_context *ctx, int cpu_id, int thread_id)
+pt_configure_ctx(struct pt_ctx *pt_ctx, struct hwt_context *ctx,
+    struct pt_cpu_config *cfg)
 {
-	struct hwt_cpu *hwt_cpu;
-	struct hwt_thread *thr;
-	struct pt_ctx *pt_ctx;
-	struct pt_cpu_config *cfg;
 	struct pt_ext_area *pt_ext;
 	struct xstate_hdr *hdr;
 	int error;
 
-	dprintf("%s\n", __func__);
-
-	cfg = (struct pt_cpu_config *)ctx->config;
-	pt_ctx = NULL;
+	KASSERT(pt_ctx->hwt_ctx == NULL,
+	    ("%s: tracing context was already configured", __func__));
 
 	/* Clear any flags we don't support yet. */
 	cfg->rtit_ctl &= PT_SUPPORTED_FLAGS;
+	dprintf("%s: requested rtit_ctl 0x%lx\n", __func__,
+	    (unsigned long)cfg->rtit_ctl);
 	if (cfg->rtit_ctl & RTIT_CTL_MTCEN) {
 		if ((pt_info.l0_ebx & CPUPT_MTC) == 0) {
 			printf("%s: CPU does not support generating MTC "
@@ -462,28 +474,6 @@ pt_backend_configure(struct hwt_context *ctx, int cpu_id, int thread_id)
 	}
 	/* TODO: support for more config bits. */
 
-	if (ctx->mode == HWT_MODE_CPU) {
-		TAILQ_FOREACH(hwt_cpu, &ctx->cpus, next) {
-			if (hwt_cpu->cpu_id != cpu_id)
-				continue;
-			pt_ctx = &pt_pcpu_ctx[cpu_id];
-			break;
-		}
-	} else {
-		TAILQ_FOREACH(thr, &ctx->threads, next) {
-			if (thr->thread_id != thread_id)
-				continue;
-			KASSERT(thr->private != NULL,
-			    ("%s: hwt thread private"
-			     " not set, thr %p",
-				__func__, thr));
-			pt_ctx = (struct pt_ctx *)thr->private;
-			break;
-		}
-	}
-	if (pt_ctx == NULL)
-		return (ENOENT);
-
 	dprintf("%s: preparing MSRs\n", __func__);
 	pt_ext = pt_ctx_get_ext_area(pt_ctx);
 	hdr = pt_ctx_get_xstate_hdr(pt_ctx);
@@ -502,7 +492,72 @@ pt_backend_configure(struct hwt_context *ctx, int cpu_id, int thread_id)
 	hdr->xstate_xcomp_bv = XFEATURE_ENABLED_PT |
 	    XSTATE_XCOMP_BV_COMPACT;
 	pt_ext->rtit_ctl |= RTIT_CTL_TRACEEN;
+	dprintf("%s: rtit_ctl 0x%lx, output base 0x%lx, output mask ptrs "
+	    "0x%lx\n", __func__, (unsigned long)pt_ext->rtit_ctl,
+	    (unsigned long)pt_ext->rtit_output_base,
+	    (unsigned long)pt_ext->rtit_output_mask_ptrs);
+
+	return (0);
+}
+
+/*
+ * HWT backend configuration method.
+ *
+ * Checks and translates the user-defined configuration to a
+ * set of PT tracing features. Uses the feature set to initialize
+ * the tracing context for the target CPU or thread.
+ */
+static int
+pt_backend_configure(struct hwt_context *ctx, int cpu_id, int thread_id)
+{
+	struct hwt_cpu *hwt_cpu;
+	struct hwt_thread *thr;
+	struct pt_ctx *pt_ctx;
+	struct pt_cpu_config *cfg;
+	int error;
+
+	dprintf("%s: mode %d, cpu %d, thread %d\n", __func__, ctx->mode,
+	    cpu_id, thread_id);
+
+	cfg = (struct pt_cpu_config *)ctx->config;
+	pt_ctx = NULL;
+	if (ctx->mode == HWT_MODE_CPU) {
+		if ((struct hwt_context *)atomic_load_ptr((uintptr_t *)&active_cpu_mode_session) !=
+		    ctx)
+			return (EALREADY);
+
+		TAILQ_FOREACH(hwt_cpu, &ctx->cpus, next) {
+			if (hwt_cpu->cpu_id != cpu_id)
+				continue;
+			pt_ctx = &pt_pcpu_ctx[cpu_id];
+			break;
+		}
+	} else {
+		TAILQ_FOREACH(thr, &ctx->threads, next) {
+			if (thr->thread_id != thread_id)
+				continue;
+			KASSERT(thr->private != NULL,
+			    ("%s: hwt thread private"
+			     " not set, thr %p",
+				__func__, thr));
+			pt_ctx = (struct pt_ctx *)thr->private;
+			break;
+		}
+	}
+	if (pt_ctx == NULL) {
+		dprintf("%s: no PT context for cpu %d, thread %d\n", __func__,
+		    cpu_id, thread_id);
+		return (ENOENT);
+	}
+
+	if (pt_ctx->hwt_ctx == NULL) {
+		error = pt_configure_ctx(pt_ctx, ctx, cfg);
+		if (error)
+			return (error);
+	}
 	pt_pcpu[cpu_id].ctx = pt_ctx;
+	dprintf("%s: pt ctx %d bound to cpu %d\n", __func__, pt_ctx->id,
+	    cpu_id);
 
 	return (0);
 }
@@ -518,6 +573,7 @@ pt_backend_enable(struct hwt_context *ctx, int cpu_id)
 
 	KASSERT(curcpu == cpu_id,
 	    ("%s: attempting to start PT on another cpu", __func__));
+	dprintf("%s: cpu %d\n", __func__, cpu_id);
 	pt_cpu_start(NULL);
 	CPU_SET(cpu_id, &ctx->cpu_map);
 }
@@ -535,13 +591,14 @@ pt_backend_disable(struct hwt_context *ctx, int cpu_id)
 	KASSERT(curcpu == cpu_id,
 	    ("%s: attempting to disable PT on another cpu", __func__));
 
+	dprintf("%s: cpu %d\n", __func__, cpu_id);
 	cpu = &pt_pcpu[cpu_id];
 
 	dprintf("%s: waiting for cpu %d to exit interrupt handler\n", __func__,
 	    cpu_id);
 	pt_cpu_set_state(cpu_id, PT_INACTIVE);
 	while (atomic_cmpset_int(&cpu->in_pcint_handler, 1, 0))
-		;
+		cpu_spinwait();
 
 	pt_cpu_stop(NULL);
 	CPU_CLR(cpu_id, &ctx->cpu_map);
@@ -554,15 +611,23 @@ pt_backend_disable(struct hwt_context *ctx, int cpu_id)
 static int
 pt_backend_enable_smp(struct hwt_context *ctx)
 {
+	int cpu;
+
 	dprintf("%s\n", __func__);
 
 	KASSERT(ctx->mode == HWT_MODE_CPU,
 	    ("%s: should only be used for CPU mode", __func__));
-	if (ctx->mode == HWT_MODE_CPU &&
-	    atomic_swap_32(&cpu_mode_ctr, 1) != 0)
+	if ((struct hwt_context *)atomic_load_ptr((uintptr_t *)&active_cpu_mode_session) !=
+	    ctx)
 		return (-1);
 
+	dprintf("%s: enabling tracing on CPUS ", __func__);
+	CPU_FOREACH_ISSET(cpu, &ctx->cpu_map) {
+		dprintf("%d ", cpu);
+	}
+	dprintf("\n");
 	smp_rendezvous_cpus(ctx->cpu_map, NULL, pt_cpu_start, NULL, NULL);
+	dprintf("%s: tracing started on target cpus\n", __func__);
 
 	return (0);
 }
@@ -576,8 +641,10 @@ pt_backend_disable_smp(struct hwt_context *ctx)
 	struct pt_cpu *cpu;
 
 	dprintf("%s\n", __func__);
+
 	if (ctx->mode == HWT_MODE_CPU &&
-	    atomic_swap_32(&cpu_mode_ctr, 0) == 0)
+	    (struct hwt_context *)atomic_load_ptr((uintptr_t *)&active_cpu_mode_session) !=
+	    ctx)
 		return (-1);
 
 	if (CPU_EMPTY(&ctx->cpu_map)) {
@@ -593,6 +660,7 @@ pt_backend_disable_smp(struct hwt_context *ctx)
 			;
 	}
 	smp_rendezvous_cpus(ctx->cpu_map, NULL, pt_cpu_stop, NULL, NULL);
+	dprintf("%s: tracing stopped on target cpus\n", __func__);
 
 	return (0);
 }
@@ -609,9 +677,14 @@ pt_backend_init(struct hwt_context *ctx)
 	struct hwt_cpu *hwt_cpu;
 	int error;
 
-	dprintf("%s\n", __func__);
+	dprintf("%s: mode %d\n", __func__, ctx->mode);
 	if (ctx->mode != HWT_MODE_CPU)
 		return (0);
+
+	if (atomic_cmpset_ptr((uintptr_t *) &active_cpu_mode_session,
+	    (uintptr_t)NULL, (uintptr_t)ctx) == 0)
+		return (EALREADY);
+
 	TAILQ_FOREACH(hwt_cpu, &ctx->cpus, next) {
 		error = pt_init_ctx(&pt_pcpu_ctx[hwt_cpu->cpu_id], hwt_cpu->vm,
 		    hwt_cpu->cpu_id);
@@ -635,7 +708,7 @@ pt_backend_deinit(struct hwt_context *ctx)
 	struct hwt_thread *thr;
 	int cpu_id;
 
-	dprintf("%s\n", __func__);
+	dprintf("%s: mode %d\n", __func__, ctx->mode);
 
 	pt_backend_disable_smp(ctx);
 	if (ctx->mode == HWT_MODE_THREAD) {
@@ -647,16 +720,18 @@ pt_backend_deinit(struct hwt_context *ctx)
 		}
 	} else {
 		CPU_FOREACH_ISSET(cpu_id, &ctx->cpu_map) {
-			if (pt_pcpu[cpu_id].ctx == NULL)
+			pt_ctx = pt_pcpu[cpu_id].ctx;
+			if (pt_ctx == NULL)
 				continue;
-			KASSERT(pt_pcpu[cpu_id].ctx == &pt_pcpu_ctx[cpu_id],
+			KASSERT(pt_ctx == &pt_pcpu_ctx[cpu_id],
 			    ("%s: CPU mode tracing with non-cpu mode PT"
 			     "context active",
 				__func__));
-			pt_deinit_ctx(pt_pcpu[cpu_id].ctx);
 			pt_pcpu[cpu_id].ctx = NULL;
-			atomic_set_int(&pt_pcpu[cpu_id].in_pcint_handler, 0);
+			pt_deinit_ctx(pt_ctx);
+			atomic_store_int(&pt_pcpu[cpu_id].in_pcint_handler, 0);
 		}
+		atomic_store_ptr((uintptr_t *)&active_cpu_mode_session, (uintptr_t) NULL);
 	}
 
 	return (0);
@@ -679,6 +754,9 @@ pt_backend_read(struct hwt_vm *vm, int *curpage, vm_offset_t *curpage_offset,
 	offset = atomic_load_acq_64(&buf->offset);
 	*curpage = offset / PAGE_SIZE;
 	*curpage_offset = offset & PAGE_MASK;
+	dprintf("%s: offset %lu, curpage %d, curpage offset %lu\n", __func__,
+	    (unsigned long)offset, *curpage,
+	    (unsigned long)*curpage_offset);
 
 	return (0);
 }
@@ -699,8 +777,12 @@ pt_backend_alloc_thread(struct hwt_thread *thr)
 		return (ENOMEM);
 
 	error = pt_init_ctx(pt_ctx, thr->vm, thr->thread_id);
-	if (error)
+	if (error) {
+		free(pt_ctx, M_PT);
 		return (error);
+	}
+	dprintf("%s: thread %d, pt ctx %p\n", __func__, thr->thread_id,
+	    (void *)pt_ctx);
 
 	thr->private = pt_ctx;
 	return (0);
@@ -715,6 +797,7 @@ pt_backend_free_thread(struct hwt_thread *thr)
 
 	ctx = (struct pt_ctx *)thr->private;
 
+	dprintf("%s: thread %d\n", __func__, thr->thread_id);
 	pt_deinit_ctx(ctx);
 	free(ctx, M_PT);
 }
@@ -763,18 +846,25 @@ pt_send_buffer_record(void *arg)
 	struct hwt_record_entry record;
 
 	struct pt_ctx *ctx = cpu->ctx;
+	if (cpu->ctx == NULL) {
+		/*
+		 * We've disabled the backend but a previously
+		 * scheduled SWI still fired.
+		 */
+		dprintf("%s: stale SWI without an active context\n", __func__);
+		return;
+	}
 	pt_fill_buffer_record(ctx->id, &ctx->buf, &record);
+	dprintf("%s: buf %d, curpage %d, offset %lu\n", __func__,
+	    record.buf_id, record.curpage, (unsigned long)record.offset);
 	hwt_record_ctx(ctx->hwt_ctx, &record, M_ZERO | M_NOWAIT);
 }
 static void
 pt_topa_status_clear(void)
 {
-	uint64_t reg;
 
-	reg = rdmsr(MSR_IA_GLOBAL_STATUS_RESET);
-	reg &= ~GLOBAL_STATUS_FLAG_TRACETOPAPMI;
-	reg |= GLOBAL_STATUS_FLAG_TRACETOPAPMI;
-	wrmsr(MSR_IA_GLOBAL_STATUS_RESET, reg);
+	wrmsr(MSR_IA_GLOBAL_STATUS_RESET,
+	    GLOBAL_STATUS_FLAG_TRACETOPAPMI);
 }
 
 /*
@@ -783,6 +873,10 @@ pt_topa_status_clear(void)
  * Invoked every time a ToPA entry marked with TOPA_INT is filled.
  * Uses taskqueue to enqueue a buffer record for userspace.
  * Re-enables the PC interrupt line as long as tracing is active.
+ *
+ * No tracing from this handler: it runs in NMI context where printf()
+ * is unsafe. PMI events are traced from the SWI routine
+ * pt_send_buffer_record() instead.
  */
 static int
 pt_topa_intr(struct trapframe *tf)
@@ -800,9 +894,10 @@ pt_topa_intr(struct trapframe *tf)
 	}
 
 	if (pt_cpu_get_state(curcpu) != PT_ACTIVE) {
+		pt_topa_status_clear();
 		return (1);
 	}
-	atomic_set_int(&cpu->in_pcint_handler, 1);
+	atomic_store_int(&cpu->in_pcint_handler, 1);
 
 	ctx = cpu->ctx;
 	KASSERT(ctx != NULL,
@@ -821,7 +916,7 @@ pt_topa_intr(struct trapframe *tf)
 		pt_cpu_toggle_local(ctx->save_area, true);
 		lapic_reenable_pcint();
 	}
-	atomic_set_int(&cpu->in_pcint_handler, 0);
+	atomic_store_int(&cpu->in_pcint_handler, 0);
 	return (1);
 }
 
@@ -949,6 +1044,10 @@ pt_supported(void)
 	pt_info.xsave_area_size = xsave_area_size(PT_XSTATE_BV, true, true);
 	pt_info.pt_xsave_offset = xsave_area_offset(PT_XSTATE_BV,
 	    XFEATURE_ENABLED_PT, true, true);
+	dprintf("pt: xsave area size %lu, hdr offset %lu, pt area offset "
+	    "%lu\n", (unsigned long)pt_info.xsave_area_size,
+	    (unsigned long)pt_info.xstate_hdr_offset,
+	    (unsigned long)pt_info.pt_xsave_offset);
 
 	return (true);
 }

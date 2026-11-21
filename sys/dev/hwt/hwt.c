@@ -136,7 +136,6 @@
 #include <dev/hwt/hwt_hook.h>
 
 #define	HWT_DEBUG
-#undef	HWT_DEBUG
 
 #ifdef	HWT_DEBUG
 #define	dprintf(fmt, ...)	printf(fmt, ##__VA_ARGS__)

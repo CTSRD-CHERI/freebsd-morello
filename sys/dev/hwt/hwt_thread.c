@@ -58,7 +58,6 @@
 #include <dev/hwt/hwt_record.h>
 
 #define	HWT_THREAD_DEBUG
-#undef	HWT_THREAD_DEBUG
 
 #ifdef	HWT_THREAD_DEBUG
 #define	dprintf(fmt, ...)	printf(fmt, ##__VA_ARGS__)

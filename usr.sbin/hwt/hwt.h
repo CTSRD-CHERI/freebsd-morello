@@ -29,11 +29,12 @@
 #ifndef	_HWTVAR_H_
 #define	_HWTVAR_H_
 
+#include <stdbool.h>
 #include "hwt_fmt.h"
 #define	TC_MAX_ADDR_RANGES	16
 
 struct trace_context;
-struct hwt_exec_img;
+struct hwt_record_user_entry;
 struct pmcstat_image;
 
 struct backend_methods {
@@ -50,8 +51,8 @@ struct backend_methods {
 	/*
 	 * Called whenever the traced process's address space layout changes.
 	 */
-	int (
-	    *image_load_cb)(struct trace_context *tc, struct hwt_exec_img *img);
+	int (*as_event_cb)(struct trace_context *tc,
+	    struct hwt_record_user_entry *ev);
 
 	/*
 	 * Trace data processing methods.
@@ -118,6 +119,7 @@ struct trace_context {
 	/* Trace file. */
 	char *filename;
 
+	bool shutdown;
 	int mode;
 	const char *fs_root;
 	enum hwt_fmt_column fmt;

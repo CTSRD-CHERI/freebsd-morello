@@ -294,27 +294,15 @@ arm_spe_set_interval(struct arm_spe_info *info, uint64_t interval)
 }
 
 static int
-spe_backend_configure(struct hwt_context *ctx, int cpu_id, int thread_id)
+spe_configure_ctx(struct arm_spe_info *info, struct hwt_context *ctx,
+    struct hwt_thread *thr, int cpu_id, int thread_id)
 {
-	struct arm_spe_info *info = NULL;
 	struct arm_spe_config *cfg;
-	struct hwt_thread *thr = NULL;
-	int err = 0;
 
-	if (ctx->mode == HWT_MODE_CPU)
-		info = &spe_info_cpu[cpu_id];
-	else {
-		TAILQ_FOREACH(thr, &ctx->threads, next) {
-			if (thr->thread_id != thread_id)
-				continue;
-			info = (struct arm_spe_info *)thr->private;
-			break;
-		}
-		if (info == NULL)
-			return (ENOENT);
-	}
+	mtx_assert(&info->lock, MA_OWNED);
+	KASSERT(!info->configured,
+	    ("%s: tracing context was already configured", __func__));
 
-	mtx_lock_spin(&info->lock);
 	if (ctx->mode == HWT_MODE_CPU)
 		info->ident = cpu_id;
 	else
@@ -342,13 +330,45 @@ spe_backend_configure(struct hwt_context *ctx, int cpu_id, int thread_id)
 		if (cfg->ctx_field)
 			info->ctx_field = cfg->ctx_field;
 	} else
-		err = (EINVAL);
+		return (EINVAL);
 
 	if (ctx->mode == HWT_MODE_THREAD) {
 		info->kvaddr = thr->vm->kvaddr;
 		info->buf_size = ctx->bufsize;
 	}
+	info->configured = true;
 
+	return (0);
+}
+
+static int
+spe_backend_configure(struct hwt_context *ctx, int cpu_id, int thread_id)
+{
+	struct arm_spe_info *info = NULL;
+	struct hwt_thread *thr = NULL;
+	int err = 0;
+
+	if (ctx->mode == HWT_MODE_CPU)
+		info = &spe_info_cpu[cpu_id];
+	else {
+		TAILQ_FOREACH(thr, &ctx->threads, next) {
+			if (thr->thread_id != thread_id)
+				continue;
+			info = (struct arm_spe_info *)thr->private;
+			break;
+		}
+		if (info == NULL)
+			return (ENOENT);
+	}
+
+	mtx_lock_spin(&info->lock);
+	if (!info->configured) {
+		err = spe_configure_ctx(info, ctx, thr, cpu_id, thread_id);
+		if (err) {
+			mtx_unlock_spin(&info->lock);
+			return (err);
+		}
+	}
 	spe_info[cpu_id] = info;
 	mtx_unlock_spin(&info->lock);
 
